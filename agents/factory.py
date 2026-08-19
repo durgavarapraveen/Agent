@@ -12,6 +12,16 @@ from agents.real_agents import (
     RealDependencyAgent, RealWebServerAgent
 )
 
+from agents.reconnaissance_agents import (
+    SubdomainDiscoveryAgent,
+    PortScanAgent,
+    DirectoryBruteforceAgent,
+    TechStackAgent,
+    ScreenshotAgent,
+    VulnerabilityDetectionAgent,
+    ComprehensiveReconAgent
+)
+
 logger = logging.getLogger(__name__)
 
 class AgentRegistry:
@@ -34,6 +44,14 @@ class AgentRegistry:
         self.register("vulnerability_scanning", RealVulnerabilityAgent)
         self.register("dependency_analysis", RealDependencyAgent)
         self.register("web_server_analysis", RealWebServerAgent)
+        
+        self.register("subdomain_discovery", SubdomainDiscoveryAgent)
+        self.register("port_scanning", PortScanAgent)
+        self.register("directory_bruteforce", DirectoryBruteforceAgent)
+        self.register("tech_detection", TechStackAgent)
+        self.register("screenshot", ScreenshotAgent)
+        self.register("vulnerability_detection", VulnerabilityDetectionAgent)
+        self.register("comprehensive_recon", ComprehensiveReconAgent)
     
     def register(self, capability: str, agent_class: Type[BaseAgent]):
         """Register an agent type."""

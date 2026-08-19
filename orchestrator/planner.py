@@ -51,6 +51,62 @@ class Planner:
                 capability="web_server_analysis",
                 priority=7
             ))
+            
+            tasks.append(Task(
+                title="Comprehensive Reconnaissance",
+                description="Full target discovery and analysis",
+                objective="Execute all reconnaissance phases",
+                capability="comprehensive_recon",
+                priority=10
+            ))
+            
+            tasks.append(Task(
+                title="Subdomain Discovery",
+                description="Enumerate subdomains using multiple sources",
+                objective="Find all subdomains and related assets",
+                capability="subdomain_discovery",
+                priority=8
+            ))
+
+            tasks.append(Task(
+                title="Port and Service Scanning",
+                description="Discover open ports and running services",
+                objective="Map network services and versions",
+                capability="port_scanning",
+                priority=8
+            ))
+
+            tasks.append(Task(
+                title="Directory and Content Discovery",
+                description="Bruteforce directories and hidden content",
+                objective="Find hidden paths and endpoints",
+                capability="directory_bruteforce",
+                priority=7
+            ))
+
+            tasks.append(Task(
+                title="Technology Stack Identification",
+                description="Identify web technologies and frameworks",
+                objective="Detect software, versions, and CVEs",
+                capability="tech_detection",
+                priority=7
+            ))
+
+            tasks.append(Task(
+                title="Visual Reconnaissance",
+                description="Capture screenshots of web applications",
+                objective="Visual assessment and reconnaissance",
+                capability="screenshot",
+                priority=6
+            ))
+
+            tasks.append(Task(
+                title="Vulnerability Detection",
+                description="Scan for known vulnerabilities",
+                objective="Identify security issues automatically",
+                capability="vulnerability_detection",
+                priority=6
+            ))
         
         elif target_type == "SOURCE":
             # Source code analysis plan
