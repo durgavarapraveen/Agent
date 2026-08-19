@@ -1,58 +1,126 @@
 """
-LLM Client - Pluggable interface for local/remote LLMs
-Supports Ollama by default. Easy to swap providers.
-
-Task tiers:
-  SMALL: quick classification, extraction, summarization (fast model)
-  LARGE: reasoning, analysis, report generation (bigger model)
+LLM Client - Reads config from .env file
+Supports Gemini + Ollama + extensible for other providers
 """
 
 import json
 import logging
-import os
+import re
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Optional, Dict, List
+from typing import Optional, Dict
 
 import httpx
+
+from core.config import get_config
 
 logger = logging.getLogger(__name__)
 
 
 class TaskTier(Enum):
-    SMALL = "small"   # fast, cheap - extraction/classification
-    LARGE = "large"   # slower, better - reasoning/analysis
+    SMALL = "small"
+    LARGE = "large"
 
 
 class LLMProvider(ABC):
-    """Base interface. Implement this to add new providers."""
+    """Base provider interface"""
 
     @abstractmethod
     async def generate(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
                         system: Optional[str] = None, max_tokens: int = 1024,
                         temperature: float = 0.3) -> str:
-        """Generate text completion. Returns raw string."""
         pass
 
     @abstractmethod
     async def generate_json(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
                              system: Optional[str] = None, max_tokens: int = 2048) -> Dict:
-        """Generate JSON response. Returns dict."""
         pass
 
     @abstractmethod
     async def is_available(self) -> bool:
-        """Check if provider is reachable."""
         pass
 
+
+# ═══════════════════════════════════════════════════════════════
+# GEMINI PROVIDER
+# ═══════════════════════════════════════════════════════════════
+
+class GeminiProvider(LLMProvider):
+    """Google Gemini API provider"""
+
+    def __init__(self, api_key: str, model: str = "gemini-2.0-flash-exp"):
+        self.api_key = api_key
+        if not self.api_key:
+            raise ValueError("GOOGLE_API_KEY not set in .env")
+        self.model = model
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
+        self.timeout = 120
+
+    async def is_available(self) -> bool:
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
+                r = await client.post(url, json={"contents": [{"parts": [{"text": "test"}]}]})
+                return r.status_code in (200, 400)
+        except Exception as e:
+            logger.debug(f"Gemini unavailable: {e}")
+            return False
+
+    async def generate(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
+                        system: Optional[str] = None, max_tokens: int = 1024,
+                        temperature: float = 0.3) -> str:
+        contents = []
+        if system:
+            contents.append({"parts": [{"text": system}]})
+        contents.append({"role": "user", "parts": [{"text": prompt}]})
+
+        payload = {
+            "contents": contents,
+            "generationConfig": {"maxOutputTokens": max_tokens, "temperature": temperature}
+        }
+
+        url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                r = await client.post(url, json=payload)
+                if r.status_code == 200:
+                    data = r.json()
+                    if "candidates" in data and data["candidates"]:
+                        parts = data["candidates"][0].get("content", {}).get("parts", [])
+                        if parts:
+                            return parts[0].get("text", "").strip()
+                logger.error(f"Gemini {r.status_code}: {r.text[:200]}")
+        except Exception as e:
+            logger.error(f"Gemini generate: {e}")
+        return ""
+
+    async def generate_json(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
+                             system: Optional[str] = None, max_tokens: int = 2048) -> Dict:
+        json_prompt = f"{prompt}\n\nRespond ONLY with valid JSON."
+        text = await self.generate(json_prompt, tier, system, max_tokens, temperature=0.1)
+        if not text:
+            return {}
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            m = re.search(r'\{[\s\S]*\}', text)
+            if m:
+                try:
+                    return json.loads(m.group(0))
+                except:
+                    pass
+        return {}
+
+
+# ═══════════════════════════════════════════════════════════════
+# OLLAMA PROVIDER
+# ═══════════════════════════════════════════════════════════════
 
 class OllamaProvider(LLMProvider):
     """Ollama local LLM provider"""
 
-    def __init__(self,
-                 base_url: str = "http://localhost:11434",
-                 small_model: str = "qwen3:8b",
-                 large_model: str = "qwen3:8b"):
+    def __init__(self, base_url: str = "http://localhost:11434",
+                 small_model: str = "qwen3:8b", large_model: str = "qwen3:8b"):
         self.base_url = base_url.rstrip("/")
         self.small_model = small_model
         self.large_model = large_model
@@ -66,56 +134,38 @@ class OllamaProvider(LLMProvider):
             async with httpx.AsyncClient(timeout=5) as client:
                 r = await client.get(f"{self.base_url}/api/tags")
                 return r.status_code == 200
-        except Exception as e:
-            logger.debug(f"Ollama not available: {e}")
-            return False
-
-    async def list_models(self) -> List[str]:
-        try:
-            async with httpx.AsyncClient(timeout=5) as client:
-                r = await client.get(f"{self.base_url}/api/tags")
-                if r.status_code == 200:
-                    return [m["name"] for m in r.json().get("models", [])]
         except:
-            pass
-        return []
+            return False
 
     async def generate(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
                         system: Optional[str] = None, max_tokens: int = 1024,
                         temperature: float = 0.3) -> str:
         model = self._model_for(tier)
         payload = {
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
+            "model": model, "prompt": prompt, "stream": False,
             "options": {"temperature": temperature, "num_predict": max_tokens}
         }
         if system:
             payload["system"] = system
-
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 r = await client.post(f"{self.base_url}/api/generate", json=payload)
                 if r.status_code == 200:
                     return r.json().get("response", "").strip()
-                logger.error(f"Ollama error {r.status_code}: {r.text[:200]}")
+                logger.error(f"Ollama {r.status_code}: {r.text[:200]}")
         except Exception as e:
-            logger.error(f"Ollama generate failed: {e}")
+            logger.error(f"Ollama generate: {e}")
         return ""
 
     async def generate_json(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
                              system: Optional[str] = None, max_tokens: int = 2048) -> Dict:
         model = self._model_for(tier)
         payload = {
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "format": "json",
+            "model": model, "prompt": prompt, "stream": False, "format": "json",
             "options": {"temperature": 0.1, "num_predict": max_tokens}
         }
         if system:
             payload["system"] = system
-
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 r = await client.post(f"{self.base_url}/api/generate", json=payload)
@@ -124,93 +174,97 @@ class OllamaProvider(LLMProvider):
                     try:
                         return json.loads(text)
                     except json.JSONDecodeError:
-                        # Try to extract JSON from response
-                        import re
                         m = re.search(r'\{[\s\S]*\}', text)
                         if m:
                             try:
                                 return json.loads(m.group(0))
                             except:
                                 pass
-                        logger.warning(f"Ollama returned non-JSON: {text[:200]}")
         except Exception as e:
-            logger.error(f"Ollama generate_json failed: {e}")
+            logger.error(f"Ollama generate_json: {e}")
         return {}
 
 
 class NullProvider(LLMProvider):
-    """No-op provider when no LLM is available"""
-
+    """Fallback provider when nothing works"""
     async def generate(self, *args, **kwargs) -> str:
         return ""
-
     async def generate_json(self, *args, **kwargs) -> Dict:
         return {}
-
     async def is_available(self) -> bool:
         return False
 
 
-# Registry - add new providers here
-_PROVIDERS = {
-    "ollama": OllamaProvider,
-    "null": NullProvider,
-}
-
+# ═══════════════════════════════════════════════════════════════
+# CLIENT
+# ═══════════════════════════════════════════════════════════════
 
 class LLMClient:
-    """Singleton client - use LLMClient.get() to access."""
+    """Main client - loads provider from .env"""
 
     _instance: Optional[LLMProvider] = None
-    _initialized: bool = False
 
     @classmethod
     def get(cls) -> LLMProvider:
         if cls._instance is None:
-            cls._instance = cls._create_from_env()
+            cls._instance = cls._create_from_config()
         return cls._instance
 
     @classmethod
     def set_provider(cls, provider: LLMProvider):
-        """Manually set provider (for testing/swapping)"""
         cls._instance = provider
 
     @classmethod
-    def _create_from_env(cls) -> LLMProvider:
+    def _create_from_config(cls) -> LLMProvider:
         """
-        Read config from environment variables:
-          LLM_PROVIDER=ollama (default)
-          LLM_BASE_URL=http://localhost:11434
-          LLM_SMALL_MODEL=llama3.2:3b
-          LLM_LARGE_MODEL=llama3.1:8b
+        Read from .env:
+          LLM_PROVIDER=gemini|ollama|other
 
-        To swap providers later, just change LLM_PROVIDER env var
-        or call LLMClient.set_provider(YourProvider(...))
+        For Gemini:
+          GOOGLE_API_KEY=...
+          GEMINI_MODEL=gemini-2.0-flash-exp
+
+        For Ollama:
+          OLLAMA_BASE_URL=http://localhost:11434
+          OLLAMA_SMALL_MODEL=qwen3:8b
+          OLLAMA_LARGE_MODEL=qwen3:8b
         """
-        provider_name = os.getenv("LLM_PROVIDER", "ollama").lower()
+        config = get_config()
+        provider_name = config.get("LLM_PROVIDER", "ollama").lower()
 
-        if provider_name == "ollama":
-            return OllamaProvider(
-                base_url=os.getenv("LLM_BASE_URL", "http://localhost:11434"),
-                small_model=os.getenv("LLM_SMALL_MODEL", "qwen3:8b"),
-                large_model=os.getenv("LLM_LARGE_MODEL", "qwen3:8b"),
-            )
-        elif provider_name in _PROVIDERS:
-            return _PROVIDERS[provider_name]()
+        logger.info(f"LLM_PROVIDER from .env: {provider_name}")
+
+        if provider_name == "gemini":
+            try:
+                api_key = config.get("GOOGLE_API_KEY")
+                model = config.get("GEMINI_MODEL", "gemini-2.0-flash-exp")
+                logger.info(f"Using Gemini provider (model: {model})")
+                return GeminiProvider(api_key, model)
+            except ValueError as e:
+                logger.error(f"Gemini init failed: {e}")
+                logger.info("Falling back to NullProvider")
+                return NullProvider()
+
+        elif provider_name == "ollama":
+            base_url = config.get("OLLAMA_BASE_URL", "http://localhost:11434")
+            small_model = config.get("OLLAMA_SMALL_MODEL", "qwen3:8b")
+            large_model = config.get("OLLAMA_LARGE_MODEL", "qwen3:8b")
+            logger.info(f"Using Ollama provider ({small_model})")
+            return OllamaProvider(base_url, small_model, large_model)
+
         else:
-            logger.warning(f"Unknown provider {provider_name}, using null")
+            logger.warning(f"Unknown provider: {provider_name}")
+            logger.info("Falling back to NullProvider")
             return NullProvider()
 
 
 # Convenience functions
 async def llm_extract(text: str, instruction: str, tier: TaskTier = TaskTier.SMALL) -> Dict:
-    """Small task: extract structured data from text"""
     client = LLMClient.get()
-    prompt = f"{instruction}\n\nInput:\n{text[:6000]}\n\nRespond with valid JSON only."
+    prompt = f"{instruction}\n\nInput:\n{text[:6000]}\n\nJSON only."
     return await client.generate_json(prompt, tier=tier)
 
 
 async def llm_analyze(text: str, question: str, tier: TaskTier = TaskTier.LARGE) -> str:
-    """Larger task: reason about content"""
     client = LLMClient.get()
-    return await client.generate(f"{question}\n\nContext:\n{text[:8000]}", tier=tier, max_tokens=2048)
+    return await client.generate(f"{question}\n\n{text[:8000]}", tier=tier, max_tokens=2048)
