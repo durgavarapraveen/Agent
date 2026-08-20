@@ -7,6 +7,7 @@ import logging
 import re
 import socket
 import ssl
+import asyncio
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -389,3 +390,50 @@ class ToolRegistry:
         if not relevant:
             return self.list_tools()  # Give all if nothing matches
         return "\n".join(relevant)
+    
+    async def validate_tools(self) -> dict:
+        """Validate which tools actually exist on startup"""
+        logger.info("Validating tool availability on startup...")
+        
+        self.available_tools = {}
+        self.unavailable_tools = {}
+        
+        for tool_name in list(self.local_tools.keys()):
+            exists = await self._tool_exists(tool_name)
+            
+            if exists:
+                self.available_tools[tool_name] = self.local_tools[tool_name]
+                logger.info(f"  ✓ {tool_name}")
+            else:
+                self.unavailable_tools[tool_name] = self.local_tools[tool_name]
+                logger.warning(f"  ✗ {tool_name} (not found)")
+        
+        logger.info(f"Available: {len(self.available_tools)}, Unavailable: {len(self.unavailable_tools)}")
+        return self.available_tools
+ 
+    async def _tool_exists(self, tool_name: str) -> bool:
+        """Check if tool exists and is executable"""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                tool_name, "--version",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+            
+            await asyncio.wait_for(proc.communicate(), timeout=2)
+            return proc.returncode == 0 or True  # Return True if no crash
+            
+        except asyncio.TimeoutError:
+            return True  # Tool exists but slow
+        except FileNotFoundError:
+            return False  # Tool doesn't exist
+        except Exception as e:
+            logger.debug(f"Error checking {tool_name}: {e}")
+            return False
+ 
+    def list_tools(self) -> str:
+        """List available tools for LLM"""
+        if hasattr(self, 'available_tools') and self.available_tools:
+            return f"Available tools: {', '.join(sorted(self.available_tools.keys()))}"
+        return f"Available tools: {', '.join(sorted(self.local_tools.keys()))}"
+ 

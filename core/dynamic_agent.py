@@ -7,6 +7,7 @@ Gets ONLY the context the brain decided is relevant.
 import json
 import logging
 import re
+import asyncio
 from typing import Dict, List, Optional
 from datetime import datetime
 
@@ -76,117 +77,107 @@ class DynamicAgent:
         self.max_steps = max_steps
         self.llm = LLMClient.get()
         self.history: List[Dict] = []  # Tool execution history
+        self.failed_tools = set()  # NEW: Track failed tools per agent
+        self.max_retries_per_tool = 1  # NEW: Don't retry failed tools
+        self.step_without_progress = 0
+        
+    async def execute_tool(self, tool_name: str, params: dict):
+        """Execute tool with smart failure handling"""
+        
+        # Skip if already failed
+        if tool_name in self.failed_tools:
+            logger.warning(f"[{self.agent_id}] Tool '{tool_name}' already failed, skipping")
+            return {
+                "error": "tool_failed_previously",
+                "status": "skipped",
+                "tool": tool_name
+            }
+        
+        try:
+            logger.info(f"[{self.agent_id}] Executing: {tool_name}")
+            result = await self.tools.execute(tool_name, params)
+            
+            # Check for common failure patterns
+            error_str = str(result).lower()
+            
+            if any(x in error_str for x in ["not found", "failed to install", "no such file"]):
+                # Tool doesn't exist
+                self.failed_tools.add(tool_name)
+                logger.warning(f"[{self.agent_id}] ✗ Tool '{tool_name}' not available (cached)")
+                return result
+            
+            if result.get("returncode") != 0 and result.get("error"):
+                # Tool errored but might be transient
+                logger.warning(f"[{self.agent_id}] Tool '{tool_name}' error: {result.get('error')[:100]}")
+                # Don't cache yet (might be transient)
+                return result
+            
+            # Success
+            self.step_without_progress = 0
+            return result
+            
+        except Exception as e:
+            logger.error(f"[{self.agent_id}] Tool '{tool_name}' exception: {e}")
+            self.failed_tools.add(tool_name)
+            return {"error": str(e), "status": "exception"}
+ 
 
-    async def execute(self) -> Dict:
-        """Run agent loop: think → tool → think → tool → done"""
-        logger.info(f"[{self.agent_id}] Starting: {self.objective}")
-        self.ctx.log_agent(self.agent_id, self.objective, "RUNNING")
-
-        # Build tool descriptions for this agent
-        tool_desc = "\n".join(
-            f"- {name}: {self.tools.get(name).description}"
-            for name in self.allowed_tools
-            if self.tools.get(name)
-        )
-
+    async def execute(self):
+        """Execute objective with failure handling"""
+        
         step = 0
+        self.step_without_progress = 0
+        
         while step < self.max_steps:
-            step += 1
-
-            # Build prompt with history
-            history_str = ""
-            if self.history:
-                history_str = "\n\nPREVIOUS STEPS:\n"
-                for h in self.history[-5:]:  # Last 5 steps only
-                    output_preview = h.get("output", "")[:800]
-                    history_str += (
-                        f"\nStep {h['step']}: {h['tool']} → "
-                        f"{'OK' if h['success'] else 'FAIL'}\n"
-                        f"Output: {output_preview}\n"
-                    )
-
-            prompt = (
-                f"OBJECTIVE: {self.objective}\n\n"
-                f"CONTEXT:\n{self.agent_context}\n\n"
-                f"AVAILABLE TOOLS:\n{tool_desc}\n"
-                f"{history_str}\n\n"
-                f"Step {step}/{self.max_steps}. What's next?"
-            )
-
-            # Ask LLM
-            decision = await self.llm.generate_json(
-                prompt,
-                system=AGENT_SYSTEM_PROMPT,
-                tier=TaskTier.SMALL,
-                max_tokens=1500,
-            )
-
+            # Break if too many steps without progress
+            if self.step_without_progress > 3:
+                logger.warning(f"[{self.agent_id}] No progress for 3 steps, giving up")
+                return {
+                    "status": "failed",
+                    "reason": "no_progress",
+                    "steps": step,
+                    "summary": "Could not make progress on objective"
+                }
+            
+            # Get next action from LLM
+            prompt = self._build_step_prompt(step)
+            decision = await self.llm.generate_json(prompt)
+            
             if not decision:
-                logger.warning(f"[{self.agent_id}] LLM returned empty, retrying...")
+                self.step_without_progress += 1
+                logger.warning(f"[{self.agent_id}] LLM returned empty (no progress counter: {self.step_without_progress})")
+                await asyncio.sleep(2)
                 continue
-
-            action = decision.get("action", "done")
-            thinking = decision.get("thinking", "")
-
-            logger.info(f"[{self.agent_id}] Step {step}: {thinking[:100]}...")
-
-            # ── DONE ──
-            if action == "done":
-                results = decision.get("results", {})
-                logger.info(f"[{self.agent_id}] Complete: {results.get('summary', '')[:100]}")
-                self._store_results(results)
-                self.ctx.log_agent(self.agent_id, self.objective, "DONE",
-                                    results.get("summary", ""))
-                return results
-
-            # ── RUN TOOL ──
-            if action == "run_tool":
-                tool_name = decision.get("tool", "")
-                command = decision.get("command", "")
-                timeout = decision.get("timeout", 120)
-
-                if tool_name not in self.allowed_tools:
-                    logger.warning(f"[{self.agent_id}] Tool '{tool_name}' not allowed")
-                    self.history.append({
-                        "step": step, "tool": tool_name,
-                        "success": False, "output": f"Tool not allowed: {tool_name}"
-                    })
-                    continue
-
-                tool = self.tools.get(tool_name)
-                if not tool:
-                    self.history.append({
-                        "step": step, "tool": tool_name,
-                        "success": False, "output": f"Tool not found: {tool_name}"
-                    })
-                    continue
-
-                # Execute
-                try:
-                    if hasattr(tool, 'run') and 'command' in tool.run.__code__.co_varnames:
-                        result = tool.run(command=command, timeout=timeout)
-                    else:
-                        result = tool.run(**json.loads(command) if command.startswith("{") else {"command": command})
-                except Exception as e:
-                    result = ToolResult(success=False, error=str(e))
-
-                self.history.append({
-                    "step": step,
-                    "tool": tool_name,
-                    "command": command,
-                    "success": result.success,
-                    "output": result.output[:2000],
-                    "error": result.error[:500] if result.error else "",
-                })
-
-                # Store raw output
-                self.ctx.store_raw(f"{self.agent_id}_step{step}", result.output)
-
-        # Max steps reached
-        logger.warning(f"[{self.agent_id}] Max steps ({self.max_steps}) reached")
-        self.ctx.log_agent(self.agent_id, self.objective, "MAX_STEPS")
-        return {"summary": "Max steps reached", "data": {}, "findings": []}
-
+            
+            # Extract tool and params
+            tool = decision.get("tool", "")
+            params = decision.get("params", {})
+            
+            # Skip if it's a failed tool
+            if tool in self.failed_tools:
+                logger.warning(f"[{self.agent_id}] LLM suggested failed tool '{tool}', instructing to try different approach")
+                # Tell LLM this tool doesn't work
+                self.step_without_progress += 1
+                continue
+            
+            # Execute tool
+            if tool:
+                result = await self.execute_tool(tool, params)
+                
+                if "error" in result and "failed_previously" not in result.get("error", ""):
+                    self.step_without_progress += 1
+                else:
+                    self.step_without_progress = 0
+            
+            step += 1
+            await asyncio.sleep(1)
+        
+        return {
+            "status": "completed",
+            "steps": self.max_steps,
+            "summary": self.ctx.get("last_result", "Unknown")
+        }
+    
     def _store_results(self, results: Dict):
         """Parse agent results and store in shared context"""
         data = results.get("data", {})
@@ -205,7 +196,14 @@ class DynamicAgent:
             self.ctx.add_directories(data["directories"], self.agent_id)
         if data.get("technologies"):
             host = data.get("host", self.ctx.target)
-            self.ctx.add_technologies(host, data["technologies"])
+            techs = data["technologies"]
+            normalized = []
+            for t in techs:
+                if isinstance(t, dict):
+                    normalized.append(t.get("name", str(t)))
+                else:
+                    normalized.append(str(t))
+            self.ctx.add_technologies(host, normalized)
 
         # Store findings as vulnerabilities
         for finding in results.get("findings", []):

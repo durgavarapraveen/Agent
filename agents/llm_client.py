@@ -14,6 +14,12 @@ import httpx
 
 from core.config import get_config
 
+try:
+    from groq import Groq as GroqClient
+    HAS_GROQ = True
+except ImportError:
+    HAS_GROQ = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -110,6 +116,92 @@ class GeminiProvider(LLMProvider):
                 except:
                     pass
         return {}
+
+
+# ═══════════════════════════════════════════════════════════════
+# GROQ PROVIDER
+# ═══════════════════════════════════════════════════════════════
+
+class GroqProvider(LLMProvider):
+    """Groq API provider - FREE, fast models"""
+
+    def __init__(self):
+        if not HAS_GROQ:
+            raise ImportError("groq package not installed. Install with: pip install groq")
+        
+        api_key = get_config().get("GROQ_API_KEY")
+        if not api_key:
+            raise ValueError("GROQ_API_KEY not set in .env")
+        
+        self.model = get_config().get("GROQ_MODEL", "mixtral-8x7b-32768")
+        self.client = GroqClient(api_key=api_key)
+
+    async def generate(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
+                       system: Optional[str] = None, max_tokens: int = 1024,
+                       temperature: float = 0.3) -> str:
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system or "You are a helpful assistant."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"Groq generate error: {e}")
+            return ""
+
+    async def generate_json(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
+                            system: Optional[str] = None, max_tokens: int = 2048) -> Dict:
+        json_prompt = f"{prompt}\n\nRespond ONLY with valid JSON. No markdown backticks."
+        json_system = (system or "") + "\n\nRespond ONLY with valid JSON."
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": json_system},
+                    {"role": "user", "content": json_prompt}
+                ],
+                max_tokens=max_tokens,
+                temperature=0.1,
+            )
+            text = response.choices[0].message.content
+            
+            # Remove markdown code blocks
+            text = re.sub(r'```json\n?|\n?```', '', text)
+            text = text.strip()
+            
+            if not text:
+                return {}
+            
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                m = re.search(r'\{[\s\S]*\}', text)
+                if m:
+                    try:
+                        return json.loads(m.group(0))
+                    except:
+                        pass
+            return {}
+        except Exception as e:
+            logger.error(f"Groq generate_json error: {e}")
+            return {}
+
+    async def is_available(self) -> bool:
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": "test"}],
+                max_tokens=10,
+            )
+            return response.choices[0].message.content != ""
+        except:
+            return False
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -234,7 +326,17 @@ class LLMClient:
 
         logger.info(f"LLM_PROVIDER from .env: {provider_name}")
 
-        if provider_name == "gemini":
+        if provider_name == "groq":
+            try:
+                model = config.get("GROQ_MODEL", "mixtral-8x7b-32768")
+                logger.info(f"Using Groq provider (model: {model})")
+                return GroqProvider()
+            except (ValueError, ImportError) as e:
+                logger.error(f"Groq init failed: {e}")
+                logger.info("Falling back to NullProvider")
+                return NullProvider()
+
+        elif provider_name == "gemini":
             try:
                 api_key = config.get("GOOGLE_API_KEY")
                 model = config.get("GEMINI_MODEL", "gemini-2.0-flash-exp")

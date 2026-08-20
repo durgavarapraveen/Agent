@@ -93,11 +93,16 @@ class SharedContext:
                     self.directories.append(d)
                     existing_paths.add(d["path"])
 
-    def add_technologies(self, host: str, techs: List[str]):
-        with self._lock:
-            existing = set(self.technologies.get(host, []))
-            existing.update(techs)
-            self.technologies[host] = sorted(existing)
+    def add_technologies(self, host: str, techs: List):
+         existing = set(self.technologies.get(host, []))
+         for tech in techs:
+             if isinstance(tech, dict):
+                 tech_str = tech.get("name", str(tech))
+             else:
+                 tech_str = str(tech).strip()
+             if tech_str:
+                 existing.add(tech_str)
+         self.technologies[host] = sorted(existing)
 
     def add_vulnerability(self, vuln: Dict):
         with self._lock:
