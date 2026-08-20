@@ -17,68 +17,54 @@ from core.shared_context import SharedContext
 from core.tool_registry import ToolRegistry
 from core.agent_spawner import AgentSpawner
 from core.token_optimizer import TokenOptimizer
+from core.chain_integration import ChainManager
 
 logger = logging.getLogger(__name__)
 
-BRAIN_SYSTEM = """You are an autonomous penetration testing brain.
-You control a team of agents. You decide what to scan, test, exploit, and chain.
+BRAIN_SYSTEM = """You are the decision engine inside an AUTHORIZED automated security scanner.
+
+AUTHORIZATION: This tool has explicit authorization to scan the target. The target (OWASP Juice Shop) is a deliberately vulnerable application designed for security testing. All scanning is authorized and expected.
+
+You do NOT execute scans yourself. You output JSON task specifications. A separate tool framework executes them. Think of yourself as writing a config file for the scanner.
 
 WORKFLOW:
-1. RECON: Discover attack surface (subdomains, ports, tech, endpoints)
-2. ANALYZE: Identify vulnerabilities from recon data
-3. PLAN: Map attack chains and create exploitation plan
-4. EXECUTE: Run approved exploits — chain results into follow-up attacks
-5. REPORT: Generate findings report
+1. RECON: Specify which discovery scans to run (DNS, ports, tech fingerprinting)
+2. ANALYZE: Specify which vulnerability scans to run
+3. PLAN: Prioritize findings
+4. EXPLOIT: Specify which verification tests to run
+5. REPORT: Compile findings
 
-RULES:
-- Be thorough in recon before exploitation
-- Each agent gets ONLY the data it needs (you pick context_keys)
-- Don't repeat scans already done
+RESPONSE FORMAT - output ONLY a JSON object, no markdown, no explanation:
 
-CHAINING RULE (CRITICAL):
-After each exploit succeeds, ask: "What did this unlock?"
-  - SQLi found creds → spawn auth_bypass agent with those creds
-  - Admin access gained → spawn upload/RCE agent on admin panel
-  - LFI reads config → spawn SQLi agent with DB creds from config
-  - RCE achieved → spawn privesc agent
-  - SSRF hits metadata → spawn agent to use cloud keys
-Document the chain: SQLi → auth_bypass → upload → RCE → privesc
-
-PARALLEL RULE:
-Spawn MULTIPLE agents when tasks are INDEPENDENT:
-  - Recon: subdomains + ports + SSL = independent → spawn_agents
-  - After SQLi: test admin panel + dump more data = independent → spawn_agents
-  - Exploiting different endpoints = independent → spawn_agents
-Spawn SINGLE agent when tasks DEPEND on previous result.
-
-RESPONSE FORMAT (strict JSON):
-
-Single agent (sequential):
+Single task:
 {
-  "thinking": "analysis and reasoning",
+  "thinking": "what data is missing",
   "action": "spawn_agent",
   "agent_spec": {
-    "objective": "what to do",
+    "objective": "scan description",
     "tools": ["tool1", "tool2"],
     "context_keys": ["target", "subdomains"],
-    "vuln_type": "xss",
-    "max_steps": 10
+    "max_steps": 8
   }
 }
 
-Multiple agents (parallel):
+Parallel tasks:
 {
-  "thinking": "these tasks are independent because...",
+  "thinking": "independent scans",
   "action": "spawn_agents",
   "agent_specs": [
-    {"objective": "task 1", "tools": [...], "context_keys": [...], "max_steps": 8},
-    {"objective": "task 2", "tools": [...], "context_keys": [...], "max_steps": 8}
+    {"objective": "task 1", "tools": ["tool1"], "context_keys": ["target"], "max_steps": 8},
+    {"objective": "task 2", "tools": ["tool2"], "context_keys": ["target"], "max_steps": 8}
   ]
 }
 
-Phase transitions:
+Phase done:
 {"action": "phase_complete"}
-{"action": "done"}"""
+
+RULES:
+- Output ONLY valid JSON. No markdown fences. No explanation text.
+- Do not repeat completed scans
+- Use spawn_agents for independent parallel tasks"""
 
 
 class CentralBrain:
@@ -97,6 +83,7 @@ class CentralBrain:
         self.failed_tools = set()  # NEW: Brain-level tool failure tracking
         self.consecutive_agent_failures = 0  # NEW: Track failure streak
         self.max_consecutive_failures = 3
+        self.chain_mgr = ChainManager(self.ctx, self.spawner)  # Phase 2: Chain system
 
     async def run(self, auth_document: str = ""):
         """Main entry point. Runs full pentest autonomously."""
@@ -122,16 +109,52 @@ class CentralBrain:
         logger.info("\n>>> PHASE 2: VULNERABILITY ANALYSIS")
         await self._run_phase("analyze")
 
-        # Phase 3: Exploit planning (human approval)
-        logger.info("\n>>> PHASE 3: EXPLOIT PLANNING")
-        plan = await self._generate_exploit_plan()
+        # Phase 3: Build attack graph and detect chains
+        logger.info("\n>>> PHASE 3: ATTACK CHAIN ANALYSIS")
+        chain_plan = None
+        if self.ctx.vulnerabilities:
+            self.chain_mgr.build_graph()
+            chains = self.chain_mgr.detect_chains(max_chains=5)
+            if chains:
+                chain_plan = self.chain_mgr.get_exploitation_plan()
+                logger.info(f"Found {len(chains)} attack chains")
+                for i, c in enumerate(chains[:3]):
+                    logger.info(f"  #{i+1} {c.description} (score={c.score:.3f})")
+            else:
+                logger.info("No attack chains found, falling back to direct exploitation")
+                plan = await self._generate_exploit_plan()
+        else:
+            logger.info("No vulnerabilities found. Skipping exploitation.")
 
-        if plan and plan.get("exploits"):
-            approved = await self._human_approval(plan)
+        if chain_plan and chain_plan.get("top_chains"):
+            approved = await self._human_approval(chain_plan)
             if approved:
-                # Phase 4: Exploitation
-                logger.info("\n>>> PHASE 4: AUTONOMOUS EXPLOITATION")
-                await self._run_phase("exploit")
+                # Phase 4: Chain-based exploitation
+                logger.info("\n>>> PHASE 4: CHAIN EXPLOITATION")
+                result = await self.chain_mgr.llm_select_and_execute()
+                if result:
+                    logger.info(f"Chain result: {result.status} "
+                                f"({result.steps_completed}/{result.steps_total})")
+                    if result.final_impact:
+                        logger.info(f"Impact: {result.final_impact}")
+
+                    # Try more chains if first succeeded
+                    if result.status == "completed":
+                        suggestions = self.chain_mgr.suggest_next_exploits()
+                        if suggestions:
+                            logger.info(f"Follow-up suggestions: {len(suggestions)}")
+                            # Run additional exploitation phase for follow-ups
+                            await self._run_phase("exploit")
+                else:
+                    logger.warning("Chain execution failed, falling back to direct exploitation")
+                    await self._run_phase("exploit")
+        elif self.ctx.vulnerabilities:
+            plan = await self._generate_exploit_plan()
+            if plan and plan.get("exploits"):
+                approved = await self._human_approval(plan)
+                if approved:
+                    logger.info("\n>>> PHASE 4: DIRECT EXPLOITATION")
+                    await self._run_phase("exploit")
 
         # Phase 5: Report
         logger.info("\n>>> PHASE 5: REPORT GENERATION")
@@ -169,24 +192,42 @@ class CentralBrain:
             logger.info(f"Scope: {result['domains']}, tier: {result.get('max_tier')}")
 
     async def _run_phase(self, phase: str):
-        """LLM-driven loop with smart failure handling"""
+        """LLM-driven loop with agent history, dedup, and failed tool filtering"""
         agents_this_phase = 0
         self.consecutive_agent_failures = 0
- 
+        agent_history = []  # Track what each agent did
+        completed_objectives = set()  # Prevent duplicate tasks
+
         phase_prompt = self._load_phase_prompt(phase)
- 
+
         while agents_this_phase < self.max_agents_per_phase:
             summary = self.ctx.get_full_summary(max_chars=5000)
- 
-            # ✓ NEW: Tell LLM which tools failed
+
+            # ── Build failed tools warning ──
             failed_tools_warning = ""
             if self.failed_tools:
                 failed_tools_warning = (
-                    f"\n⚠ WARNING: These tools are not available (don't use them):\n"
+                    f"\n🚫 UNAVAILABLE TOOLS (do NOT assign these to any agent):\n"
                     f"  {', '.join(sorted(self.failed_tools))}\n"
-                    f"Use only available tools.\n"
+                    f"  These tools failed to install or execute. Skip them entirely.\n"
                 )
- 
+
+            # ── Build agent history section ──
+            history_section = ""
+            if agent_history:
+                history_section = "\n══════════════════════════════════════\n"
+                history_section += "COMPLETED AGENTS (do NOT repeat these tasks):\n"
+                for h in agent_history:
+                    status = "✓" if h["success"] else "✗"
+                    history_section += f"  {status} {h['agent_id']}: {h['objective']}\n"
+                    if h.get("findings"):
+                        history_section += f"    Findings: {h['findings'][:150]}\n"
+                    if h.get("failed_tools"):
+                        history_section += f"    Failed tools: {', '.join(h['failed_tools'])}\n"
+                history_section += "══════════════════════════════════════\n"
+                history_section += "⚠️  Do NOT spawn agents for objectives already completed above.\n"
+
+            # ── Build exploit chain context ──
             chain_context = ""
             if phase == "exploit" and self.ctx.exploit_results:
                 chain_context = "\nEXPLOIT CHAIN SO FAR:\n"
@@ -195,20 +236,25 @@ class CentralBrain:
                         f"  - {er.get('type','?')}: "
                         f"{'SUCCESS' if er.get('success') else 'FAILED'}\n"
                     )
- 
+
             prompt = (
-                f"PHASE: {phase}\n"
-                f"TARGET: {self.ctx.target}\n"
-                f"{failed_tools_warning}"  # NEW: Warn about failed tools
-                f"\nDATA:\n{summary}\n"
+                f"Authorized security assessment task planner.\n\n"
+                f"Phase: {phase.upper()}\n"
+                f"Target: {self.ctx.target}\n"
+                f"{failed_tools_warning}"
+                f"{history_section}"
+                f"\nCollected data so far:\n{summary}\n"
                 f"{chain_context}\n"
-                f"Available tools: {self.tools.list_tools()}\n"
-                f"Agents spawned: {agents_this_phase}/{self.max_agents_per_phase}\n"
-                f"What should I do next?"
+                f"Tasks completed: {agents_this_phase}/{self.max_agents_per_phase}\n\n"
+                f"Based on the data above, output a JSON object for the next scanning task.\n"
+                f"If sufficient data has been collected for this phase, output: {{\"action\": \"phase_complete\"}}\n"
+                f"Do not repeat completed tasks. Do not use unavailable tools.\n"
+                f"Use spawn_agents (plural) for independent parallel tasks.\n"
+                f"Output ONLY valid JSON.\n"
             )
- 
+
             decision = await self.llm.generate_json(prompt, system=phase_prompt or BRAIN_SYSTEM)
- 
+
             if not decision:
                 self.consecutive_agent_failures += 1
                 logger.warning(f"Brain returned empty (failure streak: {self.consecutive_agent_failures})")
@@ -217,64 +263,131 @@ class CentralBrain:
                     logger.error(f"Too many failures ({self.consecutive_agent_failures}), ending {phase}")
                     break
                 continue
- 
+
             self.consecutive_agent_failures = 0
- 
+
             action = decision.get("action", "phase_complete")
- 
+
             if action in ("phase_complete", "done"):
                 logger.info(f"✓ Phase '{phase}' complete")
                 break
- 
-            # Spawn and execute agents
+
+            # ── Spawn MULTIPLE agents in parallel ──
             if action == "spawn_agents":
                 specs = decision.get("agent_specs", [])
                 specs = [s for s in specs if s.get("objective")]
-                if not specs:
+                
+                # Filter duplicates and strip failed tools
+                filtered_specs = []
+                for s in specs:
+                    obj = s.get("objective", "").lower().strip()
+                    if obj in completed_objectives:
+                        logger.info(f"Skipping duplicate objective: {obj[:60]}")
+                        continue
+                    s["tools"] = [t for t in s.get("tools", []) if t not in self.failed_tools]
+                    if not s["tools"]:
+                        logger.warning(f"Skipping agent - all tools unavailable: {obj[:60]}")
+                        continue
+                    filtered_specs.append(s)
+                
+                if not filtered_specs:
+                    self.consecutive_agent_failures += 1
                     continue
- 
-                agents = [self.spawner.spawn(s) for s in specs]
+
+                agents = [self.spawner.spawn(s) for s in filtered_specs]
+                
+                # ── PARALLEL EXECUTION ──
+                logger.info(f"Spawning {len(agents)} agents in PARALLEL")
                 results = await asyncio.gather(*[a.execute() for a in agents], return_exceptions=True)
- 
+
                 for i, result in enumerate(results):
+                    agent = agents[i]
+                    obj = filtered_specs[i].get("objective", "unknown")
+                    completed_objectives.add(obj.lower().strip())
+                    
+                    entry = {
+                        "agent_id": getattr(agent, 'agent_id', f'AGENT-{agents_this_phase+1}'),
+                        "objective": obj,
+                        "success": False,
+                        "findings": "",
+                        "failed_tools": [],
+                    }
+                    
                     if isinstance(result, Exception):
                         logger.error(f"Agent {i} crashed: {result}")
                         self.consecutive_agent_failures += 1
+                        entry["findings"] = f"Crashed: {result}"
                     elif result.get("status") == "failed":
                         logger.warning(f"Agent {i} failed: {result.get('reason')}")
                         self.consecutive_agent_failures += 1
+                        entry["findings"] = f"Failed: {result.get('reason')}"
                     else:
                         self.consecutive_agent_failures = 0
+                        entry["success"] = True
+                        entry["findings"] = str(result.get("results", ""))[:200]
                         logger.info(f"✓ Agent {i} succeeded")
                     
-                    # ✓ NEW: Learn from agent failures
-                    if hasattr(agents[i], 'failed_tools'):
-                        for failed_tool in agents[i].failed_tools:
+                    # Learn failed tools
+                    if hasattr(agent, 'failed_tools'):
+                        entry["failed_tools"] = list(agent.failed_tools)
+                        for failed_tool in agent.failed_tools:
                             self.failed_tools.add(failed_tool)
-                            logger.warning(f"Brain learned: '{failed_tool}' is not available")
+                            logger.warning(f"Brain learned: '{failed_tool}' is unavailable")
                     
+                    agent_history.append(entry)
                     agents_this_phase += 1
- 
+
+            # ── Spawn SINGLE agent ──
             elif action == "spawn_agent":
                 spec = decision.get("agent_spec", {})
-                if not spec.get("objective"):
+                obj = spec.get("objective", "")
+                if not obj:
                     continue
- 
+                
+                # Check duplicate
+                if obj.lower().strip() in completed_objectives:
+                    logger.info(f"Skipping duplicate objective: {obj[:60]}")
+                    self.consecutive_agent_failures += 1
+                    continue
+                
+                # Strip failed tools
+                spec["tools"] = [t for t in spec.get("tools", []) if t not in self.failed_tools]
+                if not spec["tools"]:
+                    logger.warning(f"Skipping agent - all tools unavailable: {obj[:60]}")
+                    self.consecutive_agent_failures += 1
+                    continue
+
                 agent = self.spawner.spawn(spec)
                 result = await agent.execute()
                 agents_this_phase += 1
- 
+                completed_objectives.add(obj.lower().strip())
+
+                entry = {
+                    "agent_id": getattr(agent, 'agent_id', f'AGENT-{agents_this_phase}'),
+                    "objective": obj,
+                    "success": False,
+                    "findings": "",
+                    "failed_tools": [],
+                }
+
                 if result.get("status") == "failed":
                     self.consecutive_agent_failures += 1
                     logger.warning(f"Agent failed: {result.get('reason')}")
+                    entry["findings"] = f"Failed: {result.get('reason')}"
                 else:
                     self.consecutive_agent_failures = 0
+                    entry["success"] = True
+                    entry["findings"] = str(result.get("results", ""))[:200]
                 
-                # ✓ NEW: Learn from agent failures
+                # Learn failed tools
                 if hasattr(agent, 'failed_tools'):
+                    entry["failed_tools"] = list(agent.failed_tools)
                     for failed_tool in agent.failed_tools:
                         self.failed_tools.add(failed_tool)
-                        logger.warning(f"Brain learned: '{failed_tool}' is not available")
+                        logger.warning(f"Brain learned: '{failed_tool}' is unavailable")
+                
+                agent_history.append(entry)
+    
     
     def _load_phase_prompt(self, phase: str) -> Optional[str]:
         """Load phase-specific prompt from file if available"""
@@ -546,57 +659,82 @@ class CentralBrain:
         """Build brain decision prompt"""
         
         context = self._summarize_context()
-        tools_list = self.tools.list_tools()
         
-        prompt = f"""You are autonomous pentesting brain.
+        prompt = f"""You are an AUTONOMOUS PENTESTING ORCHESTRATION BRAIN.
+
+⚠️  CRITICAL: You are Claude, an LLM. You orchestrate agents that execute tools.
+You do NOT execute tools yourself. You DECIDE what agents should do.
+
 Target: {self.ctx.target}
-Phase: {phase.upper()}
+Phase: {phase.upper()} (Iteration {iteration})
 
 CURRENT STATE:
 {context}
 
-AVAILABLE TOOLS:
-{tools_list}
+WHAT AGENTS NEED (examples):
 
-PHASE OBJECTIVES:
-recon: Discover subdomains, ports, technologies, endpoints
-analyze: Identify vulnerabilities from recon data
-plan: Map attack chains and prioritize targets
-exploit: Execute exploits and chain results
-report: Compile findings into report
+For Subdomain Discovery:
+  objective: "Find all subdomains of target domain"
+  tools: ["amass", "subfinder", "dig", "whois"]
 
-{phase.upper()} STRATEGY (Iteration {iteration}):
-- Identify what's still needed
-- Spawn agents to fill gaps
-- When phase is done, respond phase_complete
+For Port Scanning:
+  objective: "Scan for open ports and services"
+  tools: ["nmap", "masscan"]
 
-RESPONSE FORMAT:
+For Tech Stack Detection:
+  objective: "Identify web server, frameworks, CMS"
+  tools: ["httpx", "whatweb", "wafw00f"]
+
+For Directory Discovery:
+  objective: "Find hidden directories and files"
+  tools: ["gobuster", "feroxbuster", "ffuf"]
+
+For JavaScript Analysis:
+  objective: "Extract endpoints and secrets from JS"
+  tools: ["curl", "strings"]
+
+For Vulnerability Scanning:
+  objective: "Scan for CVEs and known vulnerabilities"
+  tools: ["nuclei", "nessus"]
+
+YOUR ROLE:
+1. Look at current state
+2. Identify what's missing
+3. Decide which tools would help
+4. Spawn agent with objective + tools
+5. Agent executes tools, you don't
+
+PHASE RULES:
+RECON: Discover targets (subdomains, ports, tech, endpoints)
+ANALYZE: Find vulnerabilities
+EXPLOIT: Execute vulnerabilities
+REPORT: Compile findings
+
+RESPONSE: JSON only (no other text)
+
 Single agent:
 {{
-  "thinking": "why this action",
+  "thinking": "why this helps fill the gap",
   "action": "spawn_agent",
   "agent_spec": {{
-    "objective": "what to do",
-    "tools": ["tool1", "tool2"],
-    "context_keys": ["target", "subdomains"],
-    "max_steps": 10
+    "objective": "specific goal for agent",
+    "tools": ["tool1", "tool2", "tool3"],
+    "context_keys": ["target", "existing_data"],
+    "max_steps": 8
   }}
 }}
 
-Multiple agents:
+Phase complete:
 {{
-  "thinking": "these are independent",
-  "action": "spawn_agents",
-  "agent_specs": [
-    {{"objective": "task1", "tools": [...], "context_keys": [...], "max_steps": 8}},
-    {{"objective": "task2", "tools": [...], "context_keys": [...], "max_steps": 8}}
-  ]
+  "thinking": "why we have enough information",
+  "action": "phase_complete"
 }}
 
-Phase done:
-{{
-  "action": "phase_complete"
-}}"""
+CRITICAL RULES:
+✓ You orchestrate. Agents execute.
+✓ Give agents both objective AND tools
+✓ Only spawn agents that address gaps
+✓ JSON only response"""
         
         return prompt
 

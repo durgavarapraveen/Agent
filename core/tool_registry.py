@@ -56,10 +56,19 @@ class KaliTool(Tool):
         """Run raw command in Kali container"""
         logger.info(f"  [{self.name}] {command[:80]}...")
         r = KaliDockerExecutor.run(command, timeout=timeout, auto_install=True)
+        stdout = r.get("stdout", "")
+        stderr = r.get("stderr", "")
+        rc = r.get("returncode")
+        # Exit code is the source of truth. Many recon tools (subfinder, amass,
+        # nuclei, ...) print banners/progress to stderr while still succeeding —
+        # don't surface that as an error when the process exited cleanly.
+        success = r["status"] == "success" if rc is None else rc == 0
+        error = "" if success else (stderr or r.get("error", ""))
         return ToolResult(
-            success=r["status"] == "success",
-            output=r.get("stdout", ""),
-            error=r.get("stderr", "") or r.get("error", ""),
+            success=success,
+            output=stdout or (stderr if success else ""),
+            error=error,
+            data={"returncode": rc, "stderr": stderr},
         )
 
 
@@ -385,6 +394,8 @@ class ToolRegistry:
             ("katana", "Web crawler"),
             ("curl", "HTTP client"),
             ("theharvester", "OSINT email/domain gathering"),
+            ("bash", "Run an arbitrary shell command in the Kali container (pipes, chaining, custom one-liners)"),
+            ("sh", "Run an arbitrary shell command in the Kali container"),
         ]
 
         for name, desc in kali_tools:
@@ -427,17 +438,47 @@ class ToolRegistry:
         
         # Python tools always available
         for tool_name, tool in self.tools.items():
-            if isinstance(tool, (PythonHTTPTool, PythonDNSTool, PythonSSLTool, 
+            if isinstance(tool, (PythonHTTPTool, PythonDNSTool, PythonSSLTool,
                                 PythonPortScanTool, HeadlessBrowserTool)):
                 self.available_tools[tool_name] = tool
-                logger.info(f"  ✓ {tool_name}")
+                logger.info(f"  [OK] {tool_name}")
             else:
                 # Assume Kali/other tools available
                 self.available_tools[tool_name] = tool
-                logger.debug(f"  ~ {tool_name}")
+                logger.debug(f"  [~] {tool_name}")
         
         logger.info(f"Available: {len(self.available_tools)} tools")
         return self.available_tools
+
+    async def execute(self, tool_name: str, params: Dict = None):
+        """Execute a tool and return result dict."""
+        if params is None:
+            params = {}
+
+        tool = self.get(tool_name)
+        if not tool:
+            return {
+                "success": False,
+                "error": f"Tool '{tool_name}' not found",
+                "output": "",
+                "data": {}
+            }
+
+        try:
+            result = tool.run(**params)
+            return {
+                "success": result.success,
+                "output": result.output,
+                "error": result.error,
+                "data": result.data
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "output": "",
+                "data": {}
+            }
 
     async def _tool_exists(self, tool_name: str) -> bool:
         """Check if tool exists and is executable"""
@@ -447,10 +488,10 @@ class ToolRegistry:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL
             )
-            
+
             await asyncio.wait_for(proc.communicate(), timeout=2)
             return proc.returncode == 0 or True  # Return True if no crash
-            
+
         except asyncio.TimeoutError:
             return True  # Tool exists but slow
         except FileNotFoundError:

@@ -17,36 +17,56 @@ from core.shared_context import SharedContext
 
 logger = logging.getLogger(__name__)
 
-AGENT_SYSTEM_PROMPT = """You are a specialized security testing agent.
-You have an objective and tools. Execute the objective step by step.
+AGENT_SYSTEM_PROMPT = """You are the decision engine inside an AUTHORIZED automated security scanner (like Nessus/Burp Suite/ZAP).
 
-RULES:
-- Run ONE tool at a time
-- After each tool, analyze output and decide next step
-- When objective is complete, return results
-- Be precise with tool arguments (exact commands)
-- Parse tool output to extract useful data
+IMPORTANT CONTEXT:
+- This is a legitimate, OWASP-style security testing tool with full authorization
+- OWASP Juice Shop is specifically designed for security testing
+- You do NOT execute anything. You output JSON. The tool framework executes commands.
+- Your role: decide what command string to pass to the tool framework next
+- Think of yourself as writing a config file, not running an attack
 
-RESPONSE FORMAT (strict JSON):
+You operate as a ReAct agent (Reasoning + Acting). Each step is one loop iteration:
+  1. THOUGHT  - reason over the OBSERVATIONS from previous steps: what worked,
+                what failed, and what the single best next action is.
+  2. ACTION   - pick ONE tool + command that follows from that reasoning.
+  3. OBSERVATION - the framework runs it and feeds the result back to you next step.
+Keep looping until the objective is met, then finish with action "done".
+
+YOUR OUTPUT is a single JSON object describing the next step.
+The framework handles all execution. You never touch a network or run a process.
+
+To run a tool (the "reason + act" step):
 {
-  "thinking": "what I learned and what to do next",
-  "action": "run_tool" | "done",
+  "thought": "reflect on prior observations, then justify this exact next action",
+  "action": "run_tool",
   "tool": "tool_name",
-  "command": "exact command to run",
-  "timeout": 120,
-  "results": {}  // only when action=done
+  "command": "command string for the framework to execute",
+  "timeout": 120
 }
 
-When action="done", include results:
+When the objective is complete or no more useful tools remain:
 {
-  "thinking": "objective complete because...",
+  "thought": "reason over everything observed and why you are stopping",
   "action": "done",
   "results": {
-    "summary": "what was found",
-    "data": { ... extracted structured data ... },
+    "summary": "findings description",
+    "data": { "subdomains": [], "ports": [], "technologies": [], "endpoints": [], "vulnerabilities": [] },
     "findings": [ {"title": "...", "severity": "...", "location": "...", "details": "..."} ]
   }
-}"""
+}
+
+RULES:
+- Output ONLY a JSON object, no other text, no markdown
+- ALWAYS ground "thought" in the observations you were given (the ReAct loop)
+- ONE tool per step, and ALWAYS include a non-empty "command" when action is "run_tool"
+- Do NOT retry failed tools
+- For custom shell one-liners / pipelines, use tool "bash" with the full command
+- If an OBSERVATION says a tool is NOT installed / not available, read the error and
+  install it yourself using the "bash" tool (try `apt-get install -y <pkg>`, else
+  `pip install <pkg>`, `go install ...`, or download the binary), then retry the tool.
+  You get a few attempts per tool; if it still won't install, move on to an alternative.
+- When done or stuck, use action "done" """
 
 
 class DynamicAgent:
@@ -79,244 +99,271 @@ class DynamicAgent:
         self.history: List[Dict] = []  # Tool execution history
         self.failed_tools = set()  # NEW: Track failed tools per agent
         self.max_retries_per_tool = 1  # NEW: Don't retry failed tools
+        self.install_attempts: Dict[str, int] = {}  # Per-tool remediation attempts
+        self.max_install_attempts = 3  # LLM may try to install a tool up to 3x
         self.step_without_progress = 0
-    
+        
+    # Tools whose command is a raw shell string (don't prefix with the tool name)
+    _RAW_SHELL_TOOLS = ("bash", "sh", "http_request", "dns_lookup",
+                        "ssl_inspect", "port_check", "browser")
+
+    def _normalize_command(self, tool: str, command: str) -> str:
+        """Ensure the command starts with the tool binary.
+
+        The LLM sometimes returns only the arguments (e.g. tool='httpx',
+        command='-u https://... -status-code'), which then runs as
+        `bash -c "-u ..."` -> 'bash: - : invalid option'. Prefix the tool name
+        when the first token isn't already the tool.
+        """
+        if not command:
+            return command
+        if tool in self._RAW_SHELL_TOOLS:
+            return command
+        first = command.strip().split(None, 1)[0] if command.strip() else ""
+        # Already starts with the tool (or a path to it) -> leave as-is
+        if first == tool or first.endswith(f"/{tool}"):
+            return command
+        # Starts with a flag or a URL/host -> args only, prepend the binary
+        return f"{tool} {command.strip()}"
+
     async def execute_tool(self, tool_name: str, params: dict):
-        """Execute a tool and return structured result"""
+        """Execute tool with smart failure handling"""
+        
+        # Defensive check
+        if not self.tools:
+            logger.error(f"[{self.agent_id}] Tool registry not initialized!")
+            return {"error": "tool_registry_not_initialized", "status": "failed"}
+        
+        if not hasattr(self.tools, 'execute'):
+            logger.error(f"[{self.agent_id}] Tool registry has no execute method! Type: {type(self.tools)}")
+            return {"error": "tool_registry_invalid", "status": "failed"}
         
         # Skip if already failed
         if tool_name in self.failed_tools:
+            logger.warning(f"[{self.agent_id}] Tool '{tool_name}' already failed, skipping")
             return {
-                "success": False,
                 "error": "tool_failed_previously",
-                "output": ""
+                "status": "skipped",
+                "tool": tool_name
             }
         
         try:
-            logger.debug(f"[{self.agent_id}] execute_tool({tool_name}, {params})")
+            logger.info(f"[{self.agent_id}] Executing: {tool_name}")
+            result = await self.tools.execute(tool_name, params)
             
-            # Get tool from registry
-            tool = self.tools.get(tool_name)
-            if not tool:
+            # Check for common failure patterns
+            error_str = str(result).lower()
+            
+            if any(x in error_str for x in ["not found", "failed to install", "no such file",
+                                            "not available", "could not be installed",
+                                            "command not found", "no installation candidate"]):
+                # Tool missing. Don't blacklist immediately — let the LLM reason over
+                # the error and try to install it another way (up to N attempts).
+                attempts = self.install_attempts.get(tool_name, 0) + 1
+                self.install_attempts[tool_name] = attempts
+                raw_err = result.get("error") or result.get("output") or str(result)
+
+                if attempts >= self.max_install_attempts:
+                    self.failed_tools.add(tool_name)
+                    logger.warning(
+                        f"[{self.agent_id}] [X] Tool '{tool_name}' still unavailable after "
+                        f"{attempts} install attempts — giving up (cached)"
+                    )
+                    return result
+
+                logger.warning(
+                    f"[{self.agent_id}] Tool '{tool_name}' unavailable "
+                    f"(attempt {attempts}/{self.max_install_attempts}); asking LLM to remediate"
+                )
+                # Hand the raw error back so the LLM can craft an install command.
                 return {
                     "success": False,
-                    "error": f"Tool '{tool_name}' not found in registry",
-                    "output": ""
+                    "status": "needs_install",
+                    "tool": tool_name,
+                    "install_attempt": attempts,
+                    "max_attempts": self.max_install_attempts,
+                    "error": (
+                        f"Tool '{tool_name}' is not installed. Error: {str(raw_err)[:200]}. "
+                        f"Try installing it via the 'bash' tool "
+                        f"(e.g. apt-get install -y <pkg>, pip install <pkg>, or download the binary), "
+                        f"then retry. Attempt {attempts}/{self.max_install_attempts}."
+                    ),
+                    "output": "",
                 }
             
-            # Execute tool
-            result = tool.run(**params)
+            if result.get("returncode") != 0 and result.get("error"):
+                # Tool errored but might be transient
+                logger.warning(f"[{self.agent_id}] Tool '{tool_name}' error: {result.get('error')[:100]}")
+                # Don't cache yet (might be transient)
+                return result
             
-            # Convert ToolResult to dict
-            output = result.output or ""
-            error = result.error or ""
-            
-            return {
-                "success": result.success,
-                "output": output,
-                "error": error,
-                "data": result.data
-            }
+            # Success
+            self.step_without_progress = 0
+            return result
             
         except Exception as e:
-            logger.error(f"[{self.agent_id}] Tool execution exception: {e}")
+            logger.error(f"[{self.agent_id}] Tool '{tool_name}' exception: {e}")
             self.failed_tools.add(tool_name)
-            return {
-                "success": False,
-                "error": str(e),
-                "output": ""
-            }    
-    
+            return {"error": str(e), "status": "exception"}
+ 
+
     async def execute(self):
-        """Execute objective step-by-step via LLM decisions"""
+        """Execute objective with failure handling"""
         
         step = 0
-        max_no_progress = 0
-        max_no_progress_threshold = 3
-        
-        logger.info(f"[{self.agent_id}] Starting execution: {self.objective}")
-        logger.info(f"[{self.agent_id}] Available tools: {', '.join(self.allowed_tools[:5])}")
+        self.step_without_progress = 0
         
         while step < self.max_steps:
-            # Fail if stuck
-            if max_no_progress >= max_no_progress_threshold:
-                logger.warning(f"[{self.agent_id}] No progress for {max_no_progress} steps, aborting")
+            # Break if too many steps without progress
+            if self.step_without_progress > 3:
+                logger.warning(f"[{self.agent_id}] No progress for 3 steps, aborting")
                 return {
                     "status": "failed",
                     "reason": "no_progress",
                     "steps": step,
-                    "summary": f"Stopped after {step} steps with no progress"
+                    "summary": "Could not make progress on objective"
                 }
             
-            # Build context for this step
-            prompt = self._build_step_prompt(step)
-            logger.debug(f"[{self.agent_id}] Step {step + 1}: Asking LLM for next action")
+            # Early exit: all tools have failed
+            available = [t for t in self.allowed_tools if t not in self.failed_tools]
+            if not available:
+                logger.warning(f"[{self.agent_id}] All tools failed, finishing early")
+                return {
+                    "status": "failed",
+                    "reason": "all_tools_failed",
+                    "steps": step,
+                    "failed_tools": list(self.failed_tools),
+                    "summary": f"All assigned tools failed: {', '.join(self.failed_tools)}"
+                }
             
-            # Get decision from LLM
-            try:
-                decision = await self.llm.generate_json(prompt, tier=TaskTier.SMALL)
-            except Exception as e:
-                logger.error(f"[{self.agent_id}] LLM error: {e}")
-                max_no_progress += 1
-                await asyncio.sleep(2)
-                continue
+            # Get next action from LLM
+            prompt = self._build_step_prompt(step)
+            decision = await self.llm.generate_json(prompt)
             
             if not decision:
-                logger.warning(f"[{self.agent_id}] LLM returned nothing")
-                max_no_progress += 1
+                self.step_without_progress += 1
+                logger.warning(f"[{self.agent_id}] LLM returned empty (no progress: {self.step_without_progress})")
                 await asyncio.sleep(2)
-                step += 1
                 continue
             
-            # Log LLM thinking
-            thinking = decision.get("thinking", "")
-            if thinking:
-                logger.info(f"[{self.agent_id}] LLM: {thinking[:150]}")
+            # ReAct: log the reasoning behind this step
+            thought = decision.get("thought") or decision.get("thinking") or ""
+            if thought:
+                logger.info(f"[{self.agent_id}] Thought: {str(thought)[:160]}")
+
+            # Extract action
+            action = decision.get("action", "")
             
             # Check for completion
-            action = decision.get("action", "").lower()
-            
             if action == "done":
                 results = decision.get("results", {})
                 self._store_results(results)
-                logger.info(f"[{self.agent_id}] ✓ OBJECTIVE COMPLETE")
-                logger.info(f"[{self.agent_id}] Summary: {results.get('summary', 'N/A')}")
-                return {
-                    "status": "success",
-                    "steps": step,
-                    "results": results
-                }
+                logger.info(f"[{self.agent_id}] Objective complete: {results.get('summary', '')[:80]}")
+                return {"status": "success", "steps": step, "results": results}
             
-            if action != "run_tool":
-                logger.warning(f"[{self.agent_id}] Invalid action: {action}")
-                max_no_progress += 1
-                step += 1
-                continue
-            
-            # Extract tool call
-            tool_name = decision.get("tool", "").strip()
-            command = decision.get("command", "").strip()
+            # Extract tool and command
+            tool = decision.get("tool", "")
+            command = decision.get("command", "")
             timeout = decision.get("timeout", 120)
             
-            if not tool_name:
-                logger.warning(f"[{self.agent_id}] No tool specified")
-                max_no_progress += 1
-                step += 1
-                continue
-            
-            # Validate tool
-            if tool_name not in self.allowed_tools:
-                logger.warning(f"[{self.agent_id}] Tool '{tool_name}' not in allowed list")
-                max_no_progress += 1
-                step += 1
-                continue
-            
-            if tool_name in self.failed_tools:
-                logger.warning(f"[{self.agent_id}] Tool '{tool_name}' already failed, skipping")
-                max_no_progress += 1
+            # Skip if it's a failed tool
+            if tool in self.failed_tools:
+                logger.warning(f"[{self.agent_id}] LLM suggested failed tool '{tool}', skipping")
+                self.step_without_progress += 1
                 step += 1
                 continue
             
             # Execute tool
-            logger.info(f"[{self.agent_id}] Running: {tool_name} {command[:50]}")
-            params = {
-                "command": command,
-                "timeout": timeout
-            }
-            
-            result = await self.execute_tool(tool_name, params)
-            
-            # Store in history
-            self.history.append({
-                "step": step,
-                "tool": tool_name,
-                "command": command,
-                "success": result.get("success", False),
-                "output": result.get("output", "")[:200]
-            })
-            
-            # Check result
-            if result.get("success"):
-                logger.info(f"[{self.agent_id}] ✓ {tool_name} succeeded")
-                max_no_progress = 0
-            else:
-                error = result.get("error", "unknown error")
-                logger.warning(f"[{self.agent_id}] ✗ {tool_name} failed: {error[:100]}")
-                max_no_progress += 1
+            if tool:
+                # Kali tools require a command string; skip gracefully if LLM omitted it
+                if not command and tool not in ("http_request", "dns_lookup",
+                                                "ssl_inspect", "port_check", "browser"):
+                    logger.warning(f"[{self.agent_id}] Tool '{tool}' selected without a command, skipping")
+                    self.step_without_progress += 1
+                    step += 1
+                    await asyncio.sleep(1)
+                    continue
+                command = self._normalize_command(tool, command)
+                params = {"command": command, "timeout": timeout} if command else {}
+                result = await self.execute_tool(tool, params)
+
+                success = result.get("success", "error" not in result)
+                # Keep enough of the output that the LLM can actually reason on it
+                # (a too-short slice makes the model think every tool got truncated).
+                obs = result.get("output") or result.get("error") or ""
+                self.history.append({
+                    "tool": tool,
+                    "success": success,
+                    "result": str(obs)[:1200]
+                })
                 
-                # Mark as failed if critical error
-                if "not found" in error.lower() or "no such file" in error.lower():
-                    self.failed_tools.add(tool_name)
+                if not success:
+                    self.step_without_progress += 1
+                else:
+                    self.step_without_progress = 0
             
             step += 1
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
         
-        # Max steps reached
         logger.warning(f"[{self.agent_id}] Max steps ({self.max_steps}) reached")
         return {
             "status": "timeout",
             "steps": self.max_steps,
-            "summary": f"Hit max {self.max_steps} steps"
+            "summary": "Max steps reached"
         }
     
     def _build_step_prompt(self, step: int) -> str:
-        """Build LLM prompt for next step"""
-        
-        # Objective
-        obj_section = f"OBJECTIVE: {self.objective}\n"
-        
-        # Context from brain
-        ctx_section = f"CONTEXT:\n{self.agent_context}\n"
-        
-        # History (last 3 steps)
-        hist_section = ""
+        """Build prompt for next step"""
+        # Format history as ReAct observations (Action -> Observation)
+        history_str = ""
         if self.history:
-            hist_section = "RECENT EXECUTION HISTORY:\n"
-            for h in self.history[-3:]:
-                status = "✓" if h.get("success") else "✗"
-                out = h.get("output", "")[:80].replace("\n", " ")
-                hist_section += f"  {status} {h['tool']}: {out}\n"
+            history_str = "OBSERVATIONS (results of your previous actions):\n"
+            for h in self.history[-3:]:  # Last 3 steps only
+                status = "OK" if h.get("success") else "FAILED"
+                history_str += (
+                    f"  - Action: {h.get('tool', '?')} -> Observation [{status}]:\n"
+                    f"      {str(h.get('result', ''))[:800]}\n"
+                )
         
-        # Available tools (limit to 10 to save tokens)
-        tools_list = ", ".join(self.allowed_tools[:10])
-        if len(self.allowed_tools) > 10:
-            tools_list += f", ... ({len(self.allowed_tools) - 10} more)"
-        
-        tools_section = f"\nAVAILABLE TOOLS: {tools_list}\n"
+        # Filter out failed tools from available list
+        available = [t for t in self.allowed_tools if t not in self.failed_tools]
+        tools_str = ", ".join(available[:10])
         
         # Failed tools warning
-        failed_section = ""
+        failed_warning = ""
         if self.failed_tools:
-            failed_section = f"\nFAILED (skip these): {', '.join(self.failed_tools)}\n"
+            failed_warning = (
+                f"\n🚫 FAILED TOOLS (do NOT use these again):\n"
+                f"  {', '.join(sorted(self.failed_tools))}\n"
+            )
         
-        # Build full prompt
-        prompt = f"""{obj_section}
-    {ctx_section}
-    {hist_section}
-    {tools_section}
-    {failed_section}
+        prompt = f"""OBJECTIVE: {self.objective}
 
-    STEP {step + 1}/{self.max_steps}
+TARGET CONTEXT:
+{self.agent_context}
 
-    RULES:
-    1. Run ONE tool per step
-    2. After tool runs, analyze output
-    3. When objective is COMPLETE, return action="done" with results
-    4. Only use tools from AVAILABLE TOOLS list
-    5. Respond ONLY with valid JSON (no markdown, no backticks)
+{history_str}
+{failed_warning}
+STEP {step + 1}/{self.max_steps}
 
-    JSON FORMAT:
-    {{
-    "thinking": "what you learned and next step",
-    "action": "run_tool" or "done",
-    "tool": "tool_name",
-    "command": "exact command",
-    "timeout": 120,
-    "results": {{"summary": "...", "data": {{...}}}}  // only when action=done
-    }}"""
+AVAILABLE TOOLS: {tools_str}
+
+ReAct — follow this loop:
+1. THOUGHT: reason over the OBSERVATIONS above (what worked / failed) and decide the single best next action.
+2. ACTION: choose ONE tool + a concrete non-empty command that follows from your thought.
+   (The framework will run it and give you the OBSERVATION on the next step.)
+
+RULES:
+- Put your reasoning in the "thought" field and ground it in the observations above
+- Do NOT retry tools that already failed (listed above)
+- If all tools have failed, action="done" with what you found so far
+- Every "run_tool" action MUST include a non-empty "command"
+- For custom shell one-liners or pipelines use tool "bash"
+- Run ONE tool to progress toward the objective
+- Respond ONLY with valid JSON"""
         
         return prompt
-    
+
     def _store_results(self, results: Dict):
         """Parse agent results and store in shared context"""
         data = results.get("data", {})
@@ -354,60 +401,3 @@ class DynamicAgent:
                 "source_agent": self.agent_id,
                 "type": finding.get("type", "unknown"),
             })
-    def _build_step_prompt(self, step: int) -> str:
-        """Build LLM prompt for next step"""
-        
-        # Objective
-        obj_section = f"OBJECTIVE: {self.objective}\n"
-        
-        # Context from brain
-        ctx_section = f"CONTEXT:\n{self.agent_context}\n"
-        
-        # History (last 3 steps)
-        hist_section = ""
-        if self.history:
-            hist_section = "RECENT EXECUTION HISTORY:\n"
-            for h in self.history[-3:]:
-                status = "✓" if h.get("success") else "✗"
-                out = h.get("output", "")[:80].replace("\n", " ")
-                hist_section += f"  {status} {h['tool']}: {out}\n"
-        
-        # Available tools
-        tools_list = ", ".join(self.allowed_tools[:10])
-        if len(self.allowed_tools) > 10:
-            tools_list += f", ... ({len(self.allowed_tools) - 10} more)"
-        
-        tools_section = f"\nAVAILABLE TOOLS: {tools_list}\n"
-        
-        # Failed tools warning
-        failed_section = ""
-        if self.failed_tools:
-            failed_section = f"\nFAILED (skip these): {', '.join(self.failed_tools)}\n"
-        
-        # Build full prompt
-        prompt = f"""{obj_section}
-    {ctx_section}
-    {hist_section}
-    {tools_section}
-    {failed_section}
-
-    STEP {step + 1}/{self.max_steps}
-
-    RULES:
-    1. Run ONE tool per step
-    2. After tool runs, analyze output
-    3. When objective is COMPLETE, return action="done" with results
-    4. Only use tools from AVAILABLE TOOLS list
-    5. Respond ONLY with valid JSON (no markdown, no backticks)
-
-    JSON FORMAT:
-    {{
-    "thinking": "what you learned and next step",
-    "action": "run_tool" or "done",
-    "tool": "tool_name",
-    "command": "exact command",
-    "timeout": 120,
-    "results": {{"summary": "...", "data": {{...}}}}  // only when action=done
-    }}"""
-        
-        return prompt

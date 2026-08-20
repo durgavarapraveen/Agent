@@ -353,6 +353,18 @@ class LLMClient:
             large_model = config.get("OLLAMA_LARGE_MODEL", "qwen3:8b")
             logger.info(f"Using Ollama provider ({small_model})")
             return OllamaProvider(base_url, small_model, large_model)
+        
+        elif provider_name == "bridge":
+            try:
+                from agents.llm_client_bridge import ClaudeBridgeProvider
+                bridge_url = config.get("BRIDGE_URL", "http://localhost:8000")
+                bridge_model = config.get("BRIDGE_MODEL", "sonnet")
+                logger.info(f"Using Claude Bridge provider: {bridge_url} ({bridge_model})")
+                return ClaudeBridgeProvider(bridge_url, bridge_model)
+            except (ImportError, ValueError) as e:
+                logger.error(f"Bridge init failed: {e}")
+                logger.info("Falling back to NullProvider")
+                return NullProvider()
 
         else:
             logger.warning(f"Unknown provider: {provider_name}")
