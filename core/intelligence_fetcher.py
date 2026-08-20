@@ -629,9 +629,9 @@ class IntelligenceFetcher:
         Example: "Apache/2.4.49" → ("apache", "2.4.49")
         """
         patterns = [
-            r"([\w.-]+)/([\d.]+)",           # Apache/2.4.49
-            r"([\w.-]+)\s+([\d.]+)",          # OpenSSH 8.2
-            r"([\w.-]+)\s+version\s+([\d.]+)",  # MySQL version 8.0
+            r"([\w.-]+)\s+version\s+([\d.]+)",  # MySQL version 8.0 (MOVED FIRST)
+            r"([\w.-]+)/([\d.]+)",              # Apache/2.4.49
+            r"([\w.-]+)\s+([\d.]+)",            # OpenSSH 8.2
         ]
 
         for pattern in patterns:
