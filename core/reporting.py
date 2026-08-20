@@ -34,10 +34,40 @@ TACTIC_ORDER = [
 class EnterpriseReporter:
     """Builds enterprise-grade HTML/PDF reports from a SharedContext."""
 
-    def __init__(self, ctx, report_dir: str = "reports"):
+    def __init__(self, ctx, report_dir: str = "reports",
+                 active_frameworks=None):
         self.ctx = ctx
         self.report_dir = Path(report_dir)
         self.report_dir.mkdir(exist_ok=True)
+        self.active_frameworks = active_frameworks
+
+    def _compliance_html(self) -> str:
+        """Per-framework compliance table (uses the compliance module)."""
+        try:
+            from compliance import ComplianceReporter
+        except Exception:       # noqa: BLE001
+            return "<p class='muted'>Compliance module unavailable.</p>"
+        summary = ComplianceReporter(self.active_frameworks).build(
+            self.ctx.vulnerabilities)
+        if not summary.get("frameworks"):
+            return "<p class='muted'>No frameworks selected.</p>"
+        blocks = []
+        for fw, data in summary["frameworks"].items():
+            rows = "".join(
+                f"<tr><td>{html.escape(c['control_id'])}</td>"
+                f"<td>{html.escape(c['control_title'])}</td>"
+                f"<td style='color:{'#b00020' if c['status']=='FAIL' else '#2e7d32'};"
+                f"font-weight:600'>{c['status']}</td>"
+                f"<td>{c['finding_count']}</td></tr>"
+                for c in data["controls"])
+            blocks.append(
+                f"<h4>{html.escape(data['name'])} "
+                f"<span class='muted'>({data['controls_failed']} fail / "
+                f"{data['controls_total']})</span></h4>"
+                f"<table><thead><tr><th>Control</th><th>Title</th>"
+                f"<th>Status</th><th>Findings</th></tr></thead>"
+                f"<tbody>{rows}</tbody></table>")
+        return "".join(blocks)
 
     # ── risk scoring ──
 
@@ -229,6 +259,7 @@ class EnterpriseReporter:
  <section><h2>Findings</h2>{self._vuln_table()}</section>
  <section><h2>Attack Path Visualization</h2>{self._attack_path_svg()}</section>
  <section><h2>MITRE ATT&amp;CK Heatmap</h2>{self._mitre_heatmap()}</section>
+ <section><h2>Compliance Summary</h2>{self._compliance_html()}</section>
  <section><h2>Remediation</h2>{self._remediation()}</section>
 </main></body></html>"""
 

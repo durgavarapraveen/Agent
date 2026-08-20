@@ -278,7 +278,8 @@ CRITICAL: Respond with ONLY a raw JSON object. No markdown fences, no ```json, n
                 except json.JSONDecodeError:
                     pass
 
-        logger.error(f"Could not extract JSON from: {text[:200]}")
+        # Log the FULL response (console handler trims; pentest.log keeps all)
+        logger.error(f"Could not extract JSON from response:\n{text}")
         return None
 
 # ═══════════════════════════════════════════════════════════════════════════

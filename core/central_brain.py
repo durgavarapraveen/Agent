@@ -23,6 +23,8 @@ from core.reporting import EnterpriseReporter
 from core.metrics import MetricsTracker
 from core.automation import AutomationEngine
 from core.consent import get_consent
+from validation import gate as confidence_gate, DedupStore
+from compliance import ComplianceReporter, available_frameworks
 
 logger = logging.getLogger(__name__)
 
@@ -808,6 +810,49 @@ CRITICAL RULES:
         
         return prompt
 
+    def _active_frameworks(self):
+        """Compliance frameworks selected via --frameworks (defaults to all)."""
+        try:
+            from core.config import get_config
+            fw = get_config().config.get("COMPLIANCE_FRAMEWORKS")
+            if fw:
+                return fw
+        except Exception:       # noqa: BLE001
+            pass
+        return available_frameworks()
+
+    def _validate_findings(self, ts: str):
+        """Confidence-gate + cross-scan dedup the findings.
+
+        Returns dict: reported (high/med confidence, non-suppressed),
+        needs_review (low confidence), dedup summary.
+        """
+        # Work on shallow copies so we don't mutate the canonical vuln list.
+        findings = [dict(v) for v in self.ctx.vulnerabilities]
+
+        # 1. Confidence gate — LOW confidence -> needs_review (not main report).
+        gated = confidence_gate(findings)
+        reported, needs_review = gated["report"], gated["needs_review"]
+
+        # 2. Cross-scan dedup — suppress recurring-unchanged, flag new/resolved.
+        try:
+            dedup = DedupStore()
+            dd = dedup.process_scan(reported, scan_id=ts)
+            reported = dd["report"]
+            dedup_summary = {"suppressed_recurring": dd["suppressed"],
+                             "resolved": len(dd["resolved"]),
+                             "reported": len(reported)}
+        except Exception as e:      # noqa: BLE001
+            logger.warning(f"[report] dedup failed: {e}")
+            dedup_summary = {"suppressed_recurring": 0, "resolved": 0,
+                             "reported": len(reported), "error": str(e)}
+
+        logger.info(f"[report] findings: {len(reported)} reported, "
+                    f"{len(needs_review)} need review, "
+                    f"{dedup_summary['suppressed_recurring']} recurring suppressed")
+        return {"reported": reported, "needs_review": needs_review,
+                "dedup": dedup_summary}
+
     async def _generate_report(self):
         """LLM generates final report"""
         summary = self.ctx.get_full_summary(max_chars=8000)
@@ -822,6 +867,17 @@ CRITICAL RULES:
             max_tokens=1000,
         )
 
+        # ── Finding validation + compliance mapping (production-grade layer) ──
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        validated = self._validate_findings(ts)
+        frameworks = self._active_frameworks()
+        try:
+            compliance_summary = ComplianceReporter(frameworks).build(
+                self.ctx.vulnerabilities)
+        except Exception as e:      # noqa: BLE001
+            logger.warning(f"[report] compliance mapping failed: {e}")
+            compliance_summary = {"active_frameworks": frameworks, "error": str(e)}
+
         # Build report
         report = {
             "metadata": {
@@ -833,7 +889,11 @@ CRITICAL RULES:
             },
             "executive_summary": exec_summary,
             "scope": self.ctx.scope,
-            "vulnerabilities": self.ctx.vulnerabilities,
+            "vulnerabilities": validated["reported"],
+            "vulnerabilities_all": self.ctx.vulnerabilities,
+            "needs_review": validated["needs_review"],
+            "dedup": validated["dedup"],
+            "compliance": compliance_summary,
             "attack_chains": self.ctx.attack_chains,
             "exploit_results": self.ctx.exploit_results,
             "post_exploitation": (
@@ -865,8 +925,7 @@ CRITICAL RULES:
             "agents": self.ctx.agents_spawned,
         }
 
-        # Save
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Save  (ts computed above, shared with the validation/dedup scan_id)
         report_path = self.report_dir / f"pentest_{ts}.json"
         with open(report_path, 'w', encoding='utf-8') as f:
             json.dump(report, f, indent=2, default=str, ensure_ascii=False)
@@ -874,6 +933,7 @@ CRITICAL RULES:
 
         # Enterprise HTML/PDF report + final dashboard
         try:
+            self.reporter.active_frameworks = frameworks
             paths = self.reporter.generate(executive_summary=exec_summary,
                                            stem=f"pentest_{ts}")
             logger.info(f"Enterprise report: {paths.get('html')}"
