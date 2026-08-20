@@ -378,6 +378,228 @@ class CentralBrain:
             self.ctx.log_brain("Human rejected exploitation plan", "plan_rejected")
             return False
 
+    def _summarize_context(self) -> str:
+        """Summarize current reconnaissance state"""
+        
+        lines = []
+        
+        # Target
+        lines.append(f"Target: {self.ctx.target}")
+        
+        # Subdomains
+        subs = self.ctx.get_subdomains()
+        if subs:
+            lines.append(f"Discovered subdomains: {len(subs)} ({', '.join(subs[:3])})")
+        else:
+            lines.append("Subdomains: None discovered yet")
+        
+        # Ports
+        ports_data = self.ctx.data.get("ports", {})
+        if ports_data:
+            all_ports = []
+            for host, port_list in ports_data.items():
+                all_ports.extend(port_list)
+            lines.append(f"Open ports found: {len(set(all_ports))} ({', '.join(map(str, sorted(set(all_ports))[:5]))})")
+        else:
+            lines.append("Open ports: None scanned yet")
+        
+        # Technologies
+        techs_by_host = self.ctx.data.get("technologies", {})
+        if techs_by_host:
+            all_techs = []
+            for host, tech_list in techs_by_host.items():
+                all_techs.extend(tech_list)
+            if all_techs:
+                lines.append(f"Technologies identified: {', '.join(set(all_techs)[:3])}")
+        
+        # Endpoints
+        endpoints = self.ctx.get_endpoints()
+        if endpoints:
+            lines.append(f"Web endpoints discovered: {len(endpoints)} ({', '.join(endpoints[:3])})")
+        
+        # Vulnerabilities
+        vulns = self.ctx.data.get("vulnerabilities", [])
+        if vulns:
+            lines.append(f"Vulnerabilities found: {len(vulns)}")
+            for vuln in vulns[:2]:
+                severity = vuln.get("severity", "UNKNOWN")
+                title = vuln.get("title", "Unknown")
+                lines.append(f"  - {title} ({severity})")
+        else:
+            lines.append("Vulnerabilities: None identified yet")
+        
+        return "\n".join(lines)
+
+    def _build_agent_context(self, keys: list) -> str:
+        """Build agent context from shared context keys"""
+        
+        if not keys:
+            return f"Target: {self.ctx.target}\nObjective: Complete assigned task"
+        
+        lines = []
+        for key in keys:
+            if key == "target":
+                lines.append(f"Target: {self.ctx.target}")
+            elif key == "subdomains":
+                subs = self.ctx.get_subdomains()
+                if subs:
+                    lines.append(f"Subdomains ({len(subs)}): {', '.join(subs[:5])}")
+            elif key == "ports":
+                ports_data = self.ctx.data.get("ports", {})
+                if ports_data:
+                    lines.append(f"Open ports: {list(ports_data.keys())}")
+            elif key == "technologies":
+                techs = self.ctx.get_technologies(self.ctx.target)
+                if techs:
+                    lines.append(f"Technologies: {', '.join(techs[:3])}")
+            elif key == "endpoints":
+                eps = self.ctx.get_endpoints()
+                if eps:
+                    lines.append(f"Endpoints ({len(eps)}): {eps[:3]}")
+            elif key == "vulnerabilities":
+                vulns = self.ctx.data.get("vulnerabilities", [])
+                if vulns:
+                    lines.append(f"Known vulns ({len(vulns)}): {[v.get('title', '?') for v in vulns[:2]]}")
+        
+        return "\n".join(lines) if lines else f"Target: {self.ctx.target}"
+
+    async def _spawn_and_run_agent(self, spec: Dict):
+        """Spawn single agent and run it"""
+        from core.dynamic_agent import DynamicAgent
+        
+        objective = spec.get("objective", "")
+        tools = spec.get("tools", [])
+        context_keys = spec.get("context_keys", [])
+        max_steps = spec.get("max_steps", 10)
+        
+        logger.info(f"  Spawning agent: {objective}")
+        
+        # Build agent context from shared context
+        agent_context = self._build_agent_context(context_keys)
+        
+        # Spawn agent
+        agent_id = f"AGENT-{len(self.spawner.agents) + 1:03d}"
+        
+        agent = DynamicAgent(
+            agent_id=agent_id,
+            objective=objective,
+            tool_registry=self.tools,
+            shared_context=self.ctx,
+            agent_context=agent_context,
+            allowed_tools=tools,
+            max_steps=max_steps
+        )
+        
+        # Run agent
+        logger.info(f"  Running {agent_id}...")
+        result = await agent.execute()
+        
+        # Handle result
+        if result.get("status") == "success":
+            logger.info(f"  ✓ {agent_id} succeeded")
+            self.ctx.add_event(f"{agent_id}: Success", result.get("results", {}))
+        else:
+            logger.warning(f"  ✗ {agent_id} failed: {result.get('reason', 'unknown')}")
+            self.ctx.add_event(f"{agent_id}: Failed", result)
+
+    async def _spawn_multiple_agents(self, specs: list):
+        """Spawn multiple agents and run in parallel"""
+        from core.dynamic_agent import DynamicAgent
+        
+        logger.info(f"  Spawning {len(specs)} agents in parallel...")
+        
+        agents = []
+        for i, spec in enumerate(specs):
+            objective = spec.get("objective", "")
+            tools = spec.get("tools", [])
+            context_keys = spec.get("context_keys", [])
+            max_steps = spec.get("max_steps", 8)
+            
+            # Build context
+            agent_context = self._build_agent_context(context_keys)
+            
+            # Create agent
+            agent_id = f"AGENT-{len(agents) + 1:03d}"
+            agent = DynamicAgent(
+                agent_id=agent_id,
+                objective=objective,
+                tool_registry=self.tools,
+                shared_context=self.ctx,
+                agent_context=agent_context,
+                allowed_tools=tools,
+                max_steps=max_steps
+            )
+            agents.append(agent)
+        
+        # Run all in parallel
+        logger.info(f"  Running {len(agents)} agents...")
+        results = await asyncio.gather(*[agent.execute() for agent in agents])
+        
+        # Log results
+        for agent, result in zip(agents, results):
+            if result.get("status") == "success":
+                logger.info(f"  ✓ {agent.agent_id} succeeded")
+            else:
+                logger.warning(f"  ✗ {agent.agent_id} {result.get('reason', 'failed')}")
+
+    def _build_brain_prompt(self, phase: str, iteration: int) -> str:
+        """Build brain decision prompt"""
+        
+        context = self._summarize_context()
+        tools_list = self.tools.list_tools()
+        
+        prompt = f"""You are autonomous pentesting brain.
+Target: {self.ctx.target}
+Phase: {phase.upper()}
+
+CURRENT STATE:
+{context}
+
+AVAILABLE TOOLS:
+{tools_list}
+
+PHASE OBJECTIVES:
+recon: Discover subdomains, ports, technologies, endpoints
+analyze: Identify vulnerabilities from recon data
+plan: Map attack chains and prioritize targets
+exploit: Execute exploits and chain results
+report: Compile findings into report
+
+{phase.upper()} STRATEGY (Iteration {iteration}):
+- Identify what's still needed
+- Spawn agents to fill gaps
+- When phase is done, respond phase_complete
+
+RESPONSE FORMAT:
+Single agent:
+{{
+  "thinking": "why this action",
+  "action": "spawn_agent",
+  "agent_spec": {{
+    "objective": "what to do",
+    "tools": ["tool1", "tool2"],
+    "context_keys": ["target", "subdomains"],
+    "max_steps": 10
+  }}
+}}
+
+Multiple agents:
+{{
+  "thinking": "these are independent",
+  "action": "spawn_agents",
+  "agent_specs": [
+    {{"objective": "task1", "tools": [...], "context_keys": [...], "max_steps": 8}},
+    {{"objective": "task2", "tools": [...], "context_keys": [...], "max_steps": 8}}
+  ]
+}}
+
+Phase done:
+{{
+  "action": "phase_complete"
+}}"""
+        
+        return prompt
+
     async def _generate_report(self):
         """LLM generates final report"""
         summary = self.ctx.get_full_summary(max_chars=8000)
