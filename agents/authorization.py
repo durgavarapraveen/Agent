@@ -172,7 +172,7 @@ class AuthorizationManager:
 if __name__ == "__main__":
     # Create scope file
     AuthorizationManager.create_scope_file(
-        domains=["example.com", "test.example.com"],
+        domains=["example.com", "test.example.com", "preview.owasp-juice.shop"],
         max_tier="SHALLOW",  # Can test, but no RCE
     )
 

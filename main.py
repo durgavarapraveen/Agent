@@ -35,7 +35,9 @@ class _TruncatingFormatter(logging.Formatter):
         s = super().format(record)
         if len(s) > self.max_len:
             s = s[:self.max_len] + " …(full in pentest.log)"
-        return s
+        # Always reset terminal color so a stray ANSI code from tool output
+        # (e.g. sslscan's green) can't bleed into following lines.
+        return s + "\x1b[0m"
 
 
 _console = logging.StreamHandler(sys.stdout)

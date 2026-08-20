@@ -19,6 +19,10 @@ from core.agent_spawner import AgentSpawner
 from core.token_optimizer import TokenOptimizer
 from core.chain_integration import ChainManager
 from core.post_exploit import PostExploitManager
+from core.reporting import EnterpriseReporter
+from core.metrics import MetricsTracker
+from core.automation import AutomationEngine
+from core.consent import get_consent
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +91,10 @@ class CentralBrain:
         self.chain_mgr = ChainManager(self.ctx, self.spawner)  # Phase 2: Chain system
         self.tier = (self.ctx.scope.get("max_tier") or "POC").upper()
         self.post_exploit = None  # Phase 3: Post-exploitation (lazy, needs foothold)
+        # Phase 4: enterprise hardening / automation
+        self.metrics = MetricsTracker(target=target, out_dir=str(self.report_dir))
+        self.automation = AutomationEngine(self.ctx)
+        self.reporter = EnterpriseReporter(self.ctx, report_dir=str(self.report_dir))
 
     async def run(self, auth_document: str = ""):
         """Main entry point. Runs full pentest autonomously."""
@@ -381,6 +389,8 @@ class CentralBrain:
                             self.failed_tools.add(failed_tool)
                             logger.warning(f"Brain learned: '{failed_tool}' is unavailable")
                     
+                    self.metrics.record_event("agent", entry["agent_id"],
+                                              entry["success"], entry["findings"])
                     agent_history.append(entry)
                     agents_this_phase += 1
 
@@ -432,10 +442,23 @@ class CentralBrain:
                     for failed_tool in agent.failed_tools:
                         self.failed_tools.add(failed_tool)
                         logger.warning(f"Brain learned: '{failed_tool}' is unavailable")
-                
+
+                self.metrics.record_event("agent", entry["agent_id"],
+                                          entry["success"], entry["findings"])
                 agent_history.append(entry)
-    
-    
+
+        # ── End of phase: update metrics + evaluate automation rules ──
+        self.metrics.incr("vuln_total", 0)  # ensure counter exists
+        self.metrics.counters["vuln_total"] = len(self.ctx.vulnerabilities)
+        try:
+            self.metrics.write_dashboard()
+            self.metrics.write_json()
+        except Exception as e:      # noqa: BLE001
+            logger.debug(f"[Metrics] dashboard write failed: {e}")
+        for act in self.automation.evaluate():
+            logger.info(f"Automation recommends: {act['action']} ({act['rule']})")
+
+
     def _load_phase_prompt(self, phase: str) -> Optional[str]:
         """Load phase-specific prompt from file if available"""
         prompt_map = {
@@ -833,6 +856,11 @@ CRITICAL RULES:
                 "ssl_info": self.ctx.ssl_info,
                 "secrets": self.ctx.secrets,
             },
+            "automation": self.automation.to_dict(),
+            "exploit_consent": get_consent().summary(),
+            "remediation": self.automation.remediation_report(),
+            "metrics": self.metrics.snapshot(),
+            "scheduled_scan": AutomationEngine.schedule_config(self.ctx.target),
             "brain_log": self.ctx.brain_log,
             "agents": self.ctx.agents_spawned,
         }
@@ -843,6 +871,16 @@ CRITICAL RULES:
         with open(report_path, 'w', encoding='utf-8') as f:
             json.dump(report, f, indent=2, default=str, ensure_ascii=False)
         logger.info(f"Report saved: {report_path}")
+
+        # Enterprise HTML/PDF report + final dashboard
+        try:
+            paths = self.reporter.generate(executive_summary=exec_summary,
+                                           stem=f"pentest_{ts}")
+            logger.info(f"Enterprise report: {paths.get('html')}"
+                        + (f" | {paths['pdf']}" if paths.get("pdf") else ""))
+            self.metrics.write_dashboard()
+        except Exception as e:      # noqa: BLE001
+            logger.error(f"Enterprise report generation failed: {e}")
 
         # Save shared context as backup
         ctx_path = self.report_dir / f"context_{ts}.json"
