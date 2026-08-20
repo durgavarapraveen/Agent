@@ -304,7 +304,36 @@ class HeadlessBrowserTool(Tool):
             "print(page.content()[:5000]);"
             "b.close();p.stop()"
         )
-
+        
+    def execute(self, tool_name: str, params: Dict = None) -> Dict:
+        """Execute a tool and return result dict."""
+        if params is None:
+            params = {}
+        
+        tool = self.get(tool_name)
+        if not tool:
+            return {
+                "success": False,
+                "error": f"Tool '{tool_name}' not found",
+                "output": "",
+                "data": {}
+            }
+        
+        try:
+            result = tool.run(**params)
+            return {
+                "success": result.success,
+                "output": result.output,
+                "error": result.error,
+                "data": result.data
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "output": "",
+                "data": {}
+            }
 
 # ═══════════════════════════════════════════════
 # REGISTRY
@@ -368,11 +397,10 @@ class ToolRegistry:
         return self.tools.get(name)
 
     def list_tools(self) -> str:
-        """Formatted tool list for LLM prompt"""
-        lines = []
-        for name, tool in sorted(self.tools.items()):
-            lines.append(f"- {name}: {tool.description} [{tool.category}]")
-        return "\n".join(lines)
+        """List available tools for LLM"""
+        if hasattr(self, 'available_tools') and self.available_tools:
+            return f"Available tools: {', '.join(sorted(self.available_tools.keys()))}"
+        return f"Available tools: {', '.join(sorted(self.tools.keys()))}"
 
     def list_by_category(self, category: str) -> List[Tool]:
         return [t for t in self.tools.values() if t.category == category]
@@ -392,25 +420,25 @@ class ToolRegistry:
         return "\n".join(relevant)
     
     async def validate_tools(self) -> dict:
-        """Validate which tools actually exist on startup"""
+        """Validate which tools exist. Called once at startup."""
         logger.info("Validating tool availability on startup...")
         
         self.available_tools = {}
-        self.unavailable_tools = {}
         
-        for tool_name in list(self.local_tools.keys()):
-            exists = await self._tool_exists(tool_name)
-            
-            if exists:
-                self.available_tools[tool_name] = self.local_tools[tool_name]
+        # Python tools always available
+        for tool_name, tool in self.tools.items():
+            if isinstance(tool, (PythonHTTPTool, PythonDNSTool, PythonSSLTool, 
+                                PythonPortScanTool, HeadlessBrowserTool)):
+                self.available_tools[tool_name] = tool
                 logger.info(f"  ✓ {tool_name}")
             else:
-                self.unavailable_tools[tool_name] = self.local_tools[tool_name]
-                logger.warning(f"  ✗ {tool_name} (not found)")
+                # Assume Kali/other tools available
+                self.available_tools[tool_name] = tool
+                logger.debug(f"  ~ {tool_name}")
         
-        logger.info(f"Available: {len(self.available_tools)}, Unavailable: {len(self.unavailable_tools)}")
+        logger.info(f"Available: {len(self.available_tools)} tools")
         return self.available_tools
- 
+
     async def _tool_exists(self, tool_name: str) -> bool:
         """Check if tool exists and is executable"""
         try:
@@ -430,10 +458,4 @@ class ToolRegistry:
         except Exception as e:
             logger.debug(f"Error checking {tool_name}: {e}")
             return False
- 
-    def list_tools(self) -> str:
-        """List available tools for LLM"""
-        if hasattr(self, 'available_tools') and self.available_tools:
-            return f"Available tools: {', '.join(sorted(self.available_tools.keys()))}"
-        return f"Available tools: {', '.join(sorted(self.local_tools.keys()))}"
  
