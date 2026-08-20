@@ -18,6 +18,7 @@ from core.tool_registry import ToolRegistry
 from core.agent_spawner import AgentSpawner
 from core.token_optimizer import TokenOptimizer
 from core.chain_integration import ChainManager
+from core.post_exploit import PostExploitManager
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,8 @@ class CentralBrain:
         self.consecutive_agent_failures = 0  # NEW: Track failure streak
         self.max_consecutive_failures = 3
         self.chain_mgr = ChainManager(self.ctx, self.spawner)  # Phase 2: Chain system
+        self.tier = (self.ctx.scope.get("max_tier") or "POC").upper()
+        self.post_exploit = None  # Phase 3: Post-exploitation (lazy, needs foothold)
 
     async def run(self, auth_document: str = ""):
         """Main entry point. Runs full pentest autonomously."""
@@ -156,6 +159,9 @@ class CentralBrain:
                     logger.info("\n>>> PHASE 4: DIRECT EXPLOITATION")
                     await self._run_phase("exploit")
 
+        # Phase 6: Post-exploitation (privesc / lateral / persistence / MITRE)
+        await self._run_post_exploitation()
+
         # Phase 5: Report
         logger.info("\n>>> PHASE 5: REPORT GENERATION")
         await self._generate_report()
@@ -165,6 +171,47 @@ class CentralBrain:
         logger.info(f"Agents spawned: {len(self.ctx.agents_spawned)}")
         logger.info(f"Vulnerabilities: {len(self.ctx.vulnerabilities)}")
         logger.info(f"Exploits executed: {len(self.ctx.exploit_results)}")
+
+    async def _run_post_exploitation(self):
+        """Phase 6: privesc / lateral movement / persistence / MITRE mapping.
+
+        Runs only when a shell/RCE foothold exists. Active enumeration and
+        persistence installation are gated by tier (see PostExploitManager);
+        no live command runner is wired by default, so this is analysis +
+        planning unless a foothold session is explicitly provided.
+        """
+        logger.info("\n>>> PHASE 6: POST-EXPLOITATION (privesc / lateral / persistence)")
+
+        if not self.ctx.has_shell_access():
+            logger.info("No shell/RCE foothold established — skipping post-exploitation")
+            return
+
+        # Runner stays None (plan-only) unless a confirmed foothold session is
+        # wired in. Persistence install additionally requires DEEP + authorize.
+        runner = None
+        authorize_persistence = False  # never auto-install; operator opt-in only
+
+        self.post_exploit = PostExploitManager(
+            self.ctx, tier=self.tier,
+            runner=runner, authorize_persistence=authorize_persistence,
+        )
+        try:
+            result = await self.post_exploit.run()
+            if result.get("status") == "completed":
+                pv = result["privesc"]; lat = result["lateral"]
+                logger.info(
+                    f"Post-exploitation: {pv['count']} privesc paths, "
+                    f"{lat['pivots']} pivots, {lat['credentials']} creds, "
+                    f"{len(result['persistence']['installed'])} persistence installed "
+                    f"(plan-only={self.tier != 'DEEP'}), "
+                    f"{result['mitre']['techniques']} ATT&CK techniques"
+                )
+                rec = pv.get("recommended")
+                if rec:
+                    logger.info(f"Recommended escalation: {rec.get('technique')} — "
+                                f"{rec.get('path','')[:80]}")
+        except Exception as e:      # noqa: BLE001
+            logger.error(f"Post-exploitation phase failed: {e}")
 
     async def _parse_authorization(self, auth_doc: str):
         """LLM parses authorization document to extract scope"""
@@ -766,6 +813,15 @@ CRITICAL RULES:
             "vulnerabilities": self.ctx.vulnerabilities,
             "attack_chains": self.ctx.attack_chains,
             "exploit_results": self.ctx.exploit_results,
+            "post_exploitation": (
+                self.post_exploit.to_dict() if self.post_exploit else {
+                    "privesc_findings": self.ctx.privesc_findings,
+                    "harvested_creds": self.ctx.harvested_creds,
+                    "lateral_plan": self.ctx.lateral_plan,
+                    "persistence_plan": self.ctx.persistence_plan,
+                    "mitre_mappings": self.ctx.mitre_mappings,
+                }
+            ),
             "technical_data": {
                 "subdomains": self.ctx.subdomains,
                 "ips": self.ctx.ips,

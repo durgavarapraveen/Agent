@@ -20,14 +20,31 @@ from core.config import load_config
 from core.central_brain import CentralBrain
 from core.meta_brain import MetaBrain
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("pentest.log", encoding="utf-8"),
-    ]
-)
+_LOG_FMT = '[%(asctime)s] %(name)s - %(levelname)s - %(message)s'
+
+
+class _TruncatingFormatter(logging.Formatter):
+    """Console-only: keep the terminal readable by capping long messages.
+    The file handler uses the plain formatter and records the FULL message."""
+
+    def __init__(self, fmt=None, max_len=220):
+        super().__init__(fmt)
+        self.max_len = max_len
+
+    def format(self, record):
+        s = super().format(record)
+        if len(s) > self.max_len:
+            s = s[:self.max_len] + " …(full in pentest.log)"
+        return s
+
+
+_console = logging.StreamHandler(sys.stdout)
+_console.setFormatter(_TruncatingFormatter(_LOG_FMT))
+
+_file = logging.FileHandler("pentest.log", encoding="utf-8")   # FULL, untruncated
+_file.setFormatter(logging.Formatter(_LOG_FMT))
+
+logging.basicConfig(level=logging.INFO, handlers=[_console, _file])
 logger = logging.getLogger(__name__)
 
 

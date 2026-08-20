@@ -54,7 +54,7 @@ class KaliTool(Tool):
 
     def run(self, command: str, timeout: int = 120) -> ToolResult:
         """Run raw command in Kali container"""
-        logger.info(f"  [{self.name}] {command[:80]}...")
+        logger.info(f"  [{self.name}] {command}")
         r = KaliDockerExecutor.run(command, timeout=timeout, auto_install=True)
         stdout = r.get("stdout", "")
         stderr = r.get("stderr", "")

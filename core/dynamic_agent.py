@@ -192,12 +192,15 @@ class DynamicAgent:
                 }
             
             if result.get("returncode") != 0 and result.get("error"):
-                # Tool errored but might be transient
-                logger.warning(f"[{self.agent_id}] Tool '{tool_name}' error: {result.get('error')[:100]}")
+                # Tool errored but might be transient (full error -> file, console trims)
+                logger.warning(f"[{self.agent_id}] Tool '{tool_name}' error: {result.get('error')}")
                 # Don't cache yet (might be transient)
                 return result
-            
-            # Success
+
+            # Success — record full tool output (console handler trims for display)
+            out = result.get("output") or ""
+            if out:
+                logger.info(f"[{self.agent_id}] {tool_name} output:\n{out}")
             self.step_without_progress = 0
             return result
             
@@ -249,7 +252,8 @@ class DynamicAgent:
             # ReAct: log the reasoning behind this step
             thought = decision.get("thought") or decision.get("thinking") or ""
             if thought:
-                logger.info(f"[{self.agent_id}] Thought: {str(thought)[:160]}")
+                # Full thought — console handler truncates for display, file keeps all
+                logger.info(f"[{self.agent_id}] Thought: {thought}")
 
             # Extract action
             action = decision.get("action", "")
