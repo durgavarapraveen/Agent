@@ -161,21 +161,27 @@ class KaliDockerExecutor:
         logger.info(f"Installing {tool} (package: {pkg}) in Kali container...")
 
         # Update once per session (fast if already updated)
+        # NOTE: double quotes (not single) so the wrapper survives Windows cmd.exe
         subprocess.run(
-            f"docker exec {container} bash -c 'apt-get update -qq 2>&1 | tail -3'",
+            f'docker exec {container} bash -c "apt-get update -qq 2>&1 | tail -3"',
             shell=True, capture_output=True, text=True, timeout=120
         )
 
         r = subprocess.run(
-            f"docker exec {container} bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y -qq {pkg} 2>&1 | tail -3'",
+            f'docker exec {container} bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq {pkg} 2>&1 | tail -3"',
             shell=True, capture_output=True, text=True, timeout=300
         )
 
+        # Clear stale cache so the post-install check actually re-runs `which`
+        # (an earlier check may have cached this tool as "not present")
+        cls._checked_tools.discard(tool)
+        cls._installed_tools.discard(tool)
+
         if cls.is_tool_installed(tool):
-            logger.info(f"✓ Installed {tool}")
+            logger.info(f"[OK] Installed {tool}")
             return True
         else:
-            logger.warning(f"✗ Failed to install {tool}: {r.stdout[:200]}")
+            logger.warning(f"[X] Failed to install {tool}: {r.stdout[:200]}")
             # Reset check flag so we don't loop
             cls._checked_tools.discard(tool)
             return False

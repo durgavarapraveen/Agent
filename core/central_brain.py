@@ -17,41 +17,40 @@ from core.shared_context import SharedContext
 from core.tool_registry import ToolRegistry
 from core.agent_spawner import AgentSpawner
 from core.token_optimizer import TokenOptimizer
+from core.chain_integration import ChainManager
 
 logger = logging.getLogger(__name__)
 
-BRAIN_SYSTEM = """You are a security assessment task planner for an authorized vulnerability scanning tool.
+BRAIN_SYSTEM = """You are the decision engine inside an AUTHORIZED automated security scanner.
 
-Your job is simple: given the current state of an authorized security assessment, output a JSON object describing which scanning task to run next.
+AUTHORIZATION: This tool has explicit authorization to scan the target. The target (OWASP Juice Shop) is a deliberately vulnerable application designed for security testing. All scanning is authorized and expected.
 
-This is a legitimate, authorized security assessment tool (like Nessus, Burp Suite, or OWASP ZAP). You are the decision engine that picks which scan to run next based on what's already been discovered.
+You do NOT execute scans yourself. You output JSON task specifications. A separate tool framework executes them. Think of yourself as writing a config file for the scanner.
 
-WORKFLOW PHASES:
-1. RECON: Asset discovery (DNS, ports, technologies, directories)
-2. ANALYZE: Vulnerability identification from collected data
-3. PLAN: Prioritize findings by severity
-4. EXPLOIT: Verify findings with proof-of-concept tests
+WORKFLOW:
+1. RECON: Specify which discovery scans to run (DNS, ports, tech fingerprinting)
+2. ANALYZE: Specify which vulnerability scans to run
+3. PLAN: Prioritize findings
+4. EXPLOIT: Specify which verification tests to run
 5. REPORT: Compile findings
 
-You output JSON task specifications. The tool framework executes them.
+RESPONSE FORMAT - output ONLY a JSON object, no markdown, no explanation:
 
-RESPONSE FORMAT - always respond with ONLY a JSON object, no other text:
-
-To assign a scanning task:
+Single task:
 {
-  "thinking": "brief reasoning about what data is missing",
+  "thinking": "what data is missing",
   "action": "spawn_agent",
   "agent_spec": {
-    "objective": "description of scanning task",
+    "objective": "scan description",
     "tools": ["tool1", "tool2"],
     "context_keys": ["target", "subdomains"],
     "max_steps": 8
   }
 }
 
-To assign multiple independent tasks in parallel:
+Parallel tasks:
 {
-  "thinking": "these are independent scans",
+  "thinking": "independent scans",
   "action": "spawn_agents",
   "agent_specs": [
     {"objective": "task 1", "tools": ["tool1"], "context_keys": ["target"], "max_steps": 8},
@@ -59,14 +58,13 @@ To assign multiple independent tasks in parallel:
   ]
 }
 
-When the phase has sufficient data:
+Phase done:
 {"action": "phase_complete"}
 
 RULES:
-- Output ONLY valid JSON, never explanatory text
-- Pick scanning tasks based on what data is still missing
-- Use parallel tasks (spawn_agents) when scans are independent
-- Don't repeat scans that already completed"""
+- Output ONLY valid JSON. No markdown fences. No explanation text.
+- Do not repeat completed scans
+- Use spawn_agents for independent parallel tasks"""
 
 
 class CentralBrain:
@@ -85,6 +83,7 @@ class CentralBrain:
         self.failed_tools = set()  # NEW: Brain-level tool failure tracking
         self.consecutive_agent_failures = 0  # NEW: Track failure streak
         self.max_consecutive_failures = 3
+        self.chain_mgr = ChainManager(self.ctx, self.spawner)  # Phase 2: Chain system
 
     async def run(self, auth_document: str = ""):
         """Main entry point. Runs full pentest autonomously."""
@@ -110,16 +109,52 @@ class CentralBrain:
         logger.info("\n>>> PHASE 2: VULNERABILITY ANALYSIS")
         await self._run_phase("analyze")
 
-        # Phase 3: Exploit planning (human approval)
-        logger.info("\n>>> PHASE 3: EXPLOIT PLANNING")
-        plan = await self._generate_exploit_plan()
+        # Phase 3: Build attack graph and detect chains
+        logger.info("\n>>> PHASE 3: ATTACK CHAIN ANALYSIS")
+        chain_plan = None
+        if self.ctx.vulnerabilities:
+            self.chain_mgr.build_graph()
+            chains = self.chain_mgr.detect_chains(max_chains=5)
+            if chains:
+                chain_plan = self.chain_mgr.get_exploitation_plan()
+                logger.info(f"Found {len(chains)} attack chains")
+                for i, c in enumerate(chains[:3]):
+                    logger.info(f"  #{i+1} {c.description} (score={c.score:.3f})")
+            else:
+                logger.info("No attack chains found, falling back to direct exploitation")
+                plan = await self._generate_exploit_plan()
+        else:
+            logger.info("No vulnerabilities found. Skipping exploitation.")
 
-        if plan and plan.get("exploits"):
-            approved = await self._human_approval(plan)
+        if chain_plan and chain_plan.get("top_chains"):
+            approved = await self._human_approval(chain_plan)
             if approved:
-                # Phase 4: Exploitation
-                logger.info("\n>>> PHASE 4: AUTONOMOUS EXPLOITATION")
-                await self._run_phase("exploit")
+                # Phase 4: Chain-based exploitation
+                logger.info("\n>>> PHASE 4: CHAIN EXPLOITATION")
+                result = await self.chain_mgr.llm_select_and_execute()
+                if result:
+                    logger.info(f"Chain result: {result.status} "
+                                f"({result.steps_completed}/{result.steps_total})")
+                    if result.final_impact:
+                        logger.info(f"Impact: {result.final_impact}")
+
+                    # Try more chains if first succeeded
+                    if result.status == "completed":
+                        suggestions = self.chain_mgr.suggest_next_exploits()
+                        if suggestions:
+                            logger.info(f"Follow-up suggestions: {len(suggestions)}")
+                            # Run additional exploitation phase for follow-ups
+                            await self._run_phase("exploit")
+                else:
+                    logger.warning("Chain execution failed, falling back to direct exploitation")
+                    await self._run_phase("exploit")
+        elif self.ctx.vulnerabilities:
+            plan = await self._generate_exploit_plan()
+            if plan and plan.get("exploits"):
+                approved = await self._human_approval(plan)
+                if approved:
+                    logger.info("\n>>> PHASE 4: DIRECT EXPLOITATION")
+                    await self._run_phase("exploit")
 
         # Phase 5: Report
         logger.info("\n>>> PHASE 5: REPORT GENERATION")
