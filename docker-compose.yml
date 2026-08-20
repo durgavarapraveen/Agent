@@ -1,0 +1,71 @@
+version: "3.8"
+
+services:
+  # Kali Linux with pentesting tools
+  kali-pentesting:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kali-pentesting-mcp
+    hostname: kali-pentesting
+
+    # Port mappings for MCP servers
+    ports:
+      - "9000:9000" # Hexstrike MCP
+      - "9001:9001" # Metasploit MCP
+      - "9002:9002" # Kali tools MCP
+      - "9003:9003" # Nuclei MCP
+      - "9004:9004" # Nikto MCP
+
+    environment:
+      - HEXSTRIKE_API_KEY=${HEXSTRIKE_KEY:-demo}
+      - METASPLOIT_HOST=localhost
+      - METASPLOIT_PORT=9001
+      - KALI_HOST=0.0.0.0
+      - KALI_PORT=9002
+      - PYTHONUNBUFFERED=1
+
+    # Volume mounts for persistence
+    volumes:
+      - ./reports:/pentesting/reports
+      - ./payloads:/pentesting/payloads
+      - ./loot:/pentesting/loot
+
+    # Network
+    networks:
+      - pentesting
+
+    # Resource limits
+    cpus: "2"
+    mem_limit: 2g
+
+    # Restart policy
+    restart: unless-stopped
+
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+# Networks
+networks:
+  pentesting:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
+
+# Volumes
+volumes:
+  pentesting_data:
+    driver: local

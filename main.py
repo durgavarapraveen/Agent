@@ -1,181 +1,129 @@
-#!/usr/bin/env python3
-import asyncio
-import argparse
-import os
-import logging
-from pathlib import Path
-from dotenv import load_dotenv
+"""
+Autonomous Pentesting Agent - Entry Point
 
-from core.context import ExecutionContext
-from orchestrator.central import CentralOrchestrator
-from scope.manager import ScopeManager
-from knowledge.store import KnowledgeStore
-from llm.ollama import OllamaProvider
-from tools.manager import ToolManager
-from mcp.manager import MCPManager
+Single target:
+  python main.py --target example.com
+  python main.py --target example.com --auth auth.txt --tier SHALLOW
+
+Multiple targets:
+  python main.py --targets example.com,app2.io,api.service.com
+  python main.py --targets-file targets.txt --tier POC
+"""
+
+import argparse
+import asyncio
+import logging
+import sys
+from pathlib import Path
+
+from core.config import load_config
+from core.central_brain import CentralBrain
+from core.meta_brain import MetaBrain
 
 logging.basicConfig(
     level=logging.INFO,
-    format='[%(asctime)s] %(name)s - %(levelname)s - %(message)s'
+    format='[%(asctime)s] %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("pentest.log", encoding="utf-8"),
+    ]
 )
 logger = logging.getLogger(__name__)
 
-load_dotenv()
 
-async def run_demo():
-    """Run in demo mode without a real target."""
-    logger.info("AUTONOMOUS SECURITY AGENT - DEMO MODE")
-    logger.info("=" * 60)
-    
-    db_path = Path("workspace/demo.db")
-    db_path.parent.mkdir(exist_ok=True)
-    
-    knowledge_store = KnowledgeStore(str(db_path))
-    llm_provider = OllamaProvider(
-        base_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
-        model=os.getenv("OLLAMA_MODEL", "neural-chat")
-    )
-    
-    tool_manager = ToolManager()
-    mcp_manager = MCPManager()
-    scope_manager = ScopeManager(
-        allowed_domains=["*.example.com"],
-        allowed_ips=["192.168.0.0/16"],
-        execution_mode="PASSIVE"
-    )
-    
-    context = ExecutionContext(
-        target="DEMO",
-        objective="Perform a complete security assessment",
-        knowledge_store=knowledge_store,
-        llm_provider=llm_provider,
-        tool_manager=tool_manager,
-        mcp_manager=mcp_manager,
-        scope_manager=scope_manager,
-        mode="DEMO"
-    )
-    
-    orchestrator = CentralOrchestrator(context)
-    
-    try:
-        await orchestrator.run()
-        logger.info("Demo completed successfully")
-    except Exception as e:
-        logger.error(f"Demo failed: {e}", exc_info=True)
+async def run_single(target: str, auth_file: str = None, tier: str = "POC"):
+    """Single target pentest"""
+    auth_document = ""
+    if auth_file:
+        auth_path = Path(auth_file)
+        if auth_path.exists():
+            auth_document = auth_path.read_text(encoding="utf-8")
+        else:
+            logger.error(f"Auth file not found: {auth_path}")
+            sys.exit(1)
 
-async def run_source_analysis(repository_path):
-    """Run source code analysis mode."""
-    logger.info(f"SOURCE CODE ANALYSIS MODE")
-    logger.info(f"Repository: {repository_path}")
-    logger.info("=" * 60)
-    
-    if not Path(repository_path).exists():
-        logger.error(f"Repository not found: {repository_path}")
-        return
-    
-    db_path = Path("workspace/source.db")
-    db_path.parent.mkdir(exist_ok=True)
-    
-    knowledge_store = KnowledgeStore(str(db_path))
-    llm_provider = OllamaProvider(
-        base_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
-        model=os.getenv("OLLAMA_MODEL", "neural-chat")
-    )
-    
-    tool_manager = ToolManager()
-    mcp_manager = MCPManager()
-    scope_manager = ScopeManager(
-        allowed_paths=[repository_path],
-        execution_mode="PASSIVE"
-    )
-    
-    context = ExecutionContext(
-        target=repository_path,
-        objective="Analyze source code security",
-        knowledge_store=knowledge_store,
-        llm_provider=llm_provider,
-        tool_manager=tool_manager,
-        mcp_manager=mcp_manager,
-        scope_manager=scope_manager,
-        mode="SOURCE"
-    )
-    
-    orchestrator = CentralOrchestrator(context)
-    
-    try:
-        await orchestrator.run()
-        logger.info("Source analysis completed")
-    except Exception as e:
-        logger.error(f"Source analysis failed: {e}", exc_info=True)
+    scope = {"domains": [target], "max_tier": tier}
+    brain = CentralBrain(target=target, scope=scope)
+    await brain.run(auth_document=auth_document)
 
-async def run_web_target(target_url, mode="PASSIVE"):
-    """Run web target analysis mode."""
-    logger.info(f"WEB TARGET ANALYSIS MODE")
-    logger.info(f"Target: {target_url}")
-    logger.info(f"Execution Mode: {mode}")
-    logger.info("=" * 60)
-    
-    db_path = Path(f"workspace/{target_url.replace(':', '_').replace('/', '_')}.db")
-    db_path.parent.mkdir(exist_ok=True)
-    
-    knowledge_store = KnowledgeStore(str(db_path))
-    llm_provider = OllamaProvider(
-        base_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
-        model=os.getenv("OLLAMA_MODEL", "neural-chat")
-    )
-    
-    tool_manager = ToolManager()
-    mcp_manager = MCPManager()
-    
-    from urllib.parse import urlparse
-    parsed = urlparse(target_url)
-    domain = parsed.netloc
-    
-    scope_manager = ScopeManager(
-        allowed_domains=[domain],
-        execution_mode=mode
-    )
-    
-    context = ExecutionContext(
-        target=target_url,
-        objective="Perform web security assessment",
-        knowledge_store=knowledge_store,
-        llm_provider=llm_provider,
-        tool_manager=tool_manager,
-        mcp_manager=mcp_manager,
-        scope_manager=scope_manager,
-        mode="WEB"
-    )
-    
-    orchestrator = CentralOrchestrator(context)
-    
-    try:
-        await orchestrator.run()
-        logger.info("Web target analysis completed")
-    except Exception as e:
-        logger.error(f"Web analysis failed: {e}", exc_info=True)
+
+async def run_multi(targets: list, auth_file: str = None):
+    """Multi-target parallel pentest"""
+    auth_document = ""
+    if auth_file:
+        auth_path = Path(auth_file)
+        if auth_path.exists():
+            auth_document = auth_path.read_text(encoding="utf-8")
+
+    meta = MetaBrain(targets, auth_document=auth_document)
+    await meta.run_all()
+
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Autonomous Multi-Agent Cybersecurity Assessment Platform"
+        description="Autonomous Pentesting Agent",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python main.py --target example.com
+  python main.py --target example.com --auth auth.txt --tier SHALLOW
+  python main.py --targets example.com,app2.io,api.com
+  python main.py --targets-file targets.txt --tier POC
+        """
     )
-    parser.add_argument("--demo", action="store_true", help="Run in demo mode")
-    parser.add_argument("--target", type=str, help="Web target URL")
-    parser.add_argument("--repository", type=str, help="Local repository path")
-    parser.add_argument("--mode", choices=["PASSIVE", "SAFE_ACTIVE", "FULL_AUTHORIZED"],
-                       default="PASSIVE", help="Execution mode")
-    
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--target", help="Single target domain or URL")
+    group.add_argument("--targets", help="Comma-separated list of targets")
+    group.add_argument("--targets-file", help="File with one target per line")
+    parser.add_argument("--auth", default=None, help="Authorization document")
+    parser.add_argument("--tier", default="POC",
+                         choices=["POC", "SHALLOW", "DEEP"],
+                         help="Max exploitation tier (default: POC)")
     args = parser.parse_args()
-    print(args)
-    
-    if args.demo:
-        asyncio.run(run_demo())
-    elif args.target:
-        asyncio.run(run_web_target(args.target, args.mode))
-    elif args.repository:
-        asyncio.run(run_source_analysis(args.repository))
-    else:
-        parser.print_help()
+
+    # Load .env config
+    config = load_config()
+
+    # Override tier in config
+    config.config["MAX_EXPLOITATION_TIER"] = args.tier
+
+    logger.info("=" * 60)
+    logger.info("AUTONOMOUS PENTESTING AGENT v2.0")
+    logger.info("=" * 60)
+
+    if args.target:
+        # Single target
+        logger.info(f"Mode: Single target")
+        logger.info(f"Target: {args.target}")
+        logger.info(f"Tier: {args.tier}")
+        logger.info("=" * 60)
+        asyncio.run(run_single(args.target, args.auth, args.tier))
+
+    elif args.targets:
+        # Multi-target from CLI
+        targets = [t.strip() for t in args.targets.split(",") if t.strip()]
+        logger.info(f"Mode: Multi-target ({len(targets)} targets)")
+        for t in targets:
+            logger.info(f"  - {t}")
+        logger.info(f"Tier: {args.tier}")
+        logger.info("=" * 60)
+        asyncio.run(run_multi(targets, args.auth))
+
+    elif args.targets_file:
+        # Multi-target from file
+        path = Path(args.targets_file)
+        if not path.exists():
+            logger.error(f"Targets file not found: {path}")
+            sys.exit(1)
+        targets = [
+            line.strip() for line in path.read_text().splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
+        logger.info(f"Mode: Multi-target ({len(targets)} from {path})")
+        logger.info(f"Tier: {args.tier}")
+        logger.info("=" * 60)
+        asyncio.run(run_multi(targets, args.auth))
+
 
 if __name__ == "__main__":
     main()
