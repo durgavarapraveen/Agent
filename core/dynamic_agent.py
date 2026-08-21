@@ -241,7 +241,7 @@ class DynamicAgent:
             
             # Get next action from LLM
             prompt = self._build_step_prompt(step)
-            decision = await self.llm.generate_json(prompt)
+            decision = await self.llm.generate_json(prompt, system=AGENT_SYSTEM_PROMPT, max_tokens = 4096)
             
             if not decision:
                 self.step_without_progress += 1

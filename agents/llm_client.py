@@ -263,6 +263,8 @@ class DeepSeekProvider(LLMProvider):
             logger.error(f"DeepSeek generate: {e}")
         return ""
 
+    # In llm_client.py, DeepSeekProvider.generate_json() - replace lines 263-291
+
     async def generate_json(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
                             system: Optional[str] = None, max_tokens: int = 2048) -> Dict:
         messages = []
@@ -271,32 +273,72 @@ class DeepSeekProvider(LLMProvider):
         messages.append({"role": "system", "content": json_system})
         messages.append({"role": "user", "content": prompt})
         payload = {"model": self._model_for(tier), "messages": messages,
-                   "max_tokens": max_tokens, "temperature": 0.1,
-                   "stream": False, "response_format": {"type": "json_object"}}
+                "max_tokens": max_tokens, "temperature": 0.1,
+                "stream": False, "response_format": {"type": "json_object"}}
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 r = await client.post(f"{self.base_url}/chat/completions",
-                                      headers=self._headers(), json=payload)
+                                    headers=self._headers(), json=payload)
+                
+                # --- ADD DEBUGGING ---
+                logger.debug(f"DeepSeek response status: {r.status_code}")
+                logger.debug(f"DeepSeek response body (first 500 chars): {r.text[:500]}")
+                # --- END DEBUGGING ---
+                
                 if r.status_code != 200:
                     logger.error(f"DeepSeek {r.status_code}: {r.text[:200]}")
                     return {}
-                text = r.json()["choices"][0]["message"]["content"].strip()
-                text = re.sub(r'```json\n?|\n?```', '', text).strip()
-                if not text:
+                
+                # Check if choices exist
+                data = r.json()
+                if not data.get("choices"):
+                    logger.error(f"DeepSeek: No choices in response: {data}")
                     return {}
+                
+                choice = data["choices"][0]
+                
+                # Check finish_reason
+                finish_reason = choice.get("finish_reason")
+                if finish_reason == "content_filter":
+                    logger.error("DeepSeek: Content filtered - response blocked")
+                    return {}
+                elif finish_reason == "length":
+                    logger.warning("DeepSeek: Response truncated due to max_tokens")
+                
+                text = choice.get("message", {}).get("content", "").strip()
+                
+                # --- ADD DEBUGGING ---
+                logger.debug(f"DeepSeek raw content: {repr(text)}")
+                # --- END DEBUGGING ---
+                
+                if not text:
+                    logger.warning("DeepSeek: Empty content returned")
+                    return {}
+                
+                # Remove markdown code blocks
+                text = re.sub(r'```json\n?|\n?```', '', text).strip()
+                
+                if not text:
+                    logger.warning("DeepSeek: Empty after stripping markdown")
+                    return {}
+                
                 try:
                     return json.loads(text)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as je:
+                    # Try to extract JSON with regex
+                    logger.warning(f"DeepSeek: JSON decode failed: {je}")
+                    logger.debug(f"Failed to parse: {text[:200]}")
                     m = re.search(r'\{[\s\S]*\}', text)
                     if m:
                         try:
                             return json.loads(m.group(0))
                         except json.JSONDecodeError:
+                            logger.error("DeepSeek: Failed to parse extracted JSON")
                             pass
+                    return {}
         except Exception as e:
             logger.error(f"DeepSeek generate_json: {e}")
-        return {}
-
+            return {}
 
 # ═══════════════════════════════════════════════════════════════
 # OLLAMA PROVIDER
@@ -344,32 +386,83 @@ class OllamaProvider(LLMProvider):
         return ""
 
     async def generate_json(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                             system: Optional[str] = None, max_tokens: int = 2048) -> Dict:
-        model = self._model_for(tier)
-        payload = {
-            "model": model, "prompt": prompt, "stream": False, "format": "json",
-            "options": {"temperature": 0.1, "num_predict": max_tokens}
-        }
-        if system:
-            payload["system"] = system
+                        system: Optional[str] = None, max_tokens: int = 4096) -> Dict:
+        messages = []
+        json_system = (system or "You are a helpful assistant.") + \
+            "\n\nRespond ONLY with valid JSON. No markdown."
+        messages.append({"role": "system", "content": json_system})
+        messages.append({"role": "user", "content": prompt})
+        payload = {"model": self._model_for(tier), "messages": messages,
+                "max_tokens": max_tokens, "temperature": 0.1,
+                "stream": False, "response_format": {"type": "json_object"}}
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                r = await client.post(f"{self.base_url}/api/generate", json=payload)
-                if r.status_code == 200:
-                    text = r.json().get("response", "").strip()
-                    try:
-                        return json.loads(text)
-                    except json.JSONDecodeError:
-                        m = re.search(r'\{[\s\S]*\}', text)
-                        if m:
-                            try:
-                                return json.loads(m.group(0))
-                            except:
-                                pass
+                r = await client.post(f"{self.base_url}/chat/completions",
+                                    headers=self._headers(), json=payload)
+                
+                # ── CRITICAL DEBUGGING ──
+                logger.info(f"DeepSeek response status: {r.status_code}")
+                response_text = r.text[:1000]  # First 1000 chars
+                logger.info(f"DeepSeek response (first 1000 chars): {response_text}")
+                
+                if r.status_code != 200:
+                    logger.error(f"DeepSeek {r.status_code}: {r.text[:200]}")
+                    return {}
+                
+                data = r.json()
+                
+                # Check if choices exist
+                if not data.get("choices"):
+                    logger.error(f"DeepSeek: No choices in response: {data}")
+                    return {}
+                
+                choice = data["choices"][0]
+                
+                # Check finish_reason
+                finish_reason = choice.get("finish_reason")
+                logger.info(f"DeepSeek finish_reason: {finish_reason}")
+                if finish_reason == "content_filter":
+                    logger.error("DeepSeek: Content filtered - response blocked")
+                    return {}
+                elif finish_reason == "length":
+                    logger.warning(f"DeepSeek: Response truncated at {max_tokens} tokens")
+                
+                # Check if message exists
+                message = choice.get("message")
+                if not message:
+                    logger.error("DeepSeek: No message in response")
+                    return {}
+                
+                text = message.get("content", "").strip()
+                logger.info(f"DeepSeek content length: {len(text)} chars")
+                
+                if not text:
+                    logger.warning("DeepSeek: Empty content returned")
+                    return {}
+                
+                # Remove markdown code blocks
+                text = re.sub(r'```json\n?|\n?```', '', text).strip()
+                
+                if not text:
+                    logger.warning("DeepSeek: Empty after stripping markdown")
+                    return {}
+                
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError as je:
+                    logger.warning(f"DeepSeek: JSON decode failed: {je}")
+                    logger.debug(f"Failed to parse: {text[:200]}")
+                    m = re.search(r'\{[\s\S]*\}', text)
+                    if m:
+                        try:
+                            return json.loads(m.group(0))
+                        except json.JSONDecodeError:
+                            logger.error("DeepSeek: Failed to parse extracted JSON")
+                            pass
+                    return {}
         except Exception as e:
-            logger.error(f"Ollama generate_json: {e}")
-        return {}
-
+            logger.error(f"DeepSeek generate_json: {e}")
+            return {}
 
 class NullProvider(LLMProvider):
     """Fallback provider when nothing works"""

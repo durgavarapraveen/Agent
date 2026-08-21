@@ -79,15 +79,49 @@ class SharedContext:
                 if ip and ip not in self.ips:
                     self.ips.append(ip)
 
-    def add_ports(self, host: str, ports: List[Dict], source: str = ""):
+    def add_ports(self, host: str, ports: List, source: str = ""):
+        """Add ports - handles both ints and dicts."""
         with self._lock:
             existing = self.ports.get(host, [])
-            existing_nums = {p["port"] for p in existing}
+            existing_nums = {p.get("port") if isinstance(p, dict) else p for p in existing}
+            
             for p in ports:
-                if p.get("port") and p["port"] not in existing_nums:
-                    existing.append(p)
-                    existing_nums.add(p["port"])
+                if isinstance(p, int):
+                    # Convert int to dict format
+                    port_dict = {"port": p, "service": "unknown", "version": ""}
+                    if p == 22:
+                        port_dict["service"] = "ssh"
+                    elif p == 80:
+                        port_dict["service"] = "http"
+                    elif p == 443:
+                        port_dict["service"] = "https"
+                    elif p == 21:
+                        port_dict["service"] = "ftp"
+                    elif p == 25:
+                        port_dict["service"] = "smtp"
+                    elif p == 53:
+                        port_dict["service"] = "dns"
+                    elif p == 3306:
+                        port_dict["service"] = "mysql"
+                    elif p == 5432:
+                        port_dict["service"] = "postgresql"
+                    elif p == 6379:
+                        port_dict["service"] = "redis"
+                    elif p == 27017:
+                        port_dict["service"] = "mongodb"
+                elif isinstance(p, dict):
+                    port_dict = p
+                else:
+                    # Fallback: convert to dict
+                    port_dict = {"port": str(p), "service": "unknown", "version": ""}
+                
+                port_num = port_dict.get("port")
+                if port_num and port_num not in existing_nums:
+                    existing.append(port_dict)
+                    existing_nums.add(port_num)
+            
             self.ports[host] = existing
+            logger.debug(f"Ports for {host}: +{len(ports)} from {source}, total={len(existing)}")
 
     def add_endpoints(self, endpoints: List[Dict], source: str = ""):
         with self._lock:

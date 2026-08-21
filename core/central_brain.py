@@ -27,6 +27,10 @@ from core.request_capture import RequestCapturer
 from validation import gate as confidence_gate, DedupStore
 from compliance import ComplianceReporter, available_frameworks
 
+from knowledge.store import KnowledgeStore
+import os
+import uuid
+
 logger = logging.getLogger(__name__)
 
 BRAIN_SYSTEM = """You are the decision engine inside an AUTHORIZED automated security scanner.
@@ -98,6 +102,17 @@ class CentralBrain:
         self.metrics = MetricsTracker(target=target, out_dir=str(self.report_dir))
         self.automation = AutomationEngine(self.ctx)
         self.reporter = EnterpriseReporter(self.ctx, report_dir=str(self.report_dir))
+        
+        
+        db_path = os.getenv("KNOWLEDGE_DB_PATH", str(self.report_dir / "findings.db"))
+        self.knowledge_store = KnowledgeStore(db_path)
+        self.target_id = f"tgt_{uuid.uuid4().hex[:12]}"
+        self.knowledge_store.add_target(
+            self.target_id,           # arg 1: ID
+            target,                   # arg 2: URL
+            "url"                     # arg 3: type
+        )
+        logger.info(f"Knowledge store initialized: {db_path}")
 
     async def run(self, auth_document: str = ""):
         """Main entry point. Runs full pentest autonomously."""
@@ -118,13 +133,16 @@ class CentralBrain:
         # Phase 1: Deep recon
         logger.info("\n>>> PHASE 1: DEEP RECONNAISSANCE")
         await self._run_phase("recon")
+        await self._persist_recon_findings()
 
         # Phase 1b: Intercept live HTTP traffic across the site (for exploit replay)
         await self._capture_requests()
+        await self._persist_captured_requests()
 
         # Phase 2: Vulnerability analysis
         logger.info("\n>>> PHASE 2: VULNERABILITY ANALYSIS")
         await self._run_phase("analyze")
+        await self._persist_vulnerabilities()
 
         # Phase 3: Build attack graph and detect chains
         logger.info("\n>>> PHASE 3: ATTACK CHAIN ANALYSIS")
@@ -162,9 +180,11 @@ class CentralBrain:
                             logger.info(f"Follow-up suggestions: {len(suggestions)}")
                             # Run additional exploitation phase for follow-ups
                             await self._run_phase("exploit")
+                            await self._persist_exploit_results()
                 else:
                     logger.warning("Chain execution failed, falling back to direct exploitation")
                     await self._run_phase("exploit")
+                    await self._persist_exploit_results()
         elif self.ctx.vulnerabilities:
             plan = await self._generate_exploit_plan()
             if plan and plan.get("exploits"):
@@ -172,6 +192,7 @@ class CentralBrain:
                 if approved:
                     logger.info("\n>>> PHASE 4: DIRECT EXPLOITATION")
                     await self._run_phase("exploit")
+                    await self._persist_exploit_results()
 
         # Phase 6: Post-exploitation (privesc / lateral / persistence / MITRE)
         await self._run_post_exploitation()
@@ -487,6 +508,248 @@ class CentralBrain:
             logger.debug(f"[Metrics] dashboard write failed: {e}")
         for act in self.automation.evaluate():
             logger.info(f"Automation recommends: {act['action']} ({act['rule']})")
+    
+    async def _persist_recon_findings(self):
+        """Save recon discoveries to knowledge store."""
+        try:
+            logger.info("Persisting recon findings...")
+            
+            # ── Debug: Log what's actually in the context ──
+            logger.debug(f"subdomains: {getattr(self.ctx, 'subdomains', [])}")
+            logger.debug(f"ips: {getattr(self.ctx, 'ips', [])}")
+            logger.debug(f"ports keys: {getattr(self.ctx, 'ports', {}).keys()}")
+            logger.debug(f"ports data: {getattr(self.ctx, 'ports', {})}")
+            
+            # ── Subdomains ──
+            if hasattr(self.ctx, 'subdomains') and self.ctx.subdomains:
+                for subdomain in self.ctx.subdomains:
+                    self.knowledge_store.add_asset(
+                        self.target_id, "subdomain", subdomain, 
+                        metadata=json.dumps({"discovered_at": datetime.now().isoformat()})
+                    )
+                logger.info(f"  ✓ Persisted {len(self.ctx.subdomains)} subdomains")
+            
+            # ── IPs ──
+            if hasattr(self.ctx, 'ips') and self.ctx.ips:
+                for ip in self.ctx.ips:
+                    self.knowledge_store.add_asset(
+                        self.target_id, "ip", ip,
+                        metadata=json.dumps({"discovered_at": datetime.now().isoformat()})
+                    )
+                logger.info(f"  ✓ Persisted {len(self.ctx.ips)} IPs")
+            
+            # ── Ports - FIXED ──
+            if hasattr(self.ctx, 'ports') and self.ctx.ports:
+                for host, port_list in self.ctx.ports.items():
+                    host_asset_id = self.knowledge_store.add_asset(
+                        self.target_id, "host", host,
+                        metadata=json.dumps({"discovered_at": datetime.now().isoformat()})
+                    )
+                    
+                    for port_item in port_list:
+                        # Handle both dict and int formats
+                        if isinstance(port_item, dict):
+                            port_num = port_item.get("port", "unknown")
+                            service = port_item.get("service", "unknown")
+                            version = port_item.get("version", "")
+                        else:
+                            port_num = str(port_item)
+                            service = "unknown"
+                            version = ""
+                        
+                        # Add technology with port info
+                        self.knowledge_store.add_technology(
+                            host_asset_id, 
+                            f"{service}:{port_num}", 
+                            version,
+                            source="port_scan"
+                        )
+                logger.info(f"  ✓ Persisted ports for {len(self.ctx.ports)} hosts")
+            
+            # ── Technologies ──
+            if hasattr(self.ctx, 'technologies') and self.ctx.technologies:
+                for host, techs in self.ctx.technologies.items():
+                    host_asset_id = self.knowledge_store.add_asset(
+                        self.target_id, "host", host
+                    )
+                    for tech in techs:
+                        if isinstance(tech, dict):
+                            name = tech.get("name", "")
+                            version = tech.get("version", "")
+                        else:
+                            name = str(tech)
+                            version = ""
+                        if name:
+                            self.knowledge_store.add_technology(
+                                host_asset_id, name, version,
+                                source="web_fingerprint"
+                            )
+                logger.info(f"  ✓ Persisted technologies for {len(self.ctx.technologies)} hosts")
+            
+            # ── Endpoints ──
+            if hasattr(self.ctx, 'endpoints') and self.ctx.endpoints:
+                for endpoint in self.ctx.endpoints:
+                    if isinstance(endpoint, dict):
+                        path = endpoint.get("url", "")
+                        method = endpoint.get("method", "GET")
+                        status = endpoint.get("status", 0)
+                        params = endpoint.get("params", [])
+                    elif isinstance(endpoint, str):
+                        path = endpoint
+                        method = "GET"
+                        status = 0
+                        params = []
+                    else:
+                        continue
+                    
+                    if path:
+                        self.knowledge_store.add_endpoint(
+                            target_id=self.target_id,
+                            path=path,
+                            http_method=method,
+                            status_code=status,
+                            metadata=json.dumps({
+                                "params": params,
+                                "discovered_at": datetime.now().isoformat()
+                            })
+                        )
+                logger.info(f"  ✓ Persisted {len(self.ctx.endpoints)} endpoints")
+            
+            # ── Summary ──
+            logger.info(f"Persisted: {len(getattr(self.ctx, 'subdomains', []))} subdomains, "
+                        f"{len(getattr(self.ctx, 'ips', []))} IPs, "
+                        f"{len(getattr(self.ctx, 'ports', {}))} hosts with ports, "
+                        f"{len(getattr(self.ctx, 'endpoints', []))} endpoints")
+                        
+        except Exception as e:
+            logger.error(f"Failed to persist recon findings: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+    
+    async def _persist_captured_requests(self):
+        """Save captured HTTP requests to disk for replay."""
+        try:
+            if not self.ctx.captured_requests:
+                logger.debug("No captured requests to persist")
+                return
+            
+            logger.info("Persisting captured HTTP requests...")
+            request_file = self.report_dir / f"captured_requests_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            with open(request_file, 'w') as f:
+                json.dump({
+                    "target": self.ctx.target,
+                    "captured_at": datetime.now().isoformat(),
+                    "pages": self.ctx.crawled_pages,
+                    "requests": self.ctx.captured_requests,
+                }, f, indent=2)
+            logger.info(f"Saved {len(self.ctx.captured_requests)} requests to {request_file}")
+        except Exception as e:
+            logger.error(f"Failed to persist captured requests: {e}")
+
+    async def _persist_vulnerabilities(self):
+        """Save vulnerability findings to knowledge store."""
+        try:
+            if not self.ctx.vulnerabilities:
+                logger.debug("No vulnerabilities to persist")
+                return
+            
+            logger.info("Persisting vulnerability findings...")
+            for vuln in self.ctx.vulnerabilities:
+                finding_id = self.knowledge_store.add_finding(
+                    target_id=self.target_id,
+                    title=vuln.get("title", "Unknown"),
+                    description=vuln.get("details", ""),
+                    severity=vuln.get("severity", "MEDIUM"),
+                    category=vuln.get("type", ""),
+                    cwe=vuln.get("cwe", ""),
+                    cve=vuln.get("cve", ""),
+                    affected_asset=vuln.get("location", ""),
+                    evidence=json.dumps(vuln.get("proof", {})),
+                    source_agent_id=vuln.get("source_agent", ""),
+                )
+                # Add evidence
+                for evidence_item in vuln.get("evidence", []):
+                    if isinstance(evidence_item, dict):
+                        self.knowledge_store.add_evidence(
+                            finding_id,
+                            evidence_type=evidence_item.get("type", "screenshot"),
+                            content=evidence_item.get("content", ""),
+                            tool_name=evidence_item.get("tool", "")
+                        )
+            
+            logger.info(f"Persisted {len(self.ctx.vulnerabilities)} vulnerabilities")
+        except Exception as e:
+            logger.error(f"Failed to persist vulnerabilities: {e}")
+
+    async def _persist_exploit_results(self):
+        """Save exploitation results to knowledge store."""
+        try:
+            if not self.ctx.exploit_results:
+                logger.debug("No exploit results to persist")
+                return
+            
+            logger.info("Persisting exploit results...")
+            for result in self.ctx.exploit_results:
+                self.knowledge_store.add_exploit_result(
+                    target_id=self.target_id,
+                    vuln_id=result.get("vuln_id", ""),
+                    exploit_id=result.get("exploit_id", ""),
+                    payload=result.get("payload", ""),
+                    success=result.get("success", False),
+                    proof=result.get("proof", ""),
+                    severity=result.get("severity", "MEDIUM"),
+                    executed_at=result.get("timestamp", datetime.now().isoformat()),
+                )
+            
+            logger.info(f"Persisted {len(self.ctx.exploit_results)} exploitation results")
+        except Exception as e:
+            logger.error(f"Failed to persist exploit results: {e}")
+
+    async def _persist_post_exploit_findings(self):
+        """Save post-exploitation findings (privesc, lateral, persistence, MITRE)."""
+        try:
+            findings = []
+            
+            # Privesc findings
+            for priv in self.ctx.privesc_findings:
+                self.knowledge_store.add_post_exploit_finding(
+                    target_id=self.target_id,
+                    type="privesc",
+                    host=priv.get("host", ""),
+                    technique=priv.get("technique", ""),
+                    detail=priv.get("detail", ""),
+                    severity=priv.get("severity", "MEDIUM"),
+                    metadata=json.dumps(priv)
+                )
+                findings.append(priv)
+            
+            # Lateral movement
+            if self.ctx.lateral_plan:
+                for pivot in self.ctx.lateral_plan.get("pivots", []):
+                    self.knowledge_store.add_post_exploit_finding(
+                        target_id=self.target_id,
+                        type="lateral_movement",
+                        host=pivot.get("source_host", ""),
+                        technique=pivot.get("technique", ""),
+                        detail=f"Move to {pivot.get('target_host', '')}",
+                        metadata=json.dumps(pivot)
+                    )
+                    findings.append(pivot)
+            
+            # Persistence mechanisms
+            for persist in self.ctx.persistence_plan:
+                self.knowledge_store.add_post_exploit_finding(
+                    target_id=self.target_id,
+                    type="persistence",
+                    technique=persist.get("mechanism", ""),
+                    detail=persist.get("artifact", ""),
+                    metadata=json.dumps(persist)
+                )
+                findings.append(persist)
+            
+            logger.info(f"Persisted {len(findings)} post-exploitation findings")
+        except Exception as e:
+            logger.error(f"Failed to persist post-exploit findings: {e}")
 
 
     def _load_phase_prompt(self, phase: str) -> Optional[str]:
@@ -538,7 +801,7 @@ class CentralBrain:
             f"  ]\n"
             f"}}",
             tier=TaskTier.LARGE,
-            max_tokens=3000,
+            max_tokens=6000,
         )
 
         if plan:
@@ -892,7 +1155,7 @@ CRITICAL RULES:
             f"Include: overall risk, key findings, attack chains, recommendations.\n"
             f"Be concise (3 paragraphs max).",
             tier=TaskTier.LARGE,
-            max_tokens=1000,
+            max_tokens=4096,
         )
 
         # ── Finding validation + compliance mapping (production-grade layer) ──
