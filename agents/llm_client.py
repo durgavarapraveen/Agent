@@ -205,6 +205,100 @@ class GroqProvider(LLMProvider):
 
 
 # ═══════════════════════════════════════════════════════════════
+# DEEPSEEK PROVIDER
+# ═══════════════════════════════════════════════════════════════
+
+class DeepSeekProvider(LLMProvider):
+    """DeepSeek API provider - OpenAI-compatible chat completions."""
+
+    def __init__(self, api_key: str, small_model: str = "deepseek-v4-flash",
+                 large_model: str = "deepseek-v4-flash",
+                 base_url: str = "https://api.deepseek.com"):
+        self.api_key = api_key
+        if not self.api_key:
+            raise ValueError("DEEPSEEK_API_KEY not set in .env")
+        self.small_model = small_model
+        self.large_model = large_model
+        self.base_url = base_url.rstrip("/")
+        self.timeout = 120
+
+    def _model_for(self, tier: TaskTier) -> str:
+        return self.small_model if tier == TaskTier.SMALL else self.large_model
+
+    def _headers(self) -> Dict:
+        return {"Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"}
+
+    async def is_available(self) -> bool:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.post(
+                    f"{self.base_url}/chat/completions", headers=self._headers(),
+                    json={"model": self.small_model,
+                          "messages": [{"role": "user", "content": "test"}],
+                          "max_tokens": 1})
+                return r.status_code == 200
+        except Exception as e:
+            logger.debug(f"DeepSeek unavailable: {e}")
+            return False
+
+    async def generate(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
+                       system: Optional[str] = None, max_tokens: int = 1024,
+                       temperature: float = 0.3) -> str:
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        payload = {"model": self._model_for(tier), "messages": messages,
+                   "max_tokens": max_tokens, "temperature": temperature,
+                   "stream": False}
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                r = await client.post(f"{self.base_url}/chat/completions",
+                                      headers=self._headers(), json=payload)
+                if r.status_code == 200:
+                    return r.json()["choices"][0]["message"]["content"].strip()
+                logger.error(f"DeepSeek {r.status_code}: {r.text[:200]}")
+        except Exception as e:
+            logger.error(f"DeepSeek generate: {e}")
+        return ""
+
+    async def generate_json(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
+                            system: Optional[str] = None, max_tokens: int = 2048) -> Dict:
+        messages = []
+        json_system = (system or "You are a helpful assistant.") + \
+            "\n\nRespond ONLY with valid JSON. No markdown."
+        messages.append({"role": "system", "content": json_system})
+        messages.append({"role": "user", "content": prompt})
+        payload = {"model": self._model_for(tier), "messages": messages,
+                   "max_tokens": max_tokens, "temperature": 0.1,
+                   "stream": False, "response_format": {"type": "json_object"}}
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                r = await client.post(f"{self.base_url}/chat/completions",
+                                      headers=self._headers(), json=payload)
+                if r.status_code != 200:
+                    logger.error(f"DeepSeek {r.status_code}: {r.text[:200]}")
+                    return {}
+                text = r.json()["choices"][0]["message"]["content"].strip()
+                text = re.sub(r'```json\n?|\n?```', '', text).strip()
+                if not text:
+                    return {}
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError:
+                    m = re.search(r'\{[\s\S]*\}', text)
+                    if m:
+                        try:
+                            return json.loads(m.group(0))
+                        except json.JSONDecodeError:
+                            pass
+        except Exception as e:
+            logger.error(f"DeepSeek generate_json: {e}")
+        return {}
+
+
+# ═══════════════════════════════════════════════════════════════
 # OLLAMA PROVIDER
 # ═══════════════════════════════════════════════════════════════
 
@@ -333,6 +427,19 @@ class LLMClient:
                 return GroqProvider()
             except (ValueError, ImportError) as e:
                 logger.error(f"Groq init failed: {e}")
+                logger.info("Falling back to NullProvider")
+                return NullProvider()
+
+        elif provider_name == "deepseek":
+            try:
+                api_key = config.get("DEEPSEEK_API_KEY")
+                small = config.get("DEEPSEEK_SMALL_MODEL", "deepseek-chat")
+                large = config.get("DEEPSEEK_LARGE_MODEL", "deepseek-chat")
+                base = config.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+                logger.info(f"Using DeepSeek provider ({small}/{large})")
+                return DeepSeekProvider(api_key, small, large, base)
+            except ValueError as e:
+                logger.error(f"DeepSeek init failed: {e}")
                 logger.info("Falling back to NullProvider")
                 return NullProvider()
 

@@ -60,14 +60,21 @@ class AgentSpawner:
         vuln_type = spec.get("vuln_type", "")
         target_params = spec.get("target_params", [])
 
-        # Build filtered context
-        agent_context = self.ctx.get_context_for_agent(objective, context_keys)
-
         # Decide: exploitation or generic?
         is_exploit = (
             vuln_type
             or any(kw in objective.lower() for kw in EXPLOIT_KEYWORDS)
         )
+
+        # Exploit agents always get the intercepted request inventory + endpoints
+        # so they can replay/fuzz real requests rather than guessing.
+        if is_exploit:
+            for k in ("captured_requests", "endpoints"):
+                if k not in context_keys:
+                    context_keys = list(context_keys) + [k]
+
+        # Build filtered context
+        agent_context = self.ctx.get_context_for_agent(objective, context_keys)
 
         if is_exploit:
             agent = self._spawn_exploit(

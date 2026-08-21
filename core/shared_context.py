@@ -41,6 +41,10 @@ class SharedContext:
         self.vulnerabilities: List[Dict] = []   # [{id, type, location, severity, details}]
         self.attack_chains: List[Dict] = []     # [{chain_id, steps, impact}]
 
+        # ── Captured HTTP traffic (for replay in exploits) ──
+        self.captured_requests: List[Dict] = []  # [{method,url,headers,post_data,status,...}]
+        self.crawled_pages: List[str] = []
+
         # ── Exploitation data ──
         self.exploit_plan: Optional[Dict] = None
         self.exploit_results: List[Dict] = []   # [{vuln_id, payload, success, proof}]
@@ -123,6 +127,23 @@ class SharedContext:
         with self._lock:
             result.setdefault("timestamp", datetime.now().isoformat())
             self.exploit_results.append(result)
+
+    def add_captured_requests(self, requests: List[Dict], pages: List[str] = None):
+        """Store intercepted HTTP requests (deduped) for replay in exploits."""
+        with self._lock:
+            seen = {(r.get("method"), r.get("url"), (r.get("post_data") or "")[:200])
+                    for r in self.captured_requests}
+            for req in requests:
+                key = (req.get("method"), req.get("url"),
+                       (req.get("post_data") or "")[:200])
+                if req.get("url") and key not in seen:
+                    self.captured_requests.append(req)
+                    seen.add(key)
+            for pg in (pages or []):
+                if pg and pg not in self.crawled_pages:
+                    self.crawled_pages.append(pg)
+            logger.info(f"Captured requests: +{len(requests)}, "
+                        f"total={len(self.captured_requests)}")
 
     # ── Phase 3: Post-exploitation writes ──
 
@@ -261,6 +282,14 @@ class SharedContext:
             "ports": lambda: f"PORTS: {json.dumps(self.ports, default=str)[:1500]}",
             "technologies": lambda: f"TECH: {json.dumps(self.technologies, default=str)[:800]}",
             "endpoints": lambda: f"ENDPOINTS: {json.dumps(self.endpoints[:30], default=str)}",
+            "captured_requests": lambda: (
+                "CAPTURED REQUESTS (real intercepted traffic — replay/fuzz these):\n"
+                + json.dumps([
+                    {"method": r.get("method"), "url": r.get("url"),
+                     "type": r.get("resource_type"),
+                     "post_data": (r.get("post_data") or "")[:300],
+                     "status": r.get("status")}
+                    for r in self.captured_requests[:40]], default=str)),
             "parameters": lambda: f"PARAMETERS: {json.dumps(self.parameters, default=str)[:800]}",
             "directories": lambda: f"DIRECTORIES: {json.dumps(self.directories[:30], default=str)}",
             "headers": lambda: f"HEADERS: {json.dumps(self.headers, default=str)[:800]}",
@@ -291,6 +320,8 @@ class SharedContext:
             "ports": self.ports,
             "technologies": self.technologies,
             "endpoints": self.endpoints,
+            "captured_requests": self.captured_requests,
+            "crawled_pages": self.crawled_pages,
             "parameters": self.parameters,
             "directories": self.directories,
             "headers": self.headers,

@@ -23,6 +23,7 @@ from core.reporting import EnterpriseReporter
 from core.metrics import MetricsTracker
 from core.automation import AutomationEngine
 from core.consent import get_consent
+from core.request_capture import RequestCapturer
 from validation import gate as confidence_gate, DedupStore
 from compliance import ComplianceReporter, available_frameworks
 
@@ -118,6 +119,9 @@ class CentralBrain:
         logger.info("\n>>> PHASE 1: DEEP RECONNAISSANCE")
         await self._run_phase("recon")
 
+        # Phase 1b: Intercept live HTTP traffic across the site (for exploit replay)
+        await self._capture_requests()
+
         # Phase 2: Vulnerability analysis
         logger.info("\n>>> PHASE 2: VULNERABILITY ANALYSIS")
         await self._run_phase("analyze")
@@ -181,6 +185,30 @@ class CentralBrain:
         logger.info(f"Agents spawned: {len(self.ctx.agents_spawned)}")
         logger.info(f"Vulnerabilities: {len(self.ctx.vulnerabilities)}")
         logger.info(f"Exploits executed: {len(self.ctx.exploit_results)}")
+
+    async def _capture_requests(self):
+        """Phase 1b: crawl the site with a headless browser and intercept every
+        request (XHR/fetch/API/CORS-preflight), storing them for exploit replay."""
+        target = self.ctx.target
+        if not str(target).lower().startswith(("http://", "https://")):
+            logger.info("[capture] target is not an http(s) URL — skipping capture")
+            return
+        logger.info("\n>>> PHASE 1b: HTTP REQUEST INTERCEPTION")
+        try:
+            capturer = RequestCapturer(max_pages=12, max_depth=2)
+            result = await asyncio.to_thread(capturer.capture, target)
+            if result.error and not result.requests:
+                logger.warning(f"[capture] no requests captured: {result.error}")
+                return
+            capturer.store(result, self.ctx)
+            self.metrics.record_event(
+                "tool", "request_capture",
+                bool(result.requests),
+                f"{len(result.pages)} pages, {len(result.requests)} requests")
+            logger.info(f"[capture] stored {len(self.ctx.captured_requests)} "
+                        f"requests across {len(self.ctx.crawled_pages)} pages")
+        except Exception as e:      # noqa: BLE001
+            logger.error(f"[capture] request interception failed: {e}")
 
     async def _run_post_exploitation(self):
         """Phase 6: privesc / lateral movement / persistence / MITRE mapping.
@@ -915,6 +943,8 @@ CRITICAL RULES:
                 "headers": self.ctx.headers,
                 "ssl_info": self.ctx.ssl_info,
                 "secrets": self.ctx.secrets,
+                "crawled_pages": self.ctx.crawled_pages,
+                "captured_requests": self.ctx.captured_requests,
             },
             "automation": self.automation.to_dict(),
             "exploit_consent": get_consent().summary(),
