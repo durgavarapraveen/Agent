@@ -222,23 +222,46 @@ class KaliDockerExecutor:
                     "stdout": "", "stderr": ""
                 }
 
-        # Execute inside container
-        # Wrap in bash -c to support pipes, redirects, etc.
-        escaped_cmd = command.replace('"', '\\"')
+        # Execute inside container.
+        # Enforce the timeout INSIDE the container with coreutils `timeout` so the
+        # process self-terminates. On Windows, subprocess.run(timeout=) kills only
+        # the immediate child (cmd.exe), NOT the docker exec grandchild — its stdout
+        # pipe then never closes and the call hangs forever. Container-side timeout
+        # makes docker exec exit cleanly, closing the pipe. Python timeout is a
+        # backstop with extra grace.
+        # Prefix coreutils `timeout` INSIDE the single bash -c (no nested quoting —
+        # cmd.exe only reliably preserves one level of double quotes). For a
+        # pipeline this bounds the first/long-running stage, which is what hangs.
+        timed_cmd = f"timeout --signal=KILL {int(timeout)}s {command}"
+        escaped_cmd = timed_cmd.replace('"', '\\"')
         full = f'docker exec {container} bash -c "{escaped_cmd}"'
+        grace = int(timeout) + 15
 
         try:
             r = subprocess.run(
-                full, shell=True, capture_output=True, text=True, timeout=timeout
+                full, shell=True, capture_output=True, text=True, timeout=grace
             )
+            # coreutils `timeout` exits 124 when it had to kill the command.
+            if r.returncode == 124 or r.returncode == 137:
+                return {"status": "timeout", "returncode": r.returncode,
+                        "error": f"Command exceeded {timeout}s (killed in-container)",
+                        "stdout": r.stdout, "stderr": r.stderr}
             return {
                 "status": "success" if r.returncode == 0 else "error",
                 "returncode": r.returncode,
                 "stdout": r.stdout,
                 "stderr": r.stderr,
             }
-        except subprocess.TimeoutExpired:
-            return {"status": "timeout", "error": f"Timeout {timeout}s", "stdout": "", "stderr": ""}
+        except subprocess.TimeoutExpired as e:
+            # Backstop fired (container-side timeout didn't return in time).
+            logger.warning(f"[Kali] subprocess backstop timeout after {grace}s: {command[:60]}")
+            partial = ""
+            try:
+                partial = (e.stdout or b"").decode("utf-8", "ignore") if isinstance(e.stdout, bytes) else (e.stdout or "")
+            except Exception:       # noqa: BLE001
+                partial = ""
+            return {"status": "timeout", "error": f"Timeout {timeout}s",
+                    "stdout": partial, "stderr": ""}
         except Exception as e:
             return {"status": "error", "error": str(e), "stdout": "", "stderr": ""}
 

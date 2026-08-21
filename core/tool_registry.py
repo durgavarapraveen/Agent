@@ -17,6 +17,16 @@ from agents.kali_executor import KaliDockerExecutor
 
 logger = logging.getLogger(__name__)
 
+# Strips ANSI escape sequences (color/cursor codes) from tool output. Tools like
+# sslscan/nmap colorize their output; the raw codes otherwise leak into the
+# terminal and "stick" (e.g. everything turns green) when a line is truncated
+# before the reset code.
+_ANSI_RE = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
+
+def strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text) if text else text
+
 
 class ToolResult:
     """Standard result from any tool"""
@@ -54,10 +64,10 @@ class KaliTool(Tool):
 
     def run(self, command: str, timeout: int = 120) -> ToolResult:
         """Run raw command in Kali container"""
-        logger.info(f"  [{self.name}] {command[:80]}...")
+        logger.info(f"  [{self.name}] {command}")
         r = KaliDockerExecutor.run(command, timeout=timeout, auto_install=True)
-        stdout = r.get("stdout", "")
-        stderr = r.get("stderr", "")
+        stdout = strip_ansi(r.get("stdout", ""))
+        stderr = strip_ansi(r.get("stderr", ""))
         rc = r.get("returncode")
         # Exit code is the source of truth. Many recon tools (subfinder, amass,
         # nuclei, ...) print banners/progress to stderr while still succeeding —

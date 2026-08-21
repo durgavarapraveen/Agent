@@ -20,14 +20,33 @@ from core.config import load_config
 from core.central_brain import CentralBrain
 from core.meta_brain import MetaBrain
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("pentest.log", encoding="utf-8"),
-    ]
-)
+_LOG_FMT = '[%(asctime)s] %(name)s - %(levelname)s - %(message)s'
+
+
+class _TruncatingFormatter(logging.Formatter):
+    """Console-only: keep the terminal readable by capping long messages.
+    The file handler uses the plain formatter and records the FULL message."""
+
+    def __init__(self, fmt=None, max_len=220):
+        super().__init__(fmt)
+        self.max_len = max_len
+
+    def format(self, record):
+        s = super().format(record)
+        if len(s) > self.max_len:
+            s = s[:self.max_len] + " …(full in pentest.log)"
+        # Always reset terminal color so a stray ANSI code from tool output
+        # (e.g. sslscan's green) can't bleed into following lines.
+        return s + "\x1b[0m"
+
+
+_console = logging.StreamHandler(sys.stdout)
+_console.setFormatter(_TruncatingFormatter(_LOG_FMT))
+
+_file = logging.FileHandler("pentest.log", encoding="utf-8")   # FULL, untruncated
+_file.setFormatter(logging.Formatter(_LOG_FMT))
+
+logging.basicConfig(level=logging.INFO, handlers=[_console, _file])
 logger = logging.getLogger(__name__)
 
 
@@ -79,6 +98,10 @@ Examples:
     parser.add_argument("--tier", default="POC",
                          choices=["POC", "SHALLOW", "DEEP"],
                          help="Max exploitation tier (default: POC)")
+    parser.add_argument("--frameworks", default="",
+                         help="Comma-separated compliance frameworks to map findings "
+                              "to (choices: pci,soc2,hipaa,cis,nist). "
+                              "Default: all. Example: --frameworks pci,soc2,hipaa")
     args = parser.parse_args()
 
     # Load .env config
@@ -86,6 +109,20 @@ Examples:
 
     # Override tier in config
     config.config["MAX_EXPLOITATION_TIER"] = args.tier
+
+    # Active compliance frameworks (validated against the compliance module)
+    from compliance import available_frameworks
+    if args.frameworks.strip():
+        requested = [f.strip().lower() for f in args.frameworks.split(",") if f.strip()]
+        valid = [f for f in requested if f in available_frameworks()]
+        invalid = [f for f in requested if f not in available_frameworks()]
+        if invalid:
+            logger.warning(f"Ignoring unknown frameworks: {invalid} "
+                           f"(valid: {available_frameworks()})")
+        config.config["COMPLIANCE_FRAMEWORKS"] = valid or available_frameworks()
+    else:
+        config.config["COMPLIANCE_FRAMEWORKS"] = available_frameworks()
+    logger.info(f"Compliance frameworks: {config.config['COMPLIANCE_FRAMEWORKS']}")
 
     logger.info("=" * 60)
     logger.info("AUTONOMOUS PENTESTING AGENT v2.0")

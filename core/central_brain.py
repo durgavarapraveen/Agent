@@ -18,6 +18,14 @@ from core.tool_registry import ToolRegistry
 from core.agent_spawner import AgentSpawner
 from core.token_optimizer import TokenOptimizer
 from core.chain_integration import ChainManager
+from core.post_exploit import PostExploitManager
+from core.reporting import EnterpriseReporter
+from core.metrics import MetricsTracker
+from core.automation import AutomationEngine
+from core.consent import get_consent
+from core.request_capture import RequestCapturer
+from validation import gate as confidence_gate, DedupStore
+from compliance import ComplianceReporter, available_frameworks
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +92,12 @@ class CentralBrain:
         self.consecutive_agent_failures = 0  # NEW: Track failure streak
         self.max_consecutive_failures = 3
         self.chain_mgr = ChainManager(self.ctx, self.spawner)  # Phase 2: Chain system
+        self.tier = (self.ctx.scope.get("max_tier") or "POC").upper()
+        self.post_exploit = None  # Phase 3: Post-exploitation (lazy, needs foothold)
+        # Phase 4: enterprise hardening / automation
+        self.metrics = MetricsTracker(target=target, out_dir=str(self.report_dir))
+        self.automation = AutomationEngine(self.ctx)
+        self.reporter = EnterpriseReporter(self.ctx, report_dir=str(self.report_dir))
 
     async def run(self, auth_document: str = ""):
         """Main entry point. Runs full pentest autonomously."""
@@ -104,6 +118,9 @@ class CentralBrain:
         # Phase 1: Deep recon
         logger.info("\n>>> PHASE 1: DEEP RECONNAISSANCE")
         await self._run_phase("recon")
+
+        # Phase 1b: Intercept live HTTP traffic across the site (for exploit replay)
+        await self._capture_requests()
 
         # Phase 2: Vulnerability analysis
         logger.info("\n>>> PHASE 2: VULNERABILITY ANALYSIS")
@@ -156,6 +173,9 @@ class CentralBrain:
                     logger.info("\n>>> PHASE 4: DIRECT EXPLOITATION")
                     await self._run_phase("exploit")
 
+        # Phase 6: Post-exploitation (privesc / lateral / persistence / MITRE)
+        await self._run_post_exploitation()
+
         # Phase 5: Report
         logger.info("\n>>> PHASE 5: REPORT GENERATION")
         await self._generate_report()
@@ -165,6 +185,71 @@ class CentralBrain:
         logger.info(f"Agents spawned: {len(self.ctx.agents_spawned)}")
         logger.info(f"Vulnerabilities: {len(self.ctx.vulnerabilities)}")
         logger.info(f"Exploits executed: {len(self.ctx.exploit_results)}")
+
+    async def _capture_requests(self):
+        """Phase 1b: crawl the site with a headless browser and intercept every
+        request (XHR/fetch/API/CORS-preflight), storing them for exploit replay."""
+        target = self.ctx.target
+        if not str(target).lower().startswith(("http://", "https://")):
+            logger.info("[capture] target is not an http(s) URL — skipping capture")
+            return
+        logger.info("\n>>> PHASE 1b: HTTP REQUEST INTERCEPTION")
+        try:
+            capturer = RequestCapturer(max_pages=12, max_depth=2)
+            result = await asyncio.to_thread(capturer.capture, target)
+            if result.error and not result.requests:
+                logger.warning(f"[capture] no requests captured: {result.error}")
+                return
+            capturer.store(result, self.ctx)
+            self.metrics.record_event(
+                "tool", "request_capture",
+                bool(result.requests),
+                f"{len(result.pages)} pages, {len(result.requests)} requests")
+            logger.info(f"[capture] stored {len(self.ctx.captured_requests)} "
+                        f"requests across {len(self.ctx.crawled_pages)} pages")
+        except Exception as e:      # noqa: BLE001
+            logger.error(f"[capture] request interception failed: {e}")
+
+    async def _run_post_exploitation(self):
+        """Phase 6: privesc / lateral movement / persistence / MITRE mapping.
+
+        Runs only when a shell/RCE foothold exists. Active enumeration and
+        persistence installation are gated by tier (see PostExploitManager);
+        no live command runner is wired by default, so this is analysis +
+        planning unless a foothold session is explicitly provided.
+        """
+        logger.info("\n>>> PHASE 6: POST-EXPLOITATION (privesc / lateral / persistence)")
+
+        if not self.ctx.has_shell_access():
+            logger.info("No shell/RCE foothold established — skipping post-exploitation")
+            return
+
+        # Runner stays None (plan-only) unless a confirmed foothold session is
+        # wired in. Persistence install additionally requires DEEP + authorize.
+        runner = None
+        authorize_persistence = False  # never auto-install; operator opt-in only
+
+        self.post_exploit = PostExploitManager(
+            self.ctx, tier=self.tier,
+            runner=runner, authorize_persistence=authorize_persistence,
+        )
+        try:
+            result = await self.post_exploit.run()
+            if result.get("status") == "completed":
+                pv = result["privesc"]; lat = result["lateral"]
+                logger.info(
+                    f"Post-exploitation: {pv['count']} privesc paths, "
+                    f"{lat['pivots']} pivots, {lat['credentials']} creds, "
+                    f"{len(result['persistence']['installed'])} persistence installed "
+                    f"(plan-only={self.tier != 'DEEP'}), "
+                    f"{result['mitre']['techniques']} ATT&CK techniques"
+                )
+                rec = pv.get("recommended")
+                if rec:
+                    logger.info(f"Recommended escalation: {rec.get('technique')} — "
+                                f"{rec.get('path','')[:80]}")
+        except Exception as e:      # noqa: BLE001
+            logger.error(f"Post-exploitation phase failed: {e}")
 
     async def _parse_authorization(self, auth_doc: str):
         """LLM parses authorization document to extract scope"""
@@ -334,6 +419,8 @@ class CentralBrain:
                             self.failed_tools.add(failed_tool)
                             logger.warning(f"Brain learned: '{failed_tool}' is unavailable")
                     
+                    self.metrics.record_event("agent", entry["agent_id"],
+                                              entry["success"], entry["findings"])
                     agent_history.append(entry)
                     agents_this_phase += 1
 
@@ -385,10 +472,23 @@ class CentralBrain:
                     for failed_tool in agent.failed_tools:
                         self.failed_tools.add(failed_tool)
                         logger.warning(f"Brain learned: '{failed_tool}' is unavailable")
-                
+
+                self.metrics.record_event("agent", entry["agent_id"],
+                                          entry["success"], entry["findings"])
                 agent_history.append(entry)
-    
-    
+
+        # ── End of phase: update metrics + evaluate automation rules ──
+        self.metrics.incr("vuln_total", 0)  # ensure counter exists
+        self.metrics.counters["vuln_total"] = len(self.ctx.vulnerabilities)
+        try:
+            self.metrics.write_dashboard()
+            self.metrics.write_json()
+        except Exception as e:      # noqa: BLE001
+            logger.debug(f"[Metrics] dashboard write failed: {e}")
+        for act in self.automation.evaluate():
+            logger.info(f"Automation recommends: {act['action']} ({act['rule']})")
+
+
     def _load_phase_prompt(self, phase: str) -> Optional[str]:
         """Load phase-specific prompt from file if available"""
         prompt_map = {
@@ -738,6 +838,49 @@ CRITICAL RULES:
         
         return prompt
 
+    def _active_frameworks(self):
+        """Compliance frameworks selected via --frameworks (defaults to all)."""
+        try:
+            from core.config import get_config
+            fw = get_config().config.get("COMPLIANCE_FRAMEWORKS")
+            if fw:
+                return fw
+        except Exception:       # noqa: BLE001
+            pass
+        return available_frameworks()
+
+    def _validate_findings(self, ts: str):
+        """Confidence-gate + cross-scan dedup the findings.
+
+        Returns dict: reported (high/med confidence, non-suppressed),
+        needs_review (low confidence), dedup summary.
+        """
+        # Work on shallow copies so we don't mutate the canonical vuln list.
+        findings = [dict(v) for v in self.ctx.vulnerabilities]
+
+        # 1. Confidence gate — LOW confidence -> needs_review (not main report).
+        gated = confidence_gate(findings)
+        reported, needs_review = gated["report"], gated["needs_review"]
+
+        # 2. Cross-scan dedup — suppress recurring-unchanged, flag new/resolved.
+        try:
+            dedup = DedupStore()
+            dd = dedup.process_scan(reported, scan_id=ts)
+            reported = dd["report"]
+            dedup_summary = {"suppressed_recurring": dd["suppressed"],
+                             "resolved": len(dd["resolved"]),
+                             "reported": len(reported)}
+        except Exception as e:      # noqa: BLE001
+            logger.warning(f"[report] dedup failed: {e}")
+            dedup_summary = {"suppressed_recurring": 0, "resolved": 0,
+                             "reported": len(reported), "error": str(e)}
+
+        logger.info(f"[report] findings: {len(reported)} reported, "
+                    f"{len(needs_review)} need review, "
+                    f"{dedup_summary['suppressed_recurring']} recurring suppressed")
+        return {"reported": reported, "needs_review": needs_review,
+                "dedup": dedup_summary}
+
     async def _generate_report(self):
         """LLM generates final report"""
         summary = self.ctx.get_full_summary(max_chars=8000)
@@ -752,6 +895,17 @@ CRITICAL RULES:
             max_tokens=1000,
         )
 
+        # ── Finding validation + compliance mapping (production-grade layer) ──
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        validated = self._validate_findings(ts)
+        frameworks = self._active_frameworks()
+        try:
+            compliance_summary = ComplianceReporter(frameworks).build(
+                self.ctx.vulnerabilities)
+        except Exception as e:      # noqa: BLE001
+            logger.warning(f"[report] compliance mapping failed: {e}")
+            compliance_summary = {"active_frameworks": frameworks, "error": str(e)}
+
         # Build report
         report = {
             "metadata": {
@@ -763,9 +917,22 @@ CRITICAL RULES:
             },
             "executive_summary": exec_summary,
             "scope": self.ctx.scope,
-            "vulnerabilities": self.ctx.vulnerabilities,
+            "vulnerabilities": validated["reported"],
+            "vulnerabilities_all": self.ctx.vulnerabilities,
+            "needs_review": validated["needs_review"],
+            "dedup": validated["dedup"],
+            "compliance": compliance_summary,
             "attack_chains": self.ctx.attack_chains,
             "exploit_results": self.ctx.exploit_results,
+            "post_exploitation": (
+                self.post_exploit.to_dict() if self.post_exploit else {
+                    "privesc_findings": self.ctx.privesc_findings,
+                    "harvested_creds": self.ctx.harvested_creds,
+                    "lateral_plan": self.ctx.lateral_plan,
+                    "persistence_plan": self.ctx.persistence_plan,
+                    "mitre_mappings": self.ctx.mitre_mappings,
+                }
+            ),
             "technical_data": {
                 "subdomains": self.ctx.subdomains,
                 "ips": self.ctx.ips,
@@ -776,17 +943,34 @@ CRITICAL RULES:
                 "headers": self.ctx.headers,
                 "ssl_info": self.ctx.ssl_info,
                 "secrets": self.ctx.secrets,
+                "crawled_pages": self.ctx.crawled_pages,
+                "captured_requests": self.ctx.captured_requests,
             },
+            "automation": self.automation.to_dict(),
+            "exploit_consent": get_consent().summary(),
+            "remediation": self.automation.remediation_report(),
+            "metrics": self.metrics.snapshot(),
+            "scheduled_scan": AutomationEngine.schedule_config(self.ctx.target),
             "brain_log": self.ctx.brain_log,
             "agents": self.ctx.agents_spawned,
         }
 
-        # Save
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Save  (ts computed above, shared with the validation/dedup scan_id)
         report_path = self.report_dir / f"pentest_{ts}.json"
         with open(report_path, 'w', encoding='utf-8') as f:
             json.dump(report, f, indent=2, default=str, ensure_ascii=False)
         logger.info(f"Report saved: {report_path}")
+
+        # Enterprise HTML/PDF report + final dashboard
+        try:
+            self.reporter.active_frameworks = frameworks
+            paths = self.reporter.generate(executive_summary=exec_summary,
+                                           stem=f"pentest_{ts}")
+            logger.info(f"Enterprise report: {paths.get('html')}"
+                        + (f" | {paths['pdf']}" if paths.get("pdf") else ""))
+            self.metrics.write_dashboard()
+        except Exception as e:      # noqa: BLE001
+            logger.error(f"Enterprise report generation failed: {e}")
 
         # Save shared context as backup
         ctx_path = self.report_dir / f"context_{ts}.json"

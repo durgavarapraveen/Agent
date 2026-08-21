@@ -41,9 +41,21 @@ class SharedContext:
         self.vulnerabilities: List[Dict] = []   # [{id, type, location, severity, details}]
         self.attack_chains: List[Dict] = []     # [{chain_id, steps, impact}]
 
+        # ── Captured HTTP traffic (for replay in exploits) ──
+        self.captured_requests: List[Dict] = []  # [{method,url,headers,post_data,status,...}]
+        self.crawled_pages: List[str] = []
+
         # ── Exploitation data ──
         self.exploit_plan: Optional[Dict] = None
         self.exploit_results: List[Dict] = []   # [{vuln_id, payload, success, proof}]
+
+        # ── Phase 3: Post-exploitation data ──
+        self.shell_access: List[Dict] = []       # [{host, user, method, source_vuln}]
+        self.privesc_findings: List[Dict] = []    # [{host, technique, detail, path, severity}]
+        self.harvested_creds: List[Dict] = []     # [{type, username, secret, source, host}]
+        self.lateral_plan: Optional[Dict] = None  # {pivots, internal_hosts, steps}
+        self.persistence_plan: List[Dict] = []    # [{mechanism, artifact, installed, tier}]
+        self.mitre_mappings: List[Dict] = []       # [{technique_id, name, tactic, source}]
 
         # ── Agent tracking ──
         self.agents_spawned: List[Dict] = []    # [{id, objective, status, result_summary}]
@@ -115,6 +127,69 @@ class SharedContext:
         with self._lock:
             result.setdefault("timestamp", datetime.now().isoformat())
             self.exploit_results.append(result)
+
+    def add_captured_requests(self, requests: List[Dict], pages: List[str] = None):
+        """Store intercepted HTTP requests (deduped) for replay in exploits."""
+        with self._lock:
+            seen = {(r.get("method"), r.get("url"), (r.get("post_data") or "")[:200])
+                    for r in self.captured_requests}
+            for req in requests:
+                key = (req.get("method"), req.get("url"),
+                       (req.get("post_data") or "")[:200])
+                if req.get("url") and key not in seen:
+                    self.captured_requests.append(req)
+                    seen.add(key)
+            for pg in (pages or []):
+                if pg and pg not in self.crawled_pages:
+                    self.crawled_pages.append(pg)
+            logger.info(f"Captured requests: +{len(requests)}, "
+                        f"total={len(self.captured_requests)}")
+
+    # ── Phase 3: Post-exploitation writes ──
+
+    def add_shell_access(self, shell: Dict):
+        with self._lock:
+            shell.setdefault("timestamp", datetime.now().isoformat())
+            self.shell_access.append(shell)
+            logger.info(f"  Shell access: {shell.get('user','?')}@{shell.get('host','?')} "
+                        f"via {shell.get('method','?')}")
+
+    def has_shell_access(self) -> bool:
+        """True if any RCE/shell foothold exists (gate for post-exploitation)."""
+        if self.shell_access:
+            return True
+        return any(
+            (v.get("type", "").lower() in ("rce", "file_upload", "ssti", "command_injection"))
+            for v in self.vulnerabilities
+        )
+
+    def add_privesc_finding(self, finding: Dict):
+        with self._lock:
+            self.privesc_findings.append(finding)
+            logger.info(f"  Privesc: [{finding.get('severity','?')}] {finding.get('technique','?')}")
+
+    def add_credentials(self, creds: List[Dict], source: str = ""):
+        with self._lock:
+            existing = {(c.get("username"), c.get("secret")) for c in self.harvested_creds}
+            for c in creds:
+                key = (c.get("username"), c.get("secret"))
+                if key not in existing and any(key):
+                    c.setdefault("source", source)
+                    self.harvested_creds.append(c)
+                    existing.add(key)
+
+    def add_persistence(self, mech: Dict):
+        with self._lock:
+            mech.setdefault("timestamp", datetime.now().isoformat())
+            self.persistence_plan.append(mech)
+
+    def add_mitre_mappings(self, mappings: List[Dict]):
+        with self._lock:
+            existing = {m.get("technique_id") for m in self.mitre_mappings}
+            for m in mappings:
+                if m.get("technique_id") and m["technique_id"] not in existing:
+                    self.mitre_mappings.append(m)
+                    existing.add(m["technique_id"])
 
     def log_agent(self, agent_id: str, objective: str, status: str, result_summary: str = ""):
         with self._lock:
@@ -207,6 +282,14 @@ class SharedContext:
             "ports": lambda: f"PORTS: {json.dumps(self.ports, default=str)[:1500]}",
             "technologies": lambda: f"TECH: {json.dumps(self.technologies, default=str)[:800]}",
             "endpoints": lambda: f"ENDPOINTS: {json.dumps(self.endpoints[:30], default=str)}",
+            "captured_requests": lambda: (
+                "CAPTURED REQUESTS (real intercepted traffic — replay/fuzz these):\n"
+                + json.dumps([
+                    {"method": r.get("method"), "url": r.get("url"),
+                     "type": r.get("resource_type"),
+                     "post_data": (r.get("post_data") or "")[:300],
+                     "status": r.get("status")}
+                    for r in self.captured_requests[:40]], default=str)),
             "parameters": lambda: f"PARAMETERS: {json.dumps(self.parameters, default=str)[:800]}",
             "directories": lambda: f"DIRECTORIES: {json.dumps(self.directories[:30], default=str)}",
             "headers": lambda: f"HEADERS: {json.dumps(self.headers, default=str)[:800]}",
@@ -237,6 +320,8 @@ class SharedContext:
             "ports": self.ports,
             "technologies": self.technologies,
             "endpoints": self.endpoints,
+            "captured_requests": self.captured_requests,
+            "crawled_pages": self.crawled_pages,
             "parameters": self.parameters,
             "directories": self.directories,
             "headers": self.headers,
@@ -247,6 +332,12 @@ class SharedContext:
             "attack_chains": self.attack_chains,
             "exploit_plan": self.exploit_plan,
             "exploit_results": self.exploit_results,
+            "shell_access": self.shell_access,
+            "privesc_findings": self.privesc_findings,
+            "harvested_creds": self.harvested_creds,
+            "lateral_plan": self.lateral_plan,
+            "persistence_plan": self.persistence_plan,
+            "mitre_mappings": self.mitre_mappings,
             "agents_spawned": self.agents_spawned,
             "brain_log": self.brain_log,
         }
