@@ -264,82 +264,152 @@ class DeepSeekProvider(LLMProvider):
         return ""
 
     # In llm_client.py, DeepSeekProvider.generate_json() - replace lines 263-291
-
     async def generate_json(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                            system: Optional[str] = None, max_tokens: int = 2048) -> Dict:
+                        system: Optional[str] = None, max_tokens: int = 2048) -> Dict:
         messages = []
         json_system = (system or "You are a helpful assistant.") + \
             "\n\nRespond ONLY with valid JSON. No markdown."
         messages.append({"role": "system", "content": json_system})
         messages.append({"role": "user", "content": prompt})
-        payload = {"model": self._model_for(tier), "messages": messages,
-                "max_tokens": max_tokens, "temperature": 0.1,
-                "stream": False, "response_format": {"type": "json_object"}}
+        
+        payload = {
+            "model": self._model_for(tier), 
+            "messages": messages,
+            "max_tokens": max_tokens, 
+            "temperature": 0.1,
+            "stream": False,
+            "response_format": {"type": "json_object"}
+        }
+        
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
+                logger.info(f"[DeepSeek] Request: model={self._model_for(tier)}, max_tokens={max_tokens}")
+                logger.debug(f"[DeepSeek] Payload: {json.dumps(payload, indent=2)[:500]}")
+                
                 r = await client.post(f"{self.base_url}/chat/completions",
                                     headers=self._headers(), json=payload)
                 
-                # --- ADD DEBUGGING ---
-                logger.debug(f"DeepSeek response status: {r.status_code}")
-                logger.debug(f"DeepSeek response body (first 500 chars): {r.text[:500]}")
-                # --- END DEBUGGING ---
+                # ═══════════════════════════════════════════════════════════
+                # FULL RESPONSE LOGGING (CRITICAL FOR DEBUGGING)
+                # ═══════════════════════════════════════════════════════════
+                logger.info(f"[DeepSeek] Response Status: {r.status_code}")
+                
+                # Log FULL response body (not truncated)
+                full_body = r.text
+                logger.info(f"[DeepSeek] Response Length: {len(full_body)} chars")
+                logger.info(f"[DeepSeek] Full Response Body:\n{full_body}")
                 
                 if r.status_code != 200:
-                    logger.error(f"DeepSeek {r.status_code}: {r.text[:200]}")
+                    logger.error(f"[DeepSeek] API Error {r.status_code}: {full_body[:500]}")
                     return {}
                 
+                # ═══════════════════════════════════════════════════════════
+                # PARSE RESPONSE
+                # ═══════════════════════════════════════════════════════════
+                try:
+                    data = r.json()
+                    logger.debug(f"[DeepSeek] Parsed JSON: {json.dumps(data, indent=2)[:1000]}")
+                except json.JSONDecodeError as je:
+                    logger.error(f"[DeepSeek] Failed to parse JSON: {je}")
+                    logger.error(f"[DeepSeek] Raw body: {full_body[:500]}")
+                    return {}
+                
+                # ═══════════════════════════════════════════════════════════
+                # CHECK STRUCTURE
+                # ═══════════════════════════════════════════════════════════
+                
                 # Check if choices exist
-                data = r.json()
+                if "choices" not in data:
+                    logger.error(f"[DeepSeek] No 'choices' in response. Keys: {list(data.keys())}")
+                    logger.error(f"[DeepSeek] Full response: {json.dumps(data, indent=2)}")
+                    return {}
+                
                 if not data.get("choices"):
-                    logger.error(f"DeepSeek: No choices in response: {data}")
+                    logger.error(f"[DeepSeek] 'choices' array is empty")
+                    logger.error(f"[DeepSeek] Full response: {json.dumps(data, indent=2)}")
                     return {}
                 
                 choice = data["choices"][0]
+                logger.debug(f"[DeepSeek] First choice: {json.dumps(choice, indent=2)[:500]}")
                 
-                # Check finish_reason
+                # ═══════════════════════════════════════════════════════════
+                # CHECK FINISH REASON (Content Filter?)
+                # ═══════════════════════════════════════════════════════════
                 finish_reason = choice.get("finish_reason")
+                logger.info(f"[DeepSeek] Finish Reason: {finish_reason}")
+                
                 if finish_reason == "content_filter":
-                    logger.error("DeepSeek: Content filtered - response blocked")
+                    logger.error(f"[DeepSeek] Content FILTERED by API")
+                    logger.error(f"[DeepSeek] Your prompt or system message was blocked")
+                    logger.error(f"[DeepSeek] Try simpler language or remove sensitive keywords")
                     return {}
-                elif finish_reason == "length":
-                    logger.warning("DeepSeek: Response truncated due to max_tokens")
                 
-                text = choice.get("message", {}).get("content", "").strip()
+                if finish_reason == "length":
+                    logger.warning(f"[DeepSeek] Response truncated at max_tokens={max_tokens}")
+                    logger.warning(f"[DeepSeek] Increase max_tokens if needed")
                 
-                # --- ADD DEBUGGING ---
-                logger.debug(f"DeepSeek raw content: {repr(text)}")
-                # --- END DEBUGGING ---
+                if finish_reason not in ("stop", "length", None):
+                    logger.warning(f"[DeepSeek] Unexpected finish_reason: {finish_reason}")
+                
+                # ═══════════════════════════════════════════════════════════
+                # EXTRACT MESSAGE
+                # ═══════════════════════════════════════════════════════════
+                
+                message = choice.get("message")
+                if not message:
+                    logger.error(f"[DeepSeek] No 'message' in choice. Keys: {list(choice.keys())}")
+                    logger.error(f"[DeepSeek] Full choice: {json.dumps(choice, indent=2)}")
+                    return {}
+                
+                text = message.get("content", "")
+                logger.info(f"[DeepSeek] Content Length: {len(text)} chars")
+                logger.info(f"[DeepSeek] Raw Content:\n{text[:1000]}")
                 
                 if not text:
-                    logger.warning("DeepSeek: Empty content returned")
+                    logger.error(f"[DeepSeek] Message content is EMPTY")
+                    logger.error(f"[DeepSeek] Full message: {json.dumps(message, indent=2)}")
                     return {}
+                
+                text = text.strip()
+                
+                # ═══════════════════════════════════════════════════════════
+                # PARSE JSON FROM RESPONSE
+                # ═══════════════════════════════════════════════════════════
                 
                 # Remove markdown code blocks
                 text = re.sub(r'```json\n?|\n?```', '', text).strip()
+                logger.debug(f"[DeepSeek] After markdown cleanup: {text[:500]}")
                 
                 if not text:
-                    logger.warning("DeepSeek: Empty after stripping markdown")
+                    logger.error(f"[DeepSeek] Content empty after markdown cleanup")
                     return {}
                 
                 try:
-                    return json.loads(text)
+                    result = json.loads(text)
+                    logger.info(f"[DeepSeek] ✓ Successfully parsed JSON")
+                    return result
                 except json.JSONDecodeError as je:
-                    # Try to extract JSON with regex
-                    logger.warning(f"DeepSeek: JSON decode failed: {je}")
-                    logger.debug(f"Failed to parse: {text[:200]}")
+                    logger.error(f"[DeepSeek] JSON Parse Error: {je}")
+                    logger.error(f"[DeepSeek] Failed text: {text[:500]}")
+                    
+                    # Try regex extraction
                     m = re.search(r'\{[\s\S]*\}', text)
                     if m:
                         try:
-                            return json.loads(m.group(0))
+                            result = json.loads(m.group(0))
+                            logger.info(f"[DeepSeek] ✓ Recovered JSON via regex")
+                            return result
                         except json.JSONDecodeError:
-                            logger.error("DeepSeek: Failed to parse extracted JSON")
-                            pass
+                            logger.error(f"[DeepSeek] Regex extraction also failed")
+                    
                     return {}
+                    
         except Exception as e:
-            logger.error(f"DeepSeek generate_json: {e}")
+            logger.error(f"[DeepSeek] Exception in generate_json: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return {}
-
+    
 # ═══════════════════════════════════════════════════════════════
 # OLLAMA PROVIDER
 # ═══════════════════════════════════════════════════════════════

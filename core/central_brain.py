@@ -318,20 +318,14 @@ class CentralBrain:
                     f"  These tools failed to install or execute. Skip them entirely.\n"
                 )
 
-            # ── Build agent history section ──
+            # ── Agent history (last 5 only) ──
             history_section = ""
             if agent_history:
-                history_section = "\n══════════════════════════════════════\n"
-                history_section += "COMPLETED AGENTS (do NOT repeat these tasks):\n"
-                for h in agent_history:
+                history_section = "\nCOMPLETED AGENTS (last 5):\n"
+                for h in agent_history[-5:]:
                     status = "✓" if h["success"] else "✗"
-                    history_section += f"  {status} {h['agent_id']}: {h['objective']}\n"
-                    if h.get("findings"):
-                        history_section += f"    Findings: {h['findings'][:150]}\n"
-                    if h.get("failed_tools"):
-                        history_section += f"    Failed tools: {', '.join(h['failed_tools'])}\n"
-                history_section += "══════════════════════════════════════\n"
-                history_section += "⚠️  Do NOT spawn agents for objectives already completed above.\n"
+                    history_section += f"  {status} {h['agent_id']}: {h['objective'][:60]}\n"
+                history_section += "Do NOT repeat these tasks.\n"
 
             # ── Build exploit chain context ──
             chain_context = ""
@@ -358,12 +352,17 @@ class CentralBrain:
                 f"Use spawn_agents (plural) for independent parallel tasks.\n"
                 f"Output ONLY valid JSON.\n"
             )
+            
+            # ── Log prompt size ──
+            logger.info(f"Brain prompt length: {len(prompt)} chars")
 
             decision = await self.llm.generate_json(prompt, system=phase_prompt or BRAIN_SYSTEM)
+            logger.info(f"Brain decision: {json.dumps(decision, indent=2)}")
 
             if not decision:
                 self.consecutive_agent_failures += 1
                 logger.warning(f"Brain returned empty (failure streak: {self.consecutive_agent_failures})")
+                
                 
                 if self.consecutive_agent_failures > self.max_consecutive_failures:
                     logger.error(f"Too many failures ({self.consecutive_agent_failures}), ending {phase}")
@@ -373,6 +372,11 @@ class CentralBrain:
             self.consecutive_agent_failures = 0
 
             action = decision.get("action", "phase_complete")
+            
+            if not action:
+                logger.warning(f"Brain decision missing action: {decision}")
+                self.consecutive_agent_failures += 1
+                continue
 
             if action in ("phase_complete", "done"):
                 logger.info(f"✓ Phase '{phase}' complete")
@@ -770,7 +774,7 @@ class CentralBrain:
             logger.info("No vulnerabilities found. Skipping exploitation.")
             return None
 
-        summary = self.ctx.get_full_summary(max_chars=6000)
+        summary = self.ctx.get_full_summary(max_chars=2000)
 
         plan = await self.llm.generate_json(
             f"Based on these vulnerability findings, create an exploitation plan.\n\n"
