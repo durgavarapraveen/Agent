@@ -178,28 +178,59 @@ class PlannerResponseNormalizer:
 
     @classmethod
     def _infer_capability(cls, objective: str, data: Dict[str, Any]) -> CapabilityType:
-        """Infer capability type from text keywords or tools with explicit mapping table & confidence logging."""
+        """Infer capability type with word-boundary matching and priority ranking"""
+        import re
         obj_text = (objective or "").lower()
 
-        # 1. First evaluate objective text against explicit keyword mappings
+        # Prioritized mappings with word boundary regex matching
         mappings = [
-            (["technology", "tech stack", "cms", "web server", "framework", "whatweb", "fingerprint"], CapabilityType.TECHNOLOGY_FINGERPRINTING, 0.95),
-            (["port scan", "ports", "open ports", "nmap", "service scan", "tcp"], CapabilityType.PORT_SCANNING, 0.95),
-            (["authenticate", "login", "credentials", "auth_bypass", "auth"], CapabilityType.AUTHENTICATION_TESTING, 0.95),
-            (["header", "security headers", "csp", "cors", "cookie", "config"], CapabilityType.HTTP_ANALYSIS, 0.95),
-            (["ssl", "tls", "cipher", "certificate", "sslscan", "openssl", "starttls"], CapabilityType.TLS_ANALYSIS, 0.95),
-            (["subdomain", "subfinder", "amass", "dns enumeration", "dns lookup", "resolve"], CapabilityType.DNS_ENUMERATION, 0.90),
-            (["dir", "gobuster", "feroxbuster", "ffuf", "path", "endpoint", "crawl", "katana"], CapabilityType.ENDPOINT_DISCOVERY, 0.90),
-            (["js", "javascript", "bundle"], CapabilityType.JAVASCRIPT_ANALYSIS, 0.90),
-            (["vuln", "nuclei", "cve", "sqli", "rce", "idor", "xss", "lfi", "extract data", "upload"], CapabilityType.VULNERABILITY_SCANNING, 0.90),
+            # 1. Vulnerability scanning (checked first)
+            (r'\b(?:exploit|vuln|vulnerability|nuclei|cve|sqli|rce|idor|xss|lfi|extract\s+data|upload|injection)\b',
+             CapabilityType.VULNERABILITY_SCANNING, 0.95),
+
+            # 2. Endpoint & directory discovery (more specific than DNS, checked before DNS to avoid collision)
+            (r'\b(?:hidden|directories|files|gobuster|feroxbuster|ffuf|path|endpoint|crawl|katana|directory\s+(?:brute|scan|discovery))\b',
+             CapabilityType.ENDPOINT_DISCOVERY, 0.95),
+
+            # 3. Subdomain & DNS enumeration
+            (r'\b(?:subdomain|subdomains|subfinder|amass|dns\s+enumeration|dns\s+lookup|resolve|dns\s+brute)\b',
+             CapabilityType.DNS_ENUMERATION, 0.90),
+
+            # 4. Port scanning
+            (r'\b(?:port\s+(?:scan|scanning|discovery)|open\s+ports|nmap|service\s+scan|tcp\s+scan)\b',
+             CapabilityType.PORT_SCANNING, 0.95),
+
+            # 5. Technology fingerprinting
+            (r'\b(?:tech\s+stack|cms|web\s+server|framework|whatweb|fingerprint)\b',
+             CapabilityType.TECHNOLOGY_FINGERPRINTING, 0.95),
+
+            # 6. Authentication testing
+            (r'\b(?:authenticate|login|credentials|auth_bypass|auth)\b',
+             CapabilityType.AUTHENTICATION_TESTING, 0.95),
+
+            # 7. HTTP Analysis
+            (r'\b(?:header|security\s+headers|csp|cors|cookie|config)\b',
+             CapabilityType.HTTP_ANALYSIS, 0.95),
+
+            # 8. TLS Analysis
+            (r'\b(?:ssl|tls|cipher|certificate|sslscan|openssl|starttls)\b',
+             CapabilityType.TLS_ANALYSIS, 0.95),
+
+            # 9. JavaScript Analysis
+            (r'\b(?:js|javascript|bundle)\b',
+             CapabilityType.JAVASCRIPT_ANALYSIS, 0.90),
+
+            # 10. Web Crawling
+            (r'\b(?:web\s+crawling|spider)\b',
+             CapabilityType.WEB_CRAWLING, 0.90),
         ]
 
-        for keywords, cap, conf in mappings:
-            if any(k in obj_text for k in keywords):
+        for pattern, cap, conf in mappings:
+            if re.search(pattern, obj_text):
                 logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={cap.value} confidence={conf}")
                 return cap
 
-        # 2. Check explicitly supplied capability field if objective keywords yielded no match
+        # Check explicitly supplied capability field if objective regex yielded no match
         raw_cap = data.get("capability")
         if isinstance(raw_cap, str) and raw_cap.strip():
             cap_str = raw_cap.lower().strip()
@@ -212,7 +243,7 @@ class PlannerResponseNormalizer:
         elif isinstance(raw_cap, CapabilityType):
             return raw_cap
 
-        # 3. Fallback neutral capability
+        # Fallback neutral capability
         logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' fallback_capability={CapabilityType.TECHNOLOGY_FINGERPRINTING.value} confidence=0.75")
         return CapabilityType.TECHNOLOGY_FINGERPRINTING
 

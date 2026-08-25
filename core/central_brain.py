@@ -414,10 +414,15 @@ class CentralBrain:
                 summary = summary[:_MAX_SUMMARY_CHARS] + "..."
 
             # ── Circuit-breaker hint ──
+            consecutive_failures_per_objective = {}
+
             circuit_breaker_hint = ""
             if self.consecutive_agent_failures >= 2:
-                completed_objectives.clear()
                 circuit_breaker_hint = "\n⚠️  REPLAN REQUIRED: Choose a different approach or phase_complete.\n"
+                # Option: break the phase loop instead of hoping brain will self-correct
+                if self.consecutive_agent_failures >= 5:
+                    logger.warning("Failure threshold exceeded. Exiting phase.")
+                    break
 
             # ── Compact execution context from database ──
             db_context = self._get_db_execution_context()

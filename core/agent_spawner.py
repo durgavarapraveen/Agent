@@ -110,6 +110,8 @@ class AgentSpawner:
         self.counter += 1
         agent_id = f"AGENT-{self.counter:03d}"
 
+        logger.info(f"SPAWN_ATTEMPT: agent_id={agent_id} capability={capability_name} objective='{objective[:60]}'")
+
         # BUG-004: Disambiguate objective type (RECON vs EXPLOIT)
         recon_keywords = ["analyze", "discover", "enumerate", "extract", "scan", "fingerprint", "crawl"]
         is_explicit_recon = any(kw in objective.lower() for kw in recon_keywords)
@@ -136,6 +138,20 @@ class AgentSpawner:
             logger.error(f"AGENT_VALIDATION_FAILED: capability='{capability_name}' is not in valid_capabilities")
             return None
 
+        # Fallback capability tool mapping
+        default_capability_tools = {
+            "dns_enumeration": ["subfinder", "amass", "dns_lookup", "httpx"],
+            "port_scanning": ["nmap", "port_check"],
+            "endpoint_discovery": ["gobuster", "feroxbuster", "ffuf", "katana", "http_request", "curl"],
+            "technology_fingerprinting": ["httpx", "whatweb", "http_request"],
+            "http_analysis": ["http_request", "curl", "sslscan"],
+            "javascript_analysis": ["http_request", "katana", "curl"],
+            "tls_analysis": ["sslscan", "openssl", "http_request"],
+            "authentication_testing": ["http_request", "curl", "hydra"],
+            "vulnerability_scanning": ["nuclei", "http_request", "payload_tester", "curl"],
+            "web_crawling": ["katana", "http_request", "browser"]
+        }
+
         if not allowed_tools and not is_exploit:
             try:
                 from core.capability_resolver import CapabilityResolver
@@ -147,12 +163,20 @@ class AgentSpawner:
                 logger.warning(f"Failed resolving tools for capability '{capability_name}': {e}")
 
         if not allowed_tools and not is_exploit:
+            allowed_tools = default_capability_tools.get(capability_name, ["http_request", "curl"])
+            logger.info(f"CAPABILITY_TOOL_FALLBACK: capability='{capability_name}' resolved tools={allowed_tools}")
+
+        if not allowed_tools and not is_exploit:
             logger.error(f"AGENT_VALIDATION_FAILED: tools list is empty for agent task '{objective[:50]}'")
             return None
 
         # Build filtered context
         agent_context = self.ctx.get_context_for_agent(objective, context_keys)
-        missing_keys = [k for k in context_keys if k not in agent_context and not hasattr(self.ctx, k)]
+        valid_context_keys = {"target", "scope", "subdomains", "ips", "ports", "technologies",
+                              "endpoints", "captured_requests", "parameters", "directories",
+                              "headers", "js_files", "secrets", "ssl_info", "vulnerabilities",
+                              "attack_chains", "exploit_results"}
+        missing_keys = [k for k in context_keys if k not in valid_context_keys and not hasattr(self.ctx, k)]
         if missing_keys:
             logger.error(f"AGENT_VALIDATION_FAILED: missing context_keys={missing_keys} in context dict")
             return None
@@ -180,11 +204,7 @@ class AgentSpawner:
             logger.error(f"AGENT_VALIDATION_FAILED: executor is None for agent_id={agent_id}")
             return None
 
-        logger.info(f"AGENT_VALIDATION_PASSED: agent_id={agent_id} executor={executor} tools={len(allowed_tools)}")
-
-        logger.info(
-            f"Spawned {agent_id} [{agent_label}]: {objective[:60]}..."
-        )
+        logger.info(f"SPAWN_SUCCESS: agent_id={agent_id} label='{agent_label}' capability={capability_name} tools={len(allowed_tools)}")
         return agent
 
     def _spawn_exploit(self, agent_id, objective, agent_context,
