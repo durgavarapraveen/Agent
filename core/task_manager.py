@@ -3,15 +3,18 @@ Task state machine and deterministic task management.
 Framework owns task lifecycle, not LLM.
 """
 
+import hashlib
+import json
 import logging
 from datetime import datetime
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 from core.schemas import TaskSpec, TaskStatus, SuccessCriterion
+from core.exceptions import AutonomousPentestException
 
 logger = logging.getLogger(__name__)
 
 
-class TaskStateTransitionError(Exception):
+class TaskStateTransitionError(AutonomousPentestException):
     """Invalid state transition attempted"""
     pass
 
@@ -20,15 +23,15 @@ class Task:
     """Task wrapper with state machine"""
     
     VALID_TRANSITIONS = {
-        TaskStatus.CREATED: [TaskStatus.QUEUED, TaskStatus.WAITING_DEPENDENCY],
-        TaskStatus.QUEUED: [TaskStatus.RUNNING, TaskStatus.WAITING_DEPENDENCY, TaskStatus.COMPLETED, TaskStatus.FAILED],
-        TaskStatus.WAITING_DEPENDENCY: [TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.BLOCKED],
-        TaskStatus.RUNNING: [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.TIMEOUT],
+        TaskStatus.CREATED: [TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.WAITING_DEPENDENCY, TaskStatus.BLOCKED],
+        TaskStatus.QUEUED: [TaskStatus.RUNNING, TaskStatus.WAITING_DEPENDENCY, TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.CANCELLED],
+        TaskStatus.WAITING_DEPENDENCY: [TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.BLOCKED, TaskStatus.CANCELLED],
+        TaskStatus.RUNNING: [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.TIMEOUT, TaskStatus.CANCELLED],
         TaskStatus.COMPLETED: [],
-        TaskStatus.FAILED: [],
-        TaskStatus.BLOCKED: [TaskStatus.CANCELLED],
+        TaskStatus.FAILED: [TaskStatus.QUEUED],  # For explicit deterministic retries
+        TaskStatus.BLOCKED: [TaskStatus.CANCELLED, TaskStatus.QUEUED],
         TaskStatus.CANCELLED: [],
-        TaskStatus.TIMEOUT: [],
+        TaskStatus.TIMEOUT: [TaskStatus.QUEUED],
     }
     
     def __init__(self, spec: TaskSpec):
@@ -40,13 +43,16 @@ class Task:
         self.error: Optional[str] = None
         self.result: Optional[Dict] = None
         self.retry_count = 0
-        self.max_retries = 3
+        self.max_retries = spec.max_retries or 3
         
     def transition_to(self, new_status: TaskStatus) -> bool:
         """Deterministic state transition"""
+        if new_status == self.status:
+            return True
+
         if new_status not in self.VALID_TRANSITIONS.get(self.status, []):
             raise TaskStateTransitionError(
-                f"Cannot transition from {self.status.value} to {new_status.value}"
+                f"Cannot transition task '{self.spec.task_id}' from {self.status.value} to {new_status.value}"
             )
         
         old_status = self.status
@@ -54,10 +60,20 @@ class Task:
         
         if new_status == TaskStatus.RUNNING:
             self.started_at = datetime.now()
-        elif new_status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.TIMEOUT]:
+            logger.info(f"TASK_STARTED: task_id={self.spec.task_id} capability={self.spec.capability.value}")
+        elif new_status == TaskStatus.COMPLETED:
             self.completed_at = datetime.now()
+            logger.info(f"TASK_SUCCEEDED: task_id={self.spec.task_id}")
+        elif new_status == TaskStatus.FAILED:
+            self.completed_at = datetime.now()
+            logger.warning(f"TASK_FAILED: task_id={self.spec.task_id} error={self.error}")
+        elif new_status == TaskStatus.BLOCKED:
+            logger.warning(f"TASK_BLOCKED: task_id={self.spec.task_id} reason={self.error}")
+        elif new_status == TaskStatus.WAITING_DEPENDENCY:
+            logger.info(f"TASK_WAITING_DEPENDENCY: task_id={self.spec.task_id} waiting on={self.spec.dependencies}")
+        elif new_status == TaskStatus.QUEUED:
+            logger.info(f"TASK_READY: task_id={self.spec.task_id}")
         
-        logger.info(f"[Task {self.spec.task_id}] {old_status.value} -> {new_status.value}")
         return True
     
     def is_completed(self) -> bool:
@@ -86,7 +102,7 @@ class Task:
 
 
 class TaskManager:
-    """Centralized task lifecycle management"""
+    """Centralized task lifecycle and deduplication management"""
     
     def __init__(self):
         self.tasks: Dict[str, Task] = {}
@@ -94,11 +110,47 @@ class TaskManager:
         
     def create_task(self, spec: TaskSpec) -> Task:
         """Create new task"""
+        import uuid
+        if not spec.task_id:
+            spec.task_id = str(uuid.uuid4())
+
+        # Validate scope targets at task creation time
+        from core.authorization import TargetScopeValidator
+        target = spec.inputs.get("target") or spec.inputs.get("url") or spec.inputs.get("domain") or spec.inputs.get("host")
+        if target:
+            TargetScopeValidator.get().validate(target)
+            
         task = Task(spec)
         self.tasks[spec.task_id] = task
-        logger.info(f"[TaskManager] Created task {spec.task_id}: {spec.objective}")
+        logger.info(f"TASK_CREATED: task_id={spec.task_id} capability={spec.capability.value} objective={spec.objective}")
         return task
     
+    def get_or_create_task(self, spec: TaskSpec) -> Tuple[Task, bool]:
+        """
+        Deduplicates task creation by matching normalized task fingerprints.
+        Returns (task, is_new)
+
+        force_reexecute=True on the spec bypasses deduplication entirely and
+        always creates a new task (useful for explicit retries / re-scan).
+        """
+        # Honour explicit re-execution flag — skip dedup entirely.
+        if getattr(spec, 'force_reexecute', False):
+            task = self.create_task(spec)
+            self.register_task_signature(spec, spec.task_id)
+            logger.info(f"TASK_FORCE_REEXECUTE: created fresh task={spec.task_id} capability={spec.capability.value}")
+            return task, True
+
+        duplicate = self.find_duplicate_task(spec)
+        if duplicate:
+            # If task is already RUNNING, COMPLETED, or BLOCKED, reuse it
+            target = spec.inputs.get("target") or spec.inputs.get("url") or spec.inputs.get("domain") or spec.inputs.get("host") or ""
+            logger.info(f"TASK_DEDUPLICATED: Reusing existing task={duplicate.spec.task_id} (status={duplicate.status.value}) for proposed capability={spec.capability.value} target={target}")
+            return duplicate, False
+            
+        task = self.create_task(spec)
+        self.register_task_signature(spec, spec.task_id)
+        return task, True
+
     def queue_task(self, task_id: str) -> Task:
         """Queue task for execution"""
         task = self.get_task(task_id)
@@ -160,33 +212,63 @@ class TaskManager:
         return [t for t in self.tasks.values() if t.status == status]
     
     def generate_task_signature(self, spec: TaskSpec) -> str:
-        """Generate deterministic signature for deduplication"""
+        """Generate deterministic signature based on normalized capability, target, parameters, and tools.
+        
+        Signature formula: hash(capability + target_url_or_ip + parameters + dynamic_tools)
+        This ensures that tasks on subdomains or distinct targets (e.g. sub.speshway.com vs speshway.com)
+        are NOT incorrectly deduplicated.
+        """
+        import re
         import hashlib
+        
+        # Extract and normalize target from inputs or objective
+        target = spec.inputs.get("target") or spec.inputs.get("url") or spec.inputs.get("domain") or spec.inputs.get("host")
+        if isinstance(target, list) and target:
+            target = str(target[0])
+            
+        if not target:
+            # Fallback: extract domain/host/URL from spec.objective via regex
+            urls = re.findall(r'https?://[^\s/]+|[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', spec.objective)
+            if urls:
+                target = urls[0]
+            else:
+                target = spec.objective  # Ensure distinct objectives don't share empty target
+
+        if isinstance(target, str):
+            target = target.strip().lower()
+            if "://" in target:
+                target = target.split("://", 1)[1]
+            if "/" in target:
+                target = target.split("/", 1)[0]
+        else:
+            target = str(target)
+
+        # Normalize inputs & parameters
+        norm_inputs = {}
+        for k, v in spec.inputs.items():
+            if k not in ("target", "url", "domain", "host", "task_id", "timestamp"):
+                norm_inputs[k] = v
+
+        inputs_str = json.dumps(norm_inputs, sort_keys=True)
+        tools_str = ",".join(sorted(spec.inputs.get("tools", [])))
+        
         sig_parts = [
             spec.capability.value,
-            spec.objective,
-            str(sorted(spec.inputs.items())),
+            target,
+            inputs_str,
+            tools_str,
         ]
         sig_str = "|".join(sig_parts)
         return hashlib.sha256(sig_str.encode()).hexdigest()[:16]
     
     def find_duplicate_task(self, spec: TaskSpec) -> Optional[Task]:
-        """
-        Check if equivalent task exists (completed or running).
-        Returns None if no duplicate, otherwise returns the existing task.
-        """
+        """Check if equivalent task exists"""
         sig = self.generate_task_signature(spec)
-        
         if sig in self.task_signatures:
             existing_id = self.task_signatures[sig]
             existing_task = self.tasks.get(existing_id)
-            if existing_task and not existing_task.is_completed():
-                logger.info(f"[TaskManager] Found running equivalent: {existing_id}")
+            if existing_task:
                 return existing_task
-            if existing_task and existing_task.status == TaskStatus.COMPLETED:
-                logger.info(f"[TaskManager] Found completed equivalent: {existing_id}")
-                return existing_task
-        
         return None
     
     def register_task_signature(self, spec: TaskSpec, task_id: str) -> None:
@@ -194,11 +276,8 @@ class TaskManager:
         sig = self.generate_task_signature(spec)
         self.task_signatures[sig] = task_id
     
-    def should_create_task(self, spec: TaskSpec) -> tuple[bool, Optional[str]]:
-        """
-        Determine if task should be created.
-        Returns (should_create, reason_if_no)
-        """
+    def should_create_task(self, spec: TaskSpec) -> Tuple[bool, Optional[str]]:
+        """Determine if task should be created"""
         duplicate = self.find_duplicate_task(spec)
         if duplicate:
             return (False, f"Duplicate of task {duplicate.spec.task_id}")
@@ -237,7 +316,7 @@ class TaskManager:
         for dep_id in task.spec.dependencies:
             if dep_id in self.tasks:
                 dep_task = self.tasks[dep_id]
-                if dep_task.status == TaskStatus.FAILED:
+                if dep_task.status in (TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.CANCELLED):
                     return True
         return False
     

@@ -19,32 +19,70 @@ class Scheduler:
         self.task_manager = task_manager
         self.execution_order: List[str] = []  # task_id order
         self.parallel_groups: List[List[str]] = []  # Groups of parallel-executable tasks
-    
+
+
+    def detect_circular_dependencies(self, proposed_specs: List[TaskSpec]) -> bool:
+        """Helper to detect cycles in the task dependency DAG using DFS"""
+        graph = {}
+        for task in self.task_manager.tasks.values():
+            graph[task.spec.task_id] = list(task.spec.dependencies)
+        for spec in proposed_specs:
+            graph[spec.task_id] = list(spec.dependencies)
+            
+        visited = {}  # 0=unvisited, 1=visiting, 2=visited
+        
+        def dfs(node):
+            visited[node] = 1  # visiting
+            for neighbor in graph.get(node, []):
+                state = visited.get(neighbor, 0)
+                if state == 1:
+                    return True
+                if state == 0:
+                    if dfs(neighbor):
+                        return True
+            visited[node] = 2  # visited
+            return False
+            
+        for node in graph:
+            if visited.get(node, 0) == 0:
+                if dfs(node):
+                    return True
+        return False
+
     def schedule_tasks(self, task_specs: List[TaskSpec]) -> Dict[str, Task]:
         """
         Create and schedule multiple tasks.
         Independent tasks run in parallel.
         Dependent tasks queue and wait.
         """
+        # Validate dependency IDs
+        proposed_ids = {spec.task_id for spec in task_specs}
+        for spec in task_specs:
+            for dep_id in spec.dependencies:
+                if dep_id not in self.task_manager.tasks and dep_id not in proposed_ids:
+                    logger.error(f"[Scheduler] DEPENDENCY_FAILURE: Dependency {dep_id} not found for {spec.task_id}")
+                    raise ValueError(f"Dependency {dep_id} not found in existing tasks or proposed batch")
+
+        # Detect circular dependencies
+        if self.detect_circular_dependencies(task_specs):
+            logger.error("[Scheduler] DEPENDENCY_FAILURE: Circular dependency detected in scheduling request")
+            raise ValueError("Circular dependency detected")
+
         created_tasks = {}
         
         for spec in task_specs:
-            # Check for duplicates
-            should_create, reason = self.task_manager.should_create_task(spec)
-            if not should_create:
-                logger.warning(f"[Scheduler] Skipping duplicate: {reason}")
-                continue
-            
-            task = self.task_manager.create_task(spec)
-            self.task_manager.register_task_signature(spec, spec.task_id)
+            # Check for duplicates and reuse or create
+            task, is_new = self.task_manager.get_or_create_task(spec)
             
             # Queue the task
             if spec.dependencies:
                 # Has dependencies - wait
-                self.task_manager.wait_on_dependency(task.spec.task_id)
+                if task.status == TaskStatus.CREATED:
+                    self.task_manager.wait_on_dependency(task.spec.task_id)
             else:
                 # No dependencies - ready to run
-                self.task_manager.queue_task(task.spec.task_id)
+                if task.status == TaskStatus.CREATED:
+                    self.task_manager.queue_task(task.spec.task_id)
             
             created_tasks[spec.task_id] = task
         
@@ -111,24 +149,33 @@ class Scheduler:
     def process_dependencies(self) -> None:
         """
         After a task completes, unblock waiting tasks.
-        This is called after a task transitions to COMPLETED.
+        Propagates cascading block/failures.
         """
-        for task in self.task_manager.get_tasks_by_status(TaskStatus.WAITING_DEPENDENCY):  # CHANGE: iterate tasks, not task_id
-            task_id = task.spec.task_id  # CHANGE: extract task_id from task object
-            
-            if self.task_manager.check_dependencies_satisfied(task_id):
-                # All dependencies satisfied - queue for execution
-                self.task_manager.queue_task(task_id)
-                logger.info(f"[Scheduler] Dependencies satisfied for {task_id}, queuing")
-            
-            elif self.task_manager.check_dependencies_failed(task_id):
-                # Dependency failed - block this task
-                failed_deps = [
-                    dep_id for dep_id in task.spec.dependencies
-                    if self.task_manager.get_task(dep_id).status == TaskStatus.FAILED
-                ]
-                self.task_manager.block_task(task_id, f"Dependencies failed: {failed_deps}")
-                logger.warning(f"[Scheduler] Blocking task {task_id} - failed dependencies")
+        updated = True
+        while updated:
+            updated = False
+            for task in self.task_manager.get_tasks_by_status(TaskStatus.WAITING_DEPENDENCY):
+                task_id = task.spec.task_id
+                
+                # Check if all dependencies are completed successfully
+                if self.task_manager.check_dependencies_satisfied(task_id):
+                    self.task_manager.queue_task(task_id)
+                    logger.info(f"[Scheduler] Dependencies satisfied for {task_id}, queuing")
+                    updated = True
+                
+                # Check if any dependency has failed, timed out, or blocked
+                elif self.task_manager.check_dependencies_failed(task_id):
+                    # Check failure state of dependencies
+                    failed_deps = []
+                    for dep_id in task.spec.dependencies:
+                        if dep_id in self.task_manager.tasks:
+                            dep = self.task_manager.get_task(dep_id)
+                            if dep.status in (TaskStatus.FAILED, TaskStatus.TIMEOUT, TaskStatus.CANCELLED, TaskStatus.BLOCKED):
+                                failed_deps.append(f"{dep_id} ({dep.status.value})")
+                                
+                    self.task_manager.block_task(task_id, f"DEPENDENCY_FAILURE: Dependencies failed: {failed_deps}")
+                    logger.warning(f"[Scheduler] Blocking task {task_id} - failed dependencies: {failed_deps}")
+                    updated = True
     
     def get_next_runnable_tasks(self) -> List[Task]:
         """Get tasks ready to run"""
@@ -157,3 +204,7 @@ class Scheduler:
             "execution_plan": self.get_execution_summary(),
             "tasks": self.task_manager.to_dict(),
         }
+
+
+# Compatibility alias
+TaskScheduler = Scheduler

@@ -77,7 +77,7 @@ class KaliDockerExecutor:
             # Verify it's still running
             r = subprocess.run(
                 f"docker ps --filter name={cls._container_name} --format {{{{.Names}}}}",
-                shell=True, capture_output=True, text=True, timeout=5
+                shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=5
             )
             if cls._container_name in r.stdout:
                 return cls._container_name
@@ -86,7 +86,7 @@ class KaliDockerExecutor:
         try:
             r = subprocess.run(
                 "docker ps --format {{.Names}}\\t{{.Image}}",
-                shell=True, capture_output=True, text=True, timeout=10
+                shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=10
             )
             for line in r.stdout.strip().split("\n"):
                 if not line.strip():
@@ -107,7 +107,7 @@ class KaliDockerExecutor:
                     continue
                 check = subprocess.run(
                     f"docker exec {name} cat /etc/os-release",
-                    shell=True, capture_output=True, text=True, timeout=5
+                    shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=5
                 )
                 if "kali" in check.stdout.lower():
                     cls._container_name = name
@@ -123,7 +123,7 @@ class KaliDockerExecutor:
     @classmethod
     def check_docker(cls) -> bool:
         try:
-            r = subprocess.run("docker --version", shell=True, capture_output=True, text=True, timeout=5)
+            r = subprocess.run("docker --version", shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=5)
             return r.returncode == 0
         except:
             return False
@@ -143,7 +143,7 @@ class KaliDockerExecutor:
         cls._checked_tools.add(tool)
         r = subprocess.run(
             f"docker exec {container} which {tool}",
-            shell=True, capture_output=True, text=True, timeout=10
+            shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=10
         )
         if r.returncode == 0 and r.stdout.strip():
             cls._installed_tools.add(tool)
@@ -164,12 +164,12 @@ class KaliDockerExecutor:
         # NOTE: double quotes (not single) so the wrapper survives Windows cmd.exe
         subprocess.run(
             f'docker exec {container} bash -c "apt-get update -qq 2>&1 | tail -3"',
-            shell=True, capture_output=True, text=True, timeout=120
+            shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=120
         )
 
         r = subprocess.run(
             f'docker exec {container} bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq {pkg} 2>&1 | tail -3"',
-            shell=True, capture_output=True, text=True, timeout=300
+            shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=300
         )
 
         # Clear stale cache so the post-install check actually re-runs `which`
@@ -239,7 +239,7 @@ class KaliDockerExecutor:
 
         try:
             r = subprocess.run(
-                full, shell=True, capture_output=True, text=True, timeout=grace
+                full, shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=grace
             )
             # coreutils `timeout` exits 124 when it had to kill the command.
             if r.returncode == 124 or r.returncode == 137:

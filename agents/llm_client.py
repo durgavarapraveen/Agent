@@ -8,11 +8,12 @@ import logging
 import re
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 
 import httpx
 
 from core.config import get_config
+from core.schemas import NormalizedLLMResponse
 
 try:
     from groq import Groq as GroqClient
@@ -32,15 +33,21 @@ class LLMProvider(ABC):
     """Base provider interface"""
 
     @abstractmethod
+    async def generate_response(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
+                                system: Optional[str] = None, max_tokens: int = 1024,
+                                temperature: float = 0.3, response_format: Optional[str] = None) -> NormalizedLLMResponse:
+        pass
+
     async def generate(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
                         system: Optional[str] = None, max_tokens: int = 1024,
                         temperature: float = 0.3) -> str:
-        pass
+        res = await self.generate_response(prompt, tier, system, max_tokens, temperature)
+        return res.content
 
-    @abstractmethod
     async def generate_json(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
                              system: Optional[str] = None, max_tokens: int = 2048) -> Dict:
-        pass
+        res = await self.generate_response(prompt, tier, system, max_tokens, temperature=0.1, response_format="json")
+        return res.structured_output or {}
 
     @abstractmethod
     async def is_available(self) -> bool:
@@ -72,9 +79,9 @@ class GeminiProvider(LLMProvider):
             logger.debug(f"Gemini unavailable: {e}")
             return False
 
-    async def generate(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                        system: Optional[str] = None, max_tokens: int = 1024,
-                        temperature: float = 0.3) -> str:
+    async def generate_response(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
+                                system: Optional[str] = None, max_tokens: int = 1024,
+                                temperature: float = 0.3, response_format: Optional[str] = None) -> NormalizedLLMResponse:
         contents = []
         if system:
             contents.append({"parts": [{"text": system}]})
@@ -84,38 +91,46 @@ class GeminiProvider(LLMProvider):
             "contents": contents,
             "generationConfig": {"maxOutputTokens": max_tokens, "temperature": temperature}
         }
+        if response_format == "json":
+            payload["generationConfig"]["responseMimeType"] = "application/json"
 
         url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
+        content = ""
+        structured = None
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 r = await client.post(url, json=payload)
                 if r.status_code == 200:
                     data = r.json()
                     if "candidates" in data and data["candidates"]:
-                        parts = data["candidates"][0].get("content", {}).get("parts", [])
+                        candidate = data["candidates"][0]
+                        parts = candidate.get("content", {}).get("parts", [])
                         if parts:
-                            return parts[0].get("text", "").strip()
+                            content = parts[0].get("text", "").strip()
+                            finish_reason = candidate.get("finishReason")
+                            if response_format == "json" or content.startswith("{") or content.startswith("["):
+                                try:
+                                    structured = json.loads(content)
+                                except Exception:
+                                    # Fallback regex
+                                    m = re.search(r'\{[\s\S]*\}', content)
+                                    if m:
+                                        try:
+                                            structured = json.loads(m.group(0))
+                                        except:
+                                            pass
+                            return NormalizedLLMResponse(
+                                content=content,
+                                structured_output=structured,
+                                finish_reason=finish_reason,
+                                provider="gemini",
+                                model=self.model,
+                            )
                 logger.error(f"Gemini {r.status_code}: {r.text[:200]}")
         except Exception as e:
-            logger.error(f"Gemini generate: {e}")
-        return ""
-
-    async def generate_json(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                             system: Optional[str] = None, max_tokens: int = 2048) -> Dict:
-        json_prompt = f"{prompt}\n\nRespond ONLY with valid JSON."
-        text = await self.generate(json_prompt, tier, system, max_tokens, temperature=0.1)
-        if not text:
-            return {}
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            m = re.search(r'\{[\s\S]*\}', text)
-            if m:
-                try:
-                    return json.loads(m.group(0))
-                except:
-                    pass
-        return {}
+            logger.error(f"Gemini generate_response: {e}")
+            
+        return NormalizedLLMResponse(content="", provider="gemini", model=self.model)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -136,61 +151,50 @@ class GroqProvider(LLMProvider):
         self.model = get_config().get("GROQ_MODEL", "mixtral-8x7b-32768")
         self.client = GroqClient(api_key=api_key)
 
-    async def generate(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                       system: Optional[str] = None, max_tokens: int = 1024,
-                       temperature: float = 0.3) -> str:
+    async def generate_response(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
+                                system: Optional[str] = None, max_tokens: int = 1024,
+                                temperature: float = 0.3, response_format: Optional[str] = None) -> NormalizedLLMResponse:
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
+            kwargs = {
+                "model": self.model,
+                "messages": [
                     {"role": "system", "content": system or "You are a helpful assistant."},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            logger.error(f"Groq generate error: {e}")
-            return ""
-
-    async def generate_json(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                            system: Optional[str] = None, max_tokens: int = 2048) -> Dict:
-        json_prompt = f"{prompt}\n\nRespond ONLY with valid JSON. No markdown backticks."
-        json_system = (system or "") + "\n\nRespond ONLY with valid JSON."
-        
-        try:
-            response = self.client.chat.completions.create(
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            if response_format == "json":
+                kwargs["response_format"] = {"type": "json_object"}
+                
+            response = self.client.chat.completions.create(**kwargs)
+            content = response.choices[0].message.content or ""
+            # Clean markdown code blocks
+            clean_content = re.sub(r'```json\n?|\n?```', '', content).strip()
+            
+            structured = None
+            if response_format == "json" or clean_content.startswith("{") or clean_content.startswith("["):
+                try:
+                    structured = json.loads(clean_content)
+                except Exception:
+                    m = re.search(r'\{[\s\S]*\}', clean_content)
+                    if m:
+                        try:
+                            structured = json.loads(m.group(0))
+                        except:
+                            pass
+                            
+            return NormalizedLLMResponse(
+                content=clean_content,
+                structured_output=structured,
+                finish_reason=response.choices[0].finish_reason,
+                provider="groq",
                 model=self.model,
-                messages=[
-                    {"role": "system", "content": json_system},
-                    {"role": "user", "content": json_prompt}
-                ],
-                max_tokens=max_tokens,
-                temperature=0.1,
+                usage={"completion_tokens": response.usage.completion_tokens, "prompt_tokens": response.usage.prompt_tokens} if hasattr(response, "usage") and response.usage else None
             )
-            text = response.choices[0].message.content
-            
-            # Remove markdown code blocks
-            text = re.sub(r'```json\n?|\n?```', '', text)
-            text = text.strip()
-            
-            if not text:
-                return {}
-            
-            try:
-                return json.loads(text)
-            except json.JSONDecodeError:
-                m = re.search(r'\{[\s\S]*\}', text)
-                if m:
-                    try:
-                        return json.loads(m.group(0))
-                    except:
-                        pass
-            return {}
         except Exception as e:
-            logger.error(f"Groq generate_json error: {e}")
-            return {}
+            logger.error(f"Groq generate_response error: {e}")
+            return NormalizedLLMResponse(content="", provider="groq", model=self.model)
 
     async def is_available(self) -> bool:
         try:
@@ -242,174 +246,70 @@ class DeepSeekProvider(LLMProvider):
             logger.debug(f"DeepSeek unavailable: {e}")
             return False
 
-    async def generate(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                       system: Optional[str] = None, max_tokens: int = 1024,
-                       temperature: float = 0.3) -> str:
+    async def generate_response(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
+                                system: Optional[str] = None, max_tokens: int = 1024,
+                                temperature: float = 0.3, response_format: Optional[str] = None) -> NormalizedLLMResponse:
         messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-        payload = {"model": self._model_for(tier), "messages": messages,
-                   "max_tokens": max_tokens, "temperature": temperature,
-                   "stream": False}
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                r = await client.post(f"{self.base_url}/chat/completions",
-                                      headers=self._headers(), json=payload)
-                if r.status_code == 200:
-                    return r.json()["choices"][0]["message"]["content"].strip()
-                logger.error(f"DeepSeek {r.status_code}: {r.text[:200]}")
-        except Exception as e:
-            logger.error(f"DeepSeek generate: {e}")
-        return ""
-
-    # In llm_client.py, DeepSeekProvider.generate_json() - replace lines 263-291
-    async def generate_json(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                        system: Optional[str] = None, max_tokens: int = 2048) -> Dict:
-        messages = []
-        json_system = (system or "You are a helpful assistant.") + \
-            "\n\nRespond ONLY with valid JSON. No markdown."
-        messages.append({"role": "system", "content": json_system})
+        messages.append({"role": "system", "content": system or "You are a helpful assistant."})
         messages.append({"role": "user", "content": prompt})
         
         payload = {
             "model": self._model_for(tier), 
             "messages": messages,
             "max_tokens": max_tokens, 
-            "temperature": 0.1,
-            "stream": False,
-            "response_format": {"type": "json_object"}
+            "temperature": temperature,
+            "stream": False
         }
-        
+        if response_format == "json":
+            payload["response_format"] = {"type": "json_object"}
+            
+        model_name = self._model_for(tier)
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                logger.info(f"[DeepSeek] Request: model={self._model_for(tier)}, max_tokens={max_tokens}")
-                logger.debug(f"[DeepSeek] Payload: {json.dumps(payload, indent=2)[:500]}")
-                
                 r = await client.post(f"{self.base_url}/chat/completions",
-                                    headers=self._headers(), json=payload)
-                
-                # ═══════════════════════════════════════════════════════════
-                # FULL RESPONSE LOGGING (CRITICAL FOR DEBUGGING)
-                # ═══════════════════════════════════════════════════════════
-                logger.info(f"[DeepSeek] Response Status: {r.status_code}")
-                
-                # Log FULL response body (not truncated)
-                full_body = r.text
-                logger.info(f"[DeepSeek] Response Length: {len(full_body)} chars")
-                logger.info(f"[DeepSeek] Full Response Body:\n{full_body}")
-                
-                if r.status_code != 200:
-                    logger.error(f"[DeepSeek] API Error {r.status_code}: {full_body[:500]}")
-                    return {}
-                
-                # ═══════════════════════════════════════════════════════════
-                # PARSE RESPONSE
-                # ═══════════════════════════════════════════════════════════
-                try:
+                                      headers=self._headers(), json=payload)
+                if r.status_code == 200:
                     data = r.json()
-                    logger.debug(f"[DeepSeek] Parsed JSON: {json.dumps(data, indent=2)[:1000]}")
-                except json.JSONDecodeError as je:
-                    logger.error(f"[DeepSeek] Failed to parse JSON: {je}")
-                    logger.error(f"[DeepSeek] Raw body: {full_body[:500]}")
-                    return {}
-                
-                # ═══════════════════════════════════════════════════════════
-                # CHECK STRUCTURE
-                # ═══════════════════════════════════════════════════════════
-                
-                # Check if choices exist
-                if "choices" not in data:
-                    logger.error(f"[DeepSeek] No 'choices' in response. Keys: {list(data.keys())}")
-                    logger.error(f"[DeepSeek] Full response: {json.dumps(data, indent=2)}")
-                    return {}
-                
-                if not data.get("choices"):
-                    logger.error(f"[DeepSeek] 'choices' array is empty")
-                    logger.error(f"[DeepSeek] Full response: {json.dumps(data, indent=2)}")
-                    return {}
-                
-                choice = data["choices"][0]
-                logger.debug(f"[DeepSeek] First choice: {json.dumps(choice, indent=2)[:500]}")
-                
-                # ═══════════════════════════════════════════════════════════
-                # CHECK FINISH REASON (Content Filter?)
-                # ═══════════════════════════════════════════════════════════
-                finish_reason = choice.get("finish_reason")
-                logger.info(f"[DeepSeek] Finish Reason: {finish_reason}")
-                
-                if finish_reason == "content_filter":
-                    logger.error(f"[DeepSeek] Content FILTERED by API")
-                    logger.error(f"[DeepSeek] Your prompt or system message was blocked")
-                    logger.error(f"[DeepSeek] Try simpler language or remove sensitive keywords")
-                    return {}
-                
-                if finish_reason == "length":
-                    logger.warning(f"[DeepSeek] Response truncated at max_tokens={max_tokens}")
-                    logger.warning(f"[DeepSeek] Increase max_tokens if needed")
-                
-                if finish_reason not in ("stop", "length", None):
-                    logger.warning(f"[DeepSeek] Unexpected finish_reason: {finish_reason}")
-                
-                # ═══════════════════════════════════════════════════════════
-                # EXTRACT MESSAGE
-                # ═══════════════════════════════════════════════════════════
-                
-                message = choice.get("message")
-                if not message:
-                    logger.error(f"[DeepSeek] No 'message' in choice. Keys: {list(choice.keys())}")
-                    logger.error(f"[DeepSeek] Full choice: {json.dumps(choice, indent=2)}")
-                    return {}
-                
-                text = message.get("content", "")
-                logger.info(f"[DeepSeek] Content Length: {len(text)} chars")
-                logger.info(f"[DeepSeek] Raw Content:\n{text[:1000]}")
-                
-                if not text:
-                    logger.error(f"[DeepSeek] Message content is EMPTY")
-                    logger.error(f"[DeepSeek] Full message: {json.dumps(message, indent=2)}")
-                    return {}
-                
-                text = text.strip()
-                
-                # ═══════════════════════════════════════════════════════════
-                # PARSE JSON FROM RESPONSE
-                # ═══════════════════════════════════════════════════════════
-                
-                # Remove markdown code blocks
-                text = re.sub(r'```json\n?|\n?```', '', text).strip()
-                logger.debug(f"[DeepSeek] After markdown cleanup: {text[:500]}")
-                
-                if not text:
-                    logger.error(f"[DeepSeek] Content empty after markdown cleanup")
-                    return {}
-                
-                try:
-                    result = json.loads(text)
-                    logger.info(f"[DeepSeek] ✓ Successfully parsed JSON")
-                    return result
-                except json.JSONDecodeError as je:
-                    logger.error(f"[DeepSeek] JSON Parse Error: {je}")
-                    logger.error(f"[DeepSeek] Failed text: {text[:500]}")
+                    choice = data["choices"][0]
+                    message = choice.get("message", {})
                     
-                    # Try regex extraction
-                    m = re.search(r'\{[\s\S]*\}', text)
-                    if m:
+                    content = message.get("content") or ""
+                    reasoning_content = message.get("reasoning_content") or ""
+                    
+                    # Core fix: DeepSeek Empty Content Bug
+                    if not content and reasoning_content:
+                        content = reasoning_content
+                        
+                    clean_content = re.sub(r'```json\n?|\n?```', '', content).strip()
+                    
+                    structured = None
+                    if response_format == "json" or clean_content.startswith("{") or clean_content.startswith("["):
                         try:
-                            result = json.loads(m.group(0))
-                            logger.info(f"[DeepSeek] ✓ Recovered JSON via regex")
-                            return result
-                        except json.JSONDecodeError:
-                            logger.error(f"[DeepSeek] Regex extraction also failed")
-                    
-                    return {}
-                    
+                            structured = json.loads(clean_content)
+                        except Exception:
+                            m = re.search(r'\{[\s\S]*\}', clean_content)
+                            if m:
+                                try:
+                                    structured = json.loads(m.group(0))
+                                except:
+                                    pass
+                                    
+                    return NormalizedLLMResponse(
+                        content=clean_content,
+                        structured_output=structured,
+                        finish_reason=choice.get("finish_reason"),
+                        provider="deepseek",
+                        model=model_name,
+                        usage=data.get("usage")
+                    )
+                else:
+                    logger.error(f"DeepSeek error {r.status_code}: {r.text[:500]}")
         except Exception as e:
-            logger.error(f"[DeepSeek] Exception in generate_json: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return {}
-    
+            logger.error(f"DeepSeek generate_response exception: {e}")
+            
+        return NormalizedLLMResponse(content="", provider="deepseek", model=model_name)
+
+
 # ═══════════════════════════════════════════════════════════════
 # OLLAMA PROVIDER
 # ═══════════════════════════════════════════════════════════════
@@ -435,111 +335,63 @@ class OllamaProvider(LLMProvider):
         except:
             return False
 
-    async def generate(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                        system: Optional[str] = None, max_tokens: int = 1024,
-                        temperature: float = 0.3) -> str:
+    async def generate_response(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
+                                system: Optional[str] = None, max_tokens: int = 1024,
+                                temperature: float = 0.3, response_format: Optional[str] = None) -> NormalizedLLMResponse:
         model = self._model_for(tier)
         payload = {
-            "model": model, "prompt": prompt, "stream": False,
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system or "You are a helpful assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            "stream": False,
             "options": {"temperature": temperature, "num_predict": max_tokens}
         }
-        if system:
-            payload["system"] = system
+        if response_format == "json":
+            payload["format"] = "json"
+            
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                r = await client.post(f"{self.base_url}/api/generate", json=payload)
+                r = await client.post(f"{self.base_url}/api/chat", json=payload)
                 if r.status_code == 200:
-                    return r.json().get("response", "").strip()
-                logger.error(f"Ollama {r.status_code}: {r.text[:200]}")
-        except Exception as e:
-            logger.error(f"Ollama generate: {e}")
-        return ""
-
-    async def generate_json(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                        system: Optional[str] = None, max_tokens: int = 4096) -> Dict:
-        messages = []
-        json_system = (system or "You are a helpful assistant.") + \
-            "\n\nRespond ONLY with valid JSON. No markdown."
-        messages.append({"role": "system", "content": json_system})
-        messages.append({"role": "user", "content": prompt})
-        payload = {"model": self._model_for(tier), "messages": messages,
-                "max_tokens": max_tokens, "temperature": 0.1,
-                "stream": False, "response_format": {"type": "json_object"}}
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                r = await client.post(f"{self.base_url}/chat/completions",
-                                    headers=self._headers(), json=payload)
-                
-                # ── CRITICAL DEBUGGING ──
-                logger.info(f"DeepSeek response status: {r.status_code}")
-                response_text = r.text[:1000]  # First 1000 chars
-                logger.info(f"DeepSeek response (first 1000 chars): {response_text}")
-                
-                if r.status_code != 200:
-                    logger.error(f"DeepSeek {r.status_code}: {r.text[:200]}")
-                    return {}
-                
-                data = r.json()
-                
-                # Check if choices exist
-                if not data.get("choices"):
-                    logger.error(f"DeepSeek: No choices in response: {data}")
-                    return {}
-                
-                choice = data["choices"][0]
-                
-                # Check finish_reason
-                finish_reason = choice.get("finish_reason")
-                logger.info(f"DeepSeek finish_reason: {finish_reason}")
-                if finish_reason == "content_filter":
-                    logger.error("DeepSeek: Content filtered - response blocked")
-                    return {}
-                elif finish_reason == "length":
-                    logger.warning(f"DeepSeek: Response truncated at {max_tokens} tokens")
-                
-                # Check if message exists
-                message = choice.get("message")
-                if not message:
-                    logger.error("DeepSeek: No message in response")
-                    return {}
-                
-                text = message.get("content", "").strip()
-                logger.info(f"DeepSeek content length: {len(text)} chars")
-                
-                if not text:
-                    logger.warning("DeepSeek: Empty content returned")
-                    return {}
-                
-                # Remove markdown code blocks
-                text = re.sub(r'```json\n?|\n?```', '', text).strip()
-                
-                if not text:
-                    logger.warning("DeepSeek: Empty after stripping markdown")
-                    return {}
-                
-                try:
-                    return json.loads(text)
-                except json.JSONDecodeError as je:
-                    logger.warning(f"DeepSeek: JSON decode failed: {je}")
-                    logger.debug(f"Failed to parse: {text[:200]}")
-                    m = re.search(r'\{[\s\S]*\}', text)
-                    if m:
+                    data = r.json()
+                    message = data.get("message", {})
+                    content = message.get("content", "").strip()
+                    
+                    clean_content = re.sub(r'```json\n?|\n?```', '', content).strip()
+                    
+                    structured = None
+                    if response_format == "json" or clean_content.startswith("{") or clean_content.startswith("["):
                         try:
-                            return json.loads(m.group(0))
-                        except json.JSONDecodeError:
-                            logger.error("DeepSeek: Failed to parse extracted JSON")
-                            pass
-                    return {}
+                            structured = json.loads(clean_content)
+                        except Exception:
+                            m = re.search(r'\{[\s\S]*\}', clean_content)
+                            if m:
+                                try:
+                                    structured = json.loads(m.group(0))
+                                except:
+                                    pass
+                                    
+                    return NormalizedLLMResponse(
+                        content=clean_content,
+                        structured_output=structured,
+                        provider="ollama",
+                        model=model,
+                    )
+                else:
+                    logger.error(f"Ollama error {r.status_code}: {r.text[:200]}")
         except Exception as e:
-            logger.error(f"DeepSeek generate_json: {e}")
-            return {}
+            logger.error(f"Ollama generate_response exception: {e}")
+            
+        return NormalizedLLMResponse(content="", provider="ollama", model=model)
+
 
 class NullProvider(LLMProvider):
     """Fallback provider when nothing works"""
-    async def generate(self, *args, **kwargs) -> str:
-        return ""
-    async def generate_json(self, *args, **kwargs) -> Dict:
-        return {}
+    async def generate_response(self, *args, **kwargs) -> NormalizedLLMResponse:
+        return NormalizedLLMResponse(content="", provider="null", model="null")
+        
     async def is_available(self) -> bool:
         return False
 
@@ -565,19 +417,6 @@ class LLMClient:
 
     @classmethod
     def _create_from_config(cls) -> LLMProvider:
-        """
-        Read from .env:
-          LLM_PROVIDER=gemini|ollama|other
-
-        For Gemini:
-          GOOGLE_API_KEY=...
-          GEMINI_MODEL=gemini-2.0-flash-exp
-
-        For Ollama:
-          OLLAMA_BASE_URL=http://localhost:11434
-          OLLAMA_SMALL_MODEL=qwen3:8b
-          OLLAMA_LARGE_MODEL=qwen3:8b
-        """
         config = get_config()
         provider_name = config.get("LLM_PROVIDER", "ollama").lower()
 

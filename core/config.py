@@ -54,6 +54,46 @@ class Config:
         except ValueError:
             return default
 
+    @property
+    def token_compression(self) -> bool:
+        return self.get_bool("TOKEN_COMPRESSION", True)
+
+    @token_compression.setter
+    def token_compression(self, val: bool):
+        self.config["TOKEN_COMPRESSION"] = str(val)
+
+    @property
+    def compression_threshold(self) -> int:
+        return self.get_int("COMPRESSION_THRESHOLD", 500)
+
+    @compression_threshold.setter
+    def compression_threshold(self, val: int):
+        self.config["COMPRESSION_THRESHOLD"] = str(val)
+
+    @property
+    def dedup_enabled(self) -> bool:
+        return self.get_bool("DEDUP_ENABLED", True)
+
+    @dedup_enabled.setter
+    def dedup_enabled(self, val: bool):
+        self.config["DEDUP_ENABLED"] = str(val)
+
+    @property
+    def significance_filter_enabled(self) -> bool:
+        return self.get_bool("SIGNIFICANCE_FILTER_ENABLED", True)
+
+    @significance_filter_enabled.setter
+    def significance_filter_enabled(self, val: bool):
+        self.config["SIGNIFICANCE_FILTER_ENABLED"] = str(val)
+
+    @property
+    def error_translation_enabled(self) -> bool:
+        return self.get_bool("ERROR_TRANSLATION_ENABLED", True)
+
+    @error_translation_enabled.setter
+    def error_translation_enabled(self, val: bool):
+        self.config["ERROR_TRANSLATION_ENABLED"] = str(val)
+
     def __repr__(self):
         # Don't expose sensitive keys
         safe_keys = {k: v[:10] + "..." if len(v) > 10 else v 

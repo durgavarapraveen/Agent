@@ -323,8 +323,8 @@ class TestCentralBrain:
     """Test central brain decision-making"""
     
     def test_brain_creates_structured_decision(self):
-        from central_brain_v2 import CentralBrainV2
-        brain = CentralBrainV2("example.com")
+        from core.central_brain import CentralBrain
+        brain = CentralBrain("example.com")
         state = brain.get_execution_state()
         
         decision = brain.make_decision(state)
@@ -351,5 +351,896 @@ class TestBrainDecisionSchema:
         assert d["action"] == "complete"
 
 
+# ═══════════════════════════════════════════════════════════════
+# ARCHITECTURAL REGRESSION TESTS (REQUIREMENTS A-N)
+# ═══════════════════════════════════════════════════════════════
+
+class TestArchitecturalRegressions:
+    """Regression test suite for all P0 control-plane requirements"""
+
+    # A. DeepSeek response normalization
+    @pytest.mark.anyio
+    async def test_deepseek_normalization_empty_content_with_reasoning(self):
+        from agents.llm_client import DeepSeekProvider
+        provider = DeepSeekProvider(api_key="mock_key")
+        
+        # Mock httpx response containing reasoning_content but empty content
+        mock_response = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": '{"action": "spawn_tasks", "tasks": []}'
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "model": "deepseek-v4-flash"
+        }
+        
+        # Override the request call
+        async def mock_post(*args, **kwargs):
+            class MockResponse:
+                status_code = 200
+                def json(self): return mock_response
+                @property
+                def text(self): return json.dumps(mock_response)
+            return MockResponse()
+            
+        import httpx
+        from unittest.mock import patch
+        with patch.object(httpx.AsyncClient, 'post', side_effect=mock_post):
+            res = await provider.generate_json("test prompt")
+            assert isinstance(res, dict)
+            assert res.get("action") == "spawn_tasks"
+
+    # B. Empty LLM response
+    @pytest.mark.anyio
+    async def test_empty_llm_response_error(self):
+        from agents.llm_client import DeepSeekProvider
+        provider = DeepSeekProvider(api_key="mock_key")
+        mock_response = {
+            "choices": [{"message": {"role": "assistant", "content": ""}}],
+            "model": "deepseek-v4-flash"
+        }
+        async def mock_post(*args, **kwargs):
+            class MockResponse:
+                status_code = 200
+                def json(self): return mock_response
+                @property
+                def text(self): return json.dumps(mock_response)
+            return MockResponse()
+            
+        import httpx
+        from unittest.mock import patch
+        with patch.object(httpx.AsyncClient, 'post', side_effect=mock_post):
+            res = await provider.generate_json("test prompt")
+            assert res == {}  # Handled as empty dict, retry/failure classification triggered
+
+    # C. Invalid planner schema
+    def test_invalid_planner_schema(self):
+        from pydantic import ValidationError
+        # Missing required field action
+        with pytest.raises(ValidationError):
+            BrainDecision(thought="test")
+
+    # D. Valid planner decision
+    def test_valid_planner_decision_normalization(self):
+        # Planner outputs depends_on / max_retries
+        raw_decision = {
+            "action": "spawn_tasks",
+            "tasks": [
+                {
+                    "objective": "scan",
+                    "capability": "port_scanning",
+                    "inputs": {"target": "example.com"},
+                    "depends_on": ["dep1"],
+                    "max_retries": 5
+                }
+            ]
+        }
+        decision = BrainDecision(**raw_decision)
+        assert decision.action == BrainDecisionAction.SPAWN_AGENTS
+        assert len(decision.tasks) == 1
+        assert decision.tasks[0].dependencies == ["dep1"]
+        assert decision.tasks[0].max_steps == 5
+
+    # E. Task dependency (Task B waits on Task A)
+    def test_task_dependency(self):
+        tm = TaskManager()
+        scheduler = Scheduler(tm)
+        spec_a = TaskSpec(objective="A", capability=CapabilityType.DNS_ENUMERATION)
+        spec_b = TaskSpec(objective="B", capability=CapabilityType.PORT_SCANNING, dependencies=[spec_a.task_id])
+        
+        scheduler.schedule_tasks([spec_a, spec_b])
+        
+        task_b = tm.get_task(spec_b.task_id)
+        assert task_b.status == TaskStatus.WAITING_DEPENDENCY
+        
+        # Complete A
+        tm.complete_task(spec_a.task_id)
+        scheduler.process_dependencies()
+        assert task_b.status == TaskStatus.QUEUED
+
+    # F. Dependency failure (B blocks when A fails)
+    def test_dependency_failure(self):
+        tm = TaskManager()
+        scheduler = Scheduler(tm)
+        spec_a = TaskSpec(objective="A", capability=CapabilityType.DNS_ENUMERATION)
+        spec_b = TaskSpec(objective="B", capability=CapabilityType.PORT_SCANNING, dependencies=[spec_a.task_id])
+        
+        scheduler.schedule_tasks([spec_a, spec_b])
+        
+        # Fail A
+        tm.fail_task(spec_a.task_id)
+        scheduler.process_dependencies()
+        
+        task_b = tm.get_task(spec_b.task_id)
+        assert task_b.status == TaskStatus.BLOCKED
+
+    # G. Circular dependency
+    def test_circular_dependency(self):
+        tm = TaskManager()
+        scheduler = Scheduler(tm)
+        spec_a = TaskSpec(objective="A", capability=CapabilityType.DNS_ENUMERATION)
+        spec_b = TaskSpec(objective="B", capability=CapabilityType.PORT_SCANNING, dependencies=[spec_a.task_id])
+        # Force circle
+        spec_a.dependencies.append(spec_b.task_id)
+        
+        with pytest.raises(ValueError, match="Circular dependency"):
+            scheduler.schedule_tasks([spec_a, spec_b])
+
+    # H. Duplicate task
+    def test_duplicate_task(self):
+        tm = TaskManager()
+        spec1 = TaskSpec(objective="scan1", capability=CapabilityType.DNS_ENUMERATION, inputs={"target": "example.com"})
+        spec2 = TaskSpec(objective="scan2", capability=CapabilityType.DNS_ENUMERATION, inputs={"target": "example.com"})
+        
+        t1, is_new1 = tm.get_or_create_task(spec1)
+        t2, is_new2 = tm.get_or_create_task(spec2)
+        
+        assert is_new1 is True
+        assert is_new2 is False
+        assert t1.spec.task_id == t2.spec.task_id
+
+    # I. Different task parameters
+    def test_different_task_parameters(self):
+        from core.authorization import TargetScopeValidator
+        TargetScopeValidator.set(TargetScopeValidator(["example.com", "speshway.com"]))
+        
+        tm = TaskManager()
+        spec1 = TaskSpec(objective="scan1", capability=CapabilityType.DNS_ENUMERATION, inputs={"target": "example.com"})
+        spec2 = TaskSpec(objective="scan2", capability=CapabilityType.DNS_ENUMERATION, inputs={"target": "speshway.com"})
+        
+        t1, is_new1 = tm.get_or_create_task(spec1)
+        t2, is_new2 = tm.get_or_create_task(spec2)
+        
+        assert is_new1 is True
+        assert is_new2 is True
+        assert t1.spec.task_id != t2.spec.task_id
+
+    # J. Invalid tool invocation
+    @pytest.mark.anyio
+    async def test_invalid_tool_invocation(self):
+        from core.tool_validation import ToolInvocationValidator, ToolValidationError
+        registry = CapabilityRegistry()
+        validator = ToolInvocationValidator(registry)
+        
+        # Test non-registered tool
+        with pytest.raises(ToolValidationError):
+            validator.validate("unknown_tool", {})
+            
+        # Test out of bounds timeout
+        with pytest.raises(ToolValidationError):
+            validator.validate("nmap", {"timeout": 99999})
+
+    # K. Unauthorized target
+    def test_unauthorized_target(self):
+        from core.authorization import TargetScopeValidator
+        from core.exceptions import AuthorizationError
+        
+        validator = TargetScopeValidator(["example.com"])
+        # In-scope
+        validator.validate("example.com")
+        validator.validate("sub.example.com")
+        
+        # Out-scope
+        with pytest.raises(AuthorizationError):
+            validator.validate("speshway.com")
+
+    # L. Valid tool invocation
+    @pytest.mark.anyio
+    async def test_valid_tool_invocation(self):
+        from core.tool_validation import ToolInvocationValidator
+        registry = CapabilityRegistry()
+        validator = ToolInvocationValidator(registry)
+        
+        # Valid nmap call to authorized target (configured as example.com)
+        from core.authorization import TargetScopeValidator
+        TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
+        
+        validator.validate("nmap", {"target": "example.com", "timeout": 60})
+
+    # M. Invalid state transition
+    def test_invalid_state_transition(self):
+        spec = TaskSpec(objective="A", capability=CapabilityType.DNS_ENUMERATION)
+        task = Task(spec)
+        with pytest.raises(TaskStateTransitionError):
+            task.transition_to(TaskStatus.COMPLETED)
+
+    # N. No-progress loop
+    def test_no_progress_loop(self):
+        from core.progress import ProgressEvaluator, ProgressSnapshot
+        evaluator = ProgressEvaluator()
+        
+        snap = ProgressSnapshot(
+            completed_tasks_count=1,
+            failed_tasks_count=0,
+            blocked_tasks_count=0,
+            knowledge_count=5,
+            evidence_count=2,
+            findings_count=1,
+            relationships_count=1
+        )
+        
+        assert evaluator.evaluate_progress(snap) is True
+        
+        # Loop iteration 2: state has not changed
+        assert evaluator.evaluate_progress(snap) is False
+        assert evaluator.no_progress_streak == 1
+        
+        # Loop iteration 3: state still hasn't changed
+        assert evaluator.evaluate_progress(snap) is False
+        assert evaluator.no_progress_streak == 2
+
+
+class TestP0Reliability:
+    """Explicit tests for P0-1 through P0-5 reliability refactor requirements"""
+
+    # TEST 1: Planner cannot return raw command.
+    def test_1_planner_cannot_return_raw_command(self):
+        from core.tool_adapter import ToolAdapter, ToolInvocation
+        from core.exceptions import ToolValidationError
+
+        # Direct bash command attempt is forbidden
+        inv = ToolInvocation(tool="bash", operation="exec", params={"command": "rm -rf /"})
+        with pytest.raises(ToolValidationError) as exc:
+            ToolAdapter.adapt(inv)
+        assert "forbidden" in str(exc.value).lower()
+
+    # TEST 2: Structured ToolInvocation works.
+    def test_2_structured_tool_invocation_works(self):
+        from core.tool_adapter import ToolAdapter, ToolInvocation
+
+        inv = ToolInvocation(
+            tool="nmap",
+            operation="port_scan",
+            params={
+                "target": "example.com",
+                "ports": "22,80,443",
+                "service_detection": True
+            }
+        )
+        adapted = ToolAdapter.adapt(inv)
+        assert "nmap" in adapted["command"]
+        assert "-sV" in adapted["command"]
+        assert "-p 22,80,443" in adapted["command"]
+        assert "example.com" in adapted["command"]
+
+    # TEST 3: Generic bash cannot be selected by the LLM.
+    def test_3_generic_bash_cannot_be_selected(self):
+        from core.tool_registry import ToolRegistry
+        from core.tool_validation import ToolInvocationValidator, ToolValidationError
+
+        reg = ToolRegistry()
+        # bash and sh must not be present in ToolRegistry
+        assert "bash" not in reg.tools
+        assert "sh" not in reg.tools
+
+        validator = ToolInvocationValidator(reg)
+        with pytest.raises(ToolValidationError):
+            validator.validate("bash", {"command": "echo test"})
+
+    # TEST 4: Canonical PlannerDecision is enforced.
+    def test_4_canonical_planner_decision_enforced(self):
+        from core.normalizer import PlannerResponseNormalizer
+        from core.schemas import BrainDecisionAction, BrainDecision
+
+        raw_llm_json = {
+            "action": "spawn_tasks",
+            "thinking": "Initial recon",
+            "tasks": [
+                {
+                    "objective": "Port scan target",
+                    "capability": "port_scanning",
+                    "inputs": {"target": "example.com"}
+                }
+            ]
+        }
+        decision = PlannerResponseNormalizer.normalize(raw_llm_json)
+        assert isinstance(decision, BrainDecision)
+        assert decision.action == BrainDecisionAction.SPAWN_AGENTS
+        assert len(decision.tasks) == 1
+        assert decision.tasks[0].capability == CapabilityType.PORT_SCANNING
+
+    # TEST 5: "agents" and "agent_specs" do not leak into core code.
+    def test_5_agents_and_agent_specs_do_not_leak(self):
+        from core.normalizer import PlannerResponseNormalizer
+
+        raw_drift_1 = {
+            "action": "spawn_agents",
+            "agent_specs": [
+                {"objective": "Find subdomains", "capability": "dns_enumeration", "target": "example.com"}
+            ]
+        }
+        raw_drift_2 = {
+            "action": "spawn_agents",
+            "agents": [
+                {"objective": "Analyze TLS", "capability": "tls_analysis", "target": "example.com"}
+            ]
+        }
+        dec1 = PlannerResponseNormalizer.normalize(raw_drift_1)
+        dec2 = PlannerResponseNormalizer.normalize(raw_drift_2)
+        assert len(dec1.tasks) == 1
+        assert dec1.tasks[0].capability == CapabilityType.DNS_ENUMERATION
+        assert len(dec2.tasks) == 1
+        assert dec2.tasks[0].capability == CapabilityType.TLS_ANALYSIS
+
+    # TEST 6: LLM cannot modify TaskStatus.
+    def test_6_llm_cannot_modify_task_status(self):
+        spec = TaskSpec(objective="test task", capability=CapabilityType.PORT_SCANNING)
+        task = Task(spec)
+        assert task.status == TaskStatus.CREATED
+
+        # Directly setting invalid transitions fails
+        with pytest.raises(TaskStateTransitionError):
+            task.transition_to(TaskStatus.COMPLETED)
+
+    # TEST 7: Task dependency prevents premature execution.
+    def test_7_task_dependency_prevents_premature_execution(self):
+        from orchestrator.scheduler import Scheduler
+        from core.authorization import TargetScopeValidator
+        TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
+
+        tm = TaskManager()
+        sched = Scheduler(tm)
+
+        t1 = tm.create_task(TaskSpec(task_id="t1", objective="Recon", capability=CapabilityType.DNS_ENUMERATION))
+        t2 = tm.create_task(TaskSpec(task_id="t2", objective="Scan", capability=CapabilityType.PORT_SCANNING, dependencies=["t1"]))
+
+        sched.schedule_tasks([t1.spec, t2.spec])
+        runnable = sched.get_next_runnable_tasks()
+        runnable_ids = [t.spec.task_id for t in runnable]
+
+        assert "t1" in runnable_ids
+        assert "t2" not in runnable_ids  # t2 blocked until t1 completes
+
+        # Complete t1
+        tm.start_task("t1")
+        tm.complete_task("t1")
+        sched.process_dependencies()
+
+        runnable_after = sched.get_next_runnable_tasks()
+        runnable_after_ids = [t.spec.task_id for t in runnable_after]
+        assert "t2" in runnable_after_ids
+
+    # TEST 8: Identical semantic tasks are deduplicated.
+    def test_8_identical_semantic_tasks_deduplicated(self):
+        from core.authorization import TargetScopeValidator
+        TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
+
+        tm = TaskManager()
+        spec1 = TaskSpec(
+            objective="Scan ports on example.com",
+            capability=CapabilityType.PORT_SCANNING,
+            inputs={"target": "example.com", "ports": "80,443"}
+        )
+        spec2 = TaskSpec(
+            objective="Perform port scanning on example.com",
+            capability=CapabilityType.PORT_SCANNING,
+            inputs={"target": "example.com", "ports": "80,443"}
+        )
+        t1, is_new1 = tm.get_or_create_task(spec1)
+        t2, is_new2 = tm.get_or_create_task(spec2)
+
+        assert is_new1 is True
+        assert is_new2 is False
+        assert t1.spec.task_id == t2.spec.task_id
+
+    # TEST 9: Different parameters create different tasks.
+    def test_9_different_parameters_create_different_tasks(self):
+        from core.authorization import TargetScopeValidator
+        TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
+
+        tm = TaskManager()
+        spec_top100 = TaskSpec(
+            objective="Scan top 100 ports",
+            capability=CapabilityType.PORT_SCANNING,
+            inputs={"target": "example.com", "top_ports": 100}
+        )
+        spec_all_ports = TaskSpec(
+            objective="Scan all 65535 ports",
+            capability=CapabilityType.PORT_SCANNING,
+            inputs={"target": "example.com", "all_ports": True}
+        )
+        t1, is_new1 = tm.get_or_create_task(spec_top100)
+        t2, is_new2 = tm.get_or_create_task(spec_all_ports)
+
+        assert is_new1 is True
+        assert is_new2 is True
+        assert t1.spec.task_id != t2.spec.task_id
+
+    # TEST 10: Completed task is not executed again.
+    def test_10_completed_task_not_executed_again(self):
+        from core.authorization import TargetScopeValidator
+        TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
+
+        tm = TaskManager()
+        spec = TaskSpec(
+            objective="Enumerate subdomains",
+            capability=CapabilityType.DNS_ENUMERATION,
+            inputs={"target": "example.com"}
+        )
+        task, is_new = tm.get_or_create_task(spec)
+        tm.start_task(task.spec.task_id)
+        tm.complete_task(task.spec.task_id, {"subdomains": ["www.example.com"]})
+
+        # Proposing task again
+        task_again, is_new_again = tm.get_or_create_task(spec)
+        assert is_new_again is False
+        assert task_again.status == TaskStatus.COMPLETED
+
+    # TEST 11: Successful task completes through SuccessCriterion.
+    def test_11_successful_task_completes_through_success_criterion(self):
+        from core.task_evaluator import TaskCompletionEvaluator, CompletionStatus
+
+        spec = TaskSpec(
+            objective="Port scan example.com",
+            capability=CapabilityType.PORT_SCANNING,
+            inputs={"target": "example.com"},
+            success_criteria=[
+                SuccessCriterion(criterion_type=SuccessCriterionType.TOOL_SUCCESS)
+            ]
+        )
+        tool_results = [{"success": True, "output": "22/tcp open, 80/tcp open", "data": {"ports": [22, 80]}}]
+        status, reason = TaskCompletionEvaluator.evaluate(spec, tool_results)
+        assert status == CompletionStatus.SUCCEEDED
+
+    # TEST 12: max_steps does NOT mark a task successful.
+    @pytest.mark.anyio
+    async def test_12_max_steps_does_not_mark_task_successful(self):
+        from core.dynamic_agent import DynamicAgent
+        from core.tool_registry import ToolRegistry
+        from core.shared_context import SharedContext
+        from unittest.mock import AsyncMock, patch
+
+        ctx = SharedContext("example.com")
+        tools = ToolRegistry()
+        agent = DynamicAgent(
+            agent_id="AGENT-TEST",
+            objective="Scan target",
+            tool_registry=tools,
+            shared_context=ctx,
+            agent_context="test",
+            allowed_tools=["nmap"],
+            max_steps=2
+        )
+
+        # Mock tool execution failure
+        with patch.object(tools, "execute", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = {"success": False, "error": "Execution error", "returncode": 1}
+            res = await agent.execute()
+
+            assert res["status"] == "failed"
+
+    # TEST 13: A successful deterministic task does not require another LLM planning call.
+    def test_13_successful_deterministic_task_no_extra_llm_call(self):
+        from core.task_evaluator import TaskCompletionEvaluator, CompletionStatus
+
+        spec = TaskSpec(
+            objective="Check SSL Certificate",
+            capability=CapabilityType.TLS_ANALYSIS,
+            inputs={"target": "example.com"}
+        )
+        tool_result = {"success": True, "output": "Certificate valid until 2027", "data": {"valid": True}}
+        status, _ = TaskCompletionEvaluator.evaluate(spec, [tool_result])
+        assert status == CompletionStatus.SUCCEEDED
+
+    # TEST 14: Invalid tool arguments fail BEFORE reaching the shell.
+    def test_14_invalid_tool_arguments_fail_before_shell(self):
+        from core.tool_validation import ToolInvocationValidator, ToolValidationError
+        from core.tool_registry import ToolRegistry
+
+        reg = ToolRegistry()
+        validator = ToolInvocationValidator(reg)
+
+        # Timeout > 1800 must fail immediately before any subprocess or shell execution
+        with pytest.raises(ToolValidationError):
+            validator.validate("nmap", {"target": "example.com", "timeout": 99999})
+
+        # Missing target for nmap in ToolAdapter must raise ToolValidationError
+        from core.tool_adapter import ToolAdapter, ToolInvocation
+        with pytest.raises(ToolValidationError):
+            ToolAdapter.adapt(ToolInvocation(tool="nmap", operation="port_scan", params={}))
+
+
+class TestPhaseArchitectureRefinements:
+    """Explicit tests for Follow-up Architecture Refinements (TEST 1 to TEST 10)"""
+
+    # TEST 1: Planner cannot request specific tools. Normalized into capability.
+    def test_1_planner_cannot_request_specific_tools(self):
+        from core.normalizer import PlannerResponseNormalizer
+        from core.schemas import CapabilityType
+
+        raw = {
+            "action": "spawn_tasks",
+            "tasks": [
+                {
+                    "objective": "Scan target endpoints",
+                    "tools": ["nmap", "gobuster"],
+                    "inputs": {"target": "example.com", "tools": ["nmap", "gobuster"]}
+                }
+            ]
+        }
+        dec = PlannerResponseNormalizer.normalize(raw)
+        task = dec.tasks[0]
+        # Must be normalized into capability without raw tool commanding in inputs
+        assert task.capability in (CapabilityType.PORT_SCANNING, CapabilityType.ENDPOINT_DISCOVERY)
+        assert "tools" not in task.inputs
+
+    # TEST 2: EndpointDiscoveryAgent executes without LLM calls.
+    @pytest.mark.anyio
+    async def test_2_endpoint_discovery_executes_without_llm_calls(self):
+        from core.capability_worker import CapabilityWorker
+        from core.schemas import CapabilityType
+        from core.tool_registry import ToolRegistry
+        from core.shared_context import SharedContext
+        from unittest.mock import AsyncMock, patch
+
+        ctx = SharedContext("example.com")
+        tools = ToolRegistry()
+        
+        worker = CapabilityWorker("AGENT-EP", tools, ctx)
+        
+        # Mock tools.execute to return endpoints
+        with patch.object(tools, "execute", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = {
+                "success": True,
+                "output": "https://example.com/api/v1/users\nhttps://example.com/login\n",
+                "returncode": 0,
+                "data": {"endpoints": ["/api/v1/users", "/login"]}
+            }
+            
+            res = await worker.execute_capability(
+                capability=CapabilityType.ENDPOINT_DISCOVERY,
+                target="https://example.com",
+                task_id="task-ep-1",
+                objective="Discover application endpoints"
+            )
+            
+            assert res.status == "completed"
+            assert len(res.observations) > 0
+            assert any("login" in ep for ep in res.observations[0]["data"]["endpoints"])
+
+    # TEST 3: Agent does not decide retry (RetryPolicy handles deterministically).
+    def test_3_agent_does_not_decide_retry(self):
+        from core.retry_policy import RetryPolicy
+        from core.schemas import RetryDecisionType, ToolExecutionStatus
+
+        # Timeout should retry
+        res_timeout = {"status": "failed", "error": "Connection timed out", "returncode": 124}
+        dec_timeout = RetryPolicy.evaluate("httpx", res_timeout, attempt=1, max_retries=3)
+        assert dec_timeout.decision == RetryDecisionType.RETRY
+
+        # Invalid argument should not retry
+        res_invalid = {"status": "failed", "error": "Invalid argument: --bad-flag", "returncode": 2}
+        dec_invalid = RetryPolicy.evaluate("httpx", res_invalid, attempt=1, max_retries=3)
+        assert dec_invalid.decision == RetryDecisionType.NO_RETRY
+
+        # Tool missing should use alternative strategy
+        res_missing = {"status": "failed", "error": "command not found: subfinder", "returncode": 127}
+        dec_missing = RetryPolicy.evaluate("subfinder", res_missing, attempt=1, max_retries=3)
+        assert dec_missing.decision == RetryDecisionType.ALTERNATIVE_STRATEGY
+        assert dec_missing.alternative_tool == "amass"
+
+    # TEST 4: Scheduler blocks dependent task (A depends on B, B incomplete: A cannot start).
+    def test_4_scheduler_blocks_dependent_task(self):
+        from core.task_manager import TaskManager
+        from orchestrator.scheduler import Scheduler
+        from core.schemas import TaskSpec, CapabilityType
+        from core.authorization import TargetScopeValidator
+        TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
+
+        tm = TaskManager()
+        sched = Scheduler(tm)
+
+        task_b = TaskSpec(task_id="task_B", objective="Subdomain discovery", capability=CapabilityType.DNS_ENUMERATION)
+        task_a = TaskSpec(task_id="task_A", objective="Endpoint discovery", capability=CapabilityType.ENDPOINT_DISCOVERY, dependencies=["task_B"])
+
+        sched.schedule_tasks([task_b, task_a])
+        runnable = sched.get_next_runnable_tasks()
+        runnable_ids = [t.spec.task_id for t in runnable]
+
+        assert "task_B" in runnable_ids
+        assert "task_A" not in runnable_ids
+
+    # TEST 5: After B succeeds: A becomes READY.
+    def test_5_after_b_succeeds_a_becomes_ready(self):
+        from core.task_manager import TaskManager
+        from orchestrator.scheduler import Scheduler
+        from core.schemas import TaskSpec, CapabilityType
+        from core.authorization import TargetScopeValidator
+        TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
+
+        tm = TaskManager()
+        sched = Scheduler(tm)
+
+        task_b = TaskSpec(task_id="task_B", objective="Subdomain discovery", capability=CapabilityType.DNS_ENUMERATION)
+        task_a = TaskSpec(task_id="task_A", objective="Endpoint discovery", capability=CapabilityType.ENDPOINT_DISCOVERY, dependencies=["task_B"])
+
+        sched.schedule_tasks([task_b, task_a])
+
+        # Complete B
+        tm.start_task("task_B")
+        tm.complete_task("task_B", {"subdomains": ["api.example.com"]})
+
+        # Process dependencies
+        sched.process_dependencies()
+
+        runnable = sched.get_next_runnable_tasks()
+        runnable_ids = [t.spec.task_id for t in runnable]
+        assert "task_A" in runnable_ids
+
+    # TEST 6: Duplicate semantic tasks are not created.
+    def test_6_duplicate_semantic_tasks_are_not_created(self):
+        from core.task_manager import TaskManager
+        from core.schemas import TaskSpec, CapabilityType
+        from core.authorization import TargetScopeValidator
+        TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
+
+        tm = TaskManager()
+        spec1 = TaskSpec(objective="Scan ports on example.com", capability=CapabilityType.PORT_SCANNING, inputs={"target": "example.com"})
+        spec2 = TaskSpec(objective="Perform port scanning on example.com", capability=CapabilityType.PORT_SCANNING, inputs={"target": "example.com"})
+
+        t1, is_new1 = tm.get_or_create_task(spec1)
+        t2, is_new2 = tm.get_or_create_task(spec2)
+
+        assert is_new1 is True
+        assert is_new2 is False
+        assert t1.spec.task_id == t2.spec.task_id
+
+    # TEST 7: Partial tool result is accepted (Tool returns data + warning -> PARTIAL_SUCCESS).
+    def test_7_partial_tool_result_accepted(self):
+        from core.capability_worker import CapabilityWorker
+        from core.schemas import ToolExecutionStatus
+        from core.tool_registry import ToolRegistry
+
+        worker = CapabilityWorker("AGENT-P", ToolRegistry(), None)
+        raw_res = {
+            "success": False,
+            "returncode": 1,
+            "output": "https://example.com/secret_panel\nhttps://example.com/api",
+            "error": "Warning: Deprecated dependency in python urllib",
+            "data": {}
+        }
+        res = worker._process_raw_tool_result("paramspider", "endpoint_discovery", "example.com", raw_res)
+        assert res.status == ToolExecutionStatus.PARTIAL_SUCCESS
+        assert len(res.data.get("endpoints", [])) > 0
+        assert len(res.warnings) > 0
+
+    # TEST 8: Task completion does not require LLM.
+    def test_8_task_completion_does_not_require_llm(self):
+        from core.task_evaluator import TaskCompletionEvaluator, CompletionStatus
+        from core.schemas import TaskSpec, CapabilityType
+
+        spec = TaskSpec(
+            objective="Port Scan",
+            capability=CapabilityType.PORT_SCANNING,
+            inputs={"target": "example.com"}
+        )
+        tool_results = [{
+            "status": "PARTIAL_SUCCESS",
+            "data": {"ports": [{"port": 80, "state": "open"}, {"port": 443, "state": "open"}]},
+            "warnings": ["Slow network"]
+        }]
+        status, reason = TaskCompletionEvaluator.evaluate(spec, tool_results)
+        assert status == CompletionStatus.SUCCEEDED
+
+    # TEST 9: Agent cannot execute arbitrary shell commands.
+    def test_9_agent_cannot_execute_arbitrary_shell_commands(self):
+        from core.tool_adapter import ToolAdapter, ToolInvocation
+        from core.exceptions import ToolValidationError
+
+        inv = ToolInvocation(tool="bash", operation="exec", params={"command": "whoami"})
+        with pytest.raises(ToolValidationError) as exc:
+            ToolAdapter.adapt(inv)
+        assert "forbidden" in str(exc.value).lower()
+
+    # TEST 10: Existing authorization tests continue passing.
+    def test_10_existing_authorization_tests_continue_passing(self):
+        from core.authorization import TargetScopeValidator
+        from core.exceptions import AuthorizationError
+
+        val = TargetScopeValidator(["example.com", "*.speshway.com"])
+        val.validate("example.com")
+        val.validate("app.speshway.com")
+
+        with pytest.raises(AuthorizationError):
+            val.validate("attacker-domain.org")
+
+
+class TestDynamicToolIntelligencePlatform:
+    """Explicit tests for Dynamic Agent + Tool Intelligence Platform (TEST 1 to TEST 8)"""
+
+    # TEST 1: Add new tool without code changes. Register only, Agent discovers it.
+    def test_1_add_new_tool_without_code_changes(self):
+        from core.tool_knowledge_store import ToolKnowledgeStore
+        from core.tool_intelligence import ToolProfile
+        from core.capability_resolver import CapabilityResolver
+
+        store = ToolKnowledgeStore()
+        new_tool = ToolProfile(
+            name="chaos",
+            description="ProjectDiscovery Chaos DNS recon",
+            capabilities=["dns_enumeration"],
+            trust_score=0.98,
+            performance_score=0.95,
+            source="plugin"
+        )
+        store.register_tool(new_tool)
+
+        resolver = CapabilityResolver(store)
+        resolved = resolver.resolve_tools("dns_enumeration")
+        tool_names = [t.name for t in resolved]
+        assert "chaos" in tool_names
+
+    # TEST 2: Unknown tool from LLM is rejected.
+    def test_2_unknown_tool_from_llm_is_rejected(self):
+        from core.execution_planner import ExecutionPlanner
+        from core.tool_intelligence import TargetContext
+        from core.schemas import TaskSpec, CapabilityType
+        from core.exceptions import ToolValidationError
+        from core.authorization import TargetScopeValidator
+        TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
+
+        planner = ExecutionPlanner()
+        task = TaskSpec(objective="Find endpoints", capability=CapabilityType.ENDPOINT_DISCOVERY)
+        target_ctx = TargetContext.from_target("https://example.com")
+        strategy_steps = [{"tool": "hacker_unknown_tool_xyz", "params": {}}]
+
+        with pytest.raises(ToolValidationError) as exc:
+            planner.plan_execution(strategy_steps, task, target_ctx, allowed_profiles=[])
+        assert "not registered" in str(exc.value).lower()
+
+    # TEST 3: LLM cannot bypass ToolRegistry / ExecutionPlanner.
+    def test_3_llm_cannot_bypass_tool_registry(self):
+        from core.execution_planner import ExecutionPlanner
+        from core.tool_intelligence import TargetContext
+        from core.schemas import TaskSpec, CapabilityType
+        from core.exceptions import ToolValidationError
+
+        planner = ExecutionPlanner()
+        task = TaskSpec(objective="Run bash command", capability=CapabilityType.ENDPOINT_DISCOVERY)
+        target_ctx = TargetContext.from_target("https://example.com")
+        strategy_steps = [{"tool": "bash", "params": {"command": "cat /etc/passwd"}}]
+
+        with pytest.raises(ToolValidationError) as exc:
+            planner.plan_execution(strategy_steps, task, target_ctx, allowed_profiles=[])
+        assert "forbidden" in str(exc.value).lower()
+
+    # TEST 4: Tool discovery does not execute immediately.
+    def test_4_tool_discovery_does_not_execute_immediately(self):
+        from core.tool_discovery import ToolDiscoveryAgent, ToolCandidate
+        from core.tool_knowledge_store import ToolKnowledgeStore
+        from unittest.mock import patch
+
+        store = ToolKnowledgeStore()
+        agent = ToolDiscoveryAgent(store=store)
+
+        with patch("subprocess.Popen") as mock_popen, patch("subprocess.run") as mock_run:
+            profiles = agent.run_discovery()
+            # Discovery must not execute any external subprocesses on targets
+            assert mock_popen.call_count == 0
+            assert mock_run.call_count == 0
+            assert len(profiles) > 0
+
+    # TEST 5: Bad tool source is rejected.
+    def test_5_bad_tool_source_is_rejected(self):
+        from core.tool_discovery import ToolValidationPipeline, ToolCandidate
+
+        candidate_bad_source = ToolCandidate(
+            name="evil_tool",
+            source="untrusted_anonymous_p2p",
+            capabilities=["endpoint_discovery"],
+            trust_score=0.1
+        )
+        ok, reason, profile = ToolValidationPipeline.validate_candidate(candidate_bad_source)
+        assert ok is False
+        assert "untrusted source" in reason.lower()
+
+        candidate_malicious_name = ToolCandidate(
+            name="tool; rm -rf /",
+            source="local",
+            capabilities=["dns_enumeration"]
+        )
+        ok2, reason2, profile2 = ToolValidationPipeline.validate_candidate(candidate_malicious_name)
+        assert ok2 is False
+        assert "malicious syntax" in reason2.lower()
+
+    # TEST 6: Tool ranking improves after successful execution.
+    def test_6_tool_ranking_improves_after_successful_execution(self):
+        from core.tool_intelligence import ToolProfile
+        from core.tool_ranking import ToolRankingEngine
+
+        tool_a = ToolProfile(name="toolA", trust_score=0.80, performance_score=0.80, success_rate=0.80)
+        tool_b = ToolProfile(name="toolB", trust_score=0.85, performance_score=0.85, success_rate=0.85)
+
+        # Initially B ranks above A
+        ranked_before = ToolRankingEngine.rank_tools([tool_a, tool_b])
+        assert ranked_before[0].name == "toolB"
+
+        # Tool A succeeds multiple times with findings
+        for _ in range(5):
+            tool_a.update_performance(success=True, duration=1.0, findings_count=50)
+
+        ranked_after = ToolRankingEngine.rank_tools([tool_a, tool_b])
+        assert ranked_after[0].name == "toolA"
+        assert tool_a.performance_score > 0.85
+
+    # TEST 7: DynamicAgent works without hardcoded tools.
+    @pytest.mark.anyio
+    async def test_7_dynamic_agent_works_without_hardcoded_tools(self):
+        from core.dynamic_agent import ControlledDynamicAgent
+        from core.tool_registry import ToolRegistry
+        from core.shared_context import SharedContext
+        from core.authorization import TargetScopeValidator
+        from unittest.mock import AsyncMock, patch
+
+        TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
+        ctx = SharedContext("https://example.com")
+        tools = ToolRegistry()
+        agent = ControlledDynamicAgent(
+            agent_id="DYNAMIC-AGENT-01",
+            objective="Discover endpoints on example.com",
+            tool_registry=tools,
+            shared_context=ctx
+        )
+
+        with patch.object(tools, "execute", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = {
+                "success": True,
+                "output": "https://example.com/api/v1\nhttps://example.com/dashboard",
+                "returncode": 0,
+                "data": {"endpoints": ["https://example.com/api/v1", "https://example.com/dashboard"]}
+            }
+            res = await agent.execute()
+            assert res["status"] == "success"
+            assert mock_exec.call_count >= 1
+
+    # TEST 8: Existing TaskManager tests continue passing.
+    def test_8_existing_task_manager_continues_passing(self):
+        from core.task_manager import TaskManager
+        from core.schemas import TaskSpec, CapabilityType, TaskStatus
+        from core.authorization import TargetScopeValidator
+        TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
+
+        tm = TaskManager()
+        spec = TaskSpec(objective="Perform port scanning", capability=CapabilityType.PORT_SCANNING, inputs={"target": "example.com"})
+        task, is_new = tm.get_or_create_task(spec)
+        assert is_new is True
+        assert task.status == TaskStatus.CREATED
+
+        tm.start_task(task.spec.task_id)
+        assert task.status == TaskStatus.RUNNING
+
+        tm.complete_task(task.spec.task_id, {"ports": [80, 443]})
+        assert task.status == TaskStatus.COMPLETED
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+
+

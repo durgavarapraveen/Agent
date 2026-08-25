@@ -3,9 +3,9 @@ Strict Pydantic schemas for all framework communication.
 Single source of truth for schema definitions.
 """
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator, root_validator
 from datetime import datetime
-from typing import Optional, List, Dict, Any, Literal
+from typing import Optional, List, Dict, Any, Literal, Union
 from enum import Enum
 from uuid import uuid4
 
@@ -48,15 +48,39 @@ class ErrorType(str, Enum):
     PARSE_ERROR = "PARSE_ERROR"
     POLICY_REJECTION = "POLICY_REJECTION"
     UNKNOWN = "UNKNOWN"
+    
+    # New Failure Classifications
+    LLM_EMPTY_RESPONSE = "LLM_EMPTY_RESPONSE"
+    LLM_INVALID_JSON = "LLM_INVALID_JSON"
+    LLM_SCHEMA_VALIDATION_ERROR = "LLM_SCHEMA_VALIDATION_ERROR"
+    LLM_PROVIDER_ERROR = "LLM_PROVIDER_ERROR"
+    
+    TOOL_NOT_FOUND = "TOOL_NOT_FOUND"
+    TOOL_INVALID_ARGUMENT = "TOOL_INVALID_ARGUMENT"
+    TOOL_TIMEOUT = "TOOL_TIMEOUT"
+    TOOL_RUNTIME_ERROR = "TOOL_RUNTIME_ERROR"
+    
+    AUTHORIZATION_FAILURE = "AUTHORIZATION_FAILURE"
+    TARGET_UNREACHABLE = "TARGET_UNREACHABLE"
+    
+    DEPENDENCY_FAILURE = "DEPENDENCY_FAILURE"
+    TASK_TIMEOUT = "TASK_TIMEOUT"
+    TASK_CANCELLED = "TASK_CANCELLED"
+    
+    NO_PROGRESS = "NO_PROGRESS"
 
 
 class BrainDecisionAction(str, Enum):
     SPAWN_AGENTS = "spawn_agents"
+    SPAWN_TASKS = "spawn_tasks"
     RUN_TASK = "run_task"
     WAIT = "wait"
     REPLAN = "replan"
     COMPLETE = "complete"
+    PHASE_COMPLETE = "phase_complete"
+    ASSESSMENT_COMPLETE = "assessment_complete"
     BLOCKED = "blocked"
+    ABORT = "abort"
 
 
 class SuccessCriterionType(str, Enum):
@@ -112,11 +136,24 @@ class Evidence(BaseModel):
     caveat: Optional[str] = None  # Reliability note
 
 
+class ToolExecutionStatus(str, Enum):
+    SUCCESS = "SUCCESS"
+    PARTIAL_SUCCESS = "PARTIAL_SUCCESS"
+    FAILED = "FAILED"
+    TIMEOUT = "TIMEOUT"
+
+
+class RetryDecisionType(str, Enum):
+    RETRY = "retry"
+    NO_RETRY = "no_retry"
+    ALTERNATIVE_STRATEGY = "alternative_strategy"
+
+
 class ToolResult(BaseModel):
     """Standard result from tool execution"""
     tool: str
     capability: str
-    status: Literal["success", "failed", "timeout"]
+    status: Union[ToolExecutionStatus, Literal["success", "failed", "timeout", "partial_success", "SUCCESS", "PARTIAL_SUCCESS", "FAILED", "TIMEOUT"]]
     stdout: str = ""
     stderr: str = ""
     exit_code: Optional[int] = None
@@ -127,6 +164,9 @@ class ToolResult(BaseModel):
     error: Optional[ErrorInfo] = None
     evidence_id: Optional[str] = None  # Reference to Evidence store
     data: Dict[str, Any] = Field(default_factory=dict)
+    warnings: List[str] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
 
 
 class SuccessCriterion(BaseModel):
@@ -147,12 +187,35 @@ class TaskSpec(BaseModel):
     inputs: Dict[str, Any] = Field(default_factory=dict)
     context_requirements: List[str] = Field(default_factory=list)
     dependencies: List[str] = Field(default_factory=list)
+    depends_on: List[str] = Field(default_factory=list)
     success_criteria: List[SuccessCriterion] = Field(default_factory=list)
     constraints: Dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: int = 300
     max_steps: int = 10
+    max_retries: int = 3
     priority: int = Field(default=5, ge=1, le=10)
     parent_task_id: Optional[str] = None
+    # When True, bypasses deduplication and forces a fresh execution.
+    # Use for explicit retries, tool-failure recovery, or re-scan requests.
+    force_reexecute: bool = False
+
+    @root_validator(pre=True)
+    def normalize_task_spec(cls, values):
+        if not isinstance(values, dict):
+            return values
+        # normalize depends_on to dependencies
+        if "depends_on" in values and not values.get("dependencies"):
+            values["dependencies"] = values["depends_on"]
+        elif "dependencies" in values and not values.get("depends_on"):
+            values["depends_on"] = values["dependencies"]
+            
+        # normalize max_retries to max_steps
+        if "max_retries" in values and "max_steps" not in values:
+            values["max_steps"] = values["max_retries"]
+        elif "max_steps" in values and "max_retries" not in values:
+            values["max_retries"] = values["max_steps"]
+            
+        return values
 
 
 class CapabilityRequest(BaseModel):
@@ -221,6 +284,18 @@ class AgentResult(BaseModel):
     execution_metrics: Optional[ExecutionMetrics] = None
 
 
+class NormalizedLLMResponse(BaseModel):
+    """Normalized response format across all LLM providers"""
+    content: str
+    structured_output: Optional[Dict[str, Any]] = None
+    finish_reason: Optional[str] = None
+    provider: str
+    model: str
+    usage: Optional[Dict[str, Any]] = None
+    request_id: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
 class BrainDecision(BaseModel):
     """Canonical decision output from Central Brain"""
     action: BrainDecisionAction
@@ -229,6 +304,28 @@ class BrainDecision(BaseModel):
     wait_seconds: Optional[int] = None
     reason: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @root_validator(pre=True)
+    def normalize_brain_decision(cls, values):
+        if not isinstance(values, dict):
+            return values
+        
+        # Normalize actions
+        act = values.get("action")
+        if act == "spawn_tasks":
+            values["action"] = "spawn_agents"
+        elif act in ("phase_complete", "assessment_complete"):
+            values["action"] = "complete"
+        elif act == "abort":
+            values["action"] = "blocked"
+            
+        # Support schema drift where 'agent_specs' or 'agents' is returned instead of 'tasks'
+        if "agent_specs" in values and "tasks" not in values:
+            values["tasks"] = values["agent_specs"]
+        elif "agents" in values and "tasks" not in values:
+            values["tasks"] = values["agents"]
+            
+        return values
 
 
 class ExecutionState(BaseModel):
@@ -246,3 +343,7 @@ class ExecutionState(BaseModel):
     available_capabilities: List[CapabilityType] = Field(default_factory=list)
     objectives: List[str] = Field(default_factory=list)
     execution_metrics: Optional[ExecutionMetrics] = None
+
+
+# Canonical aliases
+PlannerDecision = BrainDecision

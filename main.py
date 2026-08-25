@@ -16,6 +16,14 @@ import logging
 import sys
 from pathlib import Path
 
+# Force UTF-8 encoding for standard streams on Windows to prevent UnicodeEncodeErrors
+if sys.platform.startswith("win"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 from core.config import load_config
 from core.central_brain import CentralBrain
 from core.meta_brain import MetaBrain
@@ -98,6 +106,8 @@ Examples:
     parser.add_argument("--tier", default="POC",
                          choices=["POC", "SHALLOW", "DEEP"],
                          help="Max exploitation tier (default: POC)")
+    parser.add_argument("--reset-dedup", action="store_true",
+                         help="Reset deduplication database before starting pentest")
     parser.add_argument("--frameworks", default="",
                          help="Comma-separated compliance frameworks to map findings "
                               "to (choices: pci,soc2,hipaa,cis,nist). "
@@ -123,6 +133,10 @@ Examples:
     else:
         config.config["COMPLIANCE_FRAMEWORKS"] = available_frameworks()
     logger.info(f"Compliance frameworks: {config.config['COMPLIANCE_FRAMEWORKS']}")
+
+    if args.reset_dedup:
+        from core.dedup_tracker import DeduplicationTracker
+        DeduplicationTracker().reset_all()
 
     logger.info("=" * 60)
     logger.info("AUTONOMOUS PENTESTING AGENT v2.0")

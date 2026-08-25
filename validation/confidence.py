@@ -133,7 +133,8 @@ def gate(findings: List[Dict]) -> Dict[str, List[Dict]]:
     """Split findings into report-worthy vs. needs_review by confidence.
 
     Each finding gets a '_confidence' dict attached. LOW confidence -> needs_review.
-    Returns {'report': [...], 'needs_review': [...]}.
+    If 0 findings are recorded, flags a potential scanner misconfiguration warning.
+    Returns {'report': [...], 'needs_review': [...], 'scanner_misconfiguration_warning': bool}.
     """
     report, review = [], []
     for f in findings:
@@ -143,5 +144,18 @@ def gate(findings: List[Dict]) -> Dict[str, List[Dict]]:
             review.append(f)
         else:
             report.append(f)
+            
+    is_misconfigured = False
+    if not report and not review:
+        logger.warning(
+            "[confidence] SCANNER_MISCONFIGURATION_WARNING: Assessment finished with zero findings. "
+            "Verify tool execution parameters, scope targets, and network reachability."
+        )
+        is_misconfigured = True
+
     logger.info(f"[confidence] {len(report)} reportable, {len(review)} need review")
-    return {"report": report, "needs_review": review}
+    return {
+        "report": report,
+        "needs_review": review,
+        "scanner_misconfiguration_warning": is_misconfigured
+    }

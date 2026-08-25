@@ -2,7 +2,7 @@ import pytest
 import asyncio
 from datetime import datetime
 
-from core.models import Task, Finding, Evidence, AgentInfo, AgentResult, AgentState
+from core.models import Task, Finding, Evidence, AgentInfo, AgentResult, AgentState, FindingSeverity
 from core.events import EventBus, EventType, Event
 from core.context import ExecutionContext
 from core.exceptions import ScopeViolationException
@@ -36,7 +36,7 @@ class TestModels:
         finding = Finding(
             title="Test Finding",
             description="A test finding",
-            severity=finding.__class__.FindingSeverity.HIGH,
+            severity=FindingSeverity.HIGH,
             confidence=0.9,
             category="test"
         )
@@ -63,7 +63,7 @@ class TestModels:
         assert agent_info.state.value == "RUNNING"
 
 class TestEventBus:
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_event_publish_and_subscribe(self, event_bus):
         received_events = []
         
@@ -84,7 +84,7 @@ class TestEventBus:
         assert len(received_events) == 1
         assert received_events[0].source == "test_agent"
     
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_event_history(self, event_bus):
         event1 = Event(
             event_type=EventType.AGENT_CREATED,

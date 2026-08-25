@@ -18,7 +18,7 @@ from policy_validator import PolicyValidator, ScopeValidator
 from error_classifier import ErrorClassifier
 from result_normalizers import NormalizerFactory
 from stores import KnowledgeStore, EvidenceStore, FindingStore
-from central_brain_v2 import CentralBrainV2
+from core.central_brain import CentralBrain
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ class OrchestratorV2:
         self.start_time = datetime.now()
         
         # Core components
-        self.brain = CentralBrainV2(target, scope)
+        self.brain = CentralBrain(target, scope)
         self.task_manager = self.brain.task_manager
         self.scheduler = Scheduler(self.task_manager)
         
@@ -48,6 +48,14 @@ class OrchestratorV2:
             self.scope.get("authorized_targets", [target])
         )
         self.error_classifier = ErrorClassifier()
+        
+        # Centralized Target Scope Authorization check
+        from core.authorization import TargetScopeValidator
+        TargetScopeValidator.set(TargetScopeValidator(self.scope.get("authorized_targets", [target])))
+
+        # Progress tracking loop detection
+        from core.progress import ProgressEvaluator
+        self.progress_evaluator = ProgressEvaluator()
         
         # Metrics
         self.metrics = ExecutionMetrics()
@@ -63,6 +71,14 @@ class OrchestratorV2:
             
             # 1. Get current state
             state = self.brain.get_execution_state()
+
+            # 1b. Check progress snapshot to prevent infinite loops
+            snapshot = self.progress_evaluator.take_snapshot(state)
+            if not self.progress_evaluator.evaluate_progress(snapshot):
+                if self.progress_evaluator.no_progress_streak >= 3:
+                    logger.error("[Orchestrator] NO_PROGRESS_DETECTED: Loop stalled for 3 iterations - aborting execution.")
+                    # Return final report with stall reason
+                    return self._generate_final_report()
             
             # 2. Brain makes decision
             decision = self.brain.make_decision(state)

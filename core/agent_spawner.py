@@ -13,6 +13,7 @@ from typing import Dict, Union
 from core.dynamic_agent import DynamicAgent
 from core.tool_registry import ToolRegistry
 from core.shared_context import SharedContext
+from core.schemas import CapabilityType
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +52,6 @@ class AgentSpawner:
         Otherwise → generic DynamicAgent (recon, analysis, etc.)
         """
         self.counter += 1
-        agent_id = f"AGENT-{self.counter:03d}"
-
         objective = spec.get("objective", "")
         allowed_tools = spec.get("tools", [])
         context_keys = spec.get("context_keys", ["target"])
@@ -60,11 +59,62 @@ class AgentSpawner:
         vuln_type = spec.get("vuln_type", "")
         target_params = spec.get("target_params", [])
 
-        # Decide: exploitation or generic?
-        is_exploit = (
-            vuln_type
-            or any(kw in objective.lower() for kw in EXPLOIT_KEYWORDS)
-        )
+        # Parameter-aware gravity vector calculation
+        capability_name = str(spec.get("capability") or spec.get("vuln_type") or "general").lower().strip()
+        # Extract raw target without fallback to check validity
+        raw_target = spec.get("target") or spec.get("inputs", {}).get("target")
+
+        # Validate Target Before Dedup
+        if not raw_target or not str(raw_target).strip():
+            logger.info(f"DEDUP_VALIDATION_FAILED: target={raw_target!r} or empty, forcing fresh spawn")
+            skip_dedup = True
+        else:
+            skip_dedup = False
+
+        target_val = str(raw_target or (self.ctx.target if hasattr(self.ctx, "target") else "")).lower().strip()
+        subdomain_val = str(spec.get("subdomain") or spec.get("inputs", {}).get("subdomain") or "").lower().strip()
+        port_val = str(spec.get("port") or spec.get("inputs", {}).get("port") or "").strip()
+        ip_val = str(spec.get("ip") or spec.get("inputs", {}).get("ip") or "").strip()
+        params = spec.get("target_params") or spec.get("inputs") or spec.get("params") or {}
+        if isinstance(params, list):
+            sorted_params = ",".join(sorted(str(x) for x in params))
+        elif isinstance(params, dict):
+            sorted_params = ",".join(f"{k}={v}" for k, v in sorted(params.items()))
+        else:
+            sorted_params = str(params)
+
+        import hashlib
+        ctx_hash = hashlib.md5(",".join(sorted(context_keys)).encode("utf-8")).hexdigest()[:8]
+        gravity_vector = f"{capability_name}:{target_val}:{subdomain_val}:{port_val}:{ip_val}:{sorted_params}:{ctx_hash}"
+
+        logger.info(f"GRAVITY_VECTOR: task='{objective[:50]}' vector='{gravity_vector}'")
+
+        from core.dedup_tracker import DeduplicationTracker
+        dedup = DeduplicationTracker()
+
+        # Only compare gravity vectors when target field is populated and valid
+        if not skip_dedup and dedup.is_duplicate(tool="spawner", finding_type="task_gravity", data=gravity_vector):
+            logger.info(f"TASK_DEDUPLICATED: objective='{objective[:60]}' gravity='{gravity_vector}' (already spawned)")
+            return None
+
+        if not skip_dedup:
+            dedup.register_finding(tool="spawner", finding_type="task_gravity", data=gravity_vector)
+
+        self.counter += 1
+        agent_id = f"AGENT-{self.counter:03d}"
+
+        # BUG-004: Disambiguate objective type (RECON vs EXPLOIT)
+        recon_keywords = ["analyze", "discover", "enumerate", "extract", "scan", "fingerprint", "crawl"]
+        is_explicit_recon = any(kw in objective.lower() for kw in recon_keywords)
+        is_exploit_kw = any(kw in objective.lower() for kw in EXPLOIT_KEYWORDS)
+
+        if vuln_type:
+            is_exploit = True
+        elif is_explicit_recon and is_exploit_kw:
+            logger.warning(f"OBJECTIVE_AMBIGUOUS: '{objective}' - selecting Dynamic Recon Agent (safest)")
+            is_exploit = False
+        else:
+            is_exploit = is_exploit_kw
 
         # Exploit agents always get the intercepted request inventory + endpoints
         # so they can replay/fuzz real requests rather than guessing.
@@ -73,8 +123,32 @@ class AgentSpawner:
                 if k not in context_keys:
                     context_keys = list(context_keys) + [k]
 
+        # Pre-Spawn Agent Validation
+        valid_capabilities = {c.value for c in CapabilityType} | {c.name.lower() for c in CapabilityType} | {"general", "exploit", "recon", "dynamic"}
+        if capability_name and capability_name not in valid_capabilities:
+            logger.error(f"AGENT_VALIDATION_FAILED: capability='{capability_name}' is not in valid_capabilities")
+            return None
+
+        if not allowed_tools and not is_exploit:
+            try:
+                from core.capability_resolver import CapabilityResolver
+                resolver = CapabilityResolver()
+                resolved = resolver.resolve_tools(capability=capability_name, objective=objective)
+                if resolved:
+                    allowed_tools = [t.name for t in resolved]
+            except Exception as e:
+                logger.warning(f"Failed resolving tools for capability '{capability_name}': {e}")
+
+        if not allowed_tools and not is_exploit:
+            logger.error(f"AGENT_VALIDATION_FAILED: tools list is empty for agent task '{objective[:50]}'")
+            return None
+
         # Build filtered context
         agent_context = self.ctx.get_context_for_agent(objective, context_keys)
+        missing_keys = [k for k in context_keys if k not in agent_context and not hasattr(self.ctx, k)]
+        if missing_keys:
+            logger.error(f"AGENT_VALIDATION_FAILED: missing context_keys={missing_keys} in context dict")
+            return None
 
         if is_exploit:
             agent = self._spawn_exploit(
@@ -93,6 +167,13 @@ class AgentSpawner:
                 max_steps=max_steps,
             )
             agent_label = "dynamic"
+
+        executor = getattr(agent, "executor", None) or getattr(self.tools, "execute", None) or "local"
+        if executor is None:
+            logger.error(f"AGENT_VALIDATION_FAILED: executor is None for agent_id={agent_id}")
+            return None
+
+        logger.info(f"AGENT_VALIDATION_PASSED: agent_id={agent_id} executor={executor} tools={len(allowed_tools)}")
 
         logger.info(
             f"Spawned {agent_id} [{agent_label}]: {objective[:60]}..."

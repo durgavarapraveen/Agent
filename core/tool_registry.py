@@ -398,14 +398,13 @@ class ToolRegistry:
             ("wpscan", "WordPress vulnerability scanner"),
             ("sslscan", "SSL/TLS scanner"),
             ("sslyze", "SSL configuration analyzer"),
+            ("openssl", "SSL/TLS certificate analysis"),
             ("arjun", "HTTP parameter discovery"),
             ("paramspider", "Parameter mining from web archives"),
             ("dalfox", "XSS scanner"),
             ("katana", "Web crawler"),
             ("curl", "HTTP client"),
             ("theharvester", "OSINT email/domain gathering"),
-            ("bash", "Run an arbitrary shell command in the Kali container (pipes, chaining, custom one-liners)"),
-            ("sh", "Run an arbitrary shell command in the Kali container"),
         ]
 
         for name, desc in kali_tools:
@@ -465,11 +464,34 @@ class ToolRegistry:
         if params is None:
             params = {}
 
+        # Validate invocation parameters and authorization
+        from core.tool_validation import ToolInvocationValidator
+        from core.exceptions import ToolValidationError, AuthorizationError
+        validator = ToolInvocationValidator(self)
+        try:
+            validator.validate(tool_name, params)
+        except ToolValidationError as tve:
+            logger.error(f"[ToolRegistry] TOOL_INVOCATION_REJECTED: {tve}")
+            return {
+                "success": False,
+                "error": f"TOOL_INVALID_ARGUMENT: {str(tve)}",
+                "output": "",
+                "data": {}
+            }
+        except AuthorizationError as ae:
+            logger.error(f"[ToolRegistry] AUTHORIZATION_DENIED: {ae}")
+            return {
+                "success": False,
+                "error": f"AUTHORIZATION_FAILURE: {str(ae)}",
+                "output": "",
+                "data": {}
+            }
+
         tool = self.get(tool_name)
         if not tool:
             return {
                 "success": False,
-                "error": f"Tool '{tool_name}' not found",
+                "error": f"TOOL_NOT_FOUND: Tool '{tool_name}' not found",
                 "output": "",
                 "data": {}
             }
