@@ -50,6 +50,30 @@ class DeduplicationTracker:
             finally:
                 conn.close()
 
+    def generate_task_key(self, capability: str, target: str, resource: str = "") -> str:
+        """
+        Generate explicit task deduplication key preserving exact target FQDN/subdomain.
+        Format: {capability}:{exact_subdomain_or_target}:{port/resource}
+        Example: port_scanning:millisecond.speshway.com:80
+        """
+        cap_clean = (capability or "").lower().strip()
+        
+        target_str = str(target or "").strip().lower()
+        if "://" in target_str:
+            target_str = target_str.split("://", 1)[1]
+        if "/" in target_str:
+            target_str = target_str.split("/", 1)[0]
+        
+        res_str = str(resource or "").strip().lower()
+        if ":" in target_str and not res_str:
+            parts = target_str.split(":", 1)
+            target_str = parts[0]
+            res_str = parts[1]
+
+        target_clean = target_str.strip()
+
+        return f"{cap_clean}:{target_clean}:{res_str}"
+
     def generate_signature(self, tool: str, finding_type: str, data: Any) -> str:
         """Generate SHA-256 fingerprint signature: tool:finding_type:sha256(data)"""
         tool_clean = (tool or "").lower().strip()

@@ -40,6 +40,7 @@ class SharedContext:
 
         # ── Vulnerability data ──
         self.vulnerabilities: List[Dict] = []   # [{id, type, location, severity, details}]
+        self.false_positives: List[Dict] = []  # [{finding, reason, timestamp}]
         self.attack_chains: List[Dict] = []     # [{chain_id, steps, impact}]
 
         # ── Captured HTTP traffic (for replay in exploits) ──
@@ -180,13 +181,55 @@ class SharedContext:
                     logger.info(f"VULN_REJECTED: type={vuln_type} reason='No unauthorized access or HTTP 200 proof'")
                     return False
 
-            # Check deduplication BEFORE adding
-            dedup = DeduplicationTracker()
-            if dedup.is_duplicate(tool=tool_name, finding_type=vuln_type, data=payload or proof or vuln.get("title", "")):
-                logger.info(f"VULN_DEDUPLICATED: type={vuln_type} title='{vuln.get('title', '')}' (already recorded)")
+            # Route through FalsePositiveFilter
+            from core.fp_filter import FalsePositiveFilter
+            fp_filter = FalsePositiveFilter()
+            should_report, reason = fp_filter.should_report_finding(vuln)
+            if not should_report:
+                logger.info(f"VULN_FILTERED_FP: type={vuln_type} title='{vuln.get('title', '')}' reason='{reason}'")
+                self.false_positives.append({
+                    "finding": vuln,
+                    "reason": reason,
+                    "timestamp": datetime.now().isoformat()
+                })
                 return False
 
-            dedup.register_finding(tool=tool_name, finding_type=vuln_type, data=payload or proof or vuln.get("title", ""))
+            # Header-specific vulnerability deduplication logic
+            host = str(vuln.get("target") or vuln.get("host") or vuln.get("location") or self.target or "").strip().lower()
+            if "://" in host:
+                host = host.split("://", 1)[1]
+            if "/" in host:
+                host = host.split("/", 1)[0]
+
+            header_name = str(vuln.get("header_name") or vuln.get("header") or "").strip()
+            if not header_name and ("header" in vuln_type or "missing" in vuln_type):
+                # Attempt extracting header name from title or proof
+                title_str = vuln.get("title", "")
+                if ":" in title_str:
+                    header_name = title_str.split(":", 1)[1].strip()
+                elif "header" in title_str.lower():
+                    m = re.search(r"header[:\s]+([a-zA-Z0-9\-_]+)", title_str, re.IGNORECASE)
+                    if m:
+                        header_name = m.group(1).strip()
+
+            if "missing" in vuln_type and ("header" in vuln_type or header_name):
+                effective_finding_type = f"missing_header:{host}:{header_name or 'generic'}"
+                dedup_data = f"missing_header:{host}:{header_name}:{proof}"
+            elif "nuclei" in vuln_type or vuln.get("template_id"):
+                template_id = str(vuln.get("template_id") or "generic").strip()
+                effective_finding_type = f"nuclei:{host}:{template_id}"
+                dedup_data = f"nuclei:{host}:{template_id}:{proof}"
+            else:
+                effective_finding_type = vuln_type
+                dedup_data = payload or proof or vuln.get("title", "")
+
+            # Check deduplication BEFORE adding
+            dedup = DeduplicationTracker()
+            if dedup.is_duplicate(tool=tool_name, finding_type=effective_finding_type, data=dedup_data):
+                logger.info(f"VULN_DEDUPLICATED: type={effective_finding_type} title='{vuln.get('title', '')}' (already recorded)")
+                return False
+
+            dedup.register_finding(tool=tool_name, finding_type=effective_finding_type, data=dedup_data)
 
             vuln.setdefault("id", f"VULN-{len(self.vulnerabilities)+1:03d}")
             vuln.setdefault("timestamp", datetime.now().isoformat())

@@ -5,6 +5,7 @@ Run: pytest test_architecture.py -v
 
 import pytest
 from datetime import datetime
+import json
 from core.schemas import (
     TaskSpec, TaskStatus, CapabilityType, BrainDecision, BrainDecisionAction,
     ToolResult, ErrorInfo, ErrorType, Evidence, KnowledgeItem, SuccessCriterion,
@@ -1236,6 +1237,153 @@ class TestDynamicToolIntelligencePlatform:
 
         tm.complete_task(task.spec.task_id, {"ports": [80, 443]})
         assert task.status == TaskStatus.COMPLETED
+
+
+class TestPhaseTransitionsAndActiveScanning:
+    """Test stateful phase transitions and active vulnerability scanning planning"""
+
+    def test_state_machine_phase_transitions(self):
+        from core.central_brain import CentralBrain, ExecutionPhase
+        from core.authorization import TargetScopeValidator
+
+        TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
+        brain = CentralBrain("https://example.com")
+        assert brain.current_phase == ExecutionPhase.RECON
+
+        # RECON -> ACTIVE_SCANNING transition when endpoints are populated
+        brain.ctx.add_endpoints([{"url": "https://example.com/api/v1"}])
+        next_phase = brain._evaluate_phase_transition()
+        assert next_phase == ExecutionPhase.ACTIVE_SCANNING
+
+        brain.transition_phase(next_phase)
+        assert brain.current_phase == ExecutionPhase.ACTIVE_SCANNING
+
+        # ACTIVE_SCANNING -> EXPLOITATION transition when vulnerabilities are present
+        brain.ctx.add_vulnerability({
+            "type": "unencoded_input_reflection",
+            "title": "Unencoded Input Reflection",
+            "proof": "reflected tracer",
+            "details": "tracer"
+        })
+        next_phase = brain._evaluate_phase_transition()
+        assert next_phase == ExecutionPhase.EXPLOITATION
+
+        brain.transition_phase(next_phase)
+        assert brain.current_phase == ExecutionPhase.EXPLOITATION
+
+    def test_execution_planner_active_scan(self):
+        from core.execution_planner import ExecutionPlanner
+
+        planner = ExecutionPlanner()
+        steps = planner.plan_active_vulnerability_scan(
+            endpoint="https://example.com/api/user",
+            parameters=["id", "search"],
+            vuln_type="sqli"
+        )
+        assert len(steps) == 2
+        assert steps[0]["tool"] == "payload_tester"
+        assert steps[0]["params"]["param"] == "id"
+        assert steps[1]["params"]["param"] == "search"
+
+
+class TestCompoundRiskGraphEngine:
+    """Test theoretical security dependency graph engine and compound risk analysis"""
+
+    def test_compound_risk_analysis_auth_and_admin(self):
+        from core.chain_detector import ChainDetector
+        from core.vuln_graph import VulnGraph
+        from core.relationship_db import RelationshipDB
+
+        detector = ChainDetector(VulnGraph(), RelationshipDB())
+
+        findings = [
+            {
+                "id": "VULN-001",
+                "type": "missing_auth",
+                "title": "Missing Authorization Check",
+                "severity": "MEDIUM",
+                "location": "https://example.com/api/v1/user"
+            },
+            {
+                "id": "VULN-002",
+                "type": "admin_interface",
+                "title": "Administrative Interface",
+                "severity": "MEDIUM",
+                "location": "https://example.com/admin/dashboard"
+            }
+        ]
+
+        risks = detector.analyze_compound_risks(findings)
+        assert len(risks) == 1
+        risk = risks[0]
+        assert risk["pattern_id"] == "PATTERN-AUTH-ADMIN"
+        assert risk["compound_severity"] == "HIGH"  # MEDIUM + MEDIUM -> HIGH
+        assert len(risk["remediation_chain"]) >= 2
+        assert "RBAC" in risk["remediation_chain"][0] or "Role-Based Access Control" in risk["remediation_chain"][0]
+
+    def test_compound_risk_analysis_session_and_reflection(self):
+        from core.chain_detector import ChainDetector
+        from core.vuln_graph import VulnGraph
+        from core.relationship_db import RelationshipDB
+
+        detector = ChainDetector(VulnGraph(), RelationshipDB())
+
+        findings = [
+            {
+                "id": "VULN-003",
+                "type": "missing_httponly",
+                "title": "Missing HttpOnly Cookie Attribute",
+                "severity": "MEDIUM",
+                "location": "https://example.com/login"
+            },
+            {
+                "id": "VULN-004",
+                "type": "unencoded_input_reflection",
+                "title": "Unencoded Input Reflection",
+                "severity": "MEDIUM",
+                "location": "https://example.com/search"
+            }
+        ]
+
+        risks = detector.analyze_compound_risks(findings)
+        assert len(risks) == 1
+        risk = risks[0]
+        assert risk["pattern_id"] == "PATTERN-SESSION-REFLECTION"
+        assert risk["compound_severity"] == "HIGH"
+        assert len(risk["remediation_chain"]) >= 2
+        assert "HttpOnly" in risk["remediation_chain"][0]
+
+    def test_compound_risk_analysis_upload_and_directory(self):
+        from core.chain_detector import ChainDetector
+        from core.vuln_graph import VulnGraph
+        from core.relationship_db import RelationshipDB
+
+        detector = ChainDetector(VulnGraph(), RelationshipDB())
+
+        findings = [
+            {
+                "id": "VULN-005",
+                "type": "file_upload",
+                "title": "Unrestricted File Upload",
+                "severity": "HIGH",
+                "location": "https://example.com/upload"
+            },
+            {
+                "id": "VULN-006",
+                "type": "directory_listing",
+                "title": "Exposed Directory Indexing",
+                "severity": "MEDIUM",
+                "location": "https://example.com/uploads/"
+            }
+        ]
+
+        risks = detector.analyze_compound_risks(findings)
+        assert len(risks) == 1
+        risk = risks[0]
+        assert risk["pattern_id"] == "PATTERN-UPLOAD-DIRECTORY-LISTING"
+        assert risk["compound_severity"] == "CRITICAL"  # HIGH + MEDIUM -> CRITICAL
+        assert len(risk["remediation_chain"]) >= 2
+        assert "directory indexing" in risk["remediation_chain"][0].lower()
 
 
 if __name__ == "__main__":

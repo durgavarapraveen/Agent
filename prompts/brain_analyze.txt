@@ -119,31 +119,32 @@ LOW (Note but don't prioritize):
   - Non-critical information disclosure
   - Config issues without impact
 
-SPAWNING VERIFICATION AGENTS:
+STATEFUL PHASE TRANSITIONS & ACTIVE VULNERABILITY SCANNING:
 
-For EACH suspected vulnerability:
-  1. Spawn a testing agent
-  2. Agent tries to CONFIRM the vulnerability
-  3. Agent collects proof (response, data, status codes)
-  4. Agent documents the exact location/parameter
-
-Don't just report suspicions - VERIFY everything!
+Once target endpoints, URLs, or parameters are discovered in the reconnaissance context:
+  1. Immediately transition out of reconnaissance mode and select active vulnerability assessment actions.
+  2. Spawn active vulnerability testing agents to perform targeted payload testing:
+     - SQL Injection (SQLi) parameter testing
+     - Cross-Site Scripting (XSS) input reflection & script payload verification
+     - Server-Side Request Forgery (SSRF) resource fetching checks
+     - Command Injection (RCE) parameter probing
+  3. Do NOT remain in an indefinite discovery loop. Once endpoints are identified, output active scanning task specifications.
 
 RESPOND WITH JSON:
 {
-  "thinking": "Analysis of vulnerabilities found and what needs testing",
-  "action": "spawn_agent" | "analysis_complete",
+  "thinking": "Analysis of discovered endpoints and active vulnerability scan selection",
+  "action": "spawn_agent" | "spawn_agents" | "analysis_complete",
   "agent_spec": {
-    "objective": "Verify [specific vulnerability] on [endpoint]",
+    "objective": "Perform active [SQLi/XSS/SSRF/Command Injection] payload testing on [endpoint]",
     "tools": ["tool1", "tool2"],
-    "context_keys": ["target", "endpoints", "technologies"],
-    "max_steps": 6
+    "context_keys": ["target", "endpoints", "parameters"],
+    "max_steps": 8
   }
 }
 
 When action="analysis_complete", include:
 {
-  "thinking": "Why we've found all major vulnerabilities",
+  "thinking": "Reconnaissance and active vulnerability scanning completed for all discovered endpoints",
   "action": "analysis_complete",
   "vulnerabilities_found": 10,
   "summary": "Critical: X, High: Y, Medium: Z"

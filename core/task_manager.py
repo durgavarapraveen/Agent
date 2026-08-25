@@ -143,8 +143,8 @@ class TaskManager:
         duplicate = self.find_duplicate_task(spec)
         if duplicate:
             # If task is already RUNNING, COMPLETED, or BLOCKED, reuse it
-            target = spec.inputs.get("target") or spec.inputs.get("url") or spec.inputs.get("domain") or spec.inputs.get("host") or ""
-            logger.info(f"TASK_DEDUPLICATED: Reusing existing task={duplicate.spec.task_id} (status={duplicate.status.value}) for proposed capability={spec.capability.value} target={target}")
+            target = str(spec.inputs.get("target") or spec.inputs.get("url") or spec.inputs.get("domain") or spec.inputs.get("host") or spec.objective or "").strip()
+            logger.info(f"TASK_DEDUPLICATED: Reusing existing task={duplicate.spec.task_id} (status={duplicate.status.value}) for proposed capability={spec.capability.value} target='{target}'")
             return duplicate, False
             
         task = self.create_task(spec)

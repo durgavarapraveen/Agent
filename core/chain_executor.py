@@ -19,6 +19,44 @@ from agents.llm_client import LLMClient, TaskTier
 
 logger = logging.getLogger(__name__)
 
+VULN_TO_CAPABILITY_MAP = {
+    # Header vulns → web scanning
+    'missing_csp': 'web_scanning',
+    'missing_security_header': 'web_scanning',
+    'missing_x_frame_options': 'web_scanning',
+    'missing_hsts': 'web_scanning',
+    'missing_x_content_type_options': 'web_scanning',
+    'missing_x_xss_protection': 'web_scanning',
+    'missing_referrer_policy': 'web_scanning',
+    
+    # Injection vulns → exploits
+    'xss': 'exploits',
+    'sqli': 'exploits',
+    'command_injection': 'exploits',
+    'lfi': 'exploits',
+    'rfi': 'exploits',
+    'ssti': 'exploits',
+    'xxe': 'exploits',
+    'deserialization': 'exploits',
+    
+    # Auth vulns → exploits
+    'auth_bypass': 'exploits',
+    'privilege_escalation': 'exploits',
+    'idor': 'exploits',
+    'broken_access': 'exploits',
+    
+    # Other
+    'default': 'web_scanning',
+}
+
+def get_capability_for_vuln(vuln_type):
+    """Map vulnerability type to valid capability"""
+    capability = VULN_TO_CAPABILITY_MAP.get(
+        vuln_type.lower(), 
+        VULN_TO_CAPABILITY_MAP['default']
+    )
+    return capability
+
 
 @dataclass
 class StepResult:
@@ -229,8 +267,11 @@ class ChainExecutor:
         # Map vuln types to tools
         tools = self._tools_for_vuln(vuln_type)
 
+        capability = get_capability_for_vuln(vuln_type)
+
         spec = {
             "objective": objective,
+            "capability": capability,
             "tools": tools,
             "context_keys": ["target", "endpoints", "vulnerabilities", "exploit_results"],
             "max_steps": 8,

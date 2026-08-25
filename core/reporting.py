@@ -114,17 +114,20 @@ class EnterpriseReporter:
                         key=lambda x: SEV_WEIGHT.get(str(x.get("severity", "")).upper(), 0),
                         reverse=True):
             sev = str(v.get("severity", "MEDIUM")).upper()
+            status = str(v.get("status", "CONFIRMED")).upper()
+            status_bg = "#2e7d32" if status == "CONFIRMED" else "#c9a227"
             rows.append(
                 f"<tr>"
                 f'<td><span class="pill" style="background:{SEV_COLOR.get(sev,"#777")}">{html.escape(sev)}</span></td>'
+                f'<td><span class="pill" style="background:{status_bg}">{html.escape(status)}</span></td>'
                 f"<td>{html.escape(str(v.get('id','')))}</td>"
                 f"<td>{html.escape(str(v.get('title', v.get('type',''))))}</td>"
                 f"<td>{html.escape(str(v.get('location','')))}</td>"
                 f"<td>{html.escape(str(v.get('details',''))[:300])}</td>"
                 f"</tr>")
         if not rows:
-            rows.append('<tr><td colspan="5">No vulnerabilities recorded.</td></tr>')
-        return ("<table><thead><tr><th>Severity</th><th>ID</th><th>Title</th>"
+            rows.append('<tr><td colspan="6">No vulnerabilities recorded.</td></tr>')
+        return ("<table><thead><tr><th>Severity</th><th>Status</th><th>ID</th><th>Title</th>"
                 "<th>Location</th><th>Details</th></tr></thead><tbody>"
                 + "".join(rows) + "</tbody></table>")
 
@@ -216,10 +219,12 @@ class EnterpriseReporter:
 
     def build_html(self, executive_summary: str = "") -> str:
         risk = self.risk_score()
+        fp_count = len(getattr(self.ctx, "false_positives", []))
         meta_rows = (
             f"<tr><td>Target</td><td>{html.escape(str(self.ctx.target))}</td></tr>"
             f"<tr><td>Generated</td><td>{datetime.now().isoformat(timespec='seconds')}</td></tr>"
             f"<tr><td>Vulnerabilities</td><td>{len(self.ctx.vulnerabilities)}</td></tr>"
+            f"<tr><td>Filtered False Positives</td><td>{fp_count}</td></tr>"
             f"<tr><td>Exploits run</td><td>{len(self.ctx.exploit_results)}</td></tr>"
             f"<tr><td>Agents</td><td>{len(self.ctx.agents_spawned)}</td></tr>"
         )

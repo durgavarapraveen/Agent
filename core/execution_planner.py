@@ -86,3 +86,26 @@ class ExecutionPlanner:
 
         logger.info(f"EXECUTION_PLAN_VALIDATED: validated_tools={[inv.tool for inv in validated_invocations]}")
         return validated_invocations
+
+    def plan_active_vulnerability_scan(
+        self,
+        endpoint: str,
+        parameters: List[str],
+        vuln_type: str = "general"
+    ) -> List[Dict[str, Any]]:
+        """
+        Build active scanning strategy steps for discovered endpoints/parameters.
+        Queues active scanning tasks (fuzzing, SQLi, XSS, SSRF, command injection).
+        """
+        logger.info(f"PLAN_ACTIVE_SCAN: endpoint='{endpoint}' params={parameters} vuln_type='{vuln_type}'")
+        steps = []
+        for param in parameters or ["id"]:
+            steps.append({
+                "tool": "payload_tester" if vuln_type in ("xss", "sqli") else "nuclei",
+                "params": {
+                    "target": endpoint,
+                    "param": param,
+                    "vuln_type": vuln_type
+                }
+            })
+        return steps

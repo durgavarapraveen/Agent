@@ -66,3 +66,33 @@ def test_cache_clearing(dedup_tracker):
     deleted = dedup_tracker.clear_cache(hours=-1)
     assert deleted >= 1
     assert dedup_tracker.is_duplicate("nmap", "ports", {"port": 80}) is False
+
+
+def test_subdomain_dedup_key_isolation(dedup_tracker):
+    key1 = dedup_tracker.generate_task_key("port_scanning", "millisecond.speshway.com", "80")
+    key2 = dedup_tracker.generate_task_key("port_scanning", "www.speshway.com", "80")
+    key3 = dedup_tracker.generate_task_key("port_scanning", "speshway.com", "80")
+
+    assert key1 == "port_scanning:millisecond.speshway.com:80"
+    assert key2 == "port_scanning:www.speshway.com:80"
+    assert key3 == "port_scanning:speshway.com:80"
+
+    assert key1 != key2
+    assert key1 != key3
+    assert key2 != key3
+
+
+def test_subdomain_finding_isolation(dedup_tracker):
+    sub1 = "millisecond.speshway.com"
+    sub2 = "www.speshway.com"
+
+    sig1 = dedup_tracker.generate_signature("spawner", "task_gravity", f"port_scanning:{sub1}:80")
+    sig2 = dedup_tracker.generate_signature("spawner", "task_gravity", f"port_scanning:{sub2}:80")
+
+    assert sig1 != sig2
+    assert dedup_tracker.is_duplicate("spawner", "task_gravity", f"port_scanning:{sub1}:80") is False
+
+    dedup_tracker.register_finding("spawner", "task_gravity", f"port_scanning:{sub1}:80")
+    assert dedup_tracker.is_duplicate("spawner", "task_gravity", f"port_scanning:{sub1}:80") is True
+    assert dedup_tracker.is_duplicate("spawner", "task_gravity", f"port_scanning:{sub2}:80") is False
+

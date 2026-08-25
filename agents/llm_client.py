@@ -3,25 +3,36 @@ LLM Client - Reads config from .env file
 Supports Gemini + Ollama + extensible for other providers
 """
 
+import asyncio
 import json
 import logging
 import re
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 
 import httpx
 
 from core.config import get_config
 from core.schemas import NormalizedLLMResponse
 
-try:
-    from groq import Groq as GroqClient
-    HAS_GROQ = True
-except ImportError:
-    HAS_GROQ = False
+
 
 logger = logging.getLogger(__name__)
+
+
+def validate_json_payload(data: Any, mandatory_fields: Optional[List[str]] = None) -> bool:
+    """
+    Strict validation check for LLM JSON responses.
+    Treats None, non-dict objects, empty dicts ({}), or dicts missing mandatory fields as invalid.
+    """
+    if not data or not isinstance(data, dict) or len(data) == 0:
+        return False
+    if mandatory_fields:
+        for field in mandatory_fields:
+            if field not in data or data[field] is None:
+                return False
+    return True
 
 
 class TaskTier(Enum):
@@ -45,9 +56,80 @@ class LLMProvider(ABC):
         return res.content
 
     async def generate_json(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                             system: Optional[str] = None, max_tokens: int = 2048) -> Dict:
+                             system: Optional[str] = None, max_tokens: int = 2048,
+                             mandatory_fields: Optional[List[str]] = None) -> Dict:
         res = await self.generate_response(prompt, tier, system, max_tokens, temperature=0.1, response_format="json")
-        return res.structured_output or {}
+        raw_content = res.content
+        structured = res.structured_output
+
+        if structured is None and raw_content:
+            try:
+                clean_content = re.sub(r'```json\n?|\n?```', '', raw_content).strip()
+                structured = json.loads(clean_content)
+            except Exception:
+                m = re.search(r'\{[\s\S]*\}', raw_content)
+                if m:
+                    try:
+                        structured = json.loads(m.group(0))
+                    except Exception:
+                        pass
+
+        if not validate_json_payload(structured, mandatory_fields):
+            logger.warning(
+                f"[LLMClient] Invalid/empty JSON response received from provider '{res.provider}'. "
+                f"Raw response: '{raw_content}'"
+            )
+            return {}
+
+        return structured
+
+    async def generate_json_with_retry(
+        self,
+        prompt: str,
+        tier: TaskTier = TaskTier.SMALL,
+        system: Optional[str] = None,
+        max_tokens: int = 2048,
+        mandatory_fields: Optional[List[str]] = None,
+        max_retries: int = 3,
+        initial_backoff: float = 0.5
+    ) -> Tuple[Dict, str]:
+        """
+        Generates JSON response with strict validation, exponential backoff retries,
+        and diagnostic logging of raw responses on empty/invalid outputs.
+        Returns tuple of (structured_dict, raw_content).
+        """
+        raw_content = ""
+        for attempt in range(max_retries):
+            res = await self.generate_response(prompt, tier, system, max_tokens, temperature=0.1, response_format="json")
+            raw_content = res.content
+            structured = res.structured_output
+
+            if structured is None and raw_content:
+                try:
+                    clean_content = re.sub(r'```json\n?|\n?```', '', raw_content).strip()
+                    structured = json.loads(clean_content)
+                except Exception:
+                    m = re.search(r'\{[\s\S]*\}', raw_content)
+                    if m:
+                        try:
+                            structured = json.loads(m.group(0))
+                        except Exception:
+                            pass
+
+            if validate_json_payload(structured, mandatory_fields):
+                return structured, raw_content
+
+            logger.warning(
+                f"[LLMClient] Attempt {attempt + 1}/{max_retries} failed: "
+                f"empty {{}} or malformed JSON received from provider '{res.provider}'. "
+                f"Raw response: '{raw_content}'"
+            )
+
+            if attempt < max_retries - 1:
+                backoff = initial_backoff * (2 ** attempt)
+                await asyncio.sleep(backoff)
+
+        return {}, raw_content
 
     @abstractmethod
     async def is_available(self) -> bool:
@@ -132,80 +214,6 @@ class GeminiProvider(LLMProvider):
             
         return NormalizedLLMResponse(content="", provider="gemini", model=self.model)
 
-
-# ═══════════════════════════════════════════════════════════════
-# GROQ PROVIDER
-# ═══════════════════════════════════════════════════════════════
-
-class GroqProvider(LLMProvider):
-    """Groq API provider - FREE, fast models"""
-
-    def __init__(self):
-        if not HAS_GROQ:
-            raise ImportError("groq package not installed. Install with: pip install groq")
-        
-        api_key = get_config().get("GROQ_API_KEY")
-        if not api_key:
-            raise ValueError("GROQ_API_KEY not set in .env")
-        
-        self.model = get_config().get("GROQ_MODEL", "mixtral-8x7b-32768")
-        self.client = GroqClient(api_key=api_key)
-
-    async def generate_response(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                                system: Optional[str] = None, max_tokens: int = 1024,
-                                temperature: float = 0.3, response_format: Optional[str] = None) -> NormalizedLLMResponse:
-        try:
-            kwargs = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system or "You are a helpful assistant."},
-                    {"role": "user", "content": prompt}
-                ],
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-            }
-            if response_format == "json":
-                kwargs["response_format"] = {"type": "json_object"}
-                
-            response = self.client.chat.completions.create(**kwargs)
-            content = response.choices[0].message.content or ""
-            # Clean markdown code blocks
-            clean_content = re.sub(r'```json\n?|\n?```', '', content).strip()
-            
-            structured = None
-            if response_format == "json" or clean_content.startswith("{") or clean_content.startswith("["):
-                try:
-                    structured = json.loads(clean_content)
-                except Exception:
-                    m = re.search(r'\{[\s\S]*\}', clean_content)
-                    if m:
-                        try:
-                            structured = json.loads(m.group(0))
-                        except:
-                            pass
-                            
-            return NormalizedLLMResponse(
-                content=clean_content,
-                structured_output=structured,
-                finish_reason=response.choices[0].finish_reason,
-                provider="groq",
-                model=self.model,
-                usage={"completion_tokens": response.usage.completion_tokens, "prompt_tokens": response.usage.prompt_tokens} if hasattr(response, "usage") and response.usage else None
-            )
-        except Exception as e:
-            logger.error(f"Groq generate_response error: {e}")
-            return NormalizedLLMResponse(content="", provider="groq", model=self.model)
-
-    async def is_available(self) -> bool:
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": "test"}],
-                max_tokens=10,
-            )
-            return response.choices[0].message.content != ""
-        except:
-            return False
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -422,17 +430,8 @@ class LLMClient:
 
         logger.info(f"LLM_PROVIDER from .env: {provider_name}")
 
-        if provider_name == "groq":
-            try:
-                model = config.get("GROQ_MODEL", "mixtral-8x7b-32768")
-                logger.info(f"Using Groq provider (model: {model})")
-                return GroqProvider()
-            except (ValueError, ImportError) as e:
-                logger.error(f"Groq init failed: {e}")
-                logger.info("Falling back to NullProvider")
-                return NullProvider()
 
-        elif provider_name == "deepseek":
+        if provider_name == "deepseek":
             try:
                 api_key = config.get("DEEPSEEK_API_KEY")
                 small = config.get("DEEPSEEK_SMALL_MODEL", "deepseek-chat")

@@ -47,14 +47,44 @@ RESOLVED = "resolved"
 DEFAULT_DB = ".findings_history.sqlite"
 
 
+def generate_dedup_key(capability: str, target: str, resource: str = "") -> str:
+    """
+    Generate explicit deduplication key preserving exact target FQDN/subdomain.
+    Format: {capability}:{exact_subdomain_or_target}:{port/resource}
+    Example: port_scanning:millisecond.speshway.com:80
+    """
+    cap_clean = (capability or "").lower().strip()
+    target_str = str(target or "").strip().lower()
+    if "://" in target_str:
+        target_str = target_str.split("://", 1)[1]
+    if "/" in target_str:
+        target_str = target_str.split("/", 1)[0]
+
+    res_str = str(resource or "").strip().lower()
+    if ":" in target_str and not res_str:
+        parts = target_str.split(":", 1)
+        target_str = parts[0]
+        res_str = parts[1]
+
+    return f"{cap_clean}:{target_str.strip()}:{res_str}"
+
+
 def fingerprint(cve_id: str = "", file_path: str = "",
-                function_name: str = "", package_version: str = "") -> str:
+                function_name: str = "", package_version: str = "",
+                target: str = "") -> str:
     """Stable SHA-256 fingerprint for a finding."""
+    target_clean = (target or "").strip().lower()
+    if "://" in target_clean:
+        target_clean = target_clean.split("://", 1)[1]
+    if "/" in target_clean:
+        target_clean = target_clean.split("/", 1)[0]
+
     raw = "|".join([
         (cve_id or "").strip().upper(),
         (file_path or "").strip(),
         (function_name or "").strip(),
         (package_version or "").strip(),
+        target_clean,
     ])
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -99,9 +129,11 @@ class DedupStore:
 
     def classify(self, finding: Dict, scan_id: str) -> DedupResult:
         """Classify one finding for the current scan and update history."""
+        target_val = finding.get("target") or finding.get("host") or finding.get("domain") or ""
         fp = fingerprint(
             finding.get("cve_id", ""), finding.get("file_path", finding.get("location", "")),
-            finding.get("function_name", ""), finding.get("package_version", ""))
+            finding.get("function_name", ""), finding.get("package_version", ""),
+            target=target_val)
         severity = str(finding.get("severity", "")).upper()
         now = time.time()
 

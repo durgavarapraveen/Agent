@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from validation.dedup import (fingerprint, DedupStore, NEW, RECURRING, RESOLVED)
+from validation.dedup import (fingerprint, generate_dedup_key, DedupStore, NEW, RECURRING, RESOLVED)
 
 
 class TestFingerprint(unittest.TestCase):
@@ -27,6 +27,18 @@ class TestFingerprint(unittest.TestCase):
         a = fingerprint("CVE-1", "f.py", "foo", "1.0")
         b = fingerprint("CVE-1", "f.py", "foo", "1.1")   # version differs
         self.assertNotEqual(a, b)
+
+    def test_generate_dedup_key(self):
+        key1 = generate_dedup_key("port_scanning", "millisecond.speshway.com", "80")
+        key2 = generate_dedup_key("port_scanning", "www.speshway.com", "80")
+        self.assertEqual(key1, "port_scanning:millisecond.speshway.com:80")
+        self.assertEqual(key2, "port_scanning:www.speshway.com:80")
+        self.assertNotEqual(key1, key2)
+
+    def test_subdomains_produce_distinct_fingerprints(self):
+        fp1 = fingerprint("CVE-1", "f.py", "foo", "1.0", target="millisecond.speshway.com")
+        fp2 = fingerprint("CVE-1", "f.py", "foo", "1.0", target="www.speshway.com")
+        self.assertNotEqual(fp1, fp2)
 
 
 class TestDedupStore(unittest.TestCase):
@@ -70,6 +82,42 @@ class TestDedupStore(unittest.TestCase):
         out = self.store.process_scan(findings, "s2")
         self.assertEqual(out["suppressed"], 2)  # both recurring, unchanged
         self.assertEqual(len(out["report"]), 0)
+
+    def test_distinct_missing_headers_on_same_host_are_not_deduplicated(self):
+        from core.shared_context import SharedContext
+
+        ctx = SharedContext("target.com")
+
+        v1 = {
+            "type": "missing_security_header",
+            "title": "Missing Security Header: Content-Security-Policy",
+            "header_name": "Content-Security-Policy",
+            "proof": "Header missing",
+            "target": "target.com"
+        }
+        v2 = {
+            "type": "missing_security_header",
+            "title": "Missing Security Header: X-Frame-Options",
+            "header_name": "X-Frame-Options",
+            "proof": "Header missing",
+            "target": "target.com"
+        }
+        v3 = {
+            "type": "missing_security_header",
+            "title": "Missing Security Header: Strict-Transport-Security",
+            "header_name": "Strict-Transport-Security",
+            "proof": "Header missing",
+            "target": "target.com"
+        }
+
+        res1 = ctx.add_vulnerability(v1)
+        res2 = ctx.add_vulnerability(v2)
+        res3 = ctx.add_vulnerability(v3)
+
+        self.assertTrue(res1)
+        self.assertTrue(res2)
+        self.assertTrue(res3)
+        self.assertEqual(len(ctx.vulnerabilities), 3)
 
 
 if __name__ == "__main__":

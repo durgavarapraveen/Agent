@@ -7,7 +7,8 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from vuln_intel.scorer import (compute_score, score_cve, severity_from_score,
-                               W_CVSS, W_EPSS, W_KEV)
+                              score_security_header_severity,
+                              W_CVSS, W_EPSS, W_KEV)
 
 
 class TestScorer(unittest.TestCase):
@@ -53,6 +54,16 @@ class TestScorer(unittest.TestCase):
         low = score_cve("CVE-X", cvss_base=4.0, epss=0.01, kev=False).score
         high = score_cve("CVE-X", cvss_base=4.0, epss=0.01, kev=True).score
         self.assertGreater(high, low)
+
+    def test_security_header_severities(self):
+        self.assertEqual(score_security_header_severity("Content-Security-Policy"), "MEDIUM")
+        self.assertEqual(score_security_header_severity("X-Frame-Options"), "MEDIUM")
+        self.assertEqual(score_security_header_severity("Access-Control-Allow-Origin"), "MEDIUM")
+        self.assertEqual(score_security_header_severity("Strict-Transport-Security"), "MEDIUM")
+        self.assertEqual(score_security_header_severity("X-Content-Type-Options"), "LOW")
+        self.assertEqual(score_security_header_severity("Referrer-Policy"), "LOW")
+        self.assertEqual(score_security_header_severity("Server"), "INFO")
+        self.assertEqual(score_security_header_severity("X-Powered-By"), "INFO")
 
 
 if __name__ == "__main__":

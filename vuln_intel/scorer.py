@@ -13,7 +13,7 @@ three signals share a common range; the weighted sum is scaled to 0-100.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Any
 
 # Weights (must sum to 1.0)
 W_CVSS = 0.3
@@ -87,3 +87,68 @@ def score_cve(cve_id: str, cvss_base: float = 0.0, epss: float = 0.0,
 def rank(verdicts: List[RiskVerdict]) -> List[RiskVerdict]:
     """Sort verdicts by composite score, highest first."""
     return sorted(verdicts, key=lambda v: v.score, reverse=True)
+
+
+ACTIONABLE_HEADERS_MEDIUM = {
+    "content-security-policy", "csp",
+    "x-frame-options", "frame-ancestors",
+    "access-control-allow-origin", "cors",
+    "strict-transport-security", "hsts",
+}
+
+BASELINE_HARDENING_HEADERS_LOW_INFO = {
+    "x-content-type-options": "LOW",
+    "referrer-policy": "LOW",
+    "x-xss-protection": "LOW",
+    "server": "INFO",
+    "x-powered-by": "INFO",
+    "x-aspnet-version": "INFO",
+}
+
+
+def score_security_header_severity(header_name: str) -> str:
+    """
+    Categorize security header vulnerability severity:
+    - MEDIUM: Actionable security headers (Content-Security-Policy, X-Frame-Options, CORS, HSTS)
+    - LOW/INFO: Baseline hardening & disclosure headers (X-Content-Type-Options, Referrer-Policy, Server disclosure)
+    """
+    h_clean = (header_name or "").strip().lower()
+
+    if any(h in h_clean for h in ACTIONABLE_HEADERS_MEDIUM):
+        return "MEDIUM"
+
+    for h, sev in BASELINE_HARDENING_HEADERS_LOW_INFO.items():
+        if h in h_clean:
+            return sev
+
+    return "LOW"
+
+
+def enrich_finding_with_cve(finding: dict, cve_db: Optional[Any] = None) -> dict:
+    """
+    Enrich a candidate finding dictionary with real-time CVE IDs, CVSS scores, and KEV exploit status.
+    """
+    if cve_db is None:
+        from vuln_intel.feeds import CVEDatabase
+        cve_db = CVEDatabase()
+
+    software = str(finding.get("software") or finding.get("component") or "").strip()
+    version = str(finding.get("version") or "").strip()
+
+    if software:
+        cve_matches = cve_db.search_cve_for_software(software, version)
+        if cve_matches:
+            top_match = cve_matches[0]
+            cve_id = top_match.get("cve_id", "")
+            finding.setdefault("cve", cve_id)
+            finding.setdefault("cve_id", cve_id)
+            finding.setdefault("cvss_score", top_match.get("cvss_score", 0.0))
+            finding.setdefault("description", top_match.get("description", ""))
+
+            # Exploit availability check
+            exploit_info = cve_db.get_exploit_availability(cve_id)
+            finding["exploit_availability"] = exploit_info
+            if exploit_info.get("has_public_exploit"):
+                finding["has_public_exploit"] = True
+
+    return finding

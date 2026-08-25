@@ -7,6 +7,8 @@ Reads shared context, decides what to do, spawns agents, loops.
 import json
 import logging
 import asyncio
+import re
+from enum import Enum
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Any, List
@@ -88,8 +90,41 @@ RULES:
 - Use spawn_agents for independent parallel tasks"""
 
 
+class ExecutionPhase(str, Enum):
+    RECON = "RECON"
+    ACTIVE_SCANNING = "ACTIVE_SCANNING"
+    EXPLOITATION = "EXPLOITATION"
+    REPORTING = "REPORTING"
+
+
 class CentralBrain:
     """The autonomous pentesting orchestrator. LLM drives everything."""
+
+    @property
+    def failure_streak(self) -> int:
+        return self.consecutive_agent_failures
+
+    @failure_streak.setter
+    def failure_streak(self, value: int):
+        self.consecutive_agent_failures = value
+
+    def transition_phase(self, new_phase: ExecutionPhase):
+        old_phase = getattr(self, "current_phase", ExecutionPhase.RECON)
+        self.current_phase = new_phase
+        logger.info(f"BRAIN_PHASE_TRANSITION: old_phase='{old_phase}' -> new_phase='{new_phase}'")
+
+    def _evaluate_phase_transition(self) -> Optional[ExecutionPhase]:
+        """Check context to determine if state machine should transition to next phase."""
+        if self.current_phase == ExecutionPhase.RECON:
+            if self.ctx.endpoints or self.ctx.subdomains or self.ctx.ports or len(self.ctx.agents_spawned) >= 3:
+                return ExecutionPhase.ACTIVE_SCANNING
+        elif self.current_phase == ExecutionPhase.ACTIVE_SCANNING:
+            if self.ctx.vulnerabilities or len(self.ctx.agents_spawned) >= 6:
+                return ExecutionPhase.EXPLOITATION
+        elif self.current_phase == ExecutionPhase.EXPLOITATION:
+            if self.ctx.exploit_results or len(self.ctx.agents_spawned) >= 10:
+                return ExecutionPhase.REPORTING
+        return None
 
     def __init__(self, target: str, scope: Dict = None):
         from core.dedup_tracker import DeduplicationTracker
@@ -106,6 +141,7 @@ class CentralBrain:
         self.failed_tools = set()  # NEW: Brain-level tool failure tracking
         self.consecutive_agent_failures = 0  # NEW: Track failure streak
         self.max_consecutive_failures = 3
+        self.current_phase = ExecutionPhase.RECON
         self.chain_mgr = ChainManager(self.ctx, self.spawner)  # Phase 2: Chain system
         self.tier = (self.ctx.scope.get("max_tier") or "POC").upper()
         self.post_exploit = None  # Phase 3: Post-exploitation (lazy, needs foothold)
@@ -173,8 +209,11 @@ class CentralBrain:
         await self._capture_requests()
         await self._persist_captured_requests()
 
-        # Phase 2: Vulnerability analysis
+        # Phase 2: Vulnerability analysis & technology-matched Nuclei scanning
         logger.info("\n>>> PHASE 2: VULNERABILITY ANALYSIS")
+        from core.nuclei_runner import NucleiRunner
+        nuclei_runner = NucleiRunner()
+        await nuclei_runner.scan_context_technologies(self.ctx, timeout=60)
         await self._run_phase("analyze")
         await self._persist_vulnerabilities()
 
@@ -231,8 +270,12 @@ class CentralBrain:
         # Phase 6: Post-exploitation (privesc / lateral / persistence / MITRE)
         await self._run_post_exploitation()
 
-        # Phase 5: Report
-        logger.info("\n>>> PHASE 5: REPORT GENERATION")
+        # Phase 5: Automated finding retest & report generation
+        logger.info("\n>>> PHASE 5: FINDING RETEST & REPORT GENERATION")
+        if self.ctx.vulnerabilities:
+            from core.retest_engine import RetestEngine
+            retest_engine = RetestEngine()
+            await retest_engine.retest_findings(self.ctx.vulnerabilities)
         await self._generate_report()
 
         duration = (datetime.now() - self.start_time).total_seconds()
@@ -416,16 +459,68 @@ class CentralBrain:
             # ── Log prompt size ──
             logger.info(f"Brain prompt length: {len(prompt)} chars")
 
-            decision = await self.llm.generate_json(prompt, system=phase_prompt or BRAIN_SYSTEM)
-            logger.info(f"Brain decision: {json.dumps(decision, indent=2)}")
+            # ── LLM Response Generation with Strict Validation & Exponential Backoff Retry Loop ──
+            max_retries = 3
+            decision = None
+            raw_content = ""
 
+            from agents.llm_client import validate_json_payload
+            from core.normalizer import PlannerResponseNormalizer
+
+            for attempt in range(max_retries):
+                res = await self.llm.generate_response(
+                    prompt,
+                    system=phase_prompt or BRAIN_SYSTEM,
+                    tier=TaskTier.LARGE,
+                    temperature=0.1,
+                    response_format="json"
+                )
+                raw_content = res.content
+                structured = res.structured_output
+
+                if structured is None and raw_content:
+                    try:
+                        clean_content = re.sub(r'```json\n?|\n?```', '', raw_content).strip()
+                        structured = json.loads(clean_content)
+                    except Exception:
+                        m = re.search(r'\{[\s\S]*\}', raw_content)
+                        if m:
+                            try:
+                                structured = json.loads(m.group(0))
+                            except Exception:
+                                pass
+
+                # Validate non-empty dict and basic payload structure
+                if validate_json_payload(structured):
+                    try:
+                        canonical_decision = PlannerResponseNormalizer.normalize(structured)
+                        decision = structured
+                        logger.info(f"Brain decision accepted (attempt {attempt + 1}/{max_retries}): {json.dumps(decision, indent=2)}")
+                        break
+                    except Exception as norm_err:
+                        self.failure_streak += 1
+                        logger.warning(
+                            f"[CentralBrain] Attempt {attempt + 1}/{max_retries} failed schema validation ({norm_err}). "
+                            f"Raw response: '{raw_content}'. Failure streak: {self.failure_streak}"
+                        )
+                else:
+                    self.failure_streak += 1
+                    logger.warning(
+                        f"[CentralBrain] Attempt {attempt + 1}/{max_retries} received empty {{}} or malformed JSON. "
+                        f"Raw response: '{raw_content}'. Failure streak: {self.failure_streak}"
+                    )
+
+                if attempt < max_retries - 1:
+                    backoff = 0.5 * (2 ** attempt)
+                    await asyncio.sleep(backoff)
+
+            # If retries exhausted and no valid decision obtained or max failure streak reached
             if not decision:
-                self.consecutive_agent_failures += 1
-                logger.warning(f"Brain returned empty (failure streak: {self.consecutive_agent_failures})")
+                logger.warning(f"[CentralBrain] Brain returned empty/invalid response after {max_retries} retries (failure streak: {self.failure_streak})")
                 
-                # Deterministic fallback decision tree when LLM returns empty responses
-                if self.consecutive_agent_failures >= 2:
-                    logger.warning(f"[CentralBrain] Brain returned empty. Inject deterministic fallback task: http_request on discovered endpoints from reconnaissance phase. Log all responses.")
+                # Deterministic fallback decision tree when LLM returns empty/invalid responses
+                if self.failure_streak >= self.max_consecutive_failures or self.failure_streak >= 2:
+                    logger.warning(f"[CentralBrain] Failure threshold reached ({self.failure_streak}). Injecting safe deterministic fallback task: http_request probe.")
                     
                     # 1. Base URL
                     base_url = self.ctx.target.rstrip("/")
@@ -449,17 +544,17 @@ class CentralBrain:
                         full_target = base_url
 
                     # 4. Scope validation
-                    from agents.authorization import AuthorizationManager
+                    from core.authorization import TargetScopeValidator
                     from urllib.parse import urlparse
                     parsed_host = urlparse(full_target).hostname or full_target.split("/")[0].split(":")[0]
-                    scope_pass = AuthorizationManager.is_authorized(parsed_host)
+                    scope_pass = TargetScopeValidator.get().is_authorized(parsed_host)
                     scope_str = "pass" if scope_pass else "fail"
 
                     logger.info(f"FALLBACK_TARGET_CONSTRUCTED: target={full_target} scope_check={scope_str}")
 
                     if not scope_pass:
                         logger.warning(f"FALLBACK_TARGET_OUT_OF_SCOPE: '{full_target}' failed authorization scope check. Skipping fallback.")
-                        self.consecutive_agent_failures = 0
+                        self.failure_streak = 0
                         break
 
                     fallback_task = TaskSpec(
@@ -479,24 +574,23 @@ class CentralBrain:
                             })
                             if agent and hasattr(agent, "run"):
                                 await agent.run()
-                        self.consecutive_agent_failures = 0
+                        self.failure_streak = 0
+                        agents_this_phase += 1
+                        break
                     except Exception as ex:
                         logger.error(f"Fallback HTTP probe execution failed: {ex}")
                         break
                 continue
 
             # ── Canonical Planner Response Normalization ──
-            from core.normalizer import PlannerResponseNormalizer
-            from core.schemas import BrainDecisionAction, TaskStatus
-            
             try:
                 canonical_decision = PlannerResponseNormalizer.normalize(decision)
             except Exception as e:
-                self.consecutive_agent_failures += 1
+                self.failure_streak += 1
                 logger.error(f"Planner decision normalization failed: {e}")
                 continue
 
-            self.consecutive_agent_failures = 0
+            self.failure_streak = 0
             action = canonical_decision.action
 
             if action == BrainDecisionAction.COMPLETE:

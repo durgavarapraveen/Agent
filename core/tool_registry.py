@@ -62,7 +62,7 @@ class KaliTool(Tool):
     def __init__(self, name: str, description: str, category: str = "recon"):
         super().__init__(name, description, category)
 
-    def run(self, command: str, timeout: int = 120) -> ToolResult:
+    def run(self, command: str, timeout: int = 300) -> ToolResult:
         """Run raw command in Kali container"""
         logger.info(f"  [{self.name}] {command}")
         r = KaliDockerExecutor.run(command, timeout=timeout, auto_install=True)

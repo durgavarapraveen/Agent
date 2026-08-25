@@ -149,6 +149,20 @@ VULN_RELATIONSHIPS = {
     ("open_redirect", "credentials"): {"relationship": "extracts", "success_rate": 0.45,
                                        "description": "Redirect to phishing page"},
 
+    # ── Missing security header catalyst chains ──
+    ("missing_csp", "xss"):           {"relationship": "catalyzes", "success_rate": 0.85,
+                                       "description": "Missing CSP allows unmitigated script execution for XSS"},
+    ("missing_csp", "session_hijack"):{"relationship": "enables", "success_rate": 0.75,
+                                       "description": "Missing CSP allows XSS session cookie theft"},
+    ("missing_x_frame_options", "clickjacking"): {"relationship": "enables", "success_rate": 0.85,
+                                                  "description": "Missing X-Frame-Options enables framing / Clickjacking"},
+    ("missing_x_frame_options", "csrf"):          {"relationship": "enables", "success_rate": 0.70,
+                                                  "description": "Missing X-Frame-Options enables framed UI redress / CSRF"},
+    ("missing_cors", "data_leak"):    {"relationship": "enables", "success_rate": 0.80,
+                                       "description": "Permissive/Missing CORS allows cross-origin data theft"},
+    ("missing_cors", "credentials"):  {"relationship": "extracts", "success_rate": 0.75,
+                                       "description": "Permissive CORS with credentials exposes sensitive tokens"},
+
     # ── Deserialization chains ──
     ("deserialization", "rce"):       {"relationship": "escalates_to", "success_rate": 0.75,
                                        "description": "Unsafe deserialization → code exec"},
@@ -182,6 +196,12 @@ TYPE_ALIASES = {
     "default_credentials": "credentials",
     "information_disclosure": "data_leak",
     "sensitive_data_exposure": "data_leak",
+    "missing_csp": "missing_csp",
+    "missing_content_security_policy": "missing_csp",
+    "missing_x_frame_options": "missing_x_frame_options",
+    "missing_frame_options": "missing_x_frame_options",
+    "missing_cors": "missing_cors",
+    "missing_access_control_allow_origin": "missing_cors",
 }
 
 
@@ -195,6 +215,13 @@ class RelationshipDB:
     def normalize_type(self, vuln_type: str) -> str:
         """Normalize vulnerability type names"""
         vt = vuln_type.lower().strip().replace(" ", "_").replace("-", "_")
+        if "missing" in vt or "header" in vt:
+            if "csp" in vt or "content_security_policy" in vt:
+                return "missing_csp"
+            if "frame" in vt or "x_frame_options" in vt or "clickjacking" in vt:
+                return "missing_x_frame_options"
+            if "cors" in vt or "access_control" in vt:
+                return "missing_cors"
         return self.aliases.get(vt, vt)
 
     def get_relationship(self, source_type: str, target_type: str) -> Optional[Dict]:

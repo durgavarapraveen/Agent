@@ -71,7 +71,14 @@ class AgentSpawner:
         else:
             skip_dedup = False
 
-        target_val = str(raw_target or (self.ctx.target if hasattr(self.ctx, "target") else "")).lower().strip()
+        inputs_target = spec.get("target") or spec.get("inputs", {}).get("target") or spec.get("url") or spec.get("inputs", {}).get("url") or spec.get("subdomain") or spec.get("inputs", {}).get("subdomain")
+        exact_target = str(inputs_target or raw_target or (self.ctx.target if hasattr(self.ctx, "target") else "")).lower().strip()
+        if "://" in exact_target:
+            exact_target = exact_target.split("://", 1)[1]
+        if "/" in exact_target:
+            exact_target = exact_target.split("/", 1)[0]
+
+        target_val = exact_target
         subdomain_val = str(spec.get("subdomain") or spec.get("inputs", {}).get("subdomain") or "").lower().strip()
         port_val = str(spec.get("port") or spec.get("inputs", {}).get("port") or "").strip()
         ip_val = str(spec.get("ip") or spec.get("inputs", {}).get("ip") or "").strip()
@@ -94,7 +101,7 @@ class AgentSpawner:
 
         # Only compare gravity vectors when target field is populated and valid
         if not skip_dedup and dedup.is_duplicate(tool="spawner", finding_type="task_gravity", data=gravity_vector):
-            logger.info(f"TASK_DEDUPLICATED: objective='{objective[:60]}' gravity='{gravity_vector}' (already spawned)")
+            logger.info(f"TASK_DEDUPLICATED: target='{target_val}' objective='{objective[:60]}' gravity='{gravity_vector}' (already spawned)")
             return None
 
         if not skip_dedup:
