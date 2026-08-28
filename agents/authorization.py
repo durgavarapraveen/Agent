@@ -49,12 +49,8 @@ class AuthorizationManager:
 
     def verify_domain(self, domain: str) -> bool:
         """Check if domain is authorized"""
-        authorized = self.scope.get("domains", [])
-        for auth_domain in authorized:
-            if domain.endswith(auth_domain):
-                return True
-        logger.warning(f"Domain NOT authorized: {domain}")
-        return False
+        from core.authorization import TargetScopeValidator
+        return TargetScopeValidator.get().is_authorized(domain)
 
     def verify_tier(self, tier: ExploitTier) -> bool:
         """Check if tier is allowed"""

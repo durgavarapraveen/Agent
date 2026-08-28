@@ -9,6 +9,7 @@ import logging
 import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class SharedContext:
 
         # ── Vulnerability data ──
         self.vulnerabilities: List[Dict] = []   # [{id, type, location, severity, details}]
+        self.false_positives: List[Dict] = []  # [{finding, reason, timestamp}]
         self.attack_chains: List[Dict] = []     # [{chain_id, steps, impact}]
 
         # ── Captured HTTP traffic (for replay in exploits) ──
@@ -68,34 +70,64 @@ class SharedContext:
 
     def add_subdomains(self, subs: List[str], source: str = ""):
         with self._lock:
+            added = 0
             for s in subs:
                 if s and s not in self.subdomains:
                     self.subdomains.append(s)
-            logger.debug(f"Subdomains: +{len(subs)} from {source}, total={len(self.subdomains)}")
+                    added += 1
+            if added > 0:
+                logger.info(f"SHARED_CONTEXT_UPDATE: key=subdomains, count={len(self.subdomains)} (+{added} from {source})")
 
     def add_ips(self, ips: List[str], source: str = ""):
         with self._lock:
+            added = 0
             for ip in ips:
                 if ip and ip not in self.ips:
                     self.ips.append(ip)
+                    added += 1
+            if added > 0:
+                logger.info(f"SHARED_CONTEXT_UPDATE: key=ips, count={len(self.ips)} (+{added} from {source})")
 
-    def add_ports(self, host: str, ports: List[Dict], source: str = ""):
+    def add_ports(self, host: str, ports: List, source: str = ""):
+        """Add ports - handles both ints and dicts."""
         with self._lock:
             existing = self.ports.get(host, [])
-            existing_nums = {p["port"] for p in existing}
+            existing_nums = {p.get("port") if isinstance(p, dict) else p for p in existing}
+            
             for p in ports:
-                if p.get("port") and p["port"] not in existing_nums:
-                    existing.append(p)
-                    existing_nums.add(p["port"])
+                if isinstance(p, int):
+                    port_dict = {"port": p, "service": "unknown", "version": ""}
+                    if p == 22:
+                        port_dict["service"] = "ssh"
+                    elif p == 80:
+                        port_dict["service"] = "http"
+                    elif p == 443:
+                        port_dict["service"] = "https"
+                elif isinstance(p, dict):
+                    port_dict = p
+                else:
+                    port_dict = {"port": str(p), "service": "unknown", "version": ""}
+                
+                port_num = port_dict.get("port")
+                if port_num and port_num not in existing_nums:
+                    existing.append(port_dict)
+                    existing_nums.add(port_num)
+            
             self.ports[host] = existing
+            logger.info(f"SHARED_CONTEXT_UPDATE: key=ports[{host}], count={len(existing)} from {source}")
 
     def add_endpoints(self, endpoints: List[Dict], source: str = ""):
         with self._lock:
             existing_urls = {e.get("url") for e in self.endpoints}
+            added = 0
             for ep in endpoints:
-                if ep.get("url") and ep["url"] not in existing_urls:
-                    self.endpoints.append(ep)
-                    existing_urls.add(ep["url"])
+                url_str = ep.get("url") if isinstance(ep, dict) else str(ep)
+                if url_str and url_str not in existing_urls:
+                    self.endpoints.append(ep if isinstance(ep, dict) else {"url": url_str})
+                    existing_urls.add(url_str)
+                    added += 1
+            if added > 0:
+                logger.info(f"SHARED_CONTEXT_UPDATE: key=endpoints, count={len(self.endpoints)} (+{added} from {source})")
 
     def add_directories(self, dirs: List[Dict], source: str = ""):
         with self._lock:
@@ -115,13 +147,96 @@ class SharedContext:
              if tech_str:
                  existing.add(tech_str)
          self.technologies[host] = sorted(existing)
+         logger.info(f"SHARED_CONTEXT_UPDATE: key=technologies[{host}], count={len(self.technologies[host])}")
 
-    def add_vulnerability(self, vuln: Dict):
+    def add_vulnerability(self, vuln: Dict) -> bool:
+        from core.dedup_tracker import DeduplicationTracker
         with self._lock:
+            vuln_type = str(vuln.get("type") or vuln.get("vuln_type") or "").lower().strip()
+            proof = str(vuln.get("proof") or vuln.get("details") or "").strip()
+            payload = str(vuln.get("payload") or "").strip()
+            tool_name = str(vuln.get("tool") or "unknown").strip()
+
+            if not proof:
+                logger.info(f"VULN_REJECTED: type={vuln_type or 'unknown'} reason='No proof string or details captured'")
+                return False
+
+            if "rce" in vuln_type or "command" in vuln_type:
+                rce_patterns = [r"uid=\d+", r"root:", r"www-data", r"Linux version", r"Windows IP", r"system"]
+                if not any(re.search(pat, proof, re.IGNORECASE) for pat in rce_patterns):
+                    logger.info(f"VULN_REJECTED: type={vuln_type} reason='No command output captured'")
+                    return False
+
+            elif "sqli" in vuln_type or "sql" in vuln_type:
+                if not payload:
+                    logger.info(f"VULN_REJECTED: type={vuln_type} reason='No SQL injection payload recorded'")
+                    return False
+                sqli_indicators = ["error", "syntax", "sqlite", "mysql", "postgresql", "oracle", "extracted", "tables_found", "table", "version"]
+                if not any(ind in proof.lower() for ind in sqli_indicators):
+                    logger.info(f"VULN_REJECTED: type={vuln_type} reason='No database error message or extracted data in proof'")
+                    return False
+
+            elif "auth_bypass" in vuln_type:
+                if "200" not in proof and "unauthorized" not in proof.lower() and "token" not in proof.lower() and "data" not in proof.lower():
+                    logger.info(f"VULN_REJECTED: type={vuln_type} reason='No unauthorized access or HTTP 200 proof'")
+                    return False
+
+            # Route through FalsePositiveFilter
+            from core.fp_filter import FalsePositiveFilter
+            fp_filter = FalsePositiveFilter()
+            should_report, reason = fp_filter.should_report_finding(vuln)
+            if not should_report:
+                logger.info(f"VULN_FILTERED_FP: type={vuln_type} title='{vuln.get('title', '')}' reason='{reason}'")
+                self.false_positives.append({
+                    "finding": vuln,
+                    "reason": reason,
+                    "timestamp": datetime.now().isoformat()
+                })
+                return False
+
+            # Header-specific vulnerability deduplication logic
+            host = str(vuln.get("target") or vuln.get("host") or vuln.get("location") or self.target or "").strip().lower()
+            if "://" in host:
+                host = host.split("://", 1)[1]
+            if "/" in host:
+                host = host.split("/", 1)[0]
+
+            header_name = str(vuln.get("header_name") or vuln.get("header") or "").strip()
+            if not header_name and ("header" in vuln_type or "missing" in vuln_type):
+                # Attempt extracting header name from title or proof
+                title_str = vuln.get("title", "")
+                if ":" in title_str:
+                    header_name = title_str.split(":", 1)[1].strip()
+                elif "header" in title_str.lower():
+                    m = re.search(r"header[:\s]+([a-zA-Z0-9\-_]+)", title_str, re.IGNORECASE)
+                    if m:
+                        header_name = m.group(1).strip()
+
+            if "missing" in vuln_type and ("header" in vuln_type or header_name):
+                effective_finding_type = f"missing_header:{host}:{header_name or 'generic'}"
+                dedup_data = f"missing_header:{host}:{header_name}:{proof}"
+            elif "nuclei" in vuln_type or vuln.get("template_id"):
+                template_id = str(vuln.get("template_id") or "generic").strip()
+                effective_finding_type = f"nuclei:{host}:{template_id}"
+                dedup_data = f"nuclei:{host}:{template_id}:{proof}"
+            else:
+                effective_finding_type = vuln_type
+                dedup_data = payload or proof or vuln.get("title", "")
+
+            # Check deduplication BEFORE adding
+            dedup = DeduplicationTracker()
+            if dedup.is_duplicate(tool=tool_name, finding_type=effective_finding_type, data=dedup_data):
+                logger.info(f"VULN_DEDUPLICATED: type={effective_finding_type} title='{vuln.get('title', '')}' (already recorded)")
+                return False
+
+            dedup.register_finding(tool=tool_name, finding_type=effective_finding_type, data=dedup_data)
+
             vuln.setdefault("id", f"VULN-{len(self.vulnerabilities)+1:03d}")
             vuln.setdefault("timestamp", datetime.now().isoformat())
             self.vulnerabilities.append(vuln)
-            logger.info(f"  New vuln: [{vuln.get('severity','?')}] {vuln.get('title','?')}")
+            logger.info(f"SHARED_CONTEXT_UPDATE: key=vulnerabilities, count={len(self.vulnerabilities)}")
+            logger.info(f"  New vuln: [{vuln.get('severity','?')}] {vuln.get('title', vuln.get('type', '?'))}")
+            return True
 
     def add_exploit_result(self, result: Dict):
         with self._lock:

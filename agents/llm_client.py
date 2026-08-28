@@ -3,24 +3,36 @@ LLM Client - Reads config from .env file
 Supports Gemini + Ollama + extensible for other providers
 """
 
+import asyncio
 import json
 import logging
 import re
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Optional, Dict
+from typing import Optional, Dict, Any, List, Tuple
 
 import httpx
 
 from core.config import get_config
+from core.schemas import NormalizedLLMResponse
 
-try:
-    from groq import Groq as GroqClient
-    HAS_GROQ = True
-except ImportError:
-    HAS_GROQ = False
+
 
 logger = logging.getLogger(__name__)
+
+
+def validate_json_payload(data: Any, mandatory_fields: Optional[List[str]] = None) -> bool:
+    """
+    Strict validation check for LLM JSON responses.
+    Treats None, non-dict objects, empty dicts ({}), or dicts missing mandatory fields as invalid.
+    """
+    if not data or not isinstance(data, dict) or len(data) == 0:
+        return False
+    if mandatory_fields:
+        for field in mandatory_fields:
+            if field not in data or data[field] is None:
+                return False
+    return True
 
 
 class TaskTier(Enum):
@@ -32,15 +44,92 @@ class LLMProvider(ABC):
     """Base provider interface"""
 
     @abstractmethod
+    async def generate_response(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
+                                system: Optional[str] = None, max_tokens: int = 1024,
+                                temperature: float = 0.3, response_format: Optional[str] = None) -> NormalizedLLMResponse:
+        pass
+
     async def generate(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
                         system: Optional[str] = None, max_tokens: int = 1024,
                         temperature: float = 0.3) -> str:
-        pass
+        res = await self.generate_response(prompt, tier, system, max_tokens, temperature)
+        return res.content
 
-    @abstractmethod
     async def generate_json(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                             system: Optional[str] = None, max_tokens: int = 2048) -> Dict:
-        pass
+                             system: Optional[str] = None, max_tokens: int = 2048,
+                             mandatory_fields: Optional[List[str]] = None) -> Dict:
+        res = await self.generate_response(prompt, tier, system, max_tokens, temperature=0.1, response_format="json")
+        raw_content = res.content
+        structured = res.structured_output
+
+        if structured is None and raw_content:
+            try:
+                clean_content = re.sub(r'```json\n?|\n?```', '', raw_content).strip()
+                structured = json.loads(clean_content)
+            except Exception:
+                m = re.search(r'\{[\s\S]*\}', raw_content)
+                if m:
+                    try:
+                        structured = json.loads(m.group(0))
+                    except Exception:
+                        pass
+
+        if not validate_json_payload(structured, mandatory_fields):
+            logger.warning(
+                f"[LLMClient] Invalid/empty JSON response received from provider '{res.provider}'. "
+                f"Raw response: '{raw_content}'"
+            )
+            return {}
+
+        return structured
+
+    async def generate_json_with_retry(
+        self,
+        prompt: str,
+        tier: TaskTier = TaskTier.SMALL,
+        system: Optional[str] = None,
+        max_tokens: int = 2048,
+        mandatory_fields: Optional[List[str]] = None,
+        max_retries: int = 3,
+        initial_backoff: float = 0.5
+    ) -> Tuple[Dict, str]:
+        """
+        Generates JSON response with strict validation, exponential backoff retries,
+        and diagnostic logging of raw responses on empty/invalid outputs.
+        Returns tuple of (structured_dict, raw_content).
+        """
+        raw_content = ""
+        for attempt in range(max_retries):
+            res = await self.generate_response(prompt, tier, system, max_tokens, temperature=0.1, response_format="json")
+            raw_content = res.content
+            structured = res.structured_output
+
+            if structured is None and raw_content:
+                try:
+                    clean_content = re.sub(r'```json\n?|\n?```', '', raw_content).strip()
+                    structured = json.loads(clean_content)
+                except Exception:
+                    m = re.search(r'\{[\s\S]*\}', raw_content)
+                    if m:
+                        try:
+                            structured = json.loads(m.group(0))
+                        except Exception:
+                            pass
+
+            if validate_json_payload(structured, mandatory_fields):
+                return structured, raw_content
+
+            logger.warning(
+                f"[LLMClient] Attempt {attempt + 1}/{max_retries} failed: "
+                f"empty {{}} or malformed JSON received from provider '{res.provider}'. "
+                f"Raw response: '{raw_content}'"
+            )
+
+            if attempt < max_retries - 1:
+                backoff = initial_backoff * (2 ** attempt)
+                await asyncio.sleep(backoff)
+
+        return {}, raw_content
 
     @abstractmethod
     async def is_available(self) -> bool:
@@ -72,9 +161,9 @@ class GeminiProvider(LLMProvider):
             logger.debug(f"Gemini unavailable: {e}")
             return False
 
-    async def generate(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                        system: Optional[str] = None, max_tokens: int = 1024,
-                        temperature: float = 0.3) -> str:
+    async def generate_response(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
+                                system: Optional[str] = None, max_tokens: int = 1024,
+                                temperature: float = 0.3, response_format: Optional[str] = None) -> NormalizedLLMResponse:
         contents = []
         if system:
             contents.append({"parts": [{"text": system}]})
@@ -84,124 +173,47 @@ class GeminiProvider(LLMProvider):
             "contents": contents,
             "generationConfig": {"maxOutputTokens": max_tokens, "temperature": temperature}
         }
+        if response_format == "json":
+            payload["generationConfig"]["responseMimeType"] = "application/json"
 
         url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
+        content = ""
+        structured = None
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 r = await client.post(url, json=payload)
                 if r.status_code == 200:
                     data = r.json()
                     if "candidates" in data and data["candidates"]:
-                        parts = data["candidates"][0].get("content", {}).get("parts", [])
+                        candidate = data["candidates"][0]
+                        parts = candidate.get("content", {}).get("parts", [])
                         if parts:
-                            return parts[0].get("text", "").strip()
+                            content = parts[0].get("text", "").strip()
+                            finish_reason = candidate.get("finishReason")
+                            if response_format == "json" or content.startswith("{") or content.startswith("["):
+                                try:
+                                    structured = json.loads(content)
+                                except Exception:
+                                    # Fallback regex
+                                    m = re.search(r'\{[\s\S]*\}', content)
+                                    if m:
+                                        try:
+                                            structured = json.loads(m.group(0))
+                                        except:
+                                            pass
+                            return NormalizedLLMResponse(
+                                content=content,
+                                structured_output=structured,
+                                finish_reason=finish_reason,
+                                provider="gemini",
+                                model=self.model,
+                            )
                 logger.error(f"Gemini {r.status_code}: {r.text[:200]}")
         except Exception as e:
-            logger.error(f"Gemini generate: {e}")
-        return ""
-
-    async def generate_json(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                             system: Optional[str] = None, max_tokens: int = 2048) -> Dict:
-        json_prompt = f"{prompt}\n\nRespond ONLY with valid JSON."
-        text = await self.generate(json_prompt, tier, system, max_tokens, temperature=0.1)
-        if not text:
-            return {}
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            m = re.search(r'\{[\s\S]*\}', text)
-            if m:
-                try:
-                    return json.loads(m.group(0))
-                except:
-                    pass
-        return {}
-
-
-# ═══════════════════════════════════════════════════════════════
-# GROQ PROVIDER
-# ═══════════════════════════════════════════════════════════════
-
-class GroqProvider(LLMProvider):
-    """Groq API provider - FREE, fast models"""
-
-    def __init__(self):
-        if not HAS_GROQ:
-            raise ImportError("groq package not installed. Install with: pip install groq")
-        
-        api_key = get_config().get("GROQ_API_KEY")
-        if not api_key:
-            raise ValueError("GROQ_API_KEY not set in .env")
-        
-        self.model = get_config().get("GROQ_MODEL", "mixtral-8x7b-32768")
-        self.client = GroqClient(api_key=api_key)
-
-    async def generate(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                       system: Optional[str] = None, max_tokens: int = 1024,
-                       temperature: float = 0.3) -> str:
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system or "You are a helpful assistant."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            logger.error(f"Groq generate error: {e}")
-            return ""
-
-    async def generate_json(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                            system: Optional[str] = None, max_tokens: int = 2048) -> Dict:
-        json_prompt = f"{prompt}\n\nRespond ONLY with valid JSON. No markdown backticks."
-        json_system = (system or "") + "\n\nRespond ONLY with valid JSON."
-        
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": json_system},
-                    {"role": "user", "content": json_prompt}
-                ],
-                max_tokens=max_tokens,
-                temperature=0.1,
-            )
-            text = response.choices[0].message.content
+            logger.error(f"Gemini generate_response: {e}")
             
-            # Remove markdown code blocks
-            text = re.sub(r'```json\n?|\n?```', '', text)
-            text = text.strip()
-            
-            if not text:
-                return {}
-            
-            try:
-                return json.loads(text)
-            except json.JSONDecodeError:
-                m = re.search(r'\{[\s\S]*\}', text)
-                if m:
-                    try:
-                        return json.loads(m.group(0))
-                    except:
-                        pass
-            return {}
-        except Exception as e:
-            logger.error(f"Groq generate_json error: {e}")
-            return {}
+        return NormalizedLLMResponse(content="", provider="gemini", model=self.model)
 
-    async def is_available(self) -> bool:
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": "test"}],
-                max_tokens=10,
-            )
-            return response.choices[0].message.content != ""
-        except:
-            return False
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -242,60 +254,68 @@ class DeepSeekProvider(LLMProvider):
             logger.debug(f"DeepSeek unavailable: {e}")
             return False
 
-    async def generate(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                       system: Optional[str] = None, max_tokens: int = 1024,
-                       temperature: float = 0.3) -> str:
+    async def generate_response(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
+                                system: Optional[str] = None, max_tokens: int = 1024,
+                                temperature: float = 0.3, response_format: Optional[str] = None) -> NormalizedLLMResponse:
         messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
+        messages.append({"role": "system", "content": system or "You are a helpful assistant."})
         messages.append({"role": "user", "content": prompt})
-        payload = {"model": self._model_for(tier), "messages": messages,
-                   "max_tokens": max_tokens, "temperature": temperature,
-                   "stream": False}
+        
+        payload = {
+            "model": self._model_for(tier), 
+            "messages": messages,
+            "max_tokens": max_tokens, 
+            "temperature": temperature,
+            "stream": False
+        }
+        if response_format == "json":
+            payload["response_format"] = {"type": "json_object"}
+            
+        model_name = self._model_for(tier)
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 r = await client.post(f"{self.base_url}/chat/completions",
                                       headers=self._headers(), json=payload)
                 if r.status_code == 200:
-                    return r.json()["choices"][0]["message"]["content"].strip()
-                logger.error(f"DeepSeek {r.status_code}: {r.text[:200]}")
-        except Exception as e:
-            logger.error(f"DeepSeek generate: {e}")
-        return ""
-
-    async def generate_json(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                            system: Optional[str] = None, max_tokens: int = 2048) -> Dict:
-        messages = []
-        json_system = (system or "You are a helpful assistant.") + \
-            "\n\nRespond ONLY with valid JSON. No markdown."
-        messages.append({"role": "system", "content": json_system})
-        messages.append({"role": "user", "content": prompt})
-        payload = {"model": self._model_for(tier), "messages": messages,
-                   "max_tokens": max_tokens, "temperature": 0.1,
-                   "stream": False, "response_format": {"type": "json_object"}}
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                r = await client.post(f"{self.base_url}/chat/completions",
-                                      headers=self._headers(), json=payload)
-                if r.status_code != 200:
-                    logger.error(f"DeepSeek {r.status_code}: {r.text[:200]}")
-                    return {}
-                text = r.json()["choices"][0]["message"]["content"].strip()
-                text = re.sub(r'```json\n?|\n?```', '', text).strip()
-                if not text:
-                    return {}
-                try:
-                    return json.loads(text)
-                except json.JSONDecodeError:
-                    m = re.search(r'\{[\s\S]*\}', text)
-                    if m:
+                    data = r.json()
+                    choice = data["choices"][0]
+                    message = choice.get("message", {})
+                    
+                    content = message.get("content") or ""
+                    reasoning_content = message.get("reasoning_content") or ""
+                    
+                    # Core fix: DeepSeek Empty Content Bug
+                    if not content and reasoning_content:
+                        content = reasoning_content
+                        
+                    clean_content = re.sub(r'```json\n?|\n?```', '', content).strip()
+                    
+                    structured = None
+                    if response_format == "json" or clean_content.startswith("{") or clean_content.startswith("["):
                         try:
-                            return json.loads(m.group(0))
-                        except json.JSONDecodeError:
-                            pass
+                            structured = json.loads(clean_content)
+                        except Exception:
+                            m = re.search(r'\{[\s\S]*\}', clean_content)
+                            if m:
+                                try:
+                                    structured = json.loads(m.group(0))
+                                except:
+                                    pass
+                                    
+                    return NormalizedLLMResponse(
+                        content=clean_content,
+                        structured_output=structured,
+                        finish_reason=choice.get("finish_reason"),
+                        provider="deepseek",
+                        model=model_name,
+                        usage=data.get("usage")
+                    )
+                else:
+                    logger.error(f"DeepSeek error {r.status_code}: {r.text[:500]}")
         except Exception as e:
-            logger.error(f"DeepSeek generate_json: {e}")
-        return {}
+            logger.error(f"DeepSeek generate_response exception: {e}")
+            
+        return NormalizedLLMResponse(content="", provider="deepseek", model=model_name)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -323,60 +343,63 @@ class OllamaProvider(LLMProvider):
         except:
             return False
 
-    async def generate(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                        system: Optional[str] = None, max_tokens: int = 1024,
-                        temperature: float = 0.3) -> str:
+    async def generate_response(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
+                                system: Optional[str] = None, max_tokens: int = 1024,
+                                temperature: float = 0.3, response_format: Optional[str] = None) -> NormalizedLLMResponse:
         model = self._model_for(tier)
         payload = {
-            "model": model, "prompt": prompt, "stream": False,
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system or "You are a helpful assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            "stream": False,
             "options": {"temperature": temperature, "num_predict": max_tokens}
         }
-        if system:
-            payload["system"] = system
+        if response_format == "json":
+            payload["format"] = "json"
+            
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                r = await client.post(f"{self.base_url}/api/generate", json=payload)
+                r = await client.post(f"{self.base_url}/api/chat", json=payload)
                 if r.status_code == 200:
-                    return r.json().get("response", "").strip()
-                logger.error(f"Ollama {r.status_code}: {r.text[:200]}")
+                    data = r.json()
+                    message = data.get("message", {})
+                    content = message.get("content", "").strip()
+                    
+                    clean_content = re.sub(r'```json\n?|\n?```', '', content).strip()
+                    
+                    structured = None
+                    if response_format == "json" or clean_content.startswith("{") or clean_content.startswith("["):
+                        try:
+                            structured = json.loads(clean_content)
+                        except Exception:
+                            m = re.search(r'\{[\s\S]*\}', clean_content)
+                            if m:
+                                try:
+                                    structured = json.loads(m.group(0))
+                                except:
+                                    pass
+                                    
+                    return NormalizedLLMResponse(
+                        content=clean_content,
+                        structured_output=structured,
+                        provider="ollama",
+                        model=model,
+                    )
+                else:
+                    logger.error(f"Ollama error {r.status_code}: {r.text[:200]}")
         except Exception as e:
-            logger.error(f"Ollama generate: {e}")
-        return ""
-
-    async def generate_json(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
-                             system: Optional[str] = None, max_tokens: int = 2048) -> Dict:
-        model = self._model_for(tier)
-        payload = {
-            "model": model, "prompt": prompt, "stream": False, "format": "json",
-            "options": {"temperature": 0.1, "num_predict": max_tokens}
-        }
-        if system:
-            payload["system"] = system
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                r = await client.post(f"{self.base_url}/api/generate", json=payload)
-                if r.status_code == 200:
-                    text = r.json().get("response", "").strip()
-                    try:
-                        return json.loads(text)
-                    except json.JSONDecodeError:
-                        m = re.search(r'\{[\s\S]*\}', text)
-                        if m:
-                            try:
-                                return json.loads(m.group(0))
-                            except:
-                                pass
-        except Exception as e:
-            logger.error(f"Ollama generate_json: {e}")
-        return {}
+            logger.error(f"Ollama generate_response exception: {e}")
+            
+        return NormalizedLLMResponse(content="", provider="ollama", model=model)
 
 
 class NullProvider(LLMProvider):
     """Fallback provider when nothing works"""
-    async def generate(self, *args, **kwargs) -> str:
-        return ""
-    async def generate_json(self, *args, **kwargs) -> Dict:
-        return {}
+    async def generate_response(self, *args, **kwargs) -> NormalizedLLMResponse:
+        return NormalizedLLMResponse(content="", provider="null", model="null")
+        
     async def is_available(self) -> bool:
         return False
 
@@ -402,35 +425,13 @@ class LLMClient:
 
     @classmethod
     def _create_from_config(cls) -> LLMProvider:
-        """
-        Read from .env:
-          LLM_PROVIDER=gemini|ollama|other
-
-        For Gemini:
-          GOOGLE_API_KEY=...
-          GEMINI_MODEL=gemini-2.0-flash-exp
-
-        For Ollama:
-          OLLAMA_BASE_URL=http://localhost:11434
-          OLLAMA_SMALL_MODEL=qwen3:8b
-          OLLAMA_LARGE_MODEL=qwen3:8b
-        """
         config = get_config()
         provider_name = config.get("LLM_PROVIDER", "ollama").lower()
 
         logger.info(f"LLM_PROVIDER from .env: {provider_name}")
 
-        if provider_name == "groq":
-            try:
-                model = config.get("GROQ_MODEL", "mixtral-8x7b-32768")
-                logger.info(f"Using Groq provider (model: {model})")
-                return GroqProvider()
-            except (ValueError, ImportError) as e:
-                logger.error(f"Groq init failed: {e}")
-                logger.info("Falling back to NullProvider")
-                return NullProvider()
 
-        elif provider_name == "deepseek":
+        if provider_name == "deepseek":
             try:
                 api_key = config.get("DEEPSEEK_API_KEY")
                 small = config.get("DEEPSEEK_SMALL_MODEL", "deepseek-chat")

@@ -17,9 +17,10 @@ logger = logging.getLogger(__name__)
 class IntelligenceFetcher:
     """Fetch real-time vulnerability intelligence from public APIs."""
 
-    def __init__(self, shodan_key: str = "", github_token: str = ""):
+    def __init__(self, shodan_key: str = "", github_token: str = "", nvd_key: str = ""):
         self.shodan_key = shodan_key
         self.github_token = github_token
+        self.nvd_key = nvd_key
         self.timeout = 30
         self._rate_limits = {
             "nvd": {"remaining": 50, "reset": 0},
@@ -34,7 +35,7 @@ class IntelligenceFetcher:
                          max_results: int = 10) -> List[Dict]:
         """
         Search NVD for CVEs by product name and version.
-        Free API, no key required. Rate limit: 5 req/30s without key.
+        Free API. Rate limit: 5 req/30s without key, 50 req/30s with key.
 
         Example: search_nvd("apache", "2.4.49") → list of CVEs
         """
@@ -46,10 +47,13 @@ class IntelligenceFetcher:
             "keywordSearch": keyword,
             "resultsPerPage": min(max_results, 50),
         }
+        headers = {}
+        if self.nvd_key:
+            headers["apiKey"] = self.nvd_key
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                resp = await client.get(base_url, params=params)
+                resp = await client.get(base_url, params=params, headers=headers)
 
                 if resp.status_code == 403:
                     logger.warning("NVD rate limited. Waiting 30s...")
@@ -134,9 +138,13 @@ class IntelligenceFetcher:
         base_url = f"https://services.nvd.nist.gov/rest/json/cves/2.0"
         params = {"cveId": cve_id}
 
+        headers = {}
+        if self.nvd_key:
+            headers["apiKey"] = self.nvd_key
+
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                resp = await client.get(base_url, params=params)
+                resp = await client.get(base_url, params=params, headers=headers)
                 if resp.status_code == 200:
                     data = resp.json()
                     vulns = data.get("vulnerabilities", [])

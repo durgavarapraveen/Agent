@@ -1,5 +1,6 @@
 import sqlite3
 import json
+import uuid
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -146,6 +147,38 @@ class KnowledgeStore:
                 FOREIGN KEY(target_id) REFERENCES targets(target_id)
             )
         ''')
+
+        # Exploit Results
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS exploit_results (
+                result_id TEXT PRIMARY KEY,
+                target_id TEXT,
+                vuln_id TEXT,
+                exploit_id TEXT,
+                payload TEXT,
+                success BOOLEAN,
+                proof TEXT,
+                severity TEXT,
+                executed_at TEXT,
+                FOREIGN KEY(target_id) REFERENCES targets(target_id)
+            )
+        ''')
+
+        # Post Exploitation Findings
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS post_exploit_findings (
+                pe_id TEXT PRIMARY KEY,
+                target_id TEXT,
+                type TEXT,
+                host TEXT,
+                technique TEXT,
+                detail TEXT,
+                severity TEXT,
+                metadata TEXT,
+                created_at TEXT,
+                FOREIGN KEY(target_id) REFERENCES targets(target_id)
+            )
+        ''')
         
         # Agents execution
         cursor.execute('''
@@ -194,24 +227,60 @@ class KnowledgeStore:
         finally:
             conn.close()
     
-    def add_asset(self, asset_id: str, target_id: str, asset_type: str, value: str, metadata: Dict = None):
-        """Add an asset (domain, IP, port, service, etc)."""
+    def add_asset(self, arg1: str = None, arg2: str = None, arg3: str = None, arg4: str = None,
+                  asset_id: str = None, target_id: str = None, asset_type: str = None, value: str = None,
+                  metadata: Any = None) -> str:
+        """Add an asset (domain, IP, port, service, etc). Supports flexible signature."""
+        if asset_id is None and target_id is None and asset_type is None and value is None:
+            if arg4 is not None:
+                asset_id, target_id, asset_type, value = arg1, arg2, arg3, arg4
+            elif arg3 is not None:
+                target_id, asset_type, value = arg1, arg2, arg3
+                asset_id = f"ast_{uuid.uuid4().hex[:8]}"
+            else:
+                asset_id = arg1 or f"ast_{uuid.uuid4().hex[:8]}"
+                target_id = arg2
+        if not asset_id:
+            asset_id = f"ast_{uuid.uuid4().hex[:8]}"
+        
+        meta_str = json.dumps(metadata) if isinstance(metadata, (dict, list)) else (metadata or "{}")
+        
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
             cursor.execute('''
                 INSERT INTO assets (asset_id, target_id, asset_type, value, metadata, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)
-            ''', (asset_id, target_id, asset_type, value, json.dumps(metadata or {}), datetime.now().isoformat()))
+            ''', (asset_id, target_id, asset_type, value, meta_str, datetime.now().isoformat()))
             conn.commit()
         except sqlite3.IntegrityError:
             pass
         finally:
             conn.close()
+        return asset_id
     
-    def add_technology(self, tech_id: str, asset_id: str, name: str, version: str = None, 
-                      confidence: float = 1.0, source: str = ""):
-        """Add a technology discovery."""
+    def add_technology(self, arg1: str, arg2: str, arg3: str = None, arg4: str = None,
+                       confidence: float = 1.0, source: str = "", tech_id: str = None, 
+                       asset_id: str = None, name: str = None, version: str = None) -> str:
+        """Add a technology discovery. Supports flexible positional signatures."""
+        if asset_id is None and name is None:
+            if arg4 is not None:
+                # 4+ positional: tech_id, asset_id, name, version
+                tech_id, asset_id, name = arg1, arg2, arg3
+                version = arg4
+            elif arg3 is not None:
+                # 3 positional: asset_id, name, version
+                asset_id, name, version = arg1, arg2, arg3
+                tech_id = tech_id or f"tch_{uuid.uuid4().hex[:8]}"
+            else:
+                asset_id, name = arg1, arg2
+                tech_id = tech_id or f"tch_{uuid.uuid4().hex[:8]}"
+        
+        if not tech_id:
+            tech_id = f"tch_{uuid.uuid4().hex[:8]}"
+        if not asset_id:
+            asset_id = "default_asset"
+        
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
@@ -224,27 +293,38 @@ class KnowledgeStore:
             pass
         finally:
             conn.close()
+        return tech_id
     
-    def add_endpoint(self, endpoint_id: str, asset_id: str, path: str, http_method: str = "GET",
-                    status_code: int = None, requires_auth: bool = False):
+    def add_endpoint(self, endpoint_id: str = None, asset_id: str = None, path: str = "", http_method: str = "GET",
+                    status_code: int = None, requires_auth: bool = False, target_id: str = None,
+                    metadata: Any = None) -> str:
         """Add an endpoint discovery."""
+        if not endpoint_id:
+            endpoint_id = f"ep_{uuid.uuid4().hex[:8]}"
+        if not asset_id:
+            asset_id = target_id or "default_asset"
+        meta_str = json.dumps(metadata) if isinstance(metadata, (dict, list)) else (metadata or "{}")
+        
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
             cursor.execute('''
                 INSERT INTO endpoints (endpoint_id, asset_id, path, http_method, status_code, 
-                                      requires_auth, discovered_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                                      requires_auth, metadata, discovered_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (endpoint_id, asset_id, path, http_method, status_code, requires_auth, 
-                  datetime.now().isoformat()))
+                  meta_str, datetime.now().isoformat()))
             conn.commit()
         except sqlite3.IntegrityError:
             pass
         finally:
             conn.close()
+        return endpoint_id
     
-    def add_api(self, api_id: str, asset_id: str, api_type: str, base_url: str, auth_type: str = None):
+    def add_api(self, api_id: str = None, asset_id: str = None, api_type: str = "", base_url: str = "", auth_type: str = None) -> str:
         """Add an API discovery."""
+        if not api_id:
+            api_id = f"api_{uuid.uuid4().hex[:8]}"
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
@@ -257,28 +337,39 @@ class KnowledgeStore:
             pass
         finally:
             conn.close()
+        return api_id
     
-    def add_finding(self, finding_id: str, target_id: str, title: str, description: str,
+    def add_finding(self, finding_id: str = None, target_id: str = None, title: str = "Unknown", description: str = "",
                    severity: str = "MEDIUM", confidence: float = 0.5, status: str = "OBSERVED",
-                   category: str = "", cwe: str = None, cve: str = None):
+                   category: str = "", cwe: str = None, cve: str = None, affected_asset: str = "",
+                   affected_endpoint: str = "", evidence: str = "", remediation: str = "",
+                   source_agent_id: str = "") -> str:
         """Add a finding."""
+        if not finding_id:
+            finding_id = f"fnd_{uuid.uuid4().hex[:8]}"
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
             cursor.execute('''
                 INSERT INTO findings (finding_id, target_id, title, description, severity, 
-                                     confidence, status, category, cwe, cve, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                     confidence, status, category, cwe, cve, affected_asset,
+                                     affected_endpoint, evidence, remediation, source_agent_id,
+                                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (finding_id, target_id, title, description, severity, confidence, status, 
-                  category, cwe, cve, datetime.now().isoformat(), datetime.now().isoformat()))
+                  category, cwe, cve, affected_asset, affected_endpoint, evidence, remediation,
+                  source_agent_id, datetime.now().isoformat(), datetime.now().isoformat()))
             conn.commit()
         except sqlite3.IntegrityError:
             pass
         finally:
             conn.close()
+        return finding_id
     
-    def add_evidence(self, evidence_id: str, finding_id: str, evidence_type: str, content: str, tool_name: str = None):
+    def add_evidence(self, evidence_id: str = None, finding_id: str = None, evidence_type: str = "screenshot", content: str = "", tool_name: str = None) -> str:
         """Add evidence for a finding."""
+        if not evidence_id:
+            evidence_id = f"evd_{uuid.uuid4().hex[:8]}"
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
@@ -291,6 +382,47 @@ class KnowledgeStore:
             pass
         finally:
             conn.close()
+        return evidence_id
+
+    def add_exploit_result(self, target_id: str, vuln_id: str = "", exploit_id: str = "", payload: str = "",
+                          success: bool = False, proof: str = "", severity: str = "MEDIUM",
+                          executed_at: str = None, result_id: str = None) -> str:
+        """Add an exploit result."""
+        if not result_id:
+            result_id = f"xres_{uuid.uuid4().hex[:8]}"
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                INSERT INTO exploit_results (result_id, target_id, vuln_id, exploit_id, payload, success, proof, severity, executed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (result_id, target_id, vuln_id, exploit_id, payload, success, proof, severity, executed_at or datetime.now().isoformat()))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            pass
+        finally:
+            conn.close()
+        return result_id
+
+    def add_post_exploit_finding(self, target_id: str, type: str = "", host: str = "", technique: str = "",
+                                detail: str = "", severity: str = "MEDIUM", metadata: Any = None, pe_id: str = None) -> str:
+        """Add a post-exploitation finding."""
+        if not pe_id:
+            pe_id = f"pe_{uuid.uuid4().hex[:8]}"
+        meta_str = json.dumps(metadata) if isinstance(metadata, (dict, list)) else (metadata or "{}")
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                INSERT INTO post_exploit_findings (pe_id, target_id, type, host, technique, detail, severity, metadata, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (pe_id, target_id, type, host, technique, detail, severity, meta_str, datetime.now().isoformat()))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            pass
+        finally:
+            conn.close()
+        return pe_id
     
     def get_target_findings(self, target_id: str) -> List[Dict]:
         """Get all findings for a target."""

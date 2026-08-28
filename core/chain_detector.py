@@ -37,6 +37,72 @@ class ChainDetector:
         self.scored_chains: List[ScoredChain] = []
         self.failed_chains: List[str] = []
 
+    def detect_header_catalyst_chains(self) -> List[ScoredChain]:
+        """Identify missing security headers as catalysts for follow-up attack chains."""
+        catalysts = []
+        for nid, node in self.graph.nodes.items():
+            vt = (node.vuln_type or "").lower()
+            title = (node.details.get("title", "") if isinstance(node.details, dict) else "").lower()
+
+            # CSP -> XSS payload injection
+            if "csp" in vt or "content_security_policy" in vt or "csp" in title or "content-security-policy" in title:
+                catalysts.append(ScoredChain(
+                    chain_id=f"CHAIN-CSP-XSS-{nid}",
+                    steps=[
+                        {"vuln_id": nid, "type": "missing_csp", "location": node.location, "severity": node.severity},
+                        {"vuln_id": f"TARGET-XSS-{nid}", "type": "xss_injection_validation", "location": node.location, "severity": "HIGH"}
+                    ],
+                    edges=[{
+                        "from": nid, "to": f"TARGET-XSS-{nid}",
+                        "relationship": "catalyzes", "success_rate": 0.85
+                    }],
+                    score=0.75,
+                    success_rate=0.85,
+                    max_impact=0.8,
+                    complexity=2,
+                    description="Missing CSP → XSS Payload Injection & Execution Validation"
+                ))
+
+            # X-Frame-Options -> Clickjacking
+            if "frame" in vt or "x_frame_options" in vt or "frame" in title or "x-frame-options" in title:
+                catalysts.append(ScoredChain(
+                    chain_id=f"CHAIN-FRAME-CLICKJACKING-{nid}",
+                    steps=[
+                        {"vuln_id": nid, "type": "missing_x_frame_options", "location": node.location, "severity": node.severity},
+                        {"vuln_id": f"TARGET-CLICKJACKING-{nid}", "type": "clickjacking_validation", "location": node.location, "severity": "MEDIUM"}
+                    ],
+                    edges=[{
+                        "from": nid, "to": f"TARGET-CLICKJACKING-{nid}",
+                        "relationship": "enables", "success_rate": 0.85
+                    }],
+                    score=0.70,
+                    success_rate=0.85,
+                    max_impact=0.7,
+                    complexity=2,
+                    description="Missing X-Frame-Options → Frame Redress / Clickjacking Validation"
+                ))
+
+            # CORS -> Cross-origin data theft
+            if "cors" in vt or "access_control" in vt or "cors" in title or "access-control" in title:
+                catalysts.append(ScoredChain(
+                    chain_id=f"CHAIN-CORS-THEFT-{nid}",
+                    steps=[
+                        {"vuln_id": nid, "type": "missing_cors", "location": node.location, "severity": node.severity},
+                        {"vuln_id": f"TARGET-CORS-DATA-{nid}", "type": "cross_origin_data_theft", "location": node.location, "severity": "HIGH"}
+                    ],
+                    edges=[{
+                        "from": nid, "to": f"TARGET-CORS-DATA-{nid}",
+                        "relationship": "enables", "success_rate": 0.80
+                    }],
+                    score=0.72,
+                    success_rate=0.80,
+                    max_impact=0.8,
+                    complexity=2,
+                    description="Permissive CORS → Cross-Origin Credential & Data Theft"
+                ))
+
+        return catalysts
+
     def detect_chains(self, max_chains: int = 10) -> List[ScoredChain]:
         """Find and score all attack chains, return top N"""
         raw_paths = self.graph.find_all_paths(max_depth=6)
@@ -46,6 +112,10 @@ class ChainDetector:
             sc = self._score_chain(path)
             if sc and sc.score > 0:
                 scored.append(sc)
+
+        # Include header catalyst chains
+        header_chains = self.detect_header_catalyst_chains()
+        scored.extend(header_chains)
 
         # Deduplicate similar chains (same start+end, keep highest score)
         scored = self._deduplicate(scored)
@@ -212,3 +282,108 @@ class ChainDetector:
             } for c in self.scored_chains],
             "failed": self.failed_chains,
         }
+
+    def calculate_compound_severity(self, sev1: str, sev2: str) -> str:
+        """Calculate aggregated compound severity score from two correlated findings."""
+        s1 = (sev1 or "LOW").upper().strip()
+        s2 = (sev2 or "LOW").upper().strip()
+        order = ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+
+        i1 = order.index(s1) if s1 in order else 1
+        i2 = order.index(s2) if s2 in order else 1
+
+        # Escalation rules: MEDIUM + MEDIUM -> HIGH; HIGH + MEDIUM -> CRITICAL
+        combined_idx = max(i1, i2) + 1 if (i1 >= 2 and i2 >= 2) else max(i1, i2)
+        combined_idx = min(combined_idx, len(order) - 1)
+        return order[combined_idx]
+
+    def analyze_compound_risks(self, findings: Optional[List[Dict]] = None) -> List[Dict]:
+        """
+        Theoretical security dependency graph engine.
+        Correlates static context findings to model compound security risks and prioritized remediation chains.
+        """
+        if findings is None:
+            findings = [node.details for node in self.graph.nodes.values() if isinstance(node.details, dict)]
+
+        compound_risks = []
+
+        # Categorize findings by type / traits
+        auth_lacking = []
+        admin_endpoints = []
+        input_reflections = []
+        session_issues = []
+        file_uploads = []
+        directory_listings = []
+
+        for f in findings:
+            t = str(f.get("type") or f.get("vuln_type") or "").lower()
+            title = str(f.get("title") or "").lower()
+            loc = str(f.get("location") or f.get("target") or f.get("url") or "")
+
+            if "auth" in t or "authorization" in title or "access_control" in t:
+                auth_lacking.append(f)
+            if "admin" in loc or "admin" in title or "dashboard" in loc:
+                admin_endpoints.append(f)
+            if "reflection" in t or "xss" in t or "unencoded" in t:
+                input_reflections.append(f)
+            if "httponly" in t or "httponly" in title or "cookie" in t or "cors" in t or "session" in t:
+                session_issues.append(f)
+            if "upload" in t or "file_upload" in t or "upload" in title:
+                file_uploads.append(f)
+            if "directory" in t or "listing" in t or "indexing" in title:
+                directory_listings.append(f)
+
+        # 1. Pattern: Authorization & Access Control (Unprotected Auth + Admin Endpoints)
+        if auth_lacking and admin_endpoints:
+            for a_finding in auth_lacking:
+                for adm_finding in admin_endpoints:
+                    sev = self.calculate_compound_severity(a_finding.get("severity"), adm_finding.get("severity"))
+                    compound_risks.append({
+                        "pattern_id": "PATTERN-AUTH-ADMIN",
+                        "title": "Compound Risk: Missing Authorization on Administrative Interface",
+                        "compound_severity": sev,
+                        "correlated_findings": [a_finding.get("id") or a_finding.get("title"), adm_finding.get("id") or adm_finding.get("title")],
+                        "hypothetical_impact": "Lack of centralized access control combined with exposed admin endpoints creates high risk of unauthorized administrative privilege exposure.",
+                        "remediation_chain": [
+                            "Enforce centralized Role-Based Access Control (RBAC) middleware across all administrative routes.",
+                            "Implement strict multi-factor authentication (MFA) on endpoints matching /admin patterns."
+                        ]
+                    })
+
+        # 2. Pattern: Session Protection (Missing HTTPOnly/CORS + Input Reflection)
+        if session_issues and input_reflections:
+            for s_finding in session_issues:
+                for r_finding in input_reflections:
+                    sev = self.calculate_compound_severity(s_finding.get("severity"), r_finding.get("severity"))
+                    compound_risks.append({
+                        "pattern_id": "PATTERN-SESSION-REFLECTION",
+                        "title": "Compound Risk: Session Token Exposure via Unencoded Input Reflection",
+                        "compound_severity": sev,
+                        "correlated_findings": [s_finding.get("id") or s_finding.get("title"), r_finding.get("id") or r_finding.get("title")],
+                        "hypothetical_impact": "Unencoded input reflection combined with missing session cookie flags allows client-side script execution to read and expose session tokens.",
+                        "remediation_chain": [
+                            "Apply the HttpOnly and Secure flags to all session identifier cookies.",
+                            "Implement context-aware HTML entity output encoding across user reflection endpoints.",
+                            "Deploy a strict Content Security Policy (CSP) restricting inline script execution."
+                        ]
+                    })
+
+        # 3. Pattern: Input & Upload Configuration (File Upload + Directory Listing)
+        if file_uploads and directory_listings:
+            for u_finding in file_uploads:
+                for d_finding in directory_listings:
+                    sev = self.calculate_compound_severity(u_finding.get("severity"), d_finding.get("severity"))
+                    compound_risks.append({
+                        "pattern_id": "PATTERN-UPLOAD-DIRECTORY-LISTING",
+                        "title": "Compound Risk: Unrestricted File Upload with Exposed Directory Indexing",
+                        "compound_severity": sev,
+                        "correlated_findings": [u_finding.get("id") or u_finding.get("title"), d_finding.get("id") or d_finding.get("title")],
+                        "hypothetical_impact": "File upload capabilities alongside directory indexing expose uploaded content locations and server execution paths to public access.",
+                        "remediation_chain": [
+                            "Disable directory indexing (e.g. Options -Indexes in Apache, autoindex off in Nginx).",
+                            "Store uploaded files outside the web root and enforce strict MIME-type and extension validation."
+                        ]
+                    })
+
+        logger.info(f"[ChainDetector] Generated {len(compound_risks)} compound risk pathways")
+        return compound_risks

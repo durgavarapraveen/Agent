@@ -1,0 +1,179 @@
+"""
+Defensive Vulnerability Verification Module.
+Tests for missing input sanitization and insecure response patterns using strictly benign test inputs.
+"""
+
+import logging
+import urllib.parse
+import urllib.request
+import re
+from typing import Dict, List, Optional, Any
+
+logger = logging.getLogger(__name__)
+
+# Common database error disclosure patterns
+DB_ERROR_PATTERNS = [
+    r"you have an error in your sql syntax",
+    r"warning:\s*mysql_",
+    r"unclosed quotation mark after the character string",
+    r"quoted string not properly terminated",
+    r"pg_query\(\):\s*query failed",
+    r"sqlite3\.operationalerror",
+    r"sqlite error",
+    r"ora-\d{5}",
+    r"microsoft OLE DB Provider for SQL Server",
+    r"syntax error in string constant",
+]
+
+REMEDIATION_STRATEGIES = {
+    "UNENCODED_INPUT_REFLECTION": (
+        "Implement context-aware output encoding (e.g., HTML entity encoding, attribute encoding) "
+        "before rendering user-supplied input in response templates. Use modern templating engines with "
+        "auto-escaping enabled by default."
+    ),
+    "VERBOSE_ERROR_DISCLOSURE": (
+        "Disable detailed database and framework error disclosures in production environments. "
+        "Catch internal database exceptions at the service boundary and return generic user-friendly "
+        "error messages while logging full diagnostic stack traces securely server-side."
+    )
+}
+
+
+class PayloadTester:
+    """Defensive vulnerability verification using benign probe strings."""
+
+    def __init__(self, timeout: int = 5):
+        self.timeout = timeout
+
+    def test_xss(
+        self,
+        url: str,
+        param: str,
+        method: str = "GET",
+        headers: Optional[Dict[str, str]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Verify whether user input is reflected unencoded in response bodies.
+        Uses benign, non-executable tracer strings (e.g., probe_xss_check_12345).
+        """
+        tracer = "probe_xss_check_12345"
+        headers = headers or {"User-Agent": "DefensiveSecurityScanner/1.0"}
+
+        parsed_url = urllib.parse.urlparse(url)
+        query_params = urllib.parse.parse_qs(parsed_url.query)
+        query_params[param] = [tracer]
+        new_query = urllib.parse.urlencode(query_params, doseq=True)
+        target_url = urllib.parse.urlunparse(
+            (parsed_url.scheme, parsed_url.netloc, parsed_url.path, parsed_url.params, new_query, parsed_url.fragment)
+        )
+
+        try:
+            req = urllib.request.Request(target_url, headers=headers, method=method.upper())
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                body = resp.read().decode("utf-8", errors="ignore")
+                status = resp.status
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="ignore") if e.fp else ""
+            status = e.code
+        except Exception as e:
+            logger.debug(f"PayloadTester test_xss HTTP request failed for {url}: {e}")
+            return None
+
+        # Check for raw unencoded reflection in body
+        if tracer in body:
+            proof = f"Benign tracer '{tracer}' reflected unencoded in HTTP response (status {status})"
+            return {
+                "type": "UNENCODED_INPUT_REFLECTION",
+                "title": f"Unencoded Input Reflection on parameter '{param}'",
+                "severity": "MEDIUM",
+                "target": url,
+                "location": f"{url} [{param}]",
+                "param": param,
+                "proof": proof,
+                "details": f"Parameter '{param}' on {url} reflects raw input in response body without contextual encoding.",
+                "remediation": REMEDIATION_STRATEGIES["UNENCODED_INPUT_REFLECTION"],
+                "tracer_used": tracer
+            }
+
+        return None
+
+    def test_sqli(
+        self,
+        url: str,
+        param: str,
+        method: str = "GET",
+        headers: Optional[Dict[str, str]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Verify whether single syntax characters trigger verbose database error disclosures.
+        Uses single syntax probe characters (' or ").
+        """
+        syntax_probe = "'"
+        headers = headers or {"User-Agent": "DefensiveSecurityScanner/1.0"}
+
+        parsed_url = urllib.parse.urlparse(url)
+        query_params = urllib.parse.parse_qs(parsed_url.query)
+        query_params[param] = [syntax_probe]
+        new_query = urllib.parse.urlencode(query_params, doseq=True)
+        target_url = urllib.parse.urlunparse(
+            (parsed_url.scheme, parsed_url.netloc, parsed_url.path, parsed_url.params, new_query, parsed_url.fragment)
+        )
+
+        try:
+            req = urllib.request.Request(target_url, headers=headers, method=method.upper())
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                body = resp.read().decode("utf-8", errors="ignore")
+                status = resp.status
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="ignore") if e.fp else ""
+            status = e.code
+        except Exception as e:
+            logger.debug(f"PayloadTester test_sqli HTTP request failed for {url}: {e}")
+            return None
+
+        # Check for verbose database error disclosures in body
+        for pattern in DB_ERROR_PATTERNS:
+            match = re.search(pattern, body, re.IGNORECASE)
+            if match:
+                matched_text = match.group(0)
+                proof = f"Syntax probe '{syntax_probe}' triggered verbose error disclosure: '{matched_text}' (status {status})"
+                return {
+                    "type": "VERBOSE_ERROR_DISCLOSURE",
+                    "title": f"Verbose Database Error Disclosure on parameter '{param}'",
+                    "severity": "LOW",
+                    "target": url,
+                    "location": f"{url} [{param}]",
+                    "param": param,
+                    "proof": proof,
+                    "details": f"Parameter '{param}' on {url} disposes raw database error details when single quotation probes are supplied.",
+                    "remediation": REMEDIATION_STRATEGIES["VERBOSE_ERROR_DISCLOSURE"],
+                    "matched_error": matched_text
+                }
+
+        return None
+
+    def verify_and_report(
+        self,
+        ctx: Any,
+        url: str,
+        param: str,
+        method: str = "GET",
+        headers: Optional[Dict[str, str]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Run benign tests and register any identified issues in SharedContext.
+        """
+        reported = []
+        xss_finding = self.test_xss(url, param, method, headers)
+        if xss_finding:
+            reported.append(xss_finding)
+            if hasattr(ctx, "add_vulnerability"):
+                ctx.add_vulnerability(xss_finding)
+
+        sqli_finding = self.test_sqli(url, param, method, headers)
+        if sqli_finding:
+            reported.append(sqli_finding)
+            if hasattr(ctx, "add_vulnerability"):
+                ctx.add_vulnerability(sqli_finding)
+
+        return reported

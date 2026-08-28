@@ -41,7 +41,11 @@ To run a tool (the "reason + act" step):
   "thought": "reflect on prior observations, then justify this exact next action",
   "action": "run_tool",
   "tool": "tool_name",
-  "command": "command string for the framework to execute",
+  "operation": "operation_name (e.g. technology_detection, port_scan, etc.)",
+  "params": {
+    "target": "target domain, host, or URL",
+    "port": 443
+  },
   "timeout": 120
 }
 
@@ -59,13 +63,9 @@ When the objective is complete or no more useful tools remain:
 RULES:
 - Output ONLY a JSON object, no other text, no markdown
 - ALWAYS ground "thought" in the observations you were given (the ReAct loop)
-- ONE tool per step, and ALWAYS include a non-empty "command" when action is "run_tool"
+- ONE tool per step, and ALWAYS include structured "params" when action is "run_tool"
 - Do NOT retry failed tools
-- For custom shell one-liners / pipelines, use tool "bash" with the full command
-- If an OBSERVATION says a tool is NOT installed / not available, read the error and
-  install it yourself using the "bash" tool (try `apt-get install -y <pkg>`, else
-  `pip install <pkg>`, `go install ...`, or download the binary), then retry the tool.
-  You get a few attempts per tool; if it still won't install, move on to an alternative.
+- Use structured domain tools only (e.g. nmap, subfinder, httpx, sslscan, whatweb, gobuster)
 - When done or stuck, use action "done" """
 
 
@@ -84,8 +84,8 @@ class DynamicAgent:
         objective: str,
         tool_registry: ToolRegistry,
         shared_context: SharedContext,
-        agent_context: str,          # Pre-filtered context from brain
-        allowed_tools: List[str],    # Which tools this agent can use
+        agent_context: str = "",                  # Pre-filtered context from brain
+        allowed_tools: Optional[List[str]] = None, # Which tools this agent can use
         max_steps: int = 10,
     ):
         self.agent_id = agent_id
@@ -93,7 +93,7 @@ class DynamicAgent:
         self.tools = tool_registry
         self.ctx = shared_context
         self.agent_context = agent_context
-        self.allowed_tools = allowed_tools
+        self.allowed_tools = allowed_tools or []
         self.max_steps = max_steps
         self.llm = LLMClient.get()
         self.history: List[Dict] = []  # Tool execution history
@@ -151,17 +151,18 @@ class DynamicAgent:
             logger.info(f"[{self.agent_id}] Executing: {tool_name}")
             result = await self.tools.execute(tool_name, params)
             
-            # Check for common failure patterns
-            error_str = str(result).lower()
+            # Check for common failure patterns (only if the tool returned success=False)
+            has_failed = not result.get("success", False)
+            error_msg = str(result.get("error") or "").lower()
             
-            if any(x in error_str for x in ["not found", "failed to install", "no such file",
-                                            "not available", "could not be installed",
-                                            "command not found", "no installation candidate"]):
+            if has_failed and any(x in error_msg for x in ["not found", "failed to install", "no such file",
+                                                           "not available", "could not be installed",
+                                                           "command not found", "no installation candidate"]):
                 # Tool missing. Don't blacklist immediately — let the LLM reason over
                 # the error and try to install it another way (up to N attempts).
                 attempts = self.install_attempts.get(tool_name, 0) + 1
                 self.install_attempts[tool_name] = attempts
-                raw_err = result.get("error") or result.get("output") or str(result)
+                raw_err = result.get("error") or ""
 
                 if attempts >= self.max_install_attempts:
                     self.failed_tools.add(tool_name)
@@ -211,109 +212,94 @@ class DynamicAgent:
  
 
     async def execute(self):
-        """Execute objective with failure handling"""
-        
-        step = 0
-        self.step_without_progress = 0
-        
-        while step < self.max_steps:
-            # Break if too many steps without progress
-            if self.step_without_progress > 3:
-                logger.warning(f"[{self.agent_id}] No progress for 3 steps, aborting")
-                return {
-                    "status": "failed",
-                    "reason": "no_progress",
-                    "steps": step,
-                    "summary": "Could not make progress on objective"
-                }
-            
-            # Early exit: all tools have failed
-            available = [t for t in self.allowed_tools if t not in self.failed_tools]
-            if not available:
-                logger.warning(f"[{self.agent_id}] All tools failed, finishing early")
-                return {
-                    "status": "failed",
-                    "reason": "all_tools_failed",
-                    "steps": step,
-                    "failed_tools": list(self.failed_tools),
-                    "summary": f"All assigned tools failed: {', '.join(self.failed_tools)}"
-                }
-            
-            # Get next action from LLM
-            prompt = self._build_step_prompt(step)
-            decision = await self.llm.generate_json(prompt)
-            
-            if not decision:
-                self.step_without_progress += 1
-                logger.warning(f"[{self.agent_id}] LLM returned empty (no progress: {self.step_without_progress})")
-                await asyncio.sleep(2)
-                continue
-            
-            # ReAct: log the reasoning behind this step
-            thought = decision.get("thought") or decision.get("thinking") or ""
-            if thought:
-                # Full thought — console handler truncates for display, file keeps all
-                logger.info(f"[{self.agent_id}] Thought: {thought}")
+        """Execute objective via CapabilityResolver and ExecutionPlanner on the Tool Intelligence platform"""
+        from core.capability_worker import CapabilityWorker
+        from core.normalizer import PlannerResponseNormalizer
+        from core.task_evaluator import TaskCompletionEvaluator, CompletionStatus
+        from core.tool_intelligence import TargetContext
+        from core.capability_resolver import CapabilityResolver
+        from core.execution_planner import ExecutionPlanner
 
-            # Extract action
-            action = decision.get("action", "")
-            
-            # Check for completion
-            if action == "done":
-                results = decision.get("results", {})
-                self._store_results(results)
-                logger.info(f"[{self.agent_id}] Objective complete: {results.get('summary', '')[:80]}")
-                return {"status": "success", "steps": step, "results": results}
-            
-            # Extract tool and command
-            tool = decision.get("tool", "")
-            command = decision.get("command", "")
-            timeout = decision.get("timeout", 120)
-            
-            # Skip if it's a failed tool
-            if tool in self.failed_tools:
-                logger.warning(f"[{self.agent_id}] LLM suggested failed tool '{tool}', skipping")
-                self.step_without_progress += 1
-                step += 1
-                continue
-            
-            # Execute tool
-            if tool:
-                # Kali tools require a command string; skip gracefully if LLM omitted it
-                if not command and tool not in ("http_request", "dns_lookup",
-                                                "ssl_inspect", "port_check", "browser"):
-                    logger.warning(f"[{self.agent_id}] Tool '{tool}' selected without a command, skipping")
-                    self.step_without_progress += 1
-                    step += 1
-                    await asyncio.sleep(1)
-                    continue
-                command = self._normalize_command(tool, command)
-                params = {"command": command, "timeout": timeout} if command else {}
-                result = await self.execute_tool(tool, params)
-
-                success = result.get("success", "error" not in result)
-                # Keep enough of the output that the LLM can actually reason on it
-                # (a too-short slice makes the model think every tool got truncated).
-                obs = result.get("output") or result.get("error") or ""
-                self.history.append({
-                    "tool": tool,
-                    "success": success,
-                    "result": str(obs)[:1200]
-                })
-                
-                if not success:
-                    self.step_without_progress += 1
-                else:
-                    self.step_without_progress = 0
-            
-            step += 1
-            await asyncio.sleep(1)
+        # 1. Normalize target and resolve canonical capability
+        raw_target = self.ctx.target if hasattr(self.ctx, "target") else "unknown"
+        target_ctx = TargetContext.from_target(raw_target)
         
-        logger.warning(f"[{self.agent_id}] Max steps ({self.max_steps}) reached")
+        task_spec = PlannerResponseNormalizer._normalize_task_spec({
+            "objective": self.objective,
+            "target": target_ctx.url or target_ctx.hostname or raw_target
+        })
+        capability = task_spec.capability
+        target = task_spec.inputs.get("target") or target_ctx.url or target_ctx.hostname
+
+        logger.info(f"[{self.agent_id}] Dynamic agent executing capability={capability.value} target={target}")
+
+        # 2. Dynamic Capability Resolution (no hardcoded tools)
+        resolver = CapabilityResolver()
+        resolved_tools = resolver.resolve_tools(
+            capability=capability.value,
+            objective=self.objective,
+            task_spec=task_spec
+        )
+
+        # 3. Execute capability workflow via CapabilityWorker
+        worker = CapabilityWorker(
+            agent_id=self.agent_id,
+            tool_registry=self.tools,
+            shared_context=self.ctx
+        )
+
+        agent_result = await worker.execute_capability(
+            capability=capability,
+            target=target,
+            task_id=task_spec.task_id,
+            objective=self.objective,
+            params=task_spec.inputs
+        )
+
+        # 3. Deterministic evaluation with TaskCompletionEvaluator
+        has_extracted_data = any(bool(v) for obs in agent_result.observations for v in obs.get("data", {}).values() if isinstance(v, (list, dict, set)))
+        tool_results_dicts = [
+            {
+                "success": has_extracted_data or agent_result.status == "completed",
+                "data": obs.get("data", {}),
+                "warnings": obs.get("warnings", []),
+                "status": agent_result.status
+            }
+            for obs in agent_result.observations
+        ]
+        comp_status, comp_reason = TaskCompletionEvaluator.evaluate(
+            spec=task_spec,
+            tool_results=tool_results_dicts,
+            agent_result=agent_result.dict() if agent_result.status != "failed" else None
+        )
+
+        if comp_status == CompletionStatus.SUCCEEDED:
+            logger.info(f"[{self.agent_id}] Task completed deterministically via TaskCompletionEvaluator: {comp_reason}")
+            return {
+                "status": "success",
+                "steps": 1,
+                "results": {
+                    "summary": f"Capability {capability.value} completed successfully on {target}",
+                    "data": {k: v for obs in agent_result.observations for k, v in obs.get("data", {}).items()}
+                }
+            }
+        elif comp_status == CompletionStatus.PARTIAL:
+            logger.info(f"[{self.agent_id}] Task partially completed via TaskCompletionEvaluator: {comp_reason}")
+            return {
+                "status": "partial",
+                "steps": 1,
+                "results": {
+                    "summary": f"Capability {capability.value} partially completed on {target}",
+                    "data": {k: v for obs in agent_result.observations for k, v in obs.get("data", {}).items()}
+                }
+            }
+
+        logger.warning(f"[{self.agent_id}] Task failed to meet success criteria: {comp_reason}")
         return {
-            "status": "timeout",
-            "steps": self.max_steps,
-            "summary": "Max steps reached"
+            "status": "failed",
+            "reason": comp_reason,
+            "steps": 1,
+            "summary": f"Capability {capability.value} failed on {target}"
         }
     
     def _build_step_prompt(self, step: int) -> str:
@@ -405,3 +391,7 @@ RULES:
                 "source_agent": self.agent_id,
                 "type": finding.get("type", "unknown"),
             })
+
+
+# Dynamic Agent + Tool Intelligence alias
+ControlledDynamicAgent = DynamicAgent

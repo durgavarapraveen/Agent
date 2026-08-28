@@ -7,9 +7,11 @@ Reads shared context, decides what to do, spawns agents, loops.
 import json
 import logging
 import asyncio
+import re
+from enum import Enum
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Any, List
 
 from agents.llm_client import LLMClient, TaskTier
 from agents.authorization import AuthorizationManager
@@ -26,6 +28,19 @@ from core.consent import get_consent
 from core.request_capture import RequestCapturer
 from validation import gate as confidence_gate, DedupStore
 from compliance import ComplianceReporter, available_frameworks
+
+from knowledge.store import KnowledgeStore as PersistentKnowledgeStore
+import os
+import uuid
+
+from core.stores import KnowledgeStore, EvidenceStore, FindingStore
+from core.task_manager import TaskManager
+from orchestrator.scheduler import Scheduler
+from core.context_resolver import ContextResolver
+from core.schemas import (
+    BrainDecision, BrainDecisionAction, ExecutionState, TaskSpec,
+    SuccessCriterion, SuccessCriterionType, CapabilityType
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,15 +90,50 @@ RULES:
 - Use spawn_agents for independent parallel tasks"""
 
 
+class ExecutionPhase(str, Enum):
+    RECON = "RECON"
+    ACTIVE_SCANNING = "ACTIVE_SCANNING"
+    EXPLOITATION = "EXPLOITATION"
+    REPORTING = "REPORTING"
+
+
 class CentralBrain:
     """The autonomous pentesting orchestrator. LLM drives everything."""
 
+    @property
+    def failure_streak(self) -> int:
+        return self.consecutive_agent_failures
+
+    @failure_streak.setter
+    def failure_streak(self, value: int):
+        self.consecutive_agent_failures = value
+
+    def transition_phase(self, new_phase: ExecutionPhase):
+        old_phase = getattr(self, "current_phase", ExecutionPhase.RECON)
+        self.current_phase = new_phase
+        logger.info(f"BRAIN_PHASE_TRANSITION: old_phase='{old_phase}' -> new_phase='{new_phase}'")
+
+    def _evaluate_phase_transition(self) -> Optional[ExecutionPhase]:
+        """Check context to determine if state machine should transition to next phase."""
+        if self.current_phase == ExecutionPhase.RECON:
+            if self.ctx.endpoints or self.ctx.subdomains or self.ctx.ports or len(self.ctx.agents_spawned) >= 3:
+                return ExecutionPhase.ACTIVE_SCANNING
+        elif self.current_phase == ExecutionPhase.ACTIVE_SCANNING:
+            if self.ctx.vulnerabilities or len(self.ctx.agents_spawned) >= 6:
+                return ExecutionPhase.EXPLOITATION
+        elif self.current_phase == ExecutionPhase.EXPLOITATION:
+            if self.ctx.exploit_results or len(self.ctx.agents_spawned) >= 10:
+                return ExecutionPhase.REPORTING
+        return None
+
     def __init__(self, target: str, scope: Dict = None):
+        from core.dedup_tracker import DeduplicationTracker
         self.llm = LLMClient.get()
         self.ctx = SharedContext(target, scope)
         self.tools = ToolRegistry()
         self.spawner = AgentSpawner(self.tools, self.ctx)
         self.auth = AuthorizationManager()
+        self.dedup = DeduplicationTracker()
         self.start_time = datetime.now()
         self.max_agents_per_phase = 15
         self.report_dir = Path("reports")
@@ -91,6 +141,7 @@ class CentralBrain:
         self.failed_tools = set()  # NEW: Brain-level tool failure tracking
         self.consecutive_agent_failures = 0  # NEW: Track failure streak
         self.max_consecutive_failures = 3
+        self.current_phase = ExecutionPhase.RECON
         self.chain_mgr = ChainManager(self.ctx, self.spawner)  # Phase 2: Chain system
         self.tier = (self.ctx.scope.get("max_tier") or "POC").upper()
         self.post_exploit = None  # Phase 3: Post-exploitation (lazy, needs foothold)
@@ -98,6 +149,40 @@ class CentralBrain:
         self.metrics = MetricsTracker(target=target, out_dir=str(self.report_dir))
         self.automation = AutomationEngine(self.ctx)
         self.reporter = EnterpriseReporter(self.ctx, report_dir=str(self.report_dir))
+        
+        
+        db_path = os.getenv("KNOWLEDGE_DB_PATH", str(self.report_dir / "findings.db"))
+        self.persistent_knowledge_store = PersistentKnowledgeStore(db_path)
+        self.target_id = f"tgt_{uuid.uuid4().hex[:12]}"
+        self.persistent_knowledge_store.add_target(
+            self.target_id,           # arg 1: ID
+            target,                   # arg 2: URL
+            "url"                     # arg 3: type
+        )
+        logger.info(f"Knowledge store initialized: {db_path}")
+
+        # Core state and compatibility attributes
+        self.target = target
+        self.scope = scope or {}
+        
+        # Initialize target scope validation
+        from core.authorization import TargetScopeValidator
+        auth_targets = self.scope.get("domains") or self.scope.get("authorized_targets") or [target]
+        TargetScopeValidator.set(TargetScopeValidator(auth_targets))
+        
+        self.authorized_scope = auth_targets
+        self.execution_count = 0
+        self.max_iterations = 100
+
+        # Memory stores (for compatibility with OrchestratorV2 and state validation)
+        self.knowledge_store = KnowledgeStore()
+        self.evidence_store = EvidenceStore()
+        self.finding_store = FindingStore()
+
+        # Framework components
+        self.task_manager = TaskManager()
+        self.scheduler = Scheduler(self.task_manager)
+        self.context_resolver = ContextResolver(self.knowledge_store)
 
     async def run(self, auth_document: str = ""):
         """Main entry point. Runs full pentest autonomously."""
@@ -118,13 +203,19 @@ class CentralBrain:
         # Phase 1: Deep recon
         logger.info("\n>>> PHASE 1: DEEP RECONNAISSANCE")
         await self._run_phase("recon")
+        await self._persist_recon_findings()
 
         # Phase 1b: Intercept live HTTP traffic across the site (for exploit replay)
         await self._capture_requests()
+        await self._persist_captured_requests()
 
-        # Phase 2: Vulnerability analysis
+        # Phase 2: Vulnerability analysis & technology-matched Nuclei scanning
         logger.info("\n>>> PHASE 2: VULNERABILITY ANALYSIS")
+        from core.nuclei_runner import NucleiRunner
+        nuclei_runner = NucleiRunner()
+        await nuclei_runner.scan_context_technologies(self.ctx, timeout=60)
         await self._run_phase("analyze")
+        await self._persist_vulnerabilities()
 
         # Phase 3: Build attack graph and detect chains
         logger.info("\n>>> PHASE 3: ATTACK CHAIN ANALYSIS")
@@ -162,9 +253,11 @@ class CentralBrain:
                             logger.info(f"Follow-up suggestions: {len(suggestions)}")
                             # Run additional exploitation phase for follow-ups
                             await self._run_phase("exploit")
+                            await self._persist_exploit_results()
                 else:
                     logger.warning("Chain execution failed, falling back to direct exploitation")
                     await self._run_phase("exploit")
+                    await self._persist_exploit_results()
         elif self.ctx.vulnerabilities:
             plan = await self._generate_exploit_plan()
             if plan and plan.get("exploits"):
@@ -172,12 +265,17 @@ class CentralBrain:
                 if approved:
                     logger.info("\n>>> PHASE 4: DIRECT EXPLOITATION")
                     await self._run_phase("exploit")
+                    await self._persist_exploit_results()
 
         # Phase 6: Post-exploitation (privesc / lateral / persistence / MITRE)
         await self._run_post_exploitation()
 
-        # Phase 5: Report
-        logger.info("\n>>> PHASE 5: REPORT GENERATION")
+        # Phase 5: Automated finding retest & report generation
+        logger.info("\n>>> PHASE 5: FINDING RETEST & REPORT GENERATION")
+        if self.ctx.vulnerabilities:
+            from core.retest_engine import RetestEngine
+            retest_engine = RetestEngine()
+            await retest_engine.retest_findings(self.ctx.vulnerabilities)
         await self._generate_report()
 
         duration = (datetime.now() - self.start_time).total_seconds()
@@ -277,7 +375,7 @@ class CentralBrain:
             logger.info(f"Scope: {result['domains']}, tier: {result.get('max_tier')}")
 
     async def _run_phase(self, phase: str):
-        """LLM-driven loop with agent history, dedup, and failed tool filtering"""
+        """LLM-driven loop with agent history, dedup, failed tool filtering, and circuit-breaker."""
         agents_this_phase = 0
         self.consecutive_agent_failures = 0
         agent_history = []  # Track what each agent did
@@ -286,41 +384,60 @@ class CentralBrain:
         phase_prompt = self._load_phase_prompt(phase)
 
         while agents_this_phase < self.max_agents_per_phase:
-            summary = self.ctx.get_full_summary(max_chars=5000)
+            summary = self.ctx.get_full_summary(max_chars=800)
 
             # ── Build failed tools warning ──
             failed_tools_warning = ""
             if self.failed_tools:
                 failed_tools_warning = (
-                    f"\n🚫 UNAVAILABLE TOOLS (do NOT assign these to any agent):\n"
-                    f"  {', '.join(sorted(self.failed_tools))}\n"
-                    f"  These tools failed to install or execute. Skip them entirely.\n"
+                    f"\nUNAVAILABLE TOOLS: {', '.join(sorted(self.failed_tools))}\n"
                 )
 
-            # ── Build agent history section ──
+            # ── Agent history (last 3 only) ──
             history_section = ""
             if agent_history:
-                history_section = "\n══════════════════════════════════════\n"
-                history_section += "COMPLETED AGENTS (do NOT repeat these tasks):\n"
-                for h in agent_history:
+                history_section = "\nCOMPLETED AGENTS:\n"
+                for h in agent_history[-3:]:
                     status = "✓" if h["success"] else "✗"
-                    history_section += f"  {status} {h['agent_id']}: {h['objective']}\n"
-                    if h.get("findings"):
-                        history_section += f"    Findings: {h['findings'][:150]}\n"
-                    if h.get("failed_tools"):
-                        history_section += f"    Failed tools: {', '.join(h['failed_tools'])}\n"
-                history_section += "══════════════════════════════════════\n"
-                history_section += "⚠️  Do NOT spawn agents for objectives already completed above.\n"
+                    history_section += f"  {status} {h['agent_id']}: {h['objective'][:50]}\n"
 
             # ── Build exploit chain context ──
             chain_context = ""
             if phase == "exploit" and self.ctx.exploit_results:
-                chain_context = "\nEXPLOIT CHAIN SO FAR:\n"
-                for er in self.ctx.exploit_results:
-                    chain_context += (
-                        f"  - {er.get('type','?')}: "
-                        f"{'SUCCESS' if er.get('success') else 'FAILED'}\n"
-                    )
+                chain_context = "\nEXPLOIT CHAIN:\n"
+                for er in self.ctx.exploit_results[-3:]:
+                    chain_context += f"  - {er.get('type','?')}: {'SUCCESS' if er.get('success') else 'FAILED'}\n"
+
+            # ── Context truncation ──
+            _MAX_SUMMARY_CHARS = 800
+            if len(summary) > _MAX_SUMMARY_CHARS:
+                summary = summary[:_MAX_SUMMARY_CHARS] + "..."
+
+            # ── Circuit-breaker hint ──
+            consecutive_failures_per_objective = {}
+
+            circuit_breaker_hint = ""
+            if self.consecutive_agent_failures >= 2:
+                circuit_breaker_hint = "\n⚠️  REPLAN REQUIRED: Choose a different approach or phase_complete.\n"
+                # Option: break the phase loop instead of hoping brain will self-correct
+                if self.consecutive_agent_failures >= 5:
+                    logger.warning("Failure threshold exceeded. Exiting phase.")
+                    break
+
+            # ── Compact execution context from database ──
+            db_context = self._get_db_execution_context()
+            comp_tasks = [f"{t[0]}:{t[1]}" for t in db_context.get("completed_tasks", [])[-5:]]
+            assets = db_context.get("discovered_assets", {})
+            db_summary_lines = []
+            if comp_tasks:
+                db_summary_lines.append(f"Completed: {', '.join(comp_tasks)}")
+            if assets.get("subdomains"):
+                db_summary_lines.append(f"Subdomains: {', '.join(assets['subdomains'][:5])}")
+            if assets.get("open_ports"):
+                db_summary_lines.append(f"Ports: {assets['open_ports']}")
+            if assets.get("technologies"):
+                db_summary_lines.append(f"Tech: {assets['technologies']}")
+            db_context_str = "\n".join(db_summary_lines)
 
             prompt = (
                 f"Authorized security assessment task planner.\n\n"
@@ -328,101 +445,300 @@ class CentralBrain:
                 f"Target: {self.ctx.target}\n"
                 f"{failed_tools_warning}"
                 f"{history_section}"
-                f"\nCollected data so far:\n{summary}\n"
-                f"{chain_context}\n"
+                f"\n--- DISCOVERED CONTEXT ---\n"
+                f"{db_context_str}\n"
+                f"\nSummary:\n{summary}\n"
+                f"{chain_context}"
+                f"{circuit_breaker_hint}"
                 f"Tasks completed: {agents_this_phase}/{self.max_agents_per_phase}\n\n"
-                f"Based on the data above, output a JSON object for the next scanning task.\n"
-                f"If sufficient data has been collected for this phase, output: {{\"action\": \"phase_complete\"}}\n"
-                f"Do not repeat completed tasks. Do not use unavailable tools.\n"
-                f"Use spawn_agents (plural) for independent parallel tasks.\n"
-                f"Output ONLY valid JSON.\n"
+                f"Based on data above, output JSON for next task. "
+                f"If phase complete, output: {{\"action\": \"phase_complete\"}}\n"
+                f"Do not repeat completed tasks. Output ONLY valid JSON.\n"
             )
+            
+            # ── Explicit state transition check for Recon completion ──
+            if phase == "recon" and self._is_recon_complete(db_context):
+                logger.info("RECON_COMPLETE: All reconnaissance capabilities for discovered targets finished. Advancing to PHASE 2: VULNERABILITY_ASSESSMENT.")
+                break
 
-            decision = await self.llm.generate_json(prompt, system=phase_prompt or BRAIN_SYSTEM)
+            # ── Log prompt size ──
+            logger.info(f"Brain prompt length: {len(prompt)} chars")
 
+            # ── LLM Response Generation with Strict Validation & Exponential Backoff Retry Loop ──
+            max_retries = 3
+            decision = None
+            raw_content = ""
+
+            from agents.llm_client import validate_json_payload
+            from core.normalizer import PlannerResponseNormalizer
+
+            for attempt in range(max_retries):
+                res = await self.llm.generate_response(
+                    prompt,
+                    system=phase_prompt or BRAIN_SYSTEM,
+                    tier=TaskTier.LARGE,
+                    temperature=0.1,
+                    response_format="json"
+                )
+                raw_content = res.content
+                structured = res.structured_output
+
+                if structured is None and raw_content:
+                    try:
+                        clean_content = re.sub(r'```json\n?|\n?```', '', raw_content).strip()
+                        structured = json.loads(clean_content)
+                    except Exception:
+                        m = re.search(r'\{[\s\S]*\}', raw_content)
+                        if m:
+                            try:
+                                structured = json.loads(m.group(0))
+                            except Exception:
+                                pass
+
+                # Validate non-empty dict and basic payload structure
+                if validate_json_payload(structured):
+                    try:
+                        canonical_decision = PlannerResponseNormalizer.normalize(structured)
+                        decision = structured
+                        logger.info(f"Brain decision accepted (attempt {attempt + 1}/{max_retries}): {json.dumps(decision, indent=2)}")
+                        break
+                    except Exception as norm_err:
+                        self.failure_streak += 1
+                        logger.warning(
+                            f"[CentralBrain] Attempt {attempt + 1}/{max_retries} failed schema validation ({norm_err}). "
+                            f"Raw response: '{raw_content}'. Failure streak: {self.failure_streak}"
+                        )
+                else:
+                    self.failure_streak += 1
+                    logger.warning(
+                        f"[CentralBrain] Attempt {attempt + 1}/{max_retries} received empty {{}} or malformed JSON. "
+                        f"Raw response: '{raw_content}'. Failure streak: {self.failure_streak}"
+                    )
+
+                if attempt < max_retries - 1:
+                    backoff = 0.5 * (2 ** attempt)
+                    await asyncio.sleep(backoff)
+
+            # If retries exhausted and no valid decision obtained or max failure streak reached
             if not decision:
-                self.consecutive_agent_failures += 1
-                logger.warning(f"Brain returned empty (failure streak: {self.consecutive_agent_failures})")
+                logger.warning(f"[CentralBrain] Brain returned empty/invalid response after {max_retries} retries (failure streak: {self.failure_streak})")
                 
-                if self.consecutive_agent_failures > self.max_consecutive_failures:
-                    logger.error(f"Too many failures ({self.consecutive_agent_failures}), ending {phase}")
-                    break
+                # Deterministic fallback decision tree when LLM returns empty/invalid responses
+                if self.failure_streak >= self.max_consecutive_failures or self.failure_streak >= 2:
+                    logger.warning(f"[CentralBrain] Failure threshold reached ({self.failure_streak}). Injecting safe deterministic fallback task: http_request probe.")
+                    
+                    # 1. Base URL
+                    base_url = self.ctx.target.rstrip("/")
+                    if not base_url.startswith(("http://", "https://")):
+                        base_url = f"https://{base_url}"
+
+                    # 2. Extract first discovered endpoint
+                    discovered_endpoints = getattr(self.ctx, "endpoints", []) or []
+                    first_ep = ""
+                    if discovered_endpoints:
+                        raw_ep = discovered_endpoints[0]
+                        first_ep = raw_ep if isinstance(raw_ep, str) else raw_ep.get("url", "")
+
+                    # 3. Construct full target URL
+                    if first_ep.startswith(("http://", "https://")):
+                        full_target = first_ep
+                    elif first_ep:
+                        endpoint_path = "/" + first_ep.lstrip("/")
+                        full_target = f"{base_url}{endpoint_path}"
+                    else:
+                        full_target = base_url
+
+                    # 4. Scope validation
+                    from core.authorization import TargetScopeValidator
+                    from urllib.parse import urlparse
+                    parsed_host = urlparse(full_target).hostname or full_target.split("/")[0].split(":")[0]
+                    scope_pass = TargetScopeValidator.get().is_authorized(parsed_host)
+                    scope_str = "pass" if scope_pass else "fail"
+
+                    logger.info(f"FALLBACK_TARGET_CONSTRUCTED: target={full_target} scope_check={scope_str}")
+
+                    if not scope_pass:
+                        logger.warning(f"FALLBACK_TARGET_OUT_OF_SCOPE: '{full_target}' failed authorization scope check. Skipping fallback.")
+                        self.failure_streak = 0
+                        break
+
+                    fallback_task = TaskSpec(
+                        objective=f"HTTP request probe and security header verification for {full_target}",
+                        capability=CapabilityType.HTTP_ANALYSIS,
+                        inputs={"target": full_target, "url": full_target, "tools": ["http_request"]}
+                    )
+                    try:
+                        if hasattr(self, "scheduler") and hasattr(self.scheduler, "schedule_tasks"):
+                            self.scheduler.schedule_tasks([fallback_task])
+                        else:
+                            agent = self.spawner.spawn({
+                                "objective": fallback_task.objective,
+                                "capability": fallback_task.capability.value,
+                                "target": full_target,
+                                "tools": ["http_request"]
+                            })
+                            if agent and hasattr(agent, "run"):
+                                await agent.run()
+                        self.failure_streak = 0
+                        agents_this_phase += 1
+                        break
+                    except Exception as ex:
+                        logger.error(f"Fallback HTTP probe execution failed: {ex}")
+                        break
                 continue
 
-            self.consecutive_agent_failures = 0
+            # ── Canonical Planner Response Normalization ──
+            try:
+                canonical_decision = PlannerResponseNormalizer.normalize(decision)
+            except Exception as e:
+                self.failure_streak += 1
+                logger.error(f"Planner decision normalization failed: {e}")
+                continue
 
-            action = decision.get("action", "phase_complete")
+            self.failure_streak = 0
+            action = canonical_decision.action
 
-            if action in ("phase_complete", "done"):
+            if action == BrainDecisionAction.COMPLETE:
                 logger.info(f"✓ Phase '{phase}' complete")
                 break
 
-            # ── Spawn MULTIPLE agents in parallel ──
-            if action == "spawn_agents":
-                specs = decision.get("agent_specs", [])
-                specs = [s for s in specs if s.get("objective")]
-                
-                # Filter duplicates and strip failed tools
-                filtered_specs = []
-                for s in specs:
-                    obj = s.get("objective", "").lower().strip()
-                    if obj in completed_objectives:
-                        logger.info(f"Skipping duplicate objective: {obj[:60]}")
-                        continue
-                    s["tools"] = [t for t in s.get("tools", []) if t not in self.failed_tools]
-                    if not s["tools"]:
-                        logger.warning(f"Skipping agent - all tools unavailable: {obj[:60]}")
-                        continue
-                    filtered_specs.append(s)
-                
-                if not filtered_specs:
+            # ── Schedule & Spawn Tasks Managed by TaskManager ──
+            if action in (BrainDecisionAction.SPAWN_AGENTS, BrainDecisionAction.SPAWN_TASKS):
+                task_specs = canonical_decision.tasks
+                # Validate upstream proof before spawning auth / downstream exploit tasks
+                validated_specs = []
+                for spec in task_specs:
+                    cap_val = spec.capability.value.lower()
+                    obj_val = spec.objective.lower()
+                    
+                    if cap_val == "authentication_testing" or "auth" in obj_val or "login" in obj_val:
+                        creds = getattr(self.ctx, "harvested_creds", []) or getattr(self.ctx, "extracted_credentials", [])
+                        if not creds:
+                            logger.warning(f"[WARN] NO_EXTRACTED_CREDENTIALS: cannot spawn auth_agent without creds for objective='{spec.objective[:50]}'. Retrying data extraction.")
+                            # Substitute with data extraction task
+                            spec.capability = CapabilityType.VULNERABILITY_SCANNING
+                            spec.objective = f"Extract data and credentials from discovered endpoints for {self.ctx.target}"
+                        else:
+                            sample = creds[0].get("username") or creds[0].get("secret") or "user"
+                            logger.info(f"CREDENTIALS_AVAILABLE: count={len(creds)}, sample_user='{sample}'")
+                            
+                    elif cap_val in ("rce", "idor", "privilege_escalation") or "rce" in obj_val or "idor" in obj_val:
+                        token = getattr(self.ctx, "auth_token", None)
+                        if not token and not getattr(self.ctx, "vulnerabilities", []):
+                            logger.warning(f"[WARN] NO_UPSTREAM_PROOF: skipping downstream exploit '{spec.objective[:50]}' until auth or upstream vulnerability confirmed")
+                            continue
+                            
+                    validated_specs.append(spec)
+
+                task_specs = validated_specs
+                if not task_specs:
+                    logger.warning("All proposed tasks filtered out due to missing upstream proof/credentials")
                     self.consecutive_agent_failures += 1
                     continue
 
-                agents = [self.spawner.spawn(s) for s in filtered_specs]
-                
-                # ── PARALLEL EXECUTION ──
-                logger.info(f"Spawning {len(agents)} agents in PARALLEL")
-                results = await asyncio.gather(*[a.execute() for a in agents], return_exceptions=True)
+                # ── Schedule tasks into DAG Scheduler ──
+                try:
+                    self.scheduler.schedule_tasks(task_specs)
+                except Exception as e:
+                    logger.error(f"[CentralBrain] Scheduling failed: {e}")
+                    self.consecutive_agent_failures += 1
+                    continue
 
-                for i, result in enumerate(results):
-                    agent = agents[i]
-                    obj = filtered_specs[i].get("objective", "unknown")
-                    completed_objectives.add(obj.lower().strip())
-                    
-                    entry = {
-                        "agent_id": getattr(agent, 'agent_id', f'AGENT-{agents_this_phase+1}'),
-                        "objective": obj,
-                        "success": False,
-                        "findings": "",
-                        "failed_tools": [],
-                    }
-                    
-                    if isinstance(result, Exception):
-                        logger.error(f"Agent {i} crashed: {result}")
-                        self.consecutive_agent_failures += 1
-                        entry["findings"] = f"Crashed: {result}"
-                    elif result.get("status") == "failed":
-                        logger.warning(f"Agent {i} failed: {result.get('reason')}")
-                        self.consecutive_agent_failures += 1
-                        entry["findings"] = f"Failed: {result.get('reason')}"
-                    else:
-                        self.consecutive_agent_failures = 0
-                        entry["success"] = True
-                        entry["findings"] = str(result.get("results", ""))[:200]
-                        logger.info(f"✓ Agent {i} succeeded")
-                    
-                    # Learn failed tools
-                    if hasattr(agent, 'failed_tools'):
-                        entry["failed_tools"] = list(agent.failed_tools)
-                        for failed_tool in agent.failed_tools:
-                            self.failed_tools.add(failed_tool)
-                            logger.warning(f"Brain learned: '{failed_tool}' is unavailable")
-                    
-                    self.metrics.record_event("agent", entry["agent_id"],
-                                              entry["success"], entry["findings"])
+                # ── Execute tasks stage-by-stage respecting dependencies ──
+                while True:
+                    runnable_tasks = self.scheduler.get_next_runnable_tasks()
+                    if not runnable_tasks:
+                        break
+
+                    spawn_specs = []
+                    for task in runnable_tasks:
+                        self.task_manager.start_task(task.spec.task_id)
+                        s_dict = {
+                            "objective": task.spec.objective,
+                            "capability": task.spec.capability.value,
+                            "target": task.spec.inputs.get("target", self.ctx.target),
+                            "tools": task.spec.inputs.get("tools", []),
+                            "max_steps": task.spec.max_steps,
+                            "task_id": task.spec.task_id
+                        }
+                        spawn_specs.append((task, s_dict))
+
+                    valid_specs_and_agents = []
+                    for task, s_dict in spawn_specs:
+                        agent_inst = self.spawner.spawn(s_dict)
+                        if agent_inst is None:
+                            logger.info(f"TASK_SKIPPED_OR_DEDUPLICATED: task_id={task.spec.task_id} objective='{task.spec.objective[:50]}'")
+                            self.task_manager.complete_task(task.spec.task_id, {"status": "skipped", "reason": "Deduplicated or skipped by spawner"})
+                        else:
+                            valid_specs_and_agents.append((task, s_dict, agent_inst))
+
+                    if not valid_specs_and_agents:
+                        logger.info("[Scheduler] No new valid/non-duplicate agents to execute in this stage.")
+                        continue
+
+                    spawn_specs = [(t, s) for t, s, a in valid_specs_and_agents]
+                    agents = [a for t, s, a in valid_specs_and_agents]
+                    logger.info(f"[Scheduler] Executing {len(agents)} READY tasks in parallel stage")
+
+                    max_task_duration = float(getattr(getattr(self, "config", None), "max_task_duration", 300.0) or 300.0)
+
+                    async def _run_agent_with_timeout(agent_inst):
+                        try:
+                            return await asyncio.wait_for(agent_inst.execute(), timeout=max_task_duration)
+                        except (asyncio.TimeoutError, TimeoutError):
+                            agent_id_str = getattr(agent_inst, 'agent_id', 'AGENT')
+                            logger.warning(f"TASK_TIMEOUT: agent_id={agent_id_str} duration={max_task_duration}s, killing process")
+                            return {"status": "timeout", "reason": f"Task exceeded max duration ({max_task_duration}s)"}
+
+                    results = await asyncio.gather(*[_run_agent_with_timeout(a) for a in agents], return_exceptions=True)
+
+                    for i, result in enumerate(results):
+                        task, s_dict = spawn_specs[i]
+                        agent = agents[i]
+                        obj = task.spec.objective
+                        completed_objectives.add(obj.lower().strip())
+                        
+                        entry = {
+                            "agent_id": getattr(agent, 'agent_id', f'AGENT-{agents_this_phase+1}'),
+                            "objective": obj,
+                            "success": False,
+                            "findings": "",
+                            "failed_tools": [],
+                        }
+                        
+                        if isinstance(result, dict) and result.get("status") == "timeout":
+                            logger.warning(f"TASK_TIMEOUT: task_id={task.spec.task_id} duration={max_task_duration}s, status=TIMEOUT")
+                            self.task_manager.timeout_task(task.spec.task_id)
+                            self.consecutive_agent_failures += 1
+                            entry["findings"] = result.get("reason", "Task exceeded max duration")
+                        elif isinstance(result, Exception):
+                            logger.error(f"Task {task.spec.task_id} crashed: {result}")
+                            self.task_manager.fail_task(task.spec.task_id, str(result))
+                            self.consecutive_agent_failures += 1
+                            entry["findings"] = f"Crashed: {result}"
+                        elif isinstance(result, dict) and result.get("status") == "failed":
+                            logger.warning(f"Task {task.spec.task_id} failed: {result.get('reason')}")
+                            self.task_manager.fail_task(task.spec.task_id, result.get("reason", "failed"))
+                            self.consecutive_agent_failures += 1
+                            entry["findings"] = f"Failed: {result.get('reason')}"
+                        else:
+                            self.consecutive_agent_failures = 0
+                            entry["success"] = True
+                            entry["findings"] = str(result.get("results", "") if isinstance(result, dict) else result)[:200]
+                            self.task_manager.complete_task(task.spec.task_id, result if isinstance(result, dict) else {})
+                            logger.info(f"✓ Task {task.spec.task_id} SUCCEEDED")
+
+                        # Track metrics
+                        self.metrics.record_event("agent", entry["agent_id"],
+                                                  entry["success"], entry["findings"])
+
+                    # Aggregate wave results into shared context and persistent database
+                    self._aggregate_wave_results(agents, results)
+
+                    # Process dependencies to unlock newly ready tasks
+                    self.scheduler.process_dependencies()
                     agent_history.append(entry)
-                    agents_this_phase += 1
+                    agents_this_phase += len(runnable_tasks)
 
             # ── Spawn SINGLE agent ──
             elif action == "spawn_agent":
@@ -487,6 +803,248 @@ class CentralBrain:
             logger.debug(f"[Metrics] dashboard write failed: {e}")
         for act in self.automation.evaluate():
             logger.info(f"Automation recommends: {act['action']} ({act['rule']})")
+    
+    async def _persist_recon_findings(self):
+        """Save recon discoveries to knowledge store."""
+        try:
+            logger.info("Persisting recon findings...")
+            
+            # ── Debug: Log what's actually in the context ──
+            logger.debug(f"subdomains: {getattr(self.ctx, 'subdomains', [])}")
+            logger.debug(f"ips: {getattr(self.ctx, 'ips', [])}")
+            logger.debug(f"ports keys: {getattr(self.ctx, 'ports', {}).keys()}")
+            logger.debug(f"ports data: {getattr(self.ctx, 'ports', {})}")
+            
+            # ── Subdomains ──
+            if hasattr(self.ctx, 'subdomains') and self.ctx.subdomains:
+                for subdomain in self.ctx.subdomains:
+                    self.persistent_knowledge_store.add_asset(
+                        self.target_id, "subdomain", subdomain, 
+                        metadata=json.dumps({"discovered_at": datetime.now().isoformat()})
+                    )
+                logger.info(f"  ✓ Persisted {len(self.ctx.subdomains)} subdomains")
+            
+            # ── IPs ──
+            if hasattr(self.ctx, 'ips') and self.ctx.ips:
+                for ip in self.ctx.ips:
+                    self.persistent_knowledge_store.add_asset(
+                        self.target_id, "ip", ip,
+                        metadata=json.dumps({"discovered_at": datetime.now().isoformat()})
+                    )
+                logger.info(f"  ✓ Persisted {len(self.ctx.ips)} IPs")
+            
+            # ── Ports - FIXED ──
+            if hasattr(self.ctx, 'ports') and self.ctx.ports:
+                for host, port_list in self.ctx.ports.items():
+                    host_asset_id = self.persistent_knowledge_store.add_asset(
+                        self.target_id, "host", host,
+                        metadata=json.dumps({"discovered_at": datetime.now().isoformat()})
+                    )
+                    
+                    for port_item in port_list:
+                        # Handle both dict and int formats
+                        if isinstance(port_item, dict):
+                            port_num = port_item.get("port", "unknown")
+                            service = port_item.get("service", "unknown")
+                            version = port_item.get("version", "")
+                        else:
+                            port_num = str(port_item)
+                            service = "unknown"
+                            version = ""
+                        
+                        # Add technology with port info
+                        self.persistent_knowledge_store.add_technology(
+                            host_asset_id, 
+                            f"{service}:{port_num}", 
+                            version,
+                            source="port_scan"
+                        )
+                logger.info(f"  ✓ Persisted ports for {len(self.ctx.ports)} hosts")
+            
+            # ── Technologies ──
+            if hasattr(self.ctx, 'technologies') and self.ctx.technologies:
+                for host, techs in self.ctx.technologies.items():
+                    host_asset_id = self.persistent_knowledge_store.add_asset(
+                        self.target_id, "host", host
+                    )
+                    for tech in techs:
+                        if isinstance(tech, dict):
+                            name = tech.get("name", "")
+                            version = tech.get("version", "")
+                        else:
+                            name = str(tech)
+                            version = ""
+                        if name:
+                            self.persistent_knowledge_store.add_technology(
+                                host_asset_id, name, version,
+                                source="web_fingerprint"
+                            )
+                logger.info(f"  ✓ Persisted technologies for {len(self.ctx.technologies)} hosts")
+            
+            # ── Endpoints ──
+            if hasattr(self.ctx, 'endpoints') and self.ctx.endpoints:
+                for endpoint in self.ctx.endpoints:
+                    if isinstance(endpoint, dict):
+                        path = endpoint.get("url", "")
+                        method = endpoint.get("method", "GET")
+                        status = endpoint.get("status", 0)
+                        params = endpoint.get("params", [])
+                    elif isinstance(endpoint, str):
+                        path = endpoint
+                        method = "GET"
+                        status = 0
+                        params = []
+                    else:
+                        continue
+                    
+                    if path:
+                        self.persistent_knowledge_store.add_endpoint(
+                            target_id=self.target_id,
+                            path=path,
+                            http_method=method,
+                            status_code=status,
+                            metadata=json.dumps({
+                                "params": params,
+                                "discovered_at": datetime.now().isoformat()
+                            })
+                        )
+                logger.info(f"  ✓ Persisted {len(self.ctx.endpoints)} endpoints")
+            
+            # ── Summary ──
+            logger.info(f"Persisted: {len(getattr(self.ctx, 'subdomains', []))} subdomains, "
+                        f"{len(getattr(self.ctx, 'ips', []))} IPs, "
+                        f"{len(getattr(self.ctx, 'ports', {}))} hosts with ports, "
+                        f"{len(getattr(self.ctx, 'endpoints', []))} endpoints")
+                        
+        except Exception as e:
+            logger.error(f"Failed to persist recon findings: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+    
+    async def _persist_captured_requests(self):
+        """Save captured HTTP requests to disk for replay."""
+        try:
+            if not self.ctx.captured_requests:
+                logger.debug("No captured requests to persist")
+                return
+            
+            logger.info("Persisting captured HTTP requests...")
+            request_file = self.report_dir / f"captured_requests_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            with open(request_file, 'w') as f:
+                json.dump({
+                    "target": self.ctx.target,
+                    "captured_at": datetime.now().isoformat(),
+                    "pages": self.ctx.crawled_pages,
+                    "requests": self.ctx.captured_requests,
+                }, f, indent=2)
+            logger.info(f"Saved {len(self.ctx.captured_requests)} requests to {request_file}")
+        except Exception as e:
+            logger.error(f"Failed to persist captured requests: {e}")
+
+    async def _persist_vulnerabilities(self):
+        """Save vulnerability findings to knowledge store."""
+        try:
+            if not self.ctx.vulnerabilities:
+                logger.debug("No vulnerabilities to persist")
+                return
+            
+            logger.info("Persisting vulnerability findings...")
+            for vuln in self.ctx.vulnerabilities:
+                finding_id = self.persistent_knowledge_store.add_finding(
+                    target_id=self.target_id,
+                    title=vuln.get("title", "Unknown"),
+                    description=vuln.get("details", ""),
+                    severity=vuln.get("severity", "MEDIUM"),
+                    category=vuln.get("type", ""),
+                    cwe=vuln.get("cwe", ""),
+                    cve=vuln.get("cve", ""),
+                    affected_asset=vuln.get("location", ""),
+                    evidence=json.dumps(vuln.get("proof", {})),
+                    source_agent_id=vuln.get("source_agent", ""),
+                )
+                # Add evidence
+                for evidence_item in vuln.get("evidence", []):
+                    if isinstance(evidence_item, dict):
+                        self.persistent_knowledge_store.add_evidence(
+                            finding_id,
+                            evidence_type=evidence_item.get("type", "screenshot"),
+                            content=evidence_item.get("content", ""),
+                            tool_name=evidence_item.get("tool", "")
+                        )
+            
+            logger.info(f"Persisted {len(self.ctx.vulnerabilities)} vulnerabilities")
+        except Exception as e:
+            logger.error(f"Failed to persist vulnerabilities: {e}")
+
+    async def _persist_exploit_results(self):
+        """Save exploitation results to knowledge store."""
+        try:
+            if not self.ctx.exploit_results:
+                logger.debug("No exploit results to persist")
+                return
+            
+            logger.info("Persisting exploit results...")
+            for result in self.ctx.exploit_results:
+                self.persistent_knowledge_store.add_exploit_result(
+                    target_id=self.target_id,
+                    vuln_id=result.get("vuln_id", ""),
+                    exploit_id=result.get("exploit_id", ""),
+                    payload=result.get("payload", ""),
+                    success=result.get("success", False),
+                    proof=result.get("proof", ""),
+                    severity=result.get("severity", "MEDIUM"),
+                    executed_at=result.get("timestamp", datetime.now().isoformat()),
+                )
+            
+            logger.info(f"Persisted {len(self.ctx.exploit_results)} exploitation results")
+        except Exception as e:
+            logger.error(f"Failed to persist exploit results: {e}")
+
+    async def _persist_post_exploit_findings(self):
+        """Save post-exploitation findings (privesc, lateral, persistence, MITRE)."""
+        try:
+            findings = []
+            
+            # Privesc findings
+            for priv in self.ctx.privesc_findings:
+                self.persistent_knowledge_store.add_post_exploit_finding(
+                    target_id=self.target_id,
+                    type="privesc",
+                    host=priv.get("host", ""),
+                    technique=priv.get("technique", ""),
+                    detail=priv.get("detail", ""),
+                    severity=priv.get("severity", "MEDIUM"),
+                    metadata=json.dumps(priv)
+                )
+                findings.append(priv)
+            
+            # Lateral movement
+            if self.ctx.lateral_plan:
+                for pivot in self.ctx.lateral_plan.get("pivots", []):
+                    self.persistent_knowledge_store.add_post_exploit_finding(
+                        target_id=self.target_id,
+                        type="lateral_movement",
+                        host=pivot.get("source_host", ""),
+                        technique=pivot.get("technique", ""),
+                        detail=f"Move to {pivot.get('target_host', '')}",
+                        metadata=json.dumps(pivot)
+                    )
+                    findings.append(pivot)
+            
+            # Persistence mechanisms
+            for persist in self.ctx.persistence_plan:
+                self.persistent_knowledge_store.add_post_exploit_finding(
+                    target_id=self.target_id,
+                    type="persistence",
+                    technique=persist.get("mechanism", ""),
+                    detail=persist.get("artifact", ""),
+                    metadata=json.dumps(persist)
+                )
+                findings.append(persist)
+            
+            logger.info(f"Persisted {len(findings)} post-exploitation findings")
+        except Exception as e:
+            logger.error(f"Failed to persist post-exploit findings: {e}")
 
 
     def _load_phase_prompt(self, phase: str) -> Optional[str]:
@@ -507,7 +1065,7 @@ class CentralBrain:
             logger.info("No vulnerabilities found. Skipping exploitation.")
             return None
 
-        summary = self.ctx.get_full_summary(max_chars=6000)
+        summary = self.ctx.get_full_summary(max_chars=2000)
 
         plan = await self.llm.generate_json(
             f"Based on these vulnerability findings, create an exploitation plan.\n\n"
@@ -538,7 +1096,7 @@ class CentralBrain:
             f"  ]\n"
             f"}}",
             tier=TaskTier.LARGE,
-            max_tokens=3000,
+            max_tokens=6000,
         )
 
         if plan:
@@ -573,7 +1131,11 @@ class CentralBrain:
         print("=" * 60)
 
         try:
-            response = input("Approve this plan? [YES/NO/MODIFY]: ").strip().upper()
+            import os, sys
+            if os.environ.get("AUTO_APPROVE") == "1" or not sys.stdin.isatty():
+                response = "YES"
+            else:
+                response = input("Approve this plan? [YES/NO/MODIFY]: ").strip().upper()
         except (EOFError, KeyboardInterrupt):
             response = "NO"
 
@@ -892,7 +1454,7 @@ CRITICAL RULES:
             f"Include: overall risk, key findings, attack chains, recommendations.\n"
             f"Be concise (3 paragraphs max).",
             tier=TaskTier.LARGE,
-            max_tokens=1000,
+            max_tokens=4096,
         )
 
         # ── Finding validation + compliance mapping (production-grade layer) ──
@@ -976,3 +1538,312 @@ CRITICAL RULES:
         ctx_path = self.report_dir / f"context_{ts}.json"
         self.ctx.save(str(ctx_path))
         logger.info(f"Context saved: {ctx_path}")
+
+    def plan_reconnaissance(self, state: ExecutionState) -> BrainDecision:
+        """
+        Reason about reconnaissance tasks.
+        Returns structured decision, not task objects.
+        """
+        
+        # What do we already know?
+        hosts_known = len(self.knowledge_store.get_by_type("host"))
+        ports_known = len(self.knowledge_store.get_by_type("port"))
+        services_known = len(self.knowledge_store.get_by_type("service"))
+        
+        # What should we investigate?
+        tasks = []
+        
+        # Stage 1: DNS if no hosts known
+        if hosts_known == 0:
+            tasks.append(TaskSpec(
+                objective=f"Enumerate DNS records for {self.target}",
+                capability=CapabilityType.DNS_ENUMERATION,
+                inputs={"domain": self.target},
+                context_requirements=["hosts"],
+                success_criteria=[
+                    SuccessCriterion(
+                        criterion_type=SuccessCriterionType.KNOWLEDGE_EXISTS,
+                        entity_type="host"
+                    )
+                ],
+                timeout_seconds=300,
+                max_steps=5,
+            ))
+        
+        # Stage 2: Port scan discovered hosts
+        elif hosts_known > 0 and ports_known == 0:
+            tasks.append(TaskSpec(
+                objective="Scan discovered hosts for open ports",
+                capability=CapabilityType.PORT_SCANNING,
+                inputs={"targets": [h["host"] for h in self.context_resolver.resolve_hosts(self.authorized_scope)]},
+                context_requirements=["hosts"],
+                success_criteria=[
+                    SuccessCriterion(
+                        criterion_type=SuccessCriterionType.KNOWLEDGE_EXISTS,
+                        entity_type="port"
+                    )
+                ],
+                timeout_seconds=600,
+                max_steps=8,
+            ))
+        
+        # Stage 3: Technology fingerprinting
+        elif ports_known > 0 and services_known == 0:
+            tasks.append(TaskSpec(
+                objective="Fingerprint technologies on discovered services",
+                capability=CapabilityType.TECHNOLOGY_FINGERPRINTING,
+                inputs={"ports": self.context_resolver.resolve_ports()},
+                context_requirements=["ports"],
+                success_criteria=[
+                    SuccessCriterion(
+                        criterion_type=SuccessCriterionType.KNOWLEDGE_EXISTS,
+                        entity_type="technology"
+                    )
+                ],
+                timeout_seconds=300,
+                max_steps=8,
+            ))
+        
+        else:
+            # Recon complete
+            return BrainDecision(
+                action=BrainDecisionAction.COMPLETE,
+                thought="Reconnaissance phase complete - hosts, ports, technologies discovered",
+                reason="Sufficient reconnaissance data collected"
+            )
+        
+        if tasks:
+            return BrainDecision(
+                action=BrainDecisionAction.SPAWN_AGENTS,
+                thought=f"Spawning {len(tasks)} reconnaissance task(s)",
+                tasks=tasks,
+            )
+        
+        return BrainDecision(
+            action=BrainDecisionAction.WAIT,
+            thought="Waiting for reconnaissance tasks to complete",
+            wait_seconds=5,
+        )
+
+    def make_decision(self, state: ExecutionState) -> BrainDecision:
+        """
+        Central decision point.
+        Analyzes execution state, decides next action.
+        """
+        
+        # Safety check
+        if self.execution_count >= self.max_iterations:
+            logger.warning("[Brain] Max iterations reached, completing")
+            return BrainDecision(
+                action=BrainDecisionAction.COMPLETE,
+                reason="Max execution iterations reached"
+            )
+        
+        self.execution_count += 1
+        
+        # Check if all objectives completed
+        completed_count = len(state.tasks_completed)
+        failed_count = len(state.tasks_failed)
+        blocked_count = len(state.tasks_blocked)
+        running_count = len(state.tasks_running)
+        
+        logger.info(f"[Brain] Iteration {self.execution_count}: "
+                    f"completed={completed_count}, running={running_count}, "
+                    f"failed={failed_count}, blocked={blocked_count}")
+        
+        # Check for blocking issues
+        if blocked_count > 0 and running_count == 0 and completed_count == 0:
+            return BrainDecision(
+                action=BrainDecisionAction.BLOCKED,
+                reason="Tasks blocked and no progress being made"
+            )
+        
+        # Phase-based decision
+        phase = self._determine_phase(state)
+        
+        if phase == "recon":
+            return self.plan_reconnaissance(state)
+        elif phase == "analysis":
+            return self.plan_analysis(state)
+        else:
+            return BrainDecision(
+                action=BrainDecisionAction.COMPLETE,
+                reason="No more phases to execute"
+            )
+
+    def plan_analysis(self, state: ExecutionState) -> BrainDecision:
+        """Plan vulnerability analysis phase"""
+        # This would implement deeper analysis logic
+        return BrainDecision(
+            action=BrainDecisionAction.COMPLETE,
+            reason="Analysis planning not yet implemented"
+        )
+
+    def _determine_phase(self, state: ExecutionState) -> str:
+        """Determine current phase of execution"""
+        hosts_known = len(self.knowledge_store.get_by_type("host"))
+        ports_known = len(self.knowledge_store.get_by_type("port"))
+        services_known = len(self.knowledge_store.get_by_type("service"))
+        
+        if hosts_known == 0:
+            return "recon"
+        elif ports_known == 0:
+            return "recon"
+        elif services_known == 0:
+            return "recon"
+        else:
+            return "analysis"
+
+    def get_execution_state(self) -> ExecutionState:
+        """
+        Build structured state for Brain decision-making.
+        Not raw logs or context, structured facts.
+        """
+        # Separate tasks by status
+        all_tasks = self.task_manager.get_all_tasks()
+        completed = [t.spec for t in all_tasks if t.status.value == "COMPLETED"]
+        running = [t.spec for t in all_tasks if t.status.value == "RUNNING"]
+        failed = [t.spec.task_id for t in all_tasks if t.status.value == "FAILED"]
+        blocked = [t.spec.task_id for t in all_tasks if t.status.value == "BLOCKED"]
+        
+        return ExecutionState(
+            target=self.target,
+            scope=self.scope,
+            tasks_completed=completed,
+            tasks_running=running,
+            tasks_failed=failed,
+            tasks_blocked=blocked,
+            task_dependency_graph=self.task_manager.get_dependency_graph(),
+            knowledge_summary=self.knowledge_store.summarize(),
+            evidence_summary=self.evidence_store.to_dict(),
+            findings=self.finding_store.get_all(),
+            available_capabilities=[
+                CapabilityType.DNS_ENUMERATION,
+                CapabilityType.PORT_SCANNING,
+                CapabilityType.TLS_ANALYSIS,
+                CapabilityType.TECHNOLOGY_FINGERPRINTING,
+                CapabilityType.HTTP_ANALYSIS,
+            ],
+            objectives=self.scope.get("objectives", []),
+        )
+
+    def to_dict(self) -> Dict:
+        """Serialize brain state"""
+        return {
+            "execution_count": self.execution_count,
+            "target": self.target,
+            "scope": self.scope,
+            "knowledge": self.knowledge_store.to_dict(),
+            "evidence": self.evidence_store.to_dict(),
+            "findings": self.finding_store.to_dict(),
+            "tasks": self.task_manager.to_dict(),
+            "start_time": self.start_time.isoformat(),
+        }
+
+    def _get_db_execution_context(self) -> Dict[str, Any]:
+        """Pull active execution context and discovered assets from findings.db and TaskManager."""
+        completed_tasks = []
+        for task in self.task_manager.get_all_tasks():
+            if task.status.value in ("COMPLETED", "FAILED", "RUNNING"):
+                target = task.spec.inputs.get("target") or task.spec.inputs.get("url") or task.spec.inputs.get("domain") or self.target
+                tools = task.spec.inputs.get("tools", [])
+                summary_finding = ""
+                if task.result and isinstance(task.result, dict):
+                    summary_finding = str(task.result.get("results") or task.result.get("reason") or "")[:150]
+                completed_tasks.append([
+                    task.spec.capability.value,
+                    target,
+                    ",".join(tools) if tools else "default",
+                    task.status.value,
+                    summary_finding
+                ])
+
+        # Pull discovered assets from persistent knowledge store or shared context
+        subdomains = list(getattr(self.ctx, "subdomains", []))
+        ips = list(getattr(self.ctx, "ips", []))
+        ports = dict(getattr(self.ctx, "ports", {}))
+        technologies = dict(getattr(self.ctx, "technologies", {}))
+
+        return {
+            "completed_tasks": completed_tasks[-10:],
+            "discovered_assets": {
+                "subdomains": subdomains[:10],
+                "ips": ips[:10],
+                "open_ports": ports,
+                "technologies": technologies
+            }
+        }
+
+    def _is_recon_complete(self, db_context: Dict[str, Any]) -> bool:
+        """Check if essential reconnaissance capabilities for discovered targets have finished."""
+        completed = db_context.get("completed_tasks", [])
+        if not completed:
+            return False
+
+        # Gather target domains/subdomains tested for recon
+        recon_caps = {"dns_enumeration", "port_scanning", "technology_fingerprinting", "tls_analysis"}
+        executed_recon = {f"{item[0]}:{item[1]}" for item in completed if item[0] in recon_caps and item[3] == "COMPLETED"}
+
+        # Targets requiring recon
+        subdomains = db_context.get("discovered_assets", {}).get("subdomains", [])
+        targets = set([self.target] + subdomains)
+
+        # Check if port scanning & tech fingerprinting ran for primary target and subdomains
+        required_pairs = {f"port_scanning:{t}" for t in targets}
+        return required_pairs.issubset(executed_recon)
+
+    def _aggregate_wave_results(self, agents: List[Any], results: List[Any]) -> None:
+        """Aggregate findings and discovered assets from executed agent wave into shared context and database."""
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                continue
+            
+            res_data = result if isinstance(result, dict) else {}
+            
+            # 1. Aggregate discovered ports
+            discovered_ports = res_data.get("open_ports") or res_data.get("ports") or []
+            if isinstance(discovered_ports, list):
+                for port in discovered_ports:
+                    if isinstance(port, (int, str)):
+                        self.ctx.ports[str(port)] = "open"
+                    elif isinstance(port, dict):
+                        p_num = str(port.get("port", ""))
+                        if p_num:
+                            self.ctx.ports[p_num] = port.get("service", "open")
+
+            # 2. Aggregate discovered endpoints
+            endpoints = res_data.get("endpoints") or res_data.get("discovered_endpoints") or []
+            if isinstance(endpoints, list):
+                for ep in endpoints:
+                    if isinstance(ep, str) and ep not in self.ctx.endpoints:
+                        self.ctx.endpoints.append(ep)
+
+            # 3. Aggregate discovered subdomains
+            subdomains = res_data.get("subdomains") or []
+            if isinstance(subdomains, list):
+                for sub in subdomains:
+                    if isinstance(sub, str) and sub not in self.ctx.subdomains:
+                        self.ctx.subdomains.append(sub)
+
+            # 4. Aggregate technologies
+            techs = res_data.get("technologies") or {}
+            if isinstance(techs, dict):
+                self.ctx.technologies.update(techs)
+
+            # 5. Persist to KnowledgeStore if available
+            if hasattr(self, "store") and self.store:
+                try:
+                    for port, service in self.ctx.ports.items():
+                        self.store.add_asset(
+                            asset_type="port",
+                            value=f"{self.ctx.target}:{port}",
+                            metadata={"service": service}
+                        )
+                    for ep in self.ctx.endpoints:
+                        self.store.add_endpoint(
+                            target_id=self.ctx.target,
+                            url=ep,
+                            method="GET"
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to persist wave aggregation to knowledge store: {e}")

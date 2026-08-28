@@ -35,7 +35,7 @@ class DockerScanner:
                 f"-sV -p 1-10000 --top-ports 100 {domain}"
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            result = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=60)
             
             ports = []
             services = []
@@ -74,7 +74,7 @@ class DockerScanner:
                 f"--url={target} --batch --risk=1 --level=1 --identify-waf"
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=120)
             
             vulnerabilities = []
             
@@ -108,7 +108,7 @@ class DockerScanner:
                 f"zap-baseline.py -t {target} -r /tmp/zap-report.md"
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=180)
             
             findings = []
             
@@ -153,7 +153,7 @@ class DockerScanner:
                 "--scan / --format JSON --project Test"
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            result = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=300)
             
             if result.stdout:
                 try:
@@ -191,7 +191,7 @@ class DockerScanner:
                 f"-h {target} -o /tmp/nikto-report.txt"
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=120)
             
             findings = []
             
