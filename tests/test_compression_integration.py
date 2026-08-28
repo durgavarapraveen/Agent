@@ -56,13 +56,13 @@ def test_full_recon_workflow_compression(worker):
         ("nmap", "port_scanning", {
             "success": True,
             "returncode": 0,
-            "output": "\n".join([f"{p}/tcp open http_service_endpoint_{p}" for p in range(1000, 1500)]),
+            "output": "\n".join([f"{p}/tcp open http_service_endpoint_{p}" for p in range(1000, 4000)]),
             "data": {}
         }),
         ("sslscan", "ssl_tls_analysis", {
             "success": True,
             "returncode": 0,
-            "output": "TLSv1.0 enabled\nTLSv1.1 enabled\nSSLv3 enabled\n" + ("Verbose cipher breakdown details line\n" * 150),
+            "output": "TLSv1.0 enabled\nTLSv1.1 enabled\nSSLv3 enabled\n" + ("Verbose cipher breakdown details line\n" * 800),
             "data": {
                 "protocols": ["SSLv3", "TLSv1.0", "TLSv1.1", "TLSv1.2", "TLSv1.3"],
                 "weak_ciphers": ["RC4-SHA", "DES-CBC3-SHA"],

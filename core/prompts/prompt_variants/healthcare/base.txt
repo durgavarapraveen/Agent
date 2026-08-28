@@ -1,0 +1,6 @@
+# Healthcare Industry Prompt Variant
+Target Focus: Prioritize HIPAA compliance controls, PHI data exposure risks, and missing transport encryption.
+Allowed Depth Categories:
+- Shallow: Basic TLS/SSL auditing & web headers.
+- PoC: Nuclei HIPAA templates & endpoint enumeration.
+- Deep: Full API fuzzing for unauthenticated PHI endpoints.

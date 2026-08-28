@@ -15,6 +15,7 @@ import asyncio
 import json
 import sys
 import os
+import pytest
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
@@ -29,7 +30,7 @@ from core.knowledge_base import KnowledgeBase
 from core.tool_installer import ToolInstaller
 
 
-async def test_nvd():
+async def _test_nvd_async():
     """Test NVD CVE search."""
     print("\n" + "=" * 60)
     print("TEST 1: NVD CVE Search")
@@ -50,8 +51,11 @@ async def test_nvd():
         print("✗ No CVEs found (might be rate limited, try again in 30s)")
         return False
 
+def test_nvd():
+    return asyncio.run(_test_nvd_async())
 
-async def test_github():
+
+async def _test_github_async():
     """Test GitHub exploit search."""
     print("\n" + "=" * 60)
     print("TEST 2: GitHub Exploit Search")
@@ -74,8 +78,11 @@ async def test_github():
         print("✗ No exploits found (might be rate limited)")
         return False
 
+def test_github():
+    return asyncio.run(_test_github_async())
 
-async def test_mitre():
+
+async def _test_mitre_async():
     """Test MITRE ATT&CK lookup."""
     print("\n" + "=" * 60)
     print("TEST 3: MITRE ATT&CK Lookup")
@@ -96,8 +103,11 @@ async def test_mitre():
         print("✗ MITRE lookup failed")
         return False
 
+def test_mitre():
+    return asyncio.run(_test_mitre_async())
 
-async def test_mitre_vuln_mapping():
+
+async def _test_mitre_vuln_mapping_async():
     """Test MITRE vulnerability type mapping."""
     print("\n" + "=" * 60)
     print("TEST 4: MITRE Vuln Type Mapping")
@@ -115,8 +125,11 @@ async def test_mitre_vuln_mapping():
 
     return True
 
+def test_mitre_vuln_mapping():
+    return asyncio.run(_test_mitre_vuln_mapping_async())
 
-async def test_cache():
+
+async def _test_cache_async():
     """Test knowledge base caching."""
     print("\n" + "=" * 60)
     print("TEST 5: Knowledge Base Cache")
@@ -170,13 +183,17 @@ async def test_cache():
 
     # Cleanup
     kb.clear_all()
-    os.remove("test_kb.db")
+    if os.path.exists("test_kb.db"):
+        os.remove("test_kb.db")
     print("  ✓ Cleanup complete")
 
     return True
 
+def test_cache():
+    return asyncio.run(_test_cache_async())
 
-async def test_service_parser():
+
+async def _test_service_parser_async():
     """Test service version extraction."""
     print("\n" + "=" * 60)
     print("TEST 6: Service Version Extraction")
@@ -202,6 +219,9 @@ async def test_service_parser():
 
     return all_pass
 
+def test_service_parser():
+    return asyncio.run(_test_service_parser_async())
+
 
 def test_tool_installer():
     """Test tool installer (listing only, no actual install)."""
@@ -225,12 +245,12 @@ async def main():
 
     results = {}
 
-    results["NVD Search"] = await test_nvd()
-    results["GitHub Exploits"] = await test_github()
-    results["MITRE Lookup"] = await test_mitre()
-    results["MITRE Vuln Map"] = await test_mitre_vuln_mapping()
-    results["Cache"] = await test_cache()
-    results["Service Parser"] = await test_service_parser()
+    results["NVD Search"] = await _test_nvd_async()
+    results["GitHub Exploits"] = await _test_github_async()
+    results["MITRE Lookup"] = await _test_mitre_async()
+    results["MITRE Vuln Map"] = await _test_mitre_vuln_mapping_async()
+    results["Cache"] = await _test_cache_async()
+    results["Service Parser"] = await _test_service_parser_async()
     results["Tool Installer"] = test_tool_installer()
 
     print("\n" + "=" * 60)

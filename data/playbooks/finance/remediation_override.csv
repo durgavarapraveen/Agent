@@ -1,0 +1,4 @@
+vulnerability_type,override_recommendation
+DEFAULT,Implement PCI-DSS compliant WAF rules to protect cardholder data.
+SQLI,Implement PCI-DSS requirement 6.5.1 prepared statements and restrict database account privileges.
+XSS,Enforce strict PCI-DSS compliant Content Security Policy (CSP) and tokenization for card payment web forms.

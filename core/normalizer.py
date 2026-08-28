@@ -196,18 +196,18 @@ class PlannerResponseNormalizer:
             (r'\b(?:exploit|payload|vuln|vulnerability|nuclei|cve|sqli|rce|idor|ssrf|xss|lfi|rfi|ssti|xxe|injection|upload\s+bypass)\b',
              CapabilityType.VULNERABILITY_SCANNING, 0.95),
 
-            # 3. Endpoint & directory discovery
-            (r'\b(?:hidden|directories|files|gobuster|feroxbuster|ffuf|path|endpoint|crawl|katana|directory\s+(?:brute|scan|discovery))\b',
+            # 3. Endpoint & directory discovery — checked BEFORE dns_enumeration so
+            #    "Discover hidden directories on target and its subdomains" → ENDPOINT_DISCOVERY
+            (r'\b(?:hidden|directories|files|gobuster|feroxbuster|ffuf|path|endpoints?|crawl|katana|directory\s+(?:brute|scan|discovery))\b',
              CapabilityType.ENDPOINT_DISCOVERY, 0.95),
 
-            # 4. Subdomain & DNS enumeration — after port_scanning so that
-            #    "port scan on subdomains" is already captured above.
+            # 4. Technology fingerprinting — checked BEFORE dns_enumeration
+            (r'\b(?:tech\s+stack|technology\s+stack|cms|web\s+server|framework|whatweb|wafw00f|fingerprint)\b',
+             CapabilityType.TECHNOLOGY_FINGERPRINTING, 0.95),
+
+            # 5. Subdomain & DNS enumeration — pure subdomain tasks
             (r'\b(?:subdomain|subdomains|subfinder|amass|dns\s+enumeration|dns\s+lookup|resolve|dns\s+brute)\b',
              CapabilityType.DNS_ENUMERATION, 0.90),
-
-            # 5. Technology fingerprinting
-            (r'\b(?:tech\s+stack|cms|web\s+server|framework|whatweb|fingerprint)\b',
-             CapabilityType.TECHNOLOGY_FINGERPRINTING, 0.95),
 
             # 6. Authentication testing
             (r'\b(?:authenticate|login|credentials|auth_bypass|auth)\b',

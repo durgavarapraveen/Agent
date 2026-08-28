@@ -673,8 +673,9 @@ class CentralBrain:
                             valid_specs_and_agents.append((task, s_dict, agent_inst))
 
                     if not valid_specs_and_agents:
-                        logger.info("[Scheduler] No new valid/non-duplicate agents to execute in this stage.")
-                        continue
+                        logger.info("[Scheduler] No new valid/non-duplicate agents to execute in this stage. Advancing phase.")
+                        self.consecutive_agent_failures += 1
+                        break
 
                     spawn_specs = [(t, s) for t, s, a in valid_specs_and_agents]
                     agents = [a for t, s, a in valid_specs_and_agents]

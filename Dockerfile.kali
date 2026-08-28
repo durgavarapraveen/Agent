@@ -1,0 +1,42 @@
+# Pre-baked Kali Dockerfile for AntiGravity Platform
+FROM kalilinux/kali-rolling:latest
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Update and install all essential security audit tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nmap \
+    masscan \
+    amass \
+    subfinder \
+    dnsenum \
+    dnsrecon \
+    dnsutils \
+    whois \
+    gobuster \
+    feroxbuster \
+    dirb \
+    dirsearch \
+    ffuf \
+    nikto \
+    nuclei \
+    wpscan \
+    whatweb \
+    wafw00f \
+    httpx-toolkit \
+    katana \
+    arjun \
+    sslscan \
+    sslyze \
+    testssl.sh \
+    enum4linux \
+    enum4linux-ng \
+    hydra \
+    commix \
+    curl \
+    wget \
+    jq \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+CMD ["bash"]

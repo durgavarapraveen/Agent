@@ -1,29 +1,15 @@
 """
-Finding confidence scoring.
-
-Turns raw evidence signals into a confidence level so that low-quality (often
-false-positive) findings don't pollute the main report.
-
-Scoring (additive, 0-100):
-  version_match_exact -> +40   (the installed version is definitively affected)
-  reachable           -> +30   (vulnerable symbol reachable from an entry point)
-  epss > 0.1          -> +15   (non-trivial real-world exploitation probability)
-  kev_match           -> +15   (known exploited in the wild)
-
-Thresholds:
-  >= 70 -> HIGH
-  40-69 -> MEDIUM
-  <  40 -> LOW
-
-LOW-confidence findings are routed to a `needs_review` queue rather than the
-main report. Every verdict carries an evidence array explaining each factor.
+Finding confidence scoring & calibration module (Phase 4 Module 4.4).
+Empirical base confidence matrix, dynamic contextual adjustment factors (WAF, Exploit, Retest, Baseline),
+historical FP verdict learning, and auto-validation thresholds.
 """
 
 from __future__ import annotations
 
 import logging
+import sqlite3
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple, Any
 
 logger = logging.getLogger(__name__)
 
@@ -40,21 +26,39 @@ EPSS_THRESHOLD = 0.1
 HIGH_THRESHOLD = 70
 MEDIUM_THRESHOLD = 40
 
+AUTO_ACCEPT_THRESHOLD = 0.85
+
+BASE_CONFIDENCE_MATRIX = {
+    "SQLI_ERROR_BASED": 0.95,
+    "SQLI_TIME_BASED": 0.70,
+    "SQLI_BLIND_BOOLEAN": 0.55,
+    "XSS_REFLECTED": 0.60,
+    "XSS_STORED": 0.80,
+    "LFI": 0.75,
+    "RCE": 0.90,
+    "PATH_TRAVERSAL": 0.65,
+    "INFO_DISCLOSURE": 0.50,
+    "MISCONFIGURATION": 0.60
+}
+
 
 @dataclass
 class ConfidenceVerdict:
-    level: str                       # HIGH | MEDIUM | LOW
+    level: str  # HIGH | MEDIUM | LOW
     score: int
     evidence: List[str] = field(default_factory=list)
-    needs_review: bool = False       # True when level == LOW
+    needs_review: bool = False  # True when level == LOW
 
     def to_dict(self) -> Dict:
-        return {"level": self.level, "score": self.score,
-                "evidence": self.evidence, "needs_review": self.needs_review}
+        return {
+            "level": self.level,
+            "score": self.score,
+            "evidence": self.evidence,
+            "needs_review": self.needs_review
+        }
 
 
-def assess(*, version_match_exact: bool = False, reachable: bool = False,
-           epss: float = 0.0, kev_match: bool = False) -> ConfidenceVerdict:
+def assess(*, version_match_exact: bool = False, reachable: bool = False, epss: float = 0.0, kev_match: bool = False) -> ConfidenceVerdict:
     """Compute a confidence verdict from evidence signals."""
     score = 0
     evidence: List[str] = []
@@ -84,13 +88,10 @@ def assess(*, version_match_exact: bool = False, reachable: bool = False,
         evidence.append("not in CISA KEV (+0)")
 
     level = HIGH if score >= HIGH_THRESHOLD else MEDIUM if score >= MEDIUM_THRESHOLD else LOW
-    return ConfidenceVerdict(level=level, score=score, evidence=evidence,
-                             needs_review=(level == LOW))
+    return ConfidenceVerdict(level=level, score=score, evidence=evidence, needs_review=(level == LOW))
 
 
 def _is_directly_confirmed(finding: Dict) -> bool:
-    """A finding demonstrated in practice (successful exploit / concrete proof)
-    is the strongest possible evidence — stronger than static reachability."""
     if finding.get("confirmed") or finding.get("from_llm_final"):
         return True
     proof = str(finding.get("proof", "")).strip()
@@ -100,15 +101,7 @@ def _is_directly_confirmed(finding: Dict) -> bool:
     return bool(isinstance(data, dict) and data.get("confirmed"))
 
 
-def assess_finding(finding: Dict,
-                   reachable_status: Optional[str] = None) -> ConfidenceVerdict:
-    """Assess a finding dict. Understands common signal keys.
-
-    Recognized keys: version_match_exact/exact_version_match, reachable
-    (bool) or reachable_status ('reachable'), epss/epss_percentile, kev_match.
-    A finding that was directly confirmed by active exploitation short-circuits
-    to HIGH confidence (a demonstrated exploit is the strongest evidence there is).
-    """
+def assess_finding(finding: Dict, reachable_status: Optional[str] = None) -> ConfidenceVerdict:
     if _is_directly_confirmed(finding):
         return ConfidenceVerdict(
             level=HIGH, score=100,
@@ -121,8 +114,7 @@ def assess_finding(finding: Dict,
         reachable = True
 
     return assess(
-        version_match_exact=bool(finding.get("version_match_exact")
-                                 or finding.get("exact_version_match")),
+        version_match_exact=bool(finding.get("version_match_exact") or finding.get("exact_version_match")),
         reachable=reachable,
         epss=float(finding.get("epss", finding.get("epss_percentile", 0.0)) or 0.0),
         kev_match=bool(finding.get("kev_match")),
@@ -130,12 +122,6 @@ def assess_finding(finding: Dict,
 
 
 def gate(findings: List[Dict]) -> Dict[str, List[Dict]]:
-    """Split findings into report-worthy vs. needs_review by confidence.
-
-    Each finding gets a '_confidence' dict attached. LOW confidence -> needs_review.
-    If 0 findings are recorded, flags a potential scanner misconfiguration warning.
-    Returns {'report': [...], 'needs_review': [...], 'scanner_misconfiguration_warning': bool}.
-    """
     report, review = [], []
     for f in findings:
         verdict = assess_finding(f)
@@ -144,7 +130,7 @@ def gate(findings: List[Dict]) -> Dict[str, List[Dict]]:
             review.append(f)
         else:
             report.append(f)
-            
+
     is_misconfigured = False
     if not report and not review:
         logger.warning(
@@ -159,3 +145,101 @@ def gate(findings: List[Dict]) -> Dict[str, List[Dict]]:
         "needs_review": review,
         "scanner_misconfiguration_warning": is_misconfigured
     }
+
+
+class ConfidenceCalibrator:
+    """Confidence calibration engine with empirical matrix, dynamic modifiers, and FP history learning."""
+
+    def __init__(self, db_path: str = "confidence_learning.sqlite"):
+        self.db_path = db_path
+        self._init_db()
+
+    def _init_db(self):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS fp_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        finding_type TEXT,
+                        confidence_at_time REAL,
+                        user_verdict TEXT,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                conn.commit()
+        except Exception as e:
+            logger.error(f"[ConfidenceCalibrator] DB init error: {e}")
+
+    def record_fp_verdict(self, finding_type: str, confidence_score: float, verdict: str):
+        """Record user feedback verdict (FP or TP) for offline confidence learning."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    INSERT INTO fp_history (finding_type, confidence_at_time, user_verdict)
+                    VALUES (?, ?, ?)
+                """, (finding_type.strip().upper(), confidence_score, verdict.strip().upper()))
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"[ConfidenceCalibrator] Record verdict error: {e}")
+
+    def get_historical_fp_penalty(self, finding_type: str) -> float:
+        """If a specific finding_type consistently gets flagged as FP by users (>=80% FP), apply penalty -0.15."""
+        f_clean = finding_type.strip().upper()
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT user_verdict FROM fp_history WHERE finding_type=?", (f_clean,))
+                rows = cur.fetchall()
+                if len(rows) >= 5:
+                    fp_count = sum(1 for r in rows if r[0] == "FP")
+                    if (fp_count / float(len(rows))) >= 0.80:
+                        logger.info(f"[ConfidenceCalibrator] Applying permanent FP penalty (-0.15) for '{f_clean}'")
+                        return -0.15
+        except Exception as e:
+            logger.debug(f"[ConfidenceCalibrator] FP penalty query error: {e}")
+        return 0.0
+
+    def calibrate(self, finding: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Calibrate finding confidence using BASE_CONFIDENCE_MATRIX, contextual modifiers, and FP learning.
+        Formula: adjusted_confidence = base * (1 + sum(modifiers)), capped at [0.10, 0.99].
+        """
+        context = context or {}
+        vuln_type = str(finding.get("type") or finding.get("vuln_type") or finding.get("title") or "MISCONFIGURATION").upper()
+
+        # Extract base value
+        base_score = 0.60
+        for k, v in BASE_CONFIDENCE_MATRIX.items():
+            if k in vuln_type or vuln_type in k:
+                base_score = v
+                break
+
+        modifiers = []
+        if context.get("waf_detected", finding.get("waf_detected", False)):
+            modifiers.append(-0.20)  # WAF detected -> reduce 20%
+        if context.get("public_exploit_available", finding.get("public_exploit_available", False)):
+            modifiers.append(0.10)   # Public exploit available -> increase 10%
+        if context.get("reproducible", finding.get("reproducibility_status") == "REPRODUCIBLE"):
+            modifiers.append(0.05)   # Reproducible -> increase 5%
+        if context.get("baseline_match", finding.get("baseline_match", False)):
+            modifiers.append(-0.05)  # Baseline match -> decrease 5%
+
+        # Historical FP Penalty
+        penalty = self.get_historical_fp_penalty(vuln_type)
+        if penalty != 0.0:
+            modifiers.append(penalty)
+
+        sum_modifiers = sum(modifiers)
+        adj_confidence = base_score * (1.0 + sum_modifiers)
+        adj_confidence = round(min(max(adj_confidence, 0.10), 0.99), 2)
+
+        finding["confidence_score"] = adj_confidence
+
+        if adj_confidence >= AUTO_ACCEPT_THRESHOLD:
+            finding["auto_accepted"] = True
+            finding["review_recommendation"] = "Auto-accepted for final report"
+        else:
+            finding["auto_accepted"] = False
+            finding["review_recommendation"] = "Manual review recommended"
+
+        return finding

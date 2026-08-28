@@ -13,6 +13,10 @@ from core.shared_context import SharedContext
 
 class TestNucleiRunner(unittest.TestCase):
 
+    def setUp(self):
+        from core.dedup_tracker import DeduplicationTracker
+        DeduplicationTracker().reset_all()
+
     def test_find_templates_for(self):
         runner = NucleiRunner()
         self.assertEqual(runner.find_templates_for("nginx"), "nginx")

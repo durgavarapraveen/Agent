@@ -1,0 +1,6 @@
+# Default Industry Prompt Variant
+Target Focus: General OWASP Top 10 vulnerability assessment, network service auditing, and standard security risk scoring.
+Allowed Depth Categories:
+- Shallow: Nmap and basic web info gathering.
+- PoC: Nuclei and Gobuster.
+- Deep: Full fuzzing, exploit chaining, and business logic tests.

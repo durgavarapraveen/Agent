@@ -1,0 +1,10 @@
+sections_to_include:
+  - executive_summary
+  - findings_table
+  - trends
+  - compliance_mapping
+branding_logo_path: "assets/logo.png"
+hide_remediation_details: false
+compliance_frameworks:
+  - HIPAA
+  - PCI-DSS

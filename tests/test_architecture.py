@@ -1245,7 +1245,9 @@ class TestPhaseTransitionsAndActiveScanning:
     def test_state_machine_phase_transitions(self):
         from core.central_brain import CentralBrain, ExecutionPhase
         from core.authorization import TargetScopeValidator
+        from core.dedup_tracker import DeduplicationTracker
 
+        DeduplicationTracker().reset_all()
         TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
         brain = CentralBrain("https://example.com")
         assert brain.current_phase == ExecutionPhase.RECON

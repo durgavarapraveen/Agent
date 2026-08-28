@@ -11,6 +11,10 @@ from core.shared_context import SharedContext
 
 class TestPayloadTester(unittest.TestCase):
 
+    def setUp(self):
+        from core.dedup_tracker import DeduplicationTracker
+        DeduplicationTracker().reset_all()
+
     @patch("urllib.request.urlopen")
     def test_unencoded_input_reflection_detected(self, mock_urlopen):
         mock_resp = MagicMock()

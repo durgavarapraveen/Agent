@@ -44,6 +44,8 @@ class TestFingerprint(unittest.TestCase):
 class TestDedupStore(unittest.TestCase):
 
     def setUp(self):
+        from core.dedup_tracker import DeduplicationTracker
+        DeduplicationTracker().reset_all()
         self.tmp = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False)
         self.tmp.close()
         self.store = DedupStore(self.tmp.name)

@@ -25,11 +25,9 @@ services:
       - KALI_PORT=9002
       - PYTHONUNBUFFERED=1
 
-    # Volume mounts for persistence
+    # Volume mounts for workspace code & persistence
     volumes:
-      - ./reports:/pentesting/reports
-      - ./payloads:/pentesting/payloads
-      - ./loot:/pentesting/loot
+      - .:/pentesting
 
     # Network
     networks:
