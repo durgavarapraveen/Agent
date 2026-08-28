@@ -182,23 +182,28 @@ class PlannerResponseNormalizer:
         import re
         obj_text = (objective or "").lower()
 
-        # Prioritized mappings with word boundary regex matching
+        # Prioritized mappings with word boundary regex matching.
+        # ORDER IS CRITICAL — first match wins.
         mappings = [
-            # 1. Vulnerability scanning (checked first)
-            (r'\b(?:exploit|vuln|vulnerability|nuclei|cve|sqli|rce|idor|xss|lfi|extract\s+data|upload|injection)\b',
+            # 1. Port scanning — checked FIRST so "port scan on subdomains" never
+            #    mismatches to dns_enumeration via the "subdomains" keyword.
+            (r'\b(?:port\s+(?:scan|scanning|discovery)|open\s+ports|nmap|service\s+scan|tcp\s+scan)\b',
+             CapabilityType.PORT_SCANNING, 0.95),
+
+            # 2. Vulnerability scanning — checked BEFORE endpoint_discovery so
+            #    "SSRF payload testing on endpoint /..." → vulnerability_scanning,
+            #    not endpoint_discovery.
+            (r'\b(?:exploit|payload|vuln|vulnerability|nuclei|cve|sqli|rce|idor|ssrf|xss|lfi|rfi|ssti|xxe|injection|upload\s+bypass)\b',
              CapabilityType.VULNERABILITY_SCANNING, 0.95),
 
-            # 2. Endpoint & directory discovery (more specific than DNS, checked before DNS to avoid collision)
+            # 3. Endpoint & directory discovery
             (r'\b(?:hidden|directories|files|gobuster|feroxbuster|ffuf|path|endpoint|crawl|katana|directory\s+(?:brute|scan|discovery))\b',
              CapabilityType.ENDPOINT_DISCOVERY, 0.95),
 
-            # 3. Subdomain & DNS enumeration
+            # 4. Subdomain & DNS enumeration — after port_scanning so that
+            #    "port scan on subdomains" is already captured above.
             (r'\b(?:subdomain|subdomains|subfinder|amass|dns\s+enumeration|dns\s+lookup|resolve|dns\s+brute)\b',
              CapabilityType.DNS_ENUMERATION, 0.90),
-
-            # 4. Port scanning
-            (r'\b(?:port\s+(?:scan|scanning|discovery)|open\s+ports|nmap|service\s+scan|tcp\s+scan)\b',
-             CapabilityType.PORT_SCANNING, 0.95),
 
             # 5. Technology fingerprinting
             (r'\b(?:tech\s+stack|cms|web\s+server|framework|whatweb|fingerprint)\b',

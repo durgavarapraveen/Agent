@@ -19,43 +19,65 @@ from agents.llm_client import LLMClient, TaskTier
 
 logger = logging.getLogger(__name__)
 
+# Maps vulnerability type strings from chain-detector findings to valid CapabilityType enum values.
+# All values MUST match CapabilityType enum members in core/schemas.py.
 VULN_TO_CAPABILITY_MAP = {
-    # Header vulns → web scanning
-    'missing_csp': 'web_scanning',
-    'missing_security_header': 'web_scanning',
-    'missing_x_frame_options': 'web_scanning',
-    'missing_hsts': 'web_scanning',
-    'missing_x_content_type_options': 'web_scanning',
-    'missing_x_xss_protection': 'web_scanning',
-    'missing_referrer_policy': 'web_scanning',
-    
-    # Injection vulns → exploits
-    'xss': 'exploits',
-    'sqli': 'exploits',
-    'command_injection': 'exploits',
-    'lfi': 'exploits',
-    'rfi': 'exploits',
-    'ssti': 'exploits',
-    'xxe': 'exploits',
-    'deserialization': 'exploits',
-    
-    # Auth vulns → exploits
-    'auth_bypass': 'exploits',
-    'privilege_escalation': 'exploits',
-    'idor': 'exploits',
-    'broken_access': 'exploits',
-    
-    # Other
-    'default': 'web_scanning',
+    # Header / config vulns → http_analysis (header scanning)
+    'missing_csp': 'http_analysis',
+    'missing_security_header': 'http_analysis',
+    'missing_x_frame_options': 'http_analysis',
+    'missing_hsts': 'http_analysis',
+    'missing_x_content_type_options': 'http_analysis',
+    'missing_x_xss_protection': 'http_analysis',
+    'missing_referrer_policy': 'http_analysis',
+    'cors_misconfiguration': 'http_analysis',
+    'cors_permissive': 'http_analysis',
+
+    # Injection / active exploit vulns → vulnerability_scanning
+    'xss': 'vulnerability_scanning',
+    'sqli': 'vulnerability_scanning',
+    'command_injection': 'vulnerability_scanning',
+    'lfi': 'vulnerability_scanning',
+    'rfi': 'vulnerability_scanning',
+    'ssti': 'vulnerability_scanning',
+    'xxe': 'vulnerability_scanning',
+    'ssrf': 'vulnerability_scanning',
+    'deserialization': 'vulnerability_scanning',
+    'open_redirect': 'vulnerability_scanning',
+    'file_upload': 'vulnerability_scanning',
+    'path_traversal': 'vulnerability_scanning',
+
+    # Auth vulns → authentication_testing
+    'auth_bypass': 'authentication_testing',
+    'privilege_escalation': 'authentication_testing',
+    'idor': 'vulnerability_scanning',
+    'broken_access': 'authentication_testing',
+    'session_fixation': 'authentication_testing',
+    'missing_httponly': 'http_analysis',
+
+    # Recon-phase findings → scoped discovery
+    'directory_listing': 'endpoint_discovery',
+    'unrestricted_upload': 'vulnerability_scanning',
+
+    # TLS/cert
+    'weak_cipher': 'tls_analysis',
+    'expired_certificate': 'tls_analysis',
+    'missing_tls': 'tls_analysis',
+
+    # Default fallback
+    'default': 'vulnerability_scanning',
 }
 
-def get_capability_for_vuln(vuln_type):
-    """Map vulnerability type to valid capability"""
-    capability = VULN_TO_CAPABILITY_MAP.get(
-        vuln_type.lower(), 
+def get_capability_for_vuln(vuln_type: str) -> str:
+    """Map vulnerability type string to a valid CapabilityType enum value.
+
+    Falls back to 'vulnerability_scanning' for unmapped vuln types.
+    All returned values are guaranteed to exist in CapabilityType.
+    """
+    return VULN_TO_CAPABILITY_MAP.get(
+        (vuln_type or '').lower().strip(),
         VULN_TO_CAPABILITY_MAP['default']
     )
-    return capability
 
 
 @dataclass
