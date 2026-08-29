@@ -49,10 +49,14 @@ class NucleiRunner:
         """
         Map a detected technology name to official Nuclei template tags.
         """
+        import re
         tech_clean = (tech or "").strip().lower()
         for key, tags in TECH_TAG_MAP.items():
             if key in tech_clean:
                 return tags
+        # If it contains slashes, path characters, or invalid tag symbols (e.g. css/stylesheets), ignore it
+        if "/" in tech_clean or not re.match(r'^[a-z0-9_\-]+$', tech_clean):
+            return ""
         return tech_clean
 
     async def execute_template(
@@ -66,13 +70,17 @@ class NucleiRunner:
         CLI flags: -u <target> -tags <tags> -jsonl -silent -severity low,medium,high,critical
         """
         if isinstance(tech_tags, list):
-            tags_str = ",".join(tech_tags)
+            valid_tags = [str(t).strip() for t in tech_tags if str(t).strip()]
+            tags_str = ",".join(valid_tags)
         else:
-            tags_str = str(tech_tags)
+            tags_str = str(tech_tags).strip()
 
         # Ensure general/fallback tags map to standard Nuclei template categories if needed
-        if not tags_str or tags_str == "general":
+        split_tags = [t.strip() for t in tags_str.split(",") if t.strip() and "/" not in t]
+        if not split_tags or "general" in split_tags:
             tags_str = "cve,misconfig,exposure,tech"
+        else:
+            tags_str = ",".join(split_tags)
 
         cmd = [
             self.binary_path,

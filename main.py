@@ -25,6 +25,10 @@ if sys.platform.startswith("win"):
     except Exception:
         pass
 
+# Ensure standard storage directories exist
+for _dir in ("data/db", "reports", "loot", ".audit_logs"):
+    os.makedirs(_dir, exist_ok=True)
+
 from core.config import load_config
 from core.central_brain import CentralBrain
 from core.meta_brain import MetaBrain
@@ -112,11 +116,19 @@ Examples:
                          help="Skip OSINT reconnaissance phase")
     parser.add_argument("--reset-dedup", action="store_true",
                          help="Reset deduplication database before starting pentest")
+    parser.add_argument("--auto-approve", "-y", action="store_true",
+                         help="Auto-approve active exploit attempts without interactive consent prompts")
     parser.add_argument("--frameworks", default="",
                          help="Comma-separated compliance frameworks to map findings "
                               "to (choices: pci,soc2,hipaa,cis,nist). "
                               "Default: all. Example: --frameworks pci,soc2,hipaa")
     args = parser.parse_args()
+
+    if args.auto_approve:
+        os.environ["AUTO_APPROVE_EXPLOITS"] = "true"
+        from core.consent import get_consent
+        get_consent().set_auto_approve(True)
+        logger.info("Auto-approve exploits enabled via CLI.")
 
     if args.skip_osint:
         os.environ["ENABLE_OSINT"] = "false"

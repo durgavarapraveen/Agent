@@ -91,8 +91,12 @@ class AgentSpawner:
             sorted_params = str(params)
 
         import hashlib
+        import re
         ctx_hash = hashlib.md5(",".join(sorted(context_keys)).encode("utf-8")).hexdigest()[:8]
-        gravity_vector = f"{capability_name}:{target_val}:{subdomain_val}:{port_val}:{ip_val}:{sorted_params}:{ctx_hash}"
+        obj_clean = re.sub(r'\s+', ' ', (objective or "").lower().strip())
+        tools_str = ",".join(sorted(str(t).lower().strip() for t in allowed_tools))
+        obj_hash = hashlib.md5(f"{obj_clean}:{tools_str}".encode("utf-8")).hexdigest()[:8]
+        gravity_vector = f"{capability_name}:{target_val}:{subdomain_val}:{port_val}:{ip_val}:{sorted_params}:{ctx_hash}:{obj_hash}"
 
         logger.info(f"GRAVITY_VECTOR: task='{objective[:50]}' vector='{gravity_vector}'")
 

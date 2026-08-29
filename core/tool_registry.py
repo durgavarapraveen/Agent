@@ -121,6 +121,31 @@ class PythonHTTPTool(Tool):
             else:
                 resp = asyncio.run(_fetch())
 
+            # Check for 403 / WAF and auto-attempt bypass headers if initially blocked
+            bypassed = False
+            if resp.status_code == 403 and (headers is None or "X-Forwarded-For" not in headers):
+                from core.waf_evasion import WAFEvasionManager
+                waf = WAFEvasionManager.detect_waf(dict(resp.headers), resp.text[:2000], resp.status_code)
+                bypass_hdrs = dict(headers or {})
+                bypass_hdrs.update(WAFEvasionManager.get_403_bypass_headers(url))
+                try:
+                    async def _retry_bypass():
+                        async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=follow) as client:
+                            return await client.request(method, url, headers=bypass_hdrs, content=data)
+                    
+                    if loop.is_running():
+                        with concurrent.futures.ThreadPoolExecutor() as pool:
+                            resp_bypass = pool.submit(lambda: asyncio.run(_retry_bypass())).result(timeout=timeout+5)
+                    else:
+                        resp_bypass = asyncio.run(_retry_bypass())
+
+                    if resp_bypass.status_code == 200:
+                        logger.info(f"403_BYPASS_SUCCESSFUL: Target '{url}' accessed successfully with bypass headers!")
+                        resp = resp_bypass
+                        bypassed = True
+                except Exception as ex:
+                    logger.debug(f"403 bypass retry failed: {ex}")
+
             return ToolResult(
                 success=True,
                 output=resp.text[:5000],
@@ -129,6 +154,7 @@ class PythonHTTPTool(Tool):
                     "headers": dict(resp.headers),
                     "size": len(resp.content),
                     "url": str(resp.url),
+                    "bypassed_403": bypassed,
                 }
             )
         except Exception as e:

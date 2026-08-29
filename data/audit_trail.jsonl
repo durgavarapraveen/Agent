@@ -2,3 +2,7 @@
 {"event_type": "SCOPE_VIOLATION", "target": "192.168.99.99", "domain": null, "scope_match": false, "document_hash": "N/A", "severity": "CRITICAL", "timestamp": "2026-08-28T22:21:59.484128"}
 {"event_type": "AUTHORIZATION_CHECK", "target": "10.0.0.5", "domain": "api.target.test", "scope_match": true, "document_hash": "manual", "timestamp": "2026-08-29T11:34:24.065801"}
 {"event_type": "SCOPE_VIOLATION", "target": "192.168.99.99", "domain": null, "scope_match": false, "document_hash": "N/A", "severity": "CRITICAL", "timestamp": "2026-08-29T11:34:24.066817"}
+{"event_type": "AUTHORIZATION_CHECK", "target": "10.0.0.5", "domain": "api.target.test", "scope_match": true, "document_hash": "manual", "timestamp": "2026-08-29T16:12:14.988220"}
+{"event_type": "SCOPE_VIOLATION", "target": "192.168.99.99", "domain": null, "scope_match": false, "document_hash": "N/A", "severity": "CRITICAL", "timestamp": "2026-08-29T16:12:14.989091"}
+{"event_type": "AUTHORIZATION_CHECK", "target": "10.0.0.5", "domain": "api.target.test", "scope_match": true, "document_hash": "manual", "timestamp": "2026-08-29T16:17:56.907852"}
+{"event_type": "SCOPE_VIOLATION", "target": "192.168.99.99", "domain": null, "scope_match": false, "document_hash": "N/A", "severity": "CRITICAL", "timestamp": "2026-08-29T16:17:56.908823"}

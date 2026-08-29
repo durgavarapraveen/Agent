@@ -140,11 +140,25 @@ class CapabilityWorker:
             logger.info(f"TOOL_INVOCATION_REQUESTED: tool={current_tool} capability={capability.value} task_id={task_id}")
 
             try:
-                # 1. Adapt invocation parameters deterministically
+                # 1. Adapt invocation parameters deterministically (stack-aware)
                 tool_params = dict(params)
                 tool_params["target"] = clean_target
                 inv = ToolInvocation(tool=current_tool, operation=capability.value, params=tool_params)
-                adapted = ToolAdapter.adapt(inv)
+                
+                # Fetch target profile if available for intelligent flag tuning
+                target_profile = None
+                if hasattr(self, "ctx") and self.ctx:
+                    raw_prof = getattr(self.ctx, "target_profile", None) or (self.ctx.get("target_profile") if hasattr(self.ctx, "get") else None)
+                    if raw_prof and not isinstance(raw_prof, dict):
+                        target_profile = raw_prof
+                    else:
+                        from core.target_profiler import TargetProfiler
+                        try:
+                            target_profile = TargetProfiler.profile_target(target, self.ctx)
+                        except Exception:
+                            target_profile = None
+
+                adapted = ToolAdapter.adapt(inv, profile=target_profile)
 
                 # 2. Execute tool
                 raw_res = await self.tools.execute(current_tool, adapted)

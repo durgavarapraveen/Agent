@@ -45,6 +45,10 @@ from core.schemas import (
 from core.osint_integration import OSINTOrchestrator
 from core.threat_intel import ThreatIntelligenceEngine
 from core.subdomain_enum import SubdomainEnumerationEngine
+from core.target_profiler import TargetProfiler
+from core.tool_effectiveness import ToolEffectivenessEngine
+from core.api_reconstructor import APIReconstructor
+from core.poc_generator import POCGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +152,9 @@ class CentralBrain:
         self.osint_orchestrator = OSINTOrchestrator(self.ctx)
         self.threat_engine = ThreatIntelligenceEngine()
         self.subdomain_engine = SubdomainEnumerationEngine()
+
+        # HexStrike Intelligence Layer
+        self.target_profile = None  # Populated in run() after tool validation
         
         
         db_path = os.getenv("KNOWLEDGE_DB_PATH", str(self.report_dir / "findings.db"))
@@ -199,6 +206,15 @@ class CentralBrain:
         logger.info("\nValidating tools...")
         await self.tools.validate_tools()
 
+        # HexStrike Intelligence: Profile target before any scanning
+        logger.info("\n>>> TARGET INTELLIGENCE: Profiling target...")
+        try:
+            self.target_profile = TargetProfiler.profile_target(self.ctx.target, self.ctx)
+            self.ctx.update('target_profile', self.target_profile.to_dict())
+            logger.info(self.target_profile.to_brain_context())
+        except Exception as e:
+            logger.warning(f"Target profiling failed (non-fatal): {e}")
+
         # Phase 1: Deep recon
         logger.info("\n>>> PHASE 1: DEEP RECONNAISSANCE")
         await self._run_phase("recon")
@@ -216,6 +232,9 @@ class CentralBrain:
         # Phase 1b: Intercept live HTTP traffic across the site (for exploit replay)
         await self._capture_requests()
         await self._persist_captured_requests()
+
+        # Phase 1c: Reconstruct API routes & secrets from client-side JavaScript bundles
+        await self._analyze_client_scripts()
 
         # Phase 2: Vulnerability analysis & technology-matched Nuclei scanning
         logger.info("\n>>> PHASE 2: VULNERABILITY ANALYSIS")
@@ -465,10 +484,32 @@ class CentralBrain:
                 db_summary_lines.append(f"Tech: {assets['technologies']}")
             db_context_str = "\n".join(db_summary_lines)
 
+            # ── HexStrike Intelligence Context ──
+            intel_context = ""
+            if self.target_profile:
+                intel_context = self.target_profile.to_brain_context()
+                intel_context += "\n" + ToolEffectivenessEngine.get_brain_recommendations(
+                    self.target_profile, phase
+                )
+                # Re-profile with updated context data periodically
+                if agents_this_phase > 0 and agents_this_phase % 3 == 0:
+                    try:
+                        self.target_profile = TargetProfiler.profile_target(
+                            self.ctx.target, self.ctx
+                        )
+                        self.ctx.update('target_profile', self.target_profile.to_dict())
+                        intel_context = self.target_profile.to_brain_context()
+                        intel_context += "\n" + ToolEffectivenessEngine.get_brain_recommendations(
+                            self.target_profile, phase
+                        )
+                    except Exception:
+                        pass
+
             prompt = (
                 f"Authorized security assessment task planner.\n\n"
                 f"Phase: {phase.upper()}\n"
                 f"Target: {self.ctx.target}\n"
+                f"{intel_context}\n"
                 f"{failed_tools_warning}"
                 f"{history_section}"
                 f"\n--- DISCOVERED CONTEXT ---\n"
@@ -732,13 +773,9 @@ class CentralBrain:
                         if self.consecutive_agent_failures >= 2:
                             logger.info(f"Phase '{phase}' completed via task deduplication limit.")
                             phase_should_exit = True
-                            break
                         break
 
                     has_executed_any = True
-
-                if phase_should_exit:
-                    break
 
                     spawn_specs = [(t, s) for t, s, a in valid_specs_and_agents]
                     agents = [a for t, s, a in valid_specs_and_agents]
@@ -803,6 +840,9 @@ class CentralBrain:
                     self.scheduler.process_dependencies()
                     agent_history.append(entry)
                     agents_this_phase += len(runnable_tasks)
+
+                if phase_should_exit:
+                    break
 
             # ── Spawn SINGLE agent ──
             elif action == "spawn_agent":
@@ -1591,6 +1631,15 @@ CRITICAL RULES:
             "agents": self.ctx.agents_spawned,
         }
 
+        # Generate automated exploit POC reproduction scripts (Python, cURL, Markdown)
+        try:
+            poc_files = POCGenerator.generate(self.ctx, output_dir=str(self.report_dir))
+            if poc_files:
+                report["poc_artifacts"] = poc_files
+                logger.info(f"POC reproduction scripts generated: {poc_files}")
+        except Exception as pe:
+            logger.warning(f"POC generation failed (non-fatal): {pe}")
+
         # Save  (ts computed above, shared with the validation/dedup scan_id)
         report_path = self.report_dir / f"pentest_{ts}.json"
         with open(report_path, 'w', encoding='utf-8') as f:
@@ -2056,3 +2105,55 @@ CRITICAL RULES:
                 logger.info(f"[capture] Persisted {len(captured)} captured requests to KnowledgeStore")
             except Exception as e:
                 logger.warning(f"Failed to persist captured requests: {e}")
+
+    async def _analyze_client_scripts(self):
+        """Phase 1c: Reconstruct API routes, parameters, and credentials from client JS bundles."""
+        target = self.ctx.target
+        if not str(target).lower().startswith(("http://", "https://")):
+            return
+
+        logger.info("\n>>> PHASE 1c: JAVASCRIPT API & PARAMETER RECONSTRUCTION")
+        try:
+            html = getattr(self.ctx, "page_content", "") or ""
+            if not html:
+                try:
+                    import httpx
+                    async with httpx.AsyncClient(verify=False, timeout=10, follow_redirects=True) as client:
+                        r = await client.get(target)
+                        html = r.text
+                except Exception:
+                    html = ""
+
+            results = await APIReconstructor.extract_from_target(target, html_content=html)
+            new_endpoints = results.get("endpoints", [])
+            new_params = results.get("parameters", [])
+            new_secrets = results.get("secrets", [])
+
+            if new_endpoints:
+                existing_eps = getattr(self.ctx, "endpoints", []) or []
+                for ep in new_endpoints:
+                    if ep not in existing_eps:
+                        existing_eps.append(ep)
+                self.ctx.update("endpoints", existing_eps)
+                logger.info(f"[JS_Reconstructor] Discovered {len(new_endpoints)} hidden API routes from JS bundles")
+
+            if new_params:
+                existing_params = getattr(self.ctx, "parameters", []) or []
+                for p in new_params:
+                    if p not in existing_params:
+                        existing_params.append(p)
+                self.ctx.update("parameters", existing_params)
+
+            if new_secrets:
+                creds = getattr(self.ctx, "harvested_creds", []) or []
+                creds.extend(new_secrets)
+                self.ctx.update("harvested_creds", creds)
+                logger.info(f"[JS_Reconstructor] Extracted {len(new_secrets)} potential tokens/secrets from JS bundles")
+
+            # Update TargetProfile with newly discovered endpoints
+            if self.target_profile:
+                self.target_profile.endpoints = getattr(self.ctx, "endpoints", [])
+                self.ctx.update("target_profile", self.target_profile.to_dict())
+
+        except Exception as e:
+            logger.warning(f"[JS_Reconstructor] Script analysis failed (non-fatal): {e}")

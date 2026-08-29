@@ -209,6 +209,16 @@ class OSINTOrchestrator:
         """Run complete OSINT reconnaissance phase."""
         logger.info(f"[OSINTOrchestrator] Starting OSINT reconnaissance for {domain}")
         
+        # Profile target for intelligent OSINT orchestration
+        try:
+            from core.target_profiler import TargetProfiler
+            target_url = f"https://{domain}" if not domain.startswith(("http://", "https://")) else domain
+            profile = TargetProfiler.profile_target(target_url, self.ctx)
+            self.ctx.update('target_profile', profile.to_dict())
+            logger.info(f"[OSINTOrchestrator] Target profiling complete: type={profile.target_type.value}, score={profile.attack_surface_score}")
+        except Exception as pe:
+            logger.warning(f"[OSINTOrchestrator] Target profiling warning: {pe}")
+
         phase_results = {
             'phase': 'osint_reconnaissance',
             'domain': domain,
@@ -287,12 +297,12 @@ class OSINTOrchestrator:
 
 
 class OSINTCapabilityResolver:
-    """Maps OSINT objectives to capabilities and tools."""
+    """Maps OSINT objectives to capabilities and tools, incorporating Kali and HexStrike toolchains."""
 
     OSINT_CAPABILITIES = {
         'employee_enumeration': {
             'description': 'Discover employee email addresses and roles',
-            'tools': ['browser', 'http_request', 'dns_lookup'],
+            'tools': ['theharvester', 'browser', 'http_request', 'dns_lookup'],
             'max_steps': 10
         },
         'github_scanning': {
@@ -302,17 +312,27 @@ class OSINTCapabilityResolver:
         },
         'dns_intelligence': {
             'description': 'Analyze DNS and mail infrastructure',
-            'tools': ['dns_lookup', 'ssl_inspect'],
+            'tools': ['dig', 'dns_lookup', 'ssl_inspect', 'whois'],
             'max_steps': 8
         },
         'subdomain_enumeration': {
             'description': 'Discover all subdomains and virtual hosts',
-            'tools': ['http_request', 'dns_lookup', 'ssl_inspect'],
+            'tools': ['subfinder', 'amass', 'httpx', 'chaos', 'http_request', 'dns_lookup', 'ssl_inspect'],
             'max_steps': 20
         },
         'threat_intelligence': {
             'description': 'Correlate assets with threat intelligence feeds',
             'tools': ['http_request'],
+            'max_steps': 12
+        },
+        'web_reconnaissance': {
+            'description': 'Deep web asset and technology reconnaissance',
+            'tools': ['httpx', 'whatweb', 'wafw00f', 'katana', 'gau', 'waybackurls', 'gobuster'],
+            'max_steps': 15
+        },
+        'parameter_discovery': {
+            'description': 'Discover hidden URL parameters and endpoints',
+            'tools': ['arjun', 'paramspider', 'katana', 'gau', 'waybackurls'],
             'max_steps': 12
         }
     }
@@ -320,14 +340,35 @@ class OSINTCapabilityResolver:
     @classmethod
     def resolve_osint_objective(cls, objective: str) -> Optional[Dict]:
         """Map OSINT objective to capability and tools."""
+        obj_lower = objective.lower()
+        best_cap = None
+        best_score = 0
+
+        # Exact match check first
         for cap_name, cap_spec in cls.OSINT_CAPABILITIES.items():
-            if any(keyword in objective.lower() for keyword in cap_name.split('_')):
+            if cap_name in obj_lower:
                 return {
                     'capability': cap_name,
                     'description': cap_spec['description'],
                     'tools': cap_spec['tools'],
                     'max_steps': cap_spec['max_steps']
                 }
+
+        for cap_name, cap_spec in cls.OSINT_CAPABILITIES.items():
+            keywords = cap_name.split('_')
+            score = sum(1 for kw in keywords if kw in obj_lower and len(kw) > 3)
+            if score > best_score:
+                best_score = score
+                best_cap = (cap_name, cap_spec)
+
+        if best_cap:
+            cap_name, cap_spec = best_cap
+            return {
+                'capability': cap_name,
+                'description': cap_spec['description'],
+                'tools': cap_spec['tools'],
+                'max_steps': cap_spec['max_steps']
+            }
         return None
 
 

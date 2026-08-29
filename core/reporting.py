@@ -551,6 +551,49 @@ class EnterpriseReporter:
                     f"<ul>{items}</ul>")
         return "".join(blocks) or "<p class='muted'>No remediation items.</p>"
 
+    def _poc_reproduction_table(self) -> str:
+        """Render POC reproduction commands and script links."""
+        vulns = self.ctx.vulnerabilities or []
+        if not vulns:
+            return "<p class='muted'>No confirmed vulnerabilities requiring POC reproduction.</p>"
+
+        rows = []
+        for i, v in enumerate(vulns, 1):
+            sev = str(v.get("severity", "MEDIUM")).upper()
+            title = str(v.get("title", v.get("type", f"Vulnerability_{i}")))
+            url = str(v.get("url", v.get("endpoint", v.get("location", self.ctx.target))))
+            method = str(v.get("method", "GET")).upper()
+            payload = v.get("payload", "")
+
+            if method == "POST":
+                data_val = str(payload)
+                curl_cmd = f"curl -k -i -X POST '{url}' -d '{data_val}'"
+            else:
+                curl_cmd = f"curl -k -i -X GET '{url}'"
+
+            rows.append(
+                f"<tr>"
+                f"<td>{i}</td>"
+                f'<td><span class="pill" style="background:{SEV_COLOR.get(sev, "#777")}">{html.escape(sev)}</span></td>'
+                f"<td><b>{html.escape(title)}</b></td>"
+                f"<td><code>{html.escape(curl_cmd)}</code></td>"
+                f"</tr>"
+            )
+
+        poc_links = (
+            "<p><b>Generated Standalone Exploits:</b> "
+            "<a href='poc_reproduce.py' target='_blank'>poc_reproduce.py (Python 3)</a> &nbsp;|&nbsp; "
+            "<a href='poc_reproduce.sh' target='_blank'>poc_reproduce.sh (Bash/cURL)</a> &nbsp;|&nbsp; "
+            "<a href='poc_summary.md' target='_blank'>poc_summary.md (Markdown Guide)</a></p>"
+        )
+
+        return (
+            poc_links +
+            "<table><thead><tr><th>#</th><th>Severity</th><th>Vulnerability</th>"
+            "<th>Reproduction Command (cURL)</th></tr></thead><tbody>"
+            + "".join(rows) + "</tbody></table>"
+        )
+
     # ── build ──
 
     def build_html(self, executive_summary: str = "") -> str:
@@ -586,6 +629,7 @@ class EnterpriseReporter:
  .heatmap{{display:flex;gap:8px;overflow-x:auto}} .tcol{{min-width:150px}}
  .thead{{color:#fff;font-size:12px;font-weight:600;padding:6px;border-radius:5px;text-align:center}}
  .tech{{background:#eef1f4;margin:4px 0;padding:5px 6px;border-radius:4px;font-size:11px}}
+ code{{background:#eef1f4;padding:2px 5px;border-radius:3px;font-family:Consolas,monospace;font-size:12px}}
 </style></head><body>
 <header><h1>Penetration Test Report</h1>
  <div class="sub">{html.escape(str(self.ctx.target))} · generated {datetime.now().strftime('%Y-%m-%d %H:%M')}</div>
@@ -598,6 +642,7 @@ class EnterpriseReporter:
  </section>
  <section><h2>Executive Summary</h2><p>{exec_html}</p></section>
  <section><h2>Findings</h2>{self._vuln_table()}</section>
+ <section><h2>Exploit Proof of Concepts (POC)</h2>{self._poc_reproduction_table()}</section>
  <section><h2>Attack Path Visualization</h2>{self._attack_path_svg()}</section>
  <section><h2>MITRE ATT&amp;CK Heatmap</h2>{self._mitre_heatmap()}</section>
  <section><h2>Compliance Summary</h2>{self._compliance_html()}</section>

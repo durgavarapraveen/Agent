@@ -224,7 +224,7 @@ class PlannerResponseNormalizer:
              CapabilityType.PORT_SCANNING, 0.98),
 
             # 2. Subdomain & DNS enumeration (Prioritize subdomain discovery objectives)
-            (r'\b(?:subdomain\s+(?:discovery|enumeration|scan)|find\s+subdomains|discover\s+subdomains|enumerate\s+subdomains|dns\s+enumeration|dns\s+lookup|resolve\s+(?:ips?|ip\s+addresses)|domain\s+enumeration|dns\s+brute|subfinder|amass|crt\.sh)\b',
+            (r'\b(?:subdomains?|dns\s+records?|dns\s+enumeration|dns\s+lookup|resolve\s+(?:ips?|ip\s+addresses)|domain\s+enumeration|dns\s+brute|subfinder|amass|crt\.sh)\b',
              CapabilityType.DNS_ENUMERATION, 0.95),
 
             # 3. Vulnerability scanning & Exploitation
