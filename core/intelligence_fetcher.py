@@ -17,15 +17,29 @@ logger = logging.getLogger(__name__)
 class IntelligenceFetcher:
     """Fetch real-time vulnerability intelligence from public APIs."""
 
-    def __init__(self, shodan_key: str = "", github_token: str = "", nvd_key: str = ""):
+    def __init__(self, shodan_key: str = "", github_token: str = "", nvd_key: str = "", censys_pat: str = ""):
         self.shodan_key = shodan_key
         self.github_token = github_token
         self.nvd_key = nvd_key
+        self.censys_pat = censys_pat
         self.timeout = 30
         self._rate_limits = {
             "nvd": {"remaining": 50, "reset": 0},
             "github": {"remaining": 60, "reset": 0},
         }
+
+    async def search_censys(self, query: str, per_page: int = 10) -> Optional[Dict]:
+        """Search Censys hosts/certificates using PAT authentication."""
+        try:
+            from core.censys_client import CensysClient
+            client = CensysClient(api_token=self.censys_pat)
+            if not client.is_configured:
+                logger.debug("Censys PAT not configured, skipping Censys query")
+                return None
+            return await client.search_hosts(query, per_page=per_page)
+        except Exception as e:
+            logger.error(f"Censys search error: {e}")
+            return None
 
     # ═══════════════════════════════════════════════════════════════
     # NVD (NIST) - CVE Search

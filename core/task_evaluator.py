@@ -132,5 +132,11 @@ class TaskEvaluator:
             logger.info(f"COMPLETION_EVALUATED: task_id={task_id} result=SUCCEEDED proof='{proof}'")
             return True, proof, findings
 
+        # Check if this is an exploit/attack task vs a recon task
+        if "exploit" in obj_lower or "injection" in vuln_type or "xss" in vuln_type or "missing_csp" in vuln_type or "attack" in obj_lower:
+            reason = "Exploitation failed. No valid findings or proof generated."
+            logger.info(f"COMPLETION_EVALUATED: task_id={task_id} result=FAILED reason='{reason}'")
+            return False, reason, []
+
         logger.info(f"COMPLETION_EVALUATED: task_id={task_id} result=SUCCEEDED (recon/no vulns)")
         return True, "Task completed with zero vulnerabilities found", []

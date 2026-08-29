@@ -300,39 +300,61 @@ class ChainExecutor:
             "vuln_type": vuln_type,
         }
 
-        try:
-            agent = self.spawner.spawn(spec)
-            result = await agent.execute()
-            duration = (datetime.now() - start).total_seconds()
+        max_retries = 2
+        last_error = ""
 
-            if result.get("status") == "failed":
+        for attempt in range(max_retries):
+            try:
+                agent = self.spawner.spawn(spec)
+                if not agent:
+                    logger.warning(f"[ChainExec] Spawner returned None for step '{vuln_type}' (attempt {attempt+1}/{max_retries})")
+                    last_error = "Agent spawning failed"
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(1.0)
+                        continue
+                    break
+
+                result = await agent.execute()
+                duration = (datetime.now() - start).total_seconds()
+
+                if result.get("status") == "failed":
+                    last_error = result.get("reason", "Agent failed")
+                    logger.warning(f"[ChainExec] Step {vuln_type} attempt {attempt+1}/{max_retries} failed: {last_error}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(1.0 * (attempt + 1))
+                        continue
+                    return StepResult(
+                        vuln_id=vuln_id, vuln_type=vuln_type, success=False,
+                        error=last_error, agent_id=getattr(agent, 'agent_id', ''),
+                        duration_sec=duration,
+                    )
+
+                # Extract results
+                results_data = result.get("results", result)
                 return StepResult(
-                    vuln_id=vuln_id, vuln_type=vuln_type, success=False,
-                    error=result.get("reason", "Agent failed"),
+                    vuln_id=vuln_id,
+                    vuln_type=vuln_type,
+                    success=results_data.get("success", True),
+                    proof=results_data.get("proof", results_data.get("summary", "")),
+                    data_extracted=results_data.get("data_extracted",
+                                   results_data.get("data", {})),
                     agent_id=getattr(agent, 'agent_id', ''),
                     duration_sec=duration,
                 )
 
-            # Extract results
-            results_data = result.get("results", result)
-            return StepResult(
-                vuln_id=vuln_id,
-                vuln_type=vuln_type,
-                success=results_data.get("success", True),
-                proof=results_data.get("proof", results_data.get("summary", "")),
-                data_extracted=results_data.get("data_extracted",
-                               results_data.get("data", {})),
-                agent_id=getattr(agent, 'agent_id', ''),
-                duration_sec=duration,
-            )
+            except Exception as e:
+                duration = (datetime.now() - start).total_seconds()
+                last_error = str(e)
+                logger.warning(f"[ChainExec] Step exception on attempt {attempt+1}/{max_retries}: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+                    continue
 
-        except Exception as e:
-            duration = (datetime.now() - start).total_seconds()
-            logger.error(f"[ChainExec] Step exception: {e}")
-            return StepResult(
-                vuln_id=vuln_id, vuln_type=vuln_type, success=False,
-                error=str(e), duration_sec=duration,
-            )
+        return StepResult(
+            vuln_id=vuln_id, vuln_type=vuln_type, success=False,
+            error=last_error or "Max step retries exhausted",
+            duration_sec=(datetime.now() - start).total_seconds(),
+        )
 
     def _build_step_objective(self, step_num: int, total_steps: int,
                                vuln_type: str, location: str,

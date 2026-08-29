@@ -357,34 +357,43 @@ class CapabilityWorker:
             return data
 
         # Clean target root
-        root_domain = target.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0]
+        root_domain = target.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0].strip().lower()
+        from core.subdomain_enum import extract_apex_domain
+        apex_domain = extract_apex_domain(root_domain)
 
         # 1. Subfinder & Subdomain tools: parse JSON or line-by-line text
         if tool_name == "subfinder" or "dns" in capability or tool_name in ("amass", "dig"):
             subdomains = set()
             for line in output.splitlines():
                 line_str = line.strip()
-                if not line_str:
+                if not line_str or line_str.startswith(("[", ";", "#", "Found", "Enumerating")):
                     continue
                 if line_str.startswith("{") and line_str.endswith("}"):
                     try:
                         obj = json.loads(line_str)
                         host = obj.get("host") or obj.get("subdomain")
-                        if host:
+                        if host and isinstance(host, str) and (host.endswith(root_domain) or host.endswith(apex_domain) or "." in host):
                             subdomains.add(host.strip())
                     except Exception:
                         pass
-                elif "." in line_str and not line_str.startswith(";"):
-                    if root_domain.lower() in line_str.lower():
-                        parts = line_str.split()
-                        candidate = parts[-1] if parts else line_str
-                        subdomains.add(candidate.strip())
+                else:
+                    parts = line_str.split()
+                    for p in parts:
+                        p_clean = p.strip().lower()
+                        if (p_clean.endswith(root_domain) or p_clean.endswith(apex_domain)) and re.match(r'^[a-zA-Z0-9_\-\.]+\.[a-zA-Z]{2,}$', p_clean):
+                            subdomains.add(p_clean)
 
             # Regex fallback
-            domain_pattern = rf"([a-zA-Z0-9_\-\.]+\.{re.escape(root_domain)})"
-            subdomains.update(re.findall(domain_pattern, output, re.IGNORECASE))
-            if subdomains:
-                data["subdomains"] = sorted(list(subdomains))
+            domain_pattern = rf"\b([a-zA-Z0-9](?:[a-zA-Z0-9_\-]*[a-zA-Z0-9])?\.(?:[a-zA-Z0-9_\-]+\.)*{re.escape(apex_domain)})\b"
+            for match in re.finditer(domain_pattern, output, re.IGNORECASE):
+                subdomains.add(match.group(1).lower())
+
+            valid_subdomains = [
+                s for s in subdomains
+                if s and "." in s and (s.endswith(root_domain) or s.endswith(apex_domain)) and not s.startswith("[") and not s.startswith("http")
+            ]
+            if valid_subdomains:
+                data["subdomains"] = sorted(list(set(valid_subdomains)))
 
         # 2. Nmap & Port scanners: parse XML or text
         if tool_name in ("nmap", "masscan", "port_check") or "port" in capability:
@@ -525,6 +534,8 @@ class CapabilityWorker:
         if "endpoints" in data and hasattr(self.ctx, "add_endpoints"):
             dict_eps = [{"url": ep if isinstance(ep, str) else ep.get("url", "")} for ep in data["endpoints"]]
             self.ctx.add_endpoints(dict_eps, source=tool_name)
+        if "technologies" in data and hasattr(self.ctx, "add_technologies"):
+            self.ctx.add_technologies(clean_host, data["technologies"])
 
         # Record missing critical security headers as low/medium vulnerabilities
         if "security_headers" in data and hasattr(self.ctx, "add_vulnerability"):

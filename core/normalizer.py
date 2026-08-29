@@ -32,6 +32,9 @@ class PlannerResponseNormalizer:
             logger.warning("PLANNER_DECISION_REJECTED: Empty response received from planner")
             raise PlannerSchemaError("Empty response from planner")
 
+        if isinstance(raw, BrainDecision):
+            return raw
+
         if isinstance(raw, str):
             try:
                 raw = json.loads(raw)
@@ -180,40 +183,67 @@ class PlannerResponseNormalizer:
     def _infer_capability(cls, objective: str, data: Dict[str, Any]) -> CapabilityType:
         """Infer capability type with word-boundary matching and priority ranking"""
         import re
-        obj_text = (objective or "").lower()
+        obj_text = (objective or "").lower().strip()
+
+        # Check explicitly supplied capability field first if valid
+        raw_cap = data.get("capability")
+        if isinstance(raw_cap, CapabilityType):
+            return raw_cap
+        elif isinstance(raw_cap, str) and raw_cap.strip():
+            cap_str = raw_cap.lower().strip()
+            if cap_str in ("security_headers_analyzer", "headers", "cors", "http_headers", "header_analysis"):
+                return CapabilityType.HTTP_ANALYSIS
+            try:
+                return CapabilityType(cap_str)
+            except ValueError:
+                pass
+
+        # Check tool hints in data if provided
+        tools_hint = [str(t).lower() for t in (data.get("tools") or [])]
+        if any(t in ("nmap", "masscan", "port_check") for t in tools_hint):
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.PORT_SCANNING.value} via tools_hint")
+            return CapabilityType.PORT_SCANNING
+        if any(t in ("subfinder", "amass", "dig") for t in tools_hint):
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.DNS_ENUMERATION.value} via tools_hint")
+            return CapabilityType.DNS_ENUMERATION
+        if any(t in ("gobuster", "feroxbuster", "ffuf", "katana") for t in tools_hint):
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.ENDPOINT_DISCOVERY.value} via tools_hint")
+            return CapabilityType.ENDPOINT_DISCOVERY
+        if any(t in ("whatweb", "wafw00f") for t in tools_hint):
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.TECHNOLOGY_FINGERPRINTING.value} via tools_hint")
+            return CapabilityType.TECHNOLOGY_FINGERPRINTING
+        if any(t in ("nuclei", "sqlmap", "nikto") for t in tools_hint):
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.VULNERABILITY_SCANNING.value} via tools_hint")
+            return CapabilityType.VULNERABILITY_SCANNING
 
         # Prioritized mappings with word boundary regex matching.
         # ORDER IS CRITICAL — first match wins.
         mappings = [
-            # 1. Port scanning — checked FIRST so "port scan on subdomains" never
-            #    mismatches to dns_enumeration via the "subdomains" keyword.
-            (r'\b(?:port\s+(?:scan|scanning|discovery)|open\s+ports|nmap|service\s+scan|tcp\s+scan)\b',
-             CapabilityType.PORT_SCANNING, 0.95),
+            # 1. Port scanning — specifically for port and service detection
+            (r'\b(?:port\s+scan(?:ning)?|open\s+(?:[a-z0-9_\-]+\s+)?ports?|scan\s+(?:[a-z0-9_\-]+\s+)?ports?|port\s+and\s+service|nmap|masscan|tcp\s+scan|udp\s+scan|service\s+(?:scan|detection))\b',
+             CapabilityType.PORT_SCANNING, 0.98),
 
-            # 2. Vulnerability scanning — checked BEFORE endpoint_discovery so
-            #    "SSRF payload testing on endpoint /..." → vulnerability_scanning,
-            #    not endpoint_discovery.
+            # 2. Subdomain & DNS enumeration (Prioritize subdomain discovery objectives)
+            (r'\b(?:subdomain\s+(?:discovery|enumeration|scan)|find\s+subdomains|discover\s+subdomains|enumerate\s+subdomains|dns\s+enumeration|dns\s+lookup|resolve\s+(?:ips?|ip\s+addresses)|domain\s+enumeration|dns\s+brute|subfinder|amass|crt\.sh)\b',
+             CapabilityType.DNS_ENUMERATION, 0.95),
+
+            # 3. Vulnerability scanning & Exploitation
             (r'\b(?:exploit|payload|vuln|vulnerability|nuclei|cve|sqli|rce|idor|ssrf|xss|lfi|rfi|ssti|xxe|injection|upload\s+bypass)\b',
              CapabilityType.VULNERABILITY_SCANNING, 0.95),
 
-            # 3. Endpoint & directory discovery — checked BEFORE dns_enumeration so
-            #    "Discover hidden directories on target and its subdomains" → ENDPOINT_DISCOVERY
-            (r'\b(?:hidden|directories|files|gobuster|feroxbuster|ffuf|path|endpoints?|crawl|katana|directory\s+(?:brute|scan|discovery))\b',
+            # 4. Endpoint & Directory discovery
+            (r'\b(?:hidden\s+directories|directories|gobuster|feroxbuster|ffuf|endpoints?|crawl|katana|directory\s+(?:brute|scan|discovery))\b',
              CapabilityType.ENDPOINT_DISCOVERY, 0.95),
 
-            # 4. Technology fingerprinting — checked BEFORE dns_enumeration
-            (r'\b(?:tech\s+stack|technology\s+stack|cms|web\s+server|framework|whatweb|wafw00f|fingerprint)\b',
+            # 5. Technology fingerprinting
+            (r'\b(?:tech\s+stack|technology\s+stack|technologies|framework|cms|web\s+server|whatweb|wafw00f|fingerprint)\b',
              CapabilityType.TECHNOLOGY_FINGERPRINTING, 0.95),
 
-            # 5. Subdomain & DNS enumeration — pure subdomain tasks
-            (r'\b(?:subdomain|subdomains|subfinder|amass|dns\s+enumeration|dns\s+lookup|resolve|dns\s+brute)\b',
-             CapabilityType.DNS_ENUMERATION, 0.90),
-
             # 6. Authentication testing
-            (r'\b(?:authenticate|login|credentials|auth_bypass|auth)\b',
+            (r'\b(?:authenticate|login|credentials|auth_bypass|auth|brute\s+force|hydra)\b',
              CapabilityType.AUTHENTICATION_TESTING, 0.95),
 
-            # 7. HTTP Analysis
+            # 7. HTTP & Header Analysis
             (r'\b(?:header|security\s+headers|csp|cors|cookie|config)\b',
              CapabilityType.HTTP_ANALYSIS, 0.95),
 
@@ -222,31 +252,30 @@ class PlannerResponseNormalizer:
              CapabilityType.TLS_ANALYSIS, 0.95),
 
             # 9. JavaScript Analysis
-            (r'\b(?:js|javascript|bundle)\b',
+            (r'\b(?:js|javascript|bundle|source\s+map)\b',
              CapabilityType.JAVASCRIPT_ANALYSIS, 0.90),
 
             # 10. Web Crawling
             (r'\b(?:web\s+crawling|spider)\b',
              CapabilityType.WEB_CRAWLING, 0.90),
+
+            # OSINT capabilities
+            (r'\b(?:employee|enumerate\s+employees|linkedin|email|staff|roles|directory)\b',
+             CapabilityType.EMPLOYEE_ENUMERATION, 0.95),
+            (r'\b(?:github|gitlab|bitbucket|repository|credential|secret|api.?key)\b',
+             CapabilityType.GITHUB_SCANNING, 0.95),
+            (r'\b(?:dns\s+intel|mx\s+record|spf\s+policy|dkim|dmarc|smtp\s+server)\b',
+             CapabilityType.DNS_INTELLIGENCE, 0.90),
+            (r'\b(?:certificate.?transparency|virtual.?host)\b',
+             CapabilityType.SUBDOMAIN_ENUMERATION, 0.95),
+            (r'\b(?:threat.?intel|abuse\.ch|shodan|censys|reputation|compromised)\b',
+             CapabilityType.THREAT_INTELLIGENCE, 0.90),
         ]
 
         for pattern, cap, conf in mappings:
             if re.search(pattern, obj_text):
                 logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={cap.value} confidence={conf}")
                 return cap
-
-        # Check explicitly supplied capability field if objective regex yielded no match
-        raw_cap = data.get("capability")
-        if isinstance(raw_cap, str) and raw_cap.strip():
-            cap_str = raw_cap.lower().strip()
-            if cap_str in ("security_headers_analyzer", "headers", "cors", "http_headers", "header_analysis"):
-                return CapabilityType.HTTP_ANALYSIS
-            try:
-                return CapabilityType(cap_str)
-            except ValueError:
-                pass
-        elif isinstance(raw_cap, CapabilityType):
-            return raw_cap
 
         # Fallback neutral capability
         logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' fallback_capability={CapabilityType.TECHNOLOGY_FINGERPRINTING.value} confidence=0.75")

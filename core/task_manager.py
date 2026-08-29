@@ -142,15 +142,16 @@ class TaskManager:
 
         duplicate = self.find_duplicate_task(spec)
         if duplicate:
-            # If task is active or finished successfully (not FAILED/TIMEOUT/CANCELLED), reuse it.
-            # Do NOT reuse FAILED, TIMEOUT, or CANCELLED tasks so retry attempts can actually execute!
+            # Only accept deduplication if the existing task is COMPLETED or actively RUNNING.
+            # Unfinished/unexecuted tasks (CREATED, QUEUED, WAITING_DEPENDENCY, BLOCKED) or failed/cancelled tasks
+            # must NOT block execution and should trigger fresh task creation.
             from core.schemas import TaskStatus
-            if duplicate.status not in (TaskStatus.FAILED, TaskStatus.TIMEOUT, TaskStatus.CANCELLED):
+            if duplicate.status in (TaskStatus.COMPLETED, TaskStatus.RUNNING):
                 target = str(spec.inputs.get("target") or spec.inputs.get("url") or spec.inputs.get("domain") or spec.inputs.get("host") or spec.objective or "").strip()
                 logger.info(f"TASK_DEDUPLICATED: Reusing existing task={duplicate.spec.task_id} (status={duplicate.status.value}) for proposed capability={spec.capability.value} target='{target}'")
                 return duplicate, False
             else:
-                logger.info(f"TASK_DEDUP_BYPASS_FAILED: Previous task={duplicate.spec.task_id} has status={duplicate.status.value}. Creating fresh task for capability={spec.capability.value}")
+                logger.info(f"TASK_DEDUP_BYPASS_UNFINISHED: Previous task={duplicate.spec.task_id} has non-completed status={duplicate.status.value}. Creating fresh task for capability={spec.capability.value}")
             
         task = self.create_task(spec)
         self.register_task_signature(spec, spec.task_id)

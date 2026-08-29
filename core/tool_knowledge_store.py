@@ -27,7 +27,7 @@ class ToolKnowledgeStore:
         self.execution_history: List[Dict[str, Any]] = []
         self._bootstrap_default_tools()
 
-    def register_tool(self, profile: ToolProfile) -> None:
+    def register_tool(self, profile: ToolProfile, log_profile: bool = True) -> None:
         """Register or update a tool profile in the store"""
         tool_id = profile.name.lower().strip()
         profile.id = f"tool_{tool_id}"
@@ -40,7 +40,10 @@ class ToolKnowledgeStore:
             if tool_id not in self.capability_index[cap_norm]:
                 self.capability_index[cap_norm].append(tool_id)
 
-        logger.info(f"TOOL_PROFILE_CREATED: tool={profile.name} capabilities={profile.capabilities} trust={profile.trust_score}")
+        if log_profile:
+            logger.info(f"TOOL_PROFILE_CREATED: tool={profile.name} capabilities={profile.capabilities} trust={profile.trust_score}")
+        else:
+            logger.debug(f"TOOL_PROFILE_CREATED: tool={profile.name} capabilities={profile.capabilities} trust={profile.trust_score}")
 
     def get_tool(self, name: str) -> Optional[ToolProfile]:
         """Get profile by tool name"""
@@ -232,6 +235,14 @@ class ToolKnowledgeStore:
                 source="local"
             ),
             ToolProfile(
+                name="msfconsole",
+                description="Metasploit Framework modular auxiliary scanner and exploit verification engine",
+                capabilities=["vulnerability_scanning", "authentication_testing"],
+                trust_score=0.97,
+                performance_score=0.88,
+                source="local"
+            ),
+            ToolProfile(
                 name="sqlmap",
                 description="Automatic SQL injection and database takeover tool",
                 capabilities=["vulnerability_scanning", "authentication_testing"],
@@ -258,4 +269,6 @@ class ToolKnowledgeStore:
         ]
 
         for p in defaults:
-            self.register_tool(p)
+            self.register_tool(p, log_profile=False)
+
+        logger.info(f"[ToolKnowledgeStore] Bootstrapped {len(defaults)} baseline tool profiles.")

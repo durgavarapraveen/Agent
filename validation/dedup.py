@@ -186,18 +186,25 @@ class DedupStore:
         """Classify a full scan's findings and compute resolved set.
 
         Returns {'results': [DedupResult...], 'report': [findings kept],
+                 'suppressed_findings': [suppressed findings],
                  'suppressed': N, 'resolved': [fingerprints]}.
         """
-        results, report = [], []
+        results, report, suppressed_findings = [], [], []
         suppressed = 0
         for f in findings:
             res = self.classify(f, scan_id)
             results.append(res)
             f["_dedup"] = res.to_dict()
+            title = f.get("title") or f.get("name") or f.get("type") or "unnamed finding"
+            loc = f.get("file_path") or f.get("location") or f.get("url") or ""
             if res.suppressed:
                 suppressed += 1
+                suppressed_findings.append(f)
+                logger.info(f"DEDUP_ACTION: status=RECURRING_SUPPRESSED title='{title}' location='{loc}' fingerprint={res.fingerprint} severity={res.severity} reason='Finding already recorded in prior scan with identical severity'")
             else:
                 report.append(f)
+                logger.info(f"DEDUP_ACTION: status={res.status} title='{title}' location='{loc}' fingerprint={res.fingerprint} severity={res.severity}")
         resolved = self.mark_resolved(scan_id)
         return {"results": results, "report": report,
+                "suppressed_findings": suppressed_findings,
                 "suppressed": suppressed, "resolved": resolved}

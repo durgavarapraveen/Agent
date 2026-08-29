@@ -14,6 +14,48 @@ logger = logging.getLogger(__name__)
 class Config:
     """Load config from .env file"""
 
+    @property
+    def osint_enabled(self) -> bool:
+        val = os.getenv('ENABLE_OSINT', os.getenv('OSINT_ENABLE', self.config.get('ENABLE_OSINT', 'true'))).lower()
+        return val in ('true', 'yes', '1', 'on')
+
+    @property
+    def OSINT_ENABLED(self) -> bool:
+        return self.osint_enabled
+
+    @property
+    def GITHUB_TOKEN(self) -> Optional[str]:
+        return os.getenv('GITHUB_TOKEN', self.config.get('GITHUB_TOKEN'))
+
+    @property
+    def SHODAN_KEY(self) -> Optional[str]:
+        return os.getenv('SHODAN_API_KEY', self.config.get('SHODAN_API_KEY'))
+
+    @property
+    def CENSYS_PAT(self) -> Optional[str]:
+        legacy = os.getenv('CENSYS_UID') or os.getenv('CENSYS_SECRET') or os.getenv('CENSYS_API_ID') or os.getenv('CENSYS_API_SECRET') or self.config.get('CENSYS_UID') or self.config.get('CENSYS_SECRET')
+        if legacy and not (os.getenv('CENSYS_PAT') or self.config.get('CENSYS_PAT')):
+            logger.warning("CENSYS_UID / CENSYS_SECRET / CENSYS_API_ID / CENSYS_API_SECRET are deprecated. Please use CENSYS_PAT instead.")
+        return os.getenv('CENSYS_PAT', os.getenv('CENSYS_TOKEN', self.config.get('CENSYS_PAT')))
+
+    @property
+    def CENSYS_UID(self) -> Optional[str]:
+        logger.warning("CENSYS_UID is deprecated. Please use CENSYS_PAT instead.")
+        return os.getenv('CENSYS_UID', self.config.get('CENSYS_UID'))
+
+    @property
+    def CENSYS_SECRET(self) -> Optional[str]:
+        logger.warning("CENSYS_SECRET is deprecated. Please use CENSYS_PAT instead.")
+        return os.getenv('CENSYS_SECRET', self.config.get('CENSYS_SECRET'))
+
+    @property
+    def ABUSEIPDB_KEY(self) -> Optional[str]:
+        return os.getenv('ABUSEIPDB_API_KEY', self.config.get('ABUSEIPDB_API_KEY'))
+
+    @property
+    def VT_KEY(self) -> Optional[str]:
+        return os.getenv('VIRUSTOTAL_API_KEY', self.config.get('VIRUSTOTAL_API_KEY'))
+
     def __init__(self, env_file: str = ".env"):
         self.env_file = Path(env_file)
         self.config = {}
@@ -53,6 +95,10 @@ class Config:
             return int(self.config.get(key, default))
         except ValueError:
             return default
+
+    @property
+    def FREE_TIER_MODE(self) -> bool:
+        return self.get_bool("FREE_TIER_MODE", True)
 
     @property
     def token_compression(self) -> bool:

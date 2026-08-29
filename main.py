@@ -13,8 +13,9 @@ Multiple targets:
 import argparse
 import asyncio
 import logging
-import sys
+import sys, os
 from pathlib import Path
+
 
 # Force UTF-8 encoding for standard streams on Windows to prevent UnicodeEncodeErrors
 if sys.platform.startswith("win"):
@@ -27,6 +28,8 @@ if sys.platform.startswith("win"):
 from core.config import load_config
 from core.central_brain import CentralBrain
 from core.meta_brain import MetaBrain
+from agents.llm_harness_adapter import initialize_llm, get_llm, close_llm
+
 
 _LOG_FMT = '[%(asctime)s] %(name)s - %(levelname)s - %(message)s'
 
@@ -56,7 +59,6 @@ _file.setFormatter(logging.Formatter(_LOG_FMT))
 
 logging.basicConfig(level=logging.INFO, handlers=[_console, _file])
 logger = logging.getLogger(__name__)
-
 
 async def run_single(target: str, auth_file: str = None, tier: str = "POC"):
     """Single target pentest"""
@@ -106,6 +108,8 @@ Examples:
     parser.add_argument("--tier", default="POC",
                          choices=["POC", "SHALLOW", "DEEP"],
                          help="Max exploitation tier (default: POC)")
+    parser.add_argument("--skip-osint", action="store_true",
+                         help="Skip OSINT reconnaissance phase")
     parser.add_argument("--reset-dedup", action="store_true",
                          help="Reset deduplication database before starting pentest")
     parser.add_argument("--frameworks", default="",
@@ -113,6 +117,10 @@ Examples:
                               "to (choices: pci,soc2,hipaa,cis,nist). "
                               "Default: all. Example: --frameworks pci,soc2,hipaa")
     args = parser.parse_args()
+
+    if args.skip_osint:
+        os.environ["ENABLE_OSINT"] = "false"
+        logger.info("OSINT disabled via --skip-osint flag.")
 
     # Load .env config
     config = load_config()

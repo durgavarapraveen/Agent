@@ -22,7 +22,7 @@ import base64
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from urllib.parse import urlparse
 
 from agents.kali_executor import KaliDockerExecutor
@@ -166,6 +166,15 @@ class CapturedRequest:
             "post_data": self.post_data,
         }
 
+    def get(self, key: str, default: Any = None) -> Any:
+        """Dictionary-style attribute access compatibility."""
+        return getattr(self, key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        if hasattr(self, key):
+            return getattr(self, key)
+        raise KeyError(key)
+
 
 @dataclass
 class CaptureResult:
@@ -222,6 +231,52 @@ class RequestCapturer:
                     f"(max_pages={self.max_pages}, depth={self.max_depth})")
         r = KaliDockerExecutor.run(cmd, timeout=budget, auto_install=True)
         stdout = (r.get("stdout") or "").strip()
+        
+        # If container execution returned error (e.g. missing playwright in container), try host local python
+        if not stdout or "playwright not available" in stdout:
+            logger.info("[capture] Container capture unavailable. Falling back to host Playwright execution...")
+            try:
+                import subprocess, sys
+                host_res = subprocess.run([sys.executable, "-c", f"""
+import json, sys, os
+from urllib.parse import urlparse
+try:
+    from playwright.sync_api import sync_playwright
+except Exception as e:
+    print(json.dumps({{"error": f"host playwright missing: {{e}}"}}))
+    os._exit(0)
+
+_requests = []
+_pages = []
+_seen = set()
+
+def on_req(r):
+    try:
+        b = r.post_data or ""
+        k = (r.method, r.url, b[:200])
+        if k not in _seen:
+            _seen.add(k)
+            _requests.append({{"method": r.method, "url": r.url, "resource_type": r.resource_type, "headers": dict(r.headers), "post_data": b[:4000]}})
+    except Exception: pass
+
+with sync_playwright() as p:
+    b = p.chromium.launch(headless=True, args=["--no-sandbox", "--ignore-certificate-errors"])
+    ctx = b.new_context(ignore_https_errors=True)
+    ctx.on("request", on_req)
+    page = ctx.new_page()
+    try:
+        page.goto({json.dumps(start_url)}, timeout={self.goto_ms}, wait_until="domcontentloaded")
+        _pages.append({json.dumps(start_url)})
+    except Exception: pass
+    b.close()
+
+print(json.dumps({{"pages": _pages, "requests": _requests}}))
+"""], capture_output=True, text=True, timeout=budget)
+                if host_res.stdout and host_res.stdout.strip():
+                    stdout = host_res.stdout.strip()
+            except Exception as ex:
+                logger.warning(f"[capture] Host Playwright fallback exception: {ex}")
+
         if not stdout:
             err = r.get("stderr") or r.get("error") or "no output"
             logger.warning(f"[capture] no data from {start_url}: {str(err)[:200]}")
@@ -256,16 +311,54 @@ class RequestCapturer:
         return result
 
     def store(self, result: CaptureResult, ctx) -> None:
-        """Persist captured requests into SharedContext for reuse in exploits."""
+        """Persist captured requests and extracted technologies into SharedContext."""
         if not result.requests:
             return
         if hasattr(ctx, "add_captured_requests"):
             ctx.add_captured_requests([r.to_dict() for r in result.requests],
                                       pages=result.pages)
-        # Also surface API/XHR endpoints into the standard endpoint list.
+        # Surface API/XHR endpoints into the standard endpoint list.
         endpoints = []
         for r in result.api_requests():
             endpoints.append({"url": r.url, "method": r.method,
                               "params": "", "status": r.status})
         if endpoints and hasattr(ctx, "add_endpoints"):
             ctx.add_endpoints(endpoints, source="request_capture")
+
+        # Extract detected technologies from captured requests & headers
+        detected_techs = set()
+        host = urlparse(result.start_url).netloc
+        for r in result.requests:
+            u_lower = r.url.lower()
+            if "_next/" in u_lower or "/_next" in u_lower:
+                detected_techs.add("Next.js")
+            if "webpack" in u_lower:
+                detected_techs.add("Webpack")
+            if "react" in u_lower:
+                detected_techs.add("React")
+            if "vue" in u_lower:
+                detected_techs.add("Vue.js")
+            if "angular" in u_lower:
+                detected_techs.add("Angular")
+            if "static/css" in u_lower or u_lower.endswith(".css"):
+                detected_techs.add("CSS/Stylesheets")
+            if "bootstrap" in u_lower:
+                detected_techs.add("Bootstrap")
+            if "tailwind" in u_lower:
+                detected_techs.add("TailwindCSS")
+            
+            # CDN / external service detection
+            req_host = urlparse(r.url).netloc
+            if req_host and req_host != host:
+                detected_techs.add(f"External/CDN:{req_host}")
+
+            # Server & Powered-By response headers
+            for h_name, h_val in (r.headers or {}).items():
+                h_name_lower = h_name.lower()
+                if h_name_lower == "server" and h_val:
+                    detected_techs.add(f"Server:{h_val}")
+                elif h_name_lower == "x-powered-by" and h_val:
+                    detected_techs.add(f"Powered-By:{h_val}")
+
+        if detected_techs and hasattr(ctx, "add_technologies"):
+            ctx.add_technologies(host, sorted(list(detected_techs)))

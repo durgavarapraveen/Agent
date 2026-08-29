@@ -22,10 +22,15 @@ Jinja2>=3.1.6
 # Reporting & Visualization
 reportlab>=5.0.1
 weasyprint>=69.0
+xhtml2pdf>=0.2.11
 matplotlib>=3.11.1
 numpy>=2.5.2
 scipy>=1.18.1
 Pillow>=12.3.0
+
+# ML & FP Filtering
+scikit-learn>=1.4.0
+playwright>=1.40.0
 
 # System Performance & Monitoring
 psutil>=7.2.2

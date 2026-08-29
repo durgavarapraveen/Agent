@@ -21,7 +21,7 @@ try:
 except ImportError:
     HAS_TIKTOKEN = False
 
-STRIPPED_FINDINGS_LOG = "stripped_findings_audit.log"
+STRIPPED_FINDINGS_LOG = "logs/stripped_findings_audit.log"
 
 
 class TokenOptimizer:

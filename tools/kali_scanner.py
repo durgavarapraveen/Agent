@@ -144,7 +144,15 @@ KALI_TOOLS = {
         risk_level="passive"
     ),
     
-    # ========== VULNERABILITY SCANNING ==========
+    # ========== VULNERABILITY SCANNING & EXPLOITATION ==========
+    "msfconsole": KaliTool(
+        name="Metasploit Framework",
+        command="msfconsole -q -x \"use auxiliary/scanner/http/title; set RHOSTS {host}; set RPORT {port}; run; exit\"",
+        category="vulnerability",
+        description="Metasploit Framework modular auxiliary scanner and exploit verification engine",
+        timeout=180,
+        risk_level="active"
+    ),
     "sqlmap": KaliTool(
         name="SQLMap",
         command="sqlmap -u {url} --batch --level=1 --risk=1 -q",
@@ -429,15 +437,21 @@ def parse_nmap_output(output: str) -> Dict[str, Any]:
         "port_count": len(ports)
     }
 
+import re
+
 def parse_subfinder_output(output: str) -> Dict[str, Any]:
-    """Parse subfinder output"""
+    """Parse subfinder output safely by ignoring info banners and non-domain text."""
     domains = []
+    domain_pattern = re.compile(r'^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$')
     
     try:
         for line in output.split('\n'):
-            if line.strip() and not line.startswith('['):
-                domains.append(line.strip())
-    except:
+            line_clean = line.strip()
+            if line_clean and not line_clean.startswith('[') and not line_clean.startswith('/') and not line_clean.startswith('__'):
+                # Validate it actually looks like a domain name
+                if domain_pattern.match(line_clean):
+                    domains.append(line_clean)
+    except Exception:
         pass
     
     return {

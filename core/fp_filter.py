@@ -47,7 +47,7 @@ FP_PATTERNS = [
 class FalsePositiveFilter:
     """Evaluates candidate findings using heuristic rules, signature patterns, and ML model predictions."""
 
-    def __init__(self, model_path: str = "fp_model.joblib", scaler_path: str = "scaler.joblib"):
+    def __init__(self, model_path: str = "data/models/fp_model.joblib", scaler_path: str = "data/models/scaler.joblib"):
         self.model_path = model_path
         self.scaler_path = scaler_path
         self.model = None

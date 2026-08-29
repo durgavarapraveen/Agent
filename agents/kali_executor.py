@@ -52,6 +52,7 @@ class KaliDockerExecutor:
         "arjun": "arjun",
         "paramspider": "paramspider",
         "dalfox": "dalfox",
+        "playwright": "python3-playwright",
 
         # SSL/TLS
         "sslscan": "sslscan",
@@ -217,22 +218,19 @@ class KaliDockerExecutor:
     def install_all_tools(cls) -> Dict[str, bool]:
         """Bulk auto-install all required tools into the Kali container."""
         container = cls.get_container(auto_create=True)
-        if not container:
-            logger.error("[KaliDockerExecutor] Cannot bulk-install tools: No Kali container running.")
-            return {}
-
+        results = {}
         packages = list(set(cls.TOOL_PACKAGES.values()))
-        pkg_str = " ".join(packages)
         logger.info(f"[KaliDockerExecutor] Bulk auto-installing {len(packages)} packages into container '{container}'...")
 
-        cmd = f"docker exec {container} bash -c 'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y {pkg_str}'"
-        results = {}
         try:
+            subprocess.run(f"docker exec {container} apt-get update", shell=True, capture_output=True, timeout=120)
+            pkg_str = " ".join(packages)
+            cmd = f"docker exec {container} apt-get install -y --fix-missing {pkg_str}"
             r = subprocess.run(cmd, shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=600)
             if r.returncode == 0:
                 logger.info("[KaliDockerExecutor] Bulk installation completed successfully.")
             else:
-                logger.warning(f"[KaliDockerExecutor] Bulk installation finished with warnings: {r.stderr[:200]}")
+                logger.warning(f"[KaliDockerExecutor] Bulk installation output: {r.stderr[:200]}")
 
             for tool in cls.TOOL_PACKAGES:
                 installed = cls.is_tool_installed(tool)

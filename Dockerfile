@@ -16,13 +16,15 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-dev \
     build-essential curl wget git \
+    libgobject-2.0-0 libcairo2 libpango-1.0-0 libpangocairo-1.0-0 \
+    libgdk-pixbuf2.0-0 libffi-dev shared-mime-info \
     nmap masscan sqlmap nikto hydra hashcat john aircrack-ng \
     dnsrecon dnsenum whois net-tools openssh-client imagemagick \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Stage 3: Python Dependencies
 RUN pip3 install --break-system-packages --no-cache-dir \
-    aiohttp pydantic python-dotenv requests fastapi uvicorn
+    aiohttp pydantic python-dotenv requests fastapi uvicorn weasyprint xhtml2pdf
 
 # Stage 4: Copy Go Binaries from Stage 1
 COPY --from=go-builder /go/bin/* /usr/local/bin/

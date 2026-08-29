@@ -33,6 +33,11 @@ class CapabilityType(str, Enum):
     WEB_CRAWLING = "web_crawling"
     VULNERABILITY_SCANNING = "vulnerability_scanning"
     AUTHENTICATION_TESTING = "authentication_testing"
+    EMPLOYEE_ENUMERATION = "employee_enumeration"
+    GITHUB_SCANNING = "github_scanning"
+    DNS_INTELLIGENCE = "dns_intelligence"
+    SUBDOMAIN_ENUMERATION = "subdomain_enumeration"
+    THREAT_INTELLIGENCE = "threat_intelligence"
 
 
 class ErrorType(str, Enum):
@@ -346,4 +351,4 @@ class ExecutionState(BaseModel):
 
 
 # Canonical aliases
-PlannerDecision = BrainDecision
+PlannerDecision = BrainDecision

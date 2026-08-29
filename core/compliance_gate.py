@@ -55,9 +55,12 @@ class ComplianceGate:
         Post-Scan: Run compliance gap detection, generate scorecards per framework,
         build framework action plans, and collect audit-ready evidence statements.
         """
-        gaps = self.compliance_mapper.detect_compliance_gaps(vulnerabilities)
-        scorecards = self.compliance_mapper.generate_scorecard(vulnerabilities)
-        action_plan = self.compliance_mapper.prioritize_for_framework(vulnerabilities, primary_framework)
+        # Enrich generic vulnerabilities with Reference CVEs/CWEs first
+        enriched_vulns = self.compliance_mapper.attach_cves(vulnerabilities)
+        
+        gaps = self.compliance_mapper.detect_compliance_gaps(enriched_vulns)
+        scorecards = self.compliance_mapper.generate_scorecard(enriched_vulns)
+        action_plan = self.compliance_mapper.prioritize_for_framework(enriched_vulns, primary_framework)
         evidence = self.compliance_mapper.collect_audit_evidence(vulnerabilities)
 
         return {

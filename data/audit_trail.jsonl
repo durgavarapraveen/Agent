@@ -1,17 +1,4 @@
-{"event_type": "AUTHORIZATION_CHECK", "target": "10.0.0.5", "domain": "api.target.test", "scope_match": true, "document_hash": "manual", "timestamp": "2026-08-28T15:45:14.736539"}
-{"event_type": "SCOPE_VIOLATION", "target": "192.168.99.99", "domain": null, "scope_match": false, "document_hash": "N/A", "severity": "CRITICAL", "timestamp": "2026-08-28T15:45:14.737945"}
-{"event_type": "AUTHORIZATION_CHECK", "target": "10.0.0.5", "domain": "api.target.test", "scope_match": true, "document_hash": "manual", "timestamp": "2026-08-28T15:45:40.384756"}
-{"event_type": "SCOPE_VIOLATION", "target": "192.168.99.99", "domain": null, "scope_match": false, "document_hash": "N/A", "severity": "CRITICAL", "timestamp": "2026-08-28T15:45:40.385569"}
-{"event_type": "AUTHORIZATION_CHECK", "target": "10.0.0.5", "domain": "api.target.test", "scope_match": true, "document_hash": "manual", "timestamp": "2026-08-28T15:47:52.041217"}
-{"event_type": "SCOPE_VIOLATION", "target": "192.168.99.99", "domain": null, "scope_match": false, "document_hash": "N/A", "severity": "CRITICAL", "timestamp": "2026-08-28T15:47:52.042057"}
-{"event_type": "AUTHORIZATION_CHECK", "target": "10.0.0.5", "domain": "api.target.test", "scope_match": true, "document_hash": "manual", "timestamp": "2026-08-28T16:21:43.686093"}
-{"event_type": "SCOPE_VIOLATION", "target": "192.168.99.99", "domain": null, "scope_match": false, "document_hash": "N/A", "severity": "CRITICAL", "timestamp": "2026-08-28T16:21:43.687046"}
-{"event_type": "AUTHORIZATION_CHECK", "target": "93.184.215.14", "domain": "example.com", "scope_match": true, "document_hash": "manual", "timestamp": "2026-08-28T16:27:19.257960"}
-{"event_type": "AUTHORIZATION_CHECK", "target": "93.184.215.14", "domain": "example.com", "scope_match": true, "document_hash": "manual", "timestamp": "2026-08-28T16:28:57.414182"}
-{"event_type": "AUTHORIZATION_CHECK", "target": "93.184.215.14", "domain": "example.com", "scope_match": true, "document_hash": "manual", "timestamp": "2026-08-28T16:29:36.415071"}
-{"event_type": "AUTHORIZATION_CHECK", "target": "93.184.215.14", "domain": "example.com", "scope_match": true, "document_hash": "manual", "timestamp": "2026-08-28T16:31:39.984943"}
-{"event_type": "AUTHORIZATION_CHECK", "target": "93.184.215.14", "domain": "example.com", "scope_match": true, "document_hash": "manual", "timestamp": "2026-08-28T16:34:28.201934"}
-{"event_type": "AUTHORIZATION_CHECK", "target": "10.0.0.5", "domain": "api.target.test", "scope_match": true, "document_hash": "manual", "timestamp": "2026-08-28T16:49:12.764279"}
-{"event_type": "SCOPE_VIOLATION", "target": "192.168.99.99", "domain": null, "scope_match": false, "document_hash": "N/A", "severity": "CRITICAL", "timestamp": "2026-08-28T16:49:12.765060"}
-{"event_type": "AUTHORIZATION_CHECK", "target": "10.0.0.5", "domain": "api.target.test", "scope_match": true, "document_hash": "manual", "timestamp": "2026-08-28T17:04:07.758922"}
-{"event_type": "SCOPE_VIOLATION", "target": "192.168.99.99", "domain": null, "scope_match": false, "document_hash": "N/A", "severity": "CRITICAL", "timestamp": "2026-08-28T17:04:07.759708"}
+{"event_type": "AUTHORIZATION_CHECK", "target": "10.0.0.5", "domain": "api.target.test", "scope_match": true, "document_hash": "manual", "timestamp": "2026-08-28T22:21:59.481252"}
+{"event_type": "SCOPE_VIOLATION", "target": "192.168.99.99", "domain": null, "scope_match": false, "document_hash": "N/A", "severity": "CRITICAL", "timestamp": "2026-08-28T22:21:59.484128"}
+{"event_type": "AUTHORIZATION_CHECK", "target": "10.0.0.5", "domain": "api.target.test", "scope_match": true, "document_hash": "manual", "timestamp": "2026-08-29T11:34:24.065801"}
+{"event_type": "SCOPE_VIOLATION", "target": "192.168.99.99", "domain": null, "scope_match": false, "document_hash": "N/A", "severity": "CRITICAL", "timestamp": "2026-08-29T11:34:24.066817"}

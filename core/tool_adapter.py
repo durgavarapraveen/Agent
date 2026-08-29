@@ -45,13 +45,22 @@ class NmapAdapter:
 class SubfinderAdapter:
     @staticmethod
     def subdomain_discovery(target: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        return {"command": f"subfinder -d {target} -oJ"}
+        clean_target = target.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0].strip()
+        from core.subdomain_enum import extract_apex_domain
+        apex = extract_apex_domain(clean_target)
+        # Use apex domain if available to discover all sibling subdomains
+        query_domain = apex if apex else clean_target
+        return {"command": f"subfinder -d {query_domain} -oJ"}
 
 
 class AmassAdapter:
     @staticmethod
     def passive_enum(target: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        return {"command": f"amass enum -passive -d {target}"}
+        clean_target = target.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0].strip()
+        from core.subdomain_enum import extract_apex_domain
+        apex = extract_apex_domain(clean_target)
+        query_domain = apex if apex else clean_target
+        return {"command": f"amass enum -passive -d {query_domain}"}
 
 
 class OpenSSLAdapter:

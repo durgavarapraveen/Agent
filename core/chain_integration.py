@@ -127,7 +127,25 @@ Respond with JSON:
             logger.warning(f"[ChainMgr] Selected chain {selected_id} not found, using top")
             selected = chains[0]
 
-        return await self.executor.execute_chain(selected)
+        result = await self.executor.execute_chain(selected)
+        if result.status == "completed":
+            return result
+
+        # Fallback to remaining top chains if selected chain fails
+        logger.info(f"[ChainMgr] Selected chain {selected.chain_id} did not complete ({result.status}). Trying alternative chains...")
+        for alt in chains:
+            if alt.chain_id == selected.chain_id:
+                continue
+            if alt.chain_id in [r.chain_id for r in getattr(self.executor, 'execution_history', []) if r.status == 'completed']:
+                continue
+            logger.info(f"[ChainMgr] Trying alternative chain: {alt.chain_id} ({alt.description}, score={alt.score:.3f})")
+            alt_result = await self.executor.execute_chain(alt)
+            alt_result.alternative_used = selected.chain_id
+            if alt_result.status == "completed":
+                logger.info(f"[ChainMgr] ✓ Alternative chain {alt.chain_id} completed successfully!")
+                return alt_result
+
+        return result
 
     def get_brain_context(self) -> str:
         """Get chain context for brain prompt"""

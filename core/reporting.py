@@ -566,7 +566,7 @@ class EnterpriseReporter:
         )
         exec_html = html.escape(executive_summary).replace("\n", "<br>") or \
             "<span class='muted'>No executive summary provided.</span>"
-        return f"""<!doctype html><html><head><meta charset="utf-8">
+        full_html = f"""<!doctype html><html><head><meta charset="utf-8">
 <title>Penetration Test Report — {html.escape(str(self.ctx.target))}</title>
 <style>
  body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#f5f6f8;color:#1c2430}}
@@ -603,6 +603,7 @@ class EnterpriseReporter:
  <section><h2>Compliance Summary</h2>{self._compliance_html()}</section>
  <section><h2>Remediation</h2>{self._remediation()}</section>
 </main></body></html>"""
+        return self.add_osint_findings(full_html)
 
     def generate(self, executive_summary: str = "", stem: str = "") -> Dict[str, str]:
         """Write HTML (and PDF if a renderer is available). Returns paths."""
@@ -615,11 +616,107 @@ class EnterpriseReporter:
 
         out = {"html": str(html_path)}
         pdf_path = self.report_dir / f"{stem}.pdf"
+        pdf_generated = False
         try:
             from weasyprint import HTML as _WHTML   # optional dependency
             _WHTML(string=html_str).write_pdf(str(pdf_path))
             out["pdf"] = str(pdf_path)
-            logger.info(f"[Report] PDF report written: {pdf_path}")
+            pdf_generated = True
+            logger.info(f"[Report] PDF report written via WeasyPrint: {pdf_path}")
         except Exception as e:      # noqa: BLE001
-            logger.info(f"[Report] PDF skipped (install 'weasyprint' to enable): {e}")
+            logger.info(f"[Report] WeasyPrint PDF skipped: {e}")
+
+        if not pdf_generated:
+            try:
+                from xhtml2pdf import pisa
+                with open(pdf_path, "wb") as pdf_file:
+                    pisa_status = pisa.CreatePDF(html_str, dest=pdf_file)
+                if not pisa_status.err:
+                    out["pdf"] = str(pdf_path)
+                    pdf_generated = True
+                    logger.info(f"[Report] PDF report written via xhtml2pdf fallback: {pdf_path}")
+            except Exception as e:
+                logger.info(f"[Report] xhtml2pdf fallback skipped: {e}")
+
         return out
+
+
+    def add_osint_findings(self, report_html: str) -> str:
+        """Add OSINT section to report based on findings in self.ctx."""
+        osint_findings = getattr(self.ctx, "osint_findings", {}) or {}
+        
+        employees_data = getattr(self.ctx, "discovered_employees", []) or osint_findings.get("employees", [])
+        emp_rows = ""
+        for emp in employees_data:
+            name = getattr(emp, "name", "") or emp.get("name", "") if isinstance(emp, dict) else getattr(emp, "name", "")
+            email = getattr(emp, "email", "") or emp.get("email", "") if isinstance(emp, dict) else getattr(emp, "email", "")
+            role = getattr(emp, "role", "") or emp.get("role", "") if isinstance(emp, dict) else getattr(emp, "role", "")
+            source = getattr(emp, "source", "") or emp.get("source", "") if isinstance(emp, dict) else getattr(emp, "source", "")
+            emp_rows += f"<tr><td>{html.escape(str(email))}</td><td>{html.escape(str(role))}</td><td>{html.escape(str(source))}</td></tr>"
+        if not emp_rows:
+            emp_rows = "<tr><td colspan='3' class='muted'>No employees discovered.</td></tr>"
+
+        creds_data = getattr(self.ctx, "leaked_credentials", []) or osint_findings.get("leaked_credentials", [])
+        cred_rows = ""
+        for cred in creds_data:
+            svc = getattr(cred, "service", "") or cred.get("service", "") if isinstance(cred, dict) else getattr(cred, "service", "")
+            sev = getattr(cred, "severity", "") or cred.get("severity", "") if isinstance(cred, dict) else getattr(cred, "severity", "")
+            cred_rows += f"<tr><td>Credential Leak</td><td>{html.escape(str(svc))}</td><td><span class='pill' style='background:{SEV_COLOR.get(sev.upper(), '#777')}'>{html.escape(str(sev))}</span></td></tr>"
+        if not cred_rows:
+            cred_rows = "<tr><td colspan='3' class='muted'>No leaked credentials found.</td></tr>"
+
+        subdomains_data = getattr(self.ctx, "discovered_subdomains", []) or osint_findings.get("subdomains", [])
+        sub_rows = ""
+        for sub in subdomains_data:
+            name = getattr(sub, "name", "") or sub.get("name", "") if isinstance(sub, dict) else getattr(sub, "name", "")
+            ips = getattr(sub, "ip_addresses", []) or sub.get("ip_addresses", []) if isinstance(sub, dict) else getattr(sub, "ip_addresses", [])
+            cdn = getattr(sub, "cdn", "") or sub.get("cdn", "") if isinstance(sub, dict) else getattr(sub, "cdn", "")
+            status = getattr(sub, "status_code", "") or sub.get("status_code", "") if isinstance(sub, dict) else getattr(sub, "status_code", "")
+            ip_str = ", ".join(ips) if isinstance(ips, list) else str(ips)
+            sub_rows += f"<tr><td>{html.escape(str(name))}</td><td>{html.escape(ip_str)}</td><td>{html.escape(str(cdn or 'Direct'))}</td><td>{html.escape(str(status or 'Active'))}</td></tr>"
+        if not sub_rows:
+            sub_rows = "<tr><td colspan='4' class='muted'>No subdomains enumerated.</td></tr>"
+
+        threats_data = getattr(self.ctx, "threat_correlations", []) or osint_findings.get("threat_correlations", [])
+        threat_rows = ""
+        for th in threats_data:
+            asset = th.get("asset", "") if isinstance(th, dict) else getattr(th, "asset", "")
+            ttype = th.get("threat_type", "") if isinstance(th, dict) else getattr(th, "threat_type", "")
+            sev = th.get("severity", "") if isinstance(th, dict) else getattr(th, "severity", "")
+            sources = th.get("sources", []) if isinstance(th, dict) else getattr(th, "sources", [])
+            src_str = ", ".join(sources) if isinstance(sources, list) else str(sources)
+            threat_rows += f"<tr><td>{html.escape(str(asset))}</td><td>{html.escape(str(ttype))}</td><td><span class='pill' style='background:{SEV_COLOR.get(sev.upper(), '#777')}'>{html.escape(str(sev))}</span></td><td>{html.escape(src_str)}</td></tr>"
+        if not threat_rows:
+            threat_rows = "<tr><td colspan='4' class='muted'>No threat intelligence correlations.</td></tr>"
+
+        osint_html = f"""
+        <section class="osint-findings">
+            <h2>OSINT Reconnaissance Findings</h2>
+            
+            <h3>Employee Discovery</h3>
+            <table>
+                <tr><th>Email</th><th>Role</th><th>Source</th></tr>
+                {emp_rows}
+            </table>
+            
+            <h3>Leaked Credentials</h3>
+            <table>
+                <tr><th>Type</th><th>Service</th><th>Severity</th></tr>
+                {cred_rows}
+            </table>
+            
+            <h3>Discovered Subdomains</h3>
+            <table>
+                <tr><th>Subdomain</th><th>IPs</th><th>CDN</th><th>Status</th></tr>
+                {sub_rows}
+            </table>
+            
+            <h3>Threat Intelligence</h3>
+            <table>
+                <tr><th>Asset</th><th>Threat Type</th><th>Severity</th><th>Sources</th></tr>
+                {threat_rows}
+            </table>
+        </section>
+        """
+        
+        return report_html.replace('</main>', osint_html + '</main>')

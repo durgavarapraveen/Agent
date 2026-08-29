@@ -6,6 +6,7 @@ Maps detected technologies to official Nuclei template tags and executes non-blo
 import asyncio
 import json
 import logging
+import os
 import shutil
 import urllib.parse
 from typing import Dict, List, Optional, Any, Union
@@ -69,6 +70,10 @@ class NucleiRunner:
         else:
             tags_str = str(tech_tags)
 
+        # Ensure general/fallback tags map to standard Nuclei template categories if needed
+        if not tags_str or tags_str == "general":
+            tags_str = "cve,misconfig,exposure,tech"
+
         cmd = [
             self.binary_path,
             "-u", target,
@@ -87,27 +92,35 @@ class NucleiRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout=float(timeout))
+            process_returncode = process.returncode
         except FileNotFoundError:
-            logger.error(f"NUCLEI_BINARY_MISSING: binary '{self.binary_path}' not found in PATH")
+            # Fallback to KaliDockerExecutor if local nuclei binary is missing
+            try:
+                from agents.kali_executor import KaliDockerExecutor
+                if KaliDockerExecutor.get_container():
+                    full_cmd = f"nuclei -u {target} -tags {tags_str} -jsonl -silent -severity low,medium,high,critical"
+                    logger.info(f"NUCLEI_EXECUTE_DOCKER: running via KaliDockerExecutor: '{full_cmd}'")
+                    res = KaliDockerExecutor.run(full_cmd, timeout=timeout)
+                    stdout_bytes = res.get("stdout", "").encode("utf-8")
+                    stderr_bytes = res.get("stderr", "").encode("utf-8")
+                    process_returncode = res.get("returncode", res.get("exit_code", 0))
+                else:
+                    logger.error(f"NUCLEI_BINARY_MISSING: binary '{self.binary_path}' not found in PATH")
+                    return []
+            except Exception as e:
+                logger.error(f"NUCLEI_BINARY_MISSING: binary '{self.binary_path}' not found in PATH ({e})")
+                return []
+        except asyncio.TimeoutError:
+            logger.warning(f"NUCLEI_TIMEOUT: scan timed out after {timeout}s for target={target}")
             return []
         except Exception as e:
             logger.error(f"NUCLEI_START_FAILED: failed to spawn process: {e}")
             return []
 
-        try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout=float(timeout))
-        except asyncio.TimeoutError:
-            logger.warning(f"NUCLEI_TIMEOUT: scan timed out after {timeout}s for target={target}")
-            try:
-                process.kill()
-                await process.wait()
-            except Exception:
-                pass
-            return []
-
-        if process.returncode != 0 and stderr_bytes:
+        if process_returncode != 0 and stderr_bytes:
             err_msg = stderr_bytes.decode("utf-8", errors="ignore").strip()
-            logger.warning(f"NUCLEI_STDERR: returncode={process.returncode} msg='{err_msg[:200]}'")
+            logger.warning(f"NUCLEI_STDERR: returncode={process_returncode} msg='{err_msg[:200]}'")
 
         stdout_text = stdout_bytes.decode("utf-8", errors="ignore")
         for line in stdout_text.splitlines():

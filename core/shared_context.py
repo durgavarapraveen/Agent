@@ -66,6 +66,15 @@ class SharedContext:
         # ── Raw tool outputs ──
         self._raw_outputs: Dict[str, str] = {}  # agent_id → raw output (for debugging)
 
+        # ── OSINT data ──
+        self.discovered_employees: List[Any] = []
+        self.leaked_credentials: List[Any] = []
+        self.discovered_subdomains: List[Any] = []
+        self.cloud_buckets: List[Any] = []
+        self.threat_correlations: List[Any] = []
+        self.domain_intelligence: Optional[Any] = None
+        self.osint_findings: Dict = {}
+
     # ── Write methods (thread-safe) ──
 
     def add_subdomains(self, subs: List[str], source: str = ""):
@@ -243,15 +252,30 @@ class SharedContext:
             result.setdefault("timestamp", datetime.now().isoformat())
             self.exploit_results.append(result)
 
-    def add_captured_requests(self, requests: List[Dict], pages: List[str] = None):
+    def add_captured_requests(self, requests: List[Any], pages: List[str] = None):
         """Store intercepted HTTP requests (deduped) for replay in exploits."""
         with self._lock:
-            seen = {(r.get("method"), r.get("url"), (r.get("post_data") or "")[:200])
+            def _get_val(obj, key, default=""):
+                if isinstance(obj, dict):
+                    return obj.get(key, default)
+                return getattr(obj, key, default)
+
+            def _to_dict(obj):
+                if isinstance(obj, dict):
+                    return obj
+                if hasattr(obj, "to_dict"):
+                    return obj.to_dict()
+                if hasattr(obj, "__dict__"):
+                    return obj.__dict__
+                return dict(obj)
+
+            seen = {(_get_val(r, "method"), _get_val(r, "url"), str(_get_val(r, "post_data") or "")[:200])
                     for r in self.captured_requests}
-            for req in requests:
-                key = (req.get("method"), req.get("url"),
-                       (req.get("post_data") or "")[:200])
-                if req.get("url") and key not in seen:
+            for raw_req in requests:
+                req = _to_dict(raw_req)
+                key = (_get_val(req, "method"), _get_val(req, "url"),
+                       str(_get_val(req, "post_data") or "")[:200])
+                if _get_val(req, "url") and key not in seen:
                     self.captured_requests.append(req)
                     seen.add(key)
             for pg in (pages or []):
@@ -400,10 +424,11 @@ class SharedContext:
             "captured_requests": lambda: (
                 "CAPTURED REQUESTS (real intercepted traffic — replay/fuzz these):\n"
                 + json.dumps([
-                    {"method": r.get("method"), "url": r.get("url"),
-                     "type": r.get("resource_type"),
-                     "post_data": (r.get("post_data") or "")[:300],
-                     "status": r.get("status")}
+                    {"method": r.get("method") if isinstance(r, dict) else getattr(r, "method", "GET"),
+                     "url": r.get("url") if isinstance(r, dict) else getattr(r, "url", ""),
+                     "type": r.get("resource_type") if isinstance(r, dict) else getattr(r, "resource_type", ""),
+                     "post_data": str((r.get("post_data") if isinstance(r, dict) else getattr(r, "post_data", "")) or "")[:300],
+                     "status": r.get("status") if isinstance(r, dict) else getattr(r, "status", 0)}
                     for r in self.captured_requests[:40]], default=str)),
             "parameters": lambda: f"PARAMETERS: {json.dumps(self.parameters, default=str)[:800]}",
             "directories": lambda: f"DIRECTORIES: {json.dumps(self.directories[:30], default=str)}",
@@ -455,7 +480,77 @@ class SharedContext:
             "mitre_mappings": self.mitre_mappings,
             "agents_spawned": self.agents_spawned,
             "brain_log": self.brain_log,
+            "discovered_employees": [
+                e if isinstance(e, dict) else (e.__dict__ if hasattr(e, "__dict__") else str(e))
+                for e in self.discovered_employees
+            ],
+            "leaked_credentials": [
+                c if isinstance(c, dict) else (c.__dict__ if hasattr(c, "__dict__") else str(c))
+                for c in self.leaked_credentials
+            ],
+            "discovered_subdomains": [
+                s if isinstance(s, dict) else (s.__dict__ if hasattr(s, "__dict__") else str(s))
+                for s in self.discovered_subdomains
+            ],
+            "cloud_buckets": [
+                b if isinstance(b, dict) else (b.__dict__ if hasattr(b, "__dict__") else str(b))
+                for b in self.cloud_buckets
+            ],
+            "threat_correlations": self.threat_correlations,
+            "domain_intelligence": (
+                self.domain_intelligence if isinstance(self.domain_intelligence, dict)
+                else (self.domain_intelligence.__dict__ if hasattr(self.domain_intelligence, "__dict__") else self.domain_intelligence)
+            ),
+            "osint_findings": self.osint_findings,
         }
+
+    def update(self, key: str, value: Any):
+        """Thread-safe generic update for shared memory keys."""
+        with self._lock:
+            setattr(self, key, value)
+            count_str = f", count={len(value)}" if isinstance(value, (list, dict, set)) else f", val={str(value)[:100]}"
+            logger.info(f"SHARED_CONTEXT_UPDATE: key={key}{count_str}")
+
+            # If updating discovered_employees, also synchronize into harvested_creds
+            if key == "discovered_employees" and isinstance(value, list):
+                existing_users = {c.get("username") for c in self.harvested_creds}
+                for emp in value:
+                    email = getattr(emp, "email", "") or (emp.get("email", "") if isinstance(emp, dict) else "")
+                    name = getattr(emp, "name", "") or (emp.get("name", "") if isinstance(emp, dict) else "")
+                    source = getattr(emp, "source", "company_website") or (emp.get("source", "company_website") if isinstance(emp, dict) else "company_website")
+                    if email and email not in existing_users:
+                        self.harvested_creds.append({
+                            "type": "employee_email",
+                            "username": email,
+                            "secret": "",
+                            "name": name,
+                            "source": source,
+                            "host": self.target
+                        })
+                        existing_users.add(email)
+
+            elif key == "leaked_credentials" and isinstance(value, list):
+                existing_users = {c.get("username") for c in self.harvested_creds}
+                for cred in value:
+                    username = getattr(cred, "username", "") or (cred.get("username", "") if isinstance(cred, dict) else "")
+                    email = getattr(cred, "email", "") or (cred.get("email", "") if isinstance(cred, dict) else "")
+                    service = getattr(cred, "service", "") or (cred.get("service", "") if isinstance(cred, dict) else "")
+                    source = getattr(cred, "found_in_repo", "github") or (cred.get("found_in_repo", "github") if isinstance(cred, dict) else "github")
+                    u = username or email
+                    if u and u not in existing_users:
+                        self.harvested_creds.append({
+                            "type": f"leaked_credential_{service}",
+                            "username": u,
+                            "secret": "",
+                            "source": source,
+                            "host": self.target
+                        })
+                        existing_users.add(u)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Thread-safe generic getter for shared memory keys."""
+        with self._lock:
+            return getattr(self, key, default)
 
     def save(self, path: str):
         with open(path, 'w', encoding='utf-8') as f:

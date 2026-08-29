@@ -42,6 +42,10 @@ from core.schemas import (
     SuccessCriterion, SuccessCriterionType, CapabilityType
 )
 
+from core.osint_integration import OSINTOrchestrator
+from core.threat_intel import ThreatIntelligenceEngine
+from core.subdomain_enum import SubdomainEnumerationEngine
+
 logger = logging.getLogger(__name__)
 
 BRAIN_SYSTEM = """You are the decision engine inside an AUTHORIZED automated security scanner.
@@ -59,25 +63,17 @@ WORKFLOW:
 
 RESPONSE FORMAT - output ONLY a JSON object, no markdown, no explanation:
 
-Single task:
+Tasks (single or parallel):
 {
-  "thinking": "what data is missing",
-  "action": "spawn_agent",
-  "agent_spec": {
-    "objective": "scan description",
-    "tools": ["tool1", "tool2"],
-    "context_keys": ["target", "subdomains"],
-    "max_steps": 8
-  }
-}
-
-Parallel tasks:
-{
-  "thinking": "independent scans",
+  "thinking": "what data is missing and rationale",
   "action": "spawn_agents",
-  "agent_specs": [
-    {"objective": "task 1", "tools": ["tool1"], "context_keys": ["target"], "max_steps": 8},
-    {"objective": "task 2", "tools": ["tool2"], "context_keys": ["target"], "max_steps": 8}
+  "agents": [
+    {
+      "objective": "task description",
+      "tools": ["tool1"],
+      "context_keys": ["target", "subdomains"],
+      "max_steps": 8
+    }
   ]
 }
 
@@ -87,7 +83,7 @@ Phase done:
 RULES:
 - Output ONLY valid JSON. No markdown fences. No explanation text.
 - Do not repeat completed scans
-- Use spawn_agents for independent parallel tasks"""
+- Use spawn_agents with an agents array for all task specifications"""
 
 
 class ExecutionPhase(str, Enum):
@@ -149,6 +145,9 @@ class CentralBrain:
         self.metrics = MetricsTracker(target=target, out_dir=str(self.report_dir))
         self.automation = AutomationEngine(self.ctx)
         self.reporter = EnterpriseReporter(self.ctx, report_dir=str(self.report_dir))
+        self.osint_orchestrator = OSINTOrchestrator(self.ctx)
+        self.threat_engine = ThreatIntelligenceEngine()
+        self.subdomain_engine = SubdomainEnumerationEngine()
         
         
         db_path = os.getenv("KNOWLEDGE_DB_PATH", str(self.report_dir / "findings.db"))
@@ -203,6 +202,15 @@ class CentralBrain:
         # Phase 1: Deep recon
         logger.info("\n>>> PHASE 1: DEEP RECONNAISSANCE")
         await self._run_phase("recon")
+        
+        enable_osint = os.getenv("ENABLE_OSINT", os.getenv("OSINT_ENABLE", "true")).lower() in ("true", "1", "yes", "on")
+        if enable_osint:
+            logger.info("Running OSINT Reconnaissance...")
+            await self._run_phase("OSINT_RECONNAISSANCE")
+        else:
+            logger.info("Skipping OSINT Reconnaissance (ENABLE_OSINT=false)")
+
+        await self._run_phase("DEEP_RECONNAISSANCE")
         await self._persist_recon_findings()
 
         # Phase 1b: Intercept live HTTP traffic across the site (for exploit replay)
@@ -318,8 +326,21 @@ class CentralBrain:
         """
         logger.info("\n>>> PHASE 6: POST-EXPLOITATION (privesc / lateral / persistence)")
 
-        if not self.ctx.has_shell_access():
-            logger.info("No shell/RCE foothold established — skipping post-exploitation")
+        def should_skip_postex():
+            has_rce = self.ctx.has_shell_access()
+            has_creds = len(self.ctx.harvested_creds) > 0
+            has_exploitable_logic = any(
+                v.get("type", "").lower() in ("business_logic", "idor", "auth_bypass") 
+                for v in self.ctx.vulnerabilities
+            )
+            
+            # Skip ONLY if truly nothing to work with
+            if has_rce or has_creds or has_exploitable_logic:
+                return False
+            return True
+
+        if should_skip_postex():
+            logger.info("No shell/RCE foothold, credentials, or logic vulnerabilities established — skipping post-exploitation")
             return
 
         # Runner stays None (plan-only) unless a confirmed foothold session is
@@ -401,6 +422,13 @@ class CentralBrain:
                     status = "✓" if h["success"] else "✗"
                     history_section += f"  {status} {h['agent_id']}: {h['objective'][:50]}\n"
 
+            if phase == 'OSINT_RECONNAISSANCE':
+                await self._run_phase_osint_reconnaissance()
+                break
+            elif phase == 'DEEP_RECONNAISSANCE':
+                await self._run_phase_deep_reconnaissance()
+                break
+
             # ── Build exploit chain context ──
             chain_context = ""
             if phase == "exploit" and self.ctx.exploit_results:
@@ -419,10 +447,8 @@ class CentralBrain:
             circuit_breaker_hint = ""
             if self.consecutive_agent_failures >= 2:
                 circuit_breaker_hint = "\n⚠️  REPLAN REQUIRED: Choose a different approach or phase_complete.\n"
-                # Option: break the phase loop instead of hoping brain will self-correct
-                if self.consecutive_agent_failures >= 5:
-                    logger.warning("Failure threshold exceeded. Exiting phase.")
-                    break
+                logger.warning("Agent failure/deduplication threshold reached (2 consecutive). Exiting phase to prevent infinite loop.")
+                break
 
             # ── Compact execution context from database ──
             db_context = self._get_db_execution_context()
@@ -456,9 +482,11 @@ class CentralBrain:
                 f"Do not repeat completed tasks. Output ONLY valid JSON.\n"
             )
             
-            # ── Explicit state transition check for Recon completion ──
-            if phase == "recon" and self._is_recon_complete(db_context):
-                logger.info("RECON_COMPLETE: All reconnaissance capabilities for discovered targets finished. Advancing to PHASE 2: VULNERABILITY_ASSESSMENT.")
+            # ── Explicit Phase Gate Exit Criteria Check ──
+            if self._evaluate_phase_gate(phase, db_context):
+                logger.info("==================================================")
+                logger.info(f">>> PHASE GATE PASSED: [{phase.upper()}] exit criteria met. Advancing phase.")
+                logger.info("==================================================")
                 break
 
             # ── Log prompt size ──
@@ -473,6 +501,7 @@ class CentralBrain:
             from core.normalizer import PlannerResponseNormalizer
 
             for attempt in range(max_retries):
+                logger.info(f"[CentralBrain] Brain decision attempt {attempt + 1}/{max_retries} initiated.")
                 res = await self.llm.generate_response(
                     prompt,
                     system=phase_prompt or BRAIN_SYSTEM,
@@ -500,7 +529,7 @@ class CentralBrain:
                     try:
                         canonical_decision = PlannerResponseNormalizer.normalize(structured)
                         decision = structured
-                        logger.info(f"Brain decision accepted (attempt {attempt + 1}/{max_retries}): {json.dumps(decision, indent=2)}")
+                        logger.info(f"[CentralBrain] Brain decision accepted on attempt {attempt + 1}/{max_retries}: {json.dumps(decision, indent=2)}")
                         break
                     except Exception as norm_err:
                         self.failure_streak += 1
@@ -588,12 +617,13 @@ class CentralBrain:
                 continue
 
             # ── Canonical Planner Response Normalization ──
-            try:
-                canonical_decision = PlannerResponseNormalizer.normalize(decision)
-            except Exception as e:
-                self.failure_streak += 1
-                logger.error(f"Planner decision normalization failed: {e}")
-                continue
+            if canonical_decision is None:
+                try:
+                    canonical_decision = PlannerResponseNormalizer.normalize(decision)
+                except Exception as e:
+                    self.failure_streak += 1
+                    logger.error(f"Planner decision normalization failed: {e}")
+                    continue
 
             self.failure_streak = 0
             action = canonical_decision.action
@@ -612,20 +642,26 @@ class CentralBrain:
                     obj_val = spec.objective.lower()
                     
                     if cap_val == "authentication_testing" or "auth" in obj_val or "login" in obj_val:
-                        creds = getattr(self.ctx, "harvested_creds", []) or getattr(self.ctx, "extracted_credentials", [])
+                        creds = getattr(self.ctx, "harvested_creds", []) or getattr(self.ctx, "extracted_credentials", []) or getattr(self.ctx, "leaked_credentials", [])
                         if not creds:
-                            logger.warning(f"[WARN] NO_EXTRACTED_CREDENTIALS: cannot spawn auth_agent without creds for objective='{spec.objective[:50]}'. Retrying data extraction.")
-                            # Substitute with data extraction task
-                            spec.capability = CapabilityType.VULNERABILITY_SCANNING
-                            spec.objective = f"Extract data and credentials from discovered endpoints for {self.ctx.target}"
+                            has_extracted = getattr(self.ctx, "has_run_data_extraction", False)
+                            if not has_extracted:
+                                logger.info(f"CREDENTIAL_EXTRACTION_REQUIRED: Scheduling data & credential extraction before auth testing for objective='{spec.objective[:50]}'")
+                                self.ctx.has_run_data_extraction = True
+                                spec.capability = CapabilityType.ENDPOINT_DISCOVERY
+                                spec.objective = f"Discover API endpoints and extract leaked credentials or tokens for {self.ctx.target}"
+                            else:
+                                logger.info(f"NO_EXTRACTED_CREDENTIALS_FALLBACK: Data extraction complete (0 creds found). Proceeding with default/anonymous auth testing for '{spec.objective[:50]}'")
                         else:
                             sample = creds[0].get("username") or creds[0].get("secret") or "user"
                             logger.info(f"CREDENTIALS_AVAILABLE: count={len(creds)}, sample_user='{sample}'")
                             
                     elif cap_val in ("rce", "idor", "privilege_escalation") or "rce" in obj_val or "idor" in obj_val:
                         token = getattr(self.ctx, "auth_token", None)
-                        if not token and not getattr(self.ctx, "vulnerabilities", []):
-                            logger.warning(f"[WARN] NO_UPSTREAM_PROOF: skipping downstream exploit '{spec.objective[:50]}' until auth or upstream vulnerability confirmed")
+                        vulns = getattr(self.ctx, "vulnerabilities", [])
+                        requests_cap = getattr(self.ctx, "captured_requests", [])
+                        if not token and not vulns and not requests_cap and not getattr(self.ctx, "has_run_data_extraction", False):
+                            logger.warning(f"[WARN] NO_UPSTREAM_PROOF: postponing downstream exploit '{spec.objective[:50]}' until recon/auth completes")
                             continue
                             
                     validated_specs.append(spec)
@@ -645,11 +681,25 @@ class CentralBrain:
                     continue
 
                 # ── Execute tasks stage-by-stage respecting dependencies ──
+                stage_count = 0
+                has_executed_any = False
+                phase_should_exit = False
+
                 while True:
                     runnable_tasks = self.scheduler.get_next_runnable_tasks()
                     if not runnable_tasks:
+                        if stage_count == 0 and not has_executed_any:
+                            # All scheduled tasks were already completed or duplicates
+                            for spec in task_specs:
+                                if spec.objective:
+                                    completed_objectives.add(spec.objective.lower().strip())
+                            self.consecutive_agent_failures += 1
+                            if self.consecutive_agent_failures >= 2:
+                                logger.info(f"Phase '{phase}' completed via task deduplication limit.")
+                                phase_should_exit = True
                         break
 
+                    stage_count += 1
                     spawn_specs = []
                     for task in runnable_tasks:
                         self.task_manager.start_task(task.spec.task_id)
@@ -674,8 +724,21 @@ class CentralBrain:
 
                     if not valid_specs_and_agents:
                         logger.info("[Scheduler] No new valid/non-duplicate agents to execute in this stage. Advancing phase.")
+                        for task, s_dict in spawn_specs:
+                            obj = task.spec.objective
+                            if obj:
+                                completed_objectives.add(obj.lower().strip())
                         self.consecutive_agent_failures += 1
+                        if self.consecutive_agent_failures >= 2:
+                            logger.info(f"Phase '{phase}' completed via task deduplication limit.")
+                            phase_should_exit = True
+                            break
                         break
+
+                    has_executed_any = True
+
+                if phase_should_exit:
+                    break
 
                     spawn_specs = [(t, s) for t, s, a in valid_specs_and_agents]
                     agents = [a for t, s, a in valid_specs_and_agents]
@@ -1430,12 +1493,22 @@ CRITICAL RULES:
             dedup = DedupStore()
             dd = dedup.process_scan(reported, scan_id=ts)
             reported = dd["report"]
-            dedup_summary = {"suppressed_recurring": dd["suppressed"],
-                             "resolved": len(dd["resolved"]),
-                             "reported": len(reported)}
+            suppressed_findings = dd.get("suppressed_findings", [])
+            
+            # Explicit logging for suppressed findings
+            for sf in suppressed_findings:
+                reason = "recurring_deduplicated_by_fingerprint"
+                logger.info(f"SUPPRESSED: {sf.get('id', 'unknown')} reason={reason}")
+                
+            dedup_summary = {
+                "suppressed_recurring": dd["suppressed"],
+                "suppressed_findings": [f.get("title") or f.get("name") or f.get("type") for f in suppressed_findings],
+                "resolved": len(dd["resolved"]),
+                "reported": len(reported)
+            }
         except Exception as e:      # noqa: BLE001
             logger.warning(f"[report] dedup failed: {e}")
-            dedup_summary = {"suppressed_recurring": 0, "resolved": 0,
+            dedup_summary = {"suppressed_recurring": 0, "suppressed_findings": [], "resolved": 0,
                              "reported": len(reported), "error": str(e)}
 
         logger.info(f"[report] findings: {len(reported)} reported, "
@@ -1777,21 +1850,45 @@ CRITICAL RULES:
 
     def _is_recon_complete(self, db_context: Dict[str, Any]) -> bool:
         """Check if essential reconnaissance capabilities for discovered targets have finished."""
+        return self._evaluate_phase_gate("recon", db_context)
+
+    def _evaluate_phase_gate(self, phase: str, db_context: Dict[str, Any]) -> bool:
+        """Evaluate deterministic phase exit gates and completion thresholds for each phase."""
         completed = db_context.get("completed_tasks", [])
-        if not completed:
+        p_lower = phase.lower().strip()
+
+        # 1. Reconnaissance Phase Gate (recon, osint, deep_recon)
+        if p_lower in ("recon", "osint_reconnaissance", "deep_reconnaissance"):
+            if not completed:
+                return False
+            recon_caps = {"dns_enumeration", "port_scanning", "technology_fingerprinting", "tls_analysis", "subdomain_enumeration", "endpoint_discovery"}
+            executed_recon = {f"{item[0]}:{item[1]}" for item in completed if item[0] in recon_caps}
+            subdomains = db_context.get("discovered_assets", {}).get("subdomains", [])
+            targets = set([self.target] + subdomains[:5])
+            required_port_scans = {f"port_scanning:{t}" for t in targets}
+            if required_port_scans.issubset(executed_recon) or len(executed_recon) >= 3:
+                return True
             return False
 
-        # Gather target domains/subdomains tested for recon
-        recon_caps = {"dns_enumeration", "port_scanning", "technology_fingerprinting", "tls_analysis"}
-        executed_recon = {f"{item[0]}:{item[1]}" for item in completed if item[0] in recon_caps and item[3] == "COMPLETED"}
+        # 2. Vulnerability Assessment Phase Gate (analyze)
+        elif p_lower in ("analyze", "vulnerability_assessment"):
+            vuln_caps = {"vulnerability_scanning", "http_analysis", "javascript_analysis"}
+            executed_vulns = [item for item in completed if item[0] in vuln_caps]
+            if getattr(self.ctx, "vulnerabilities", []) or len(executed_vulns) >= 2:
+                return True
+            return False
 
-        # Targets requiring recon
-        subdomains = db_context.get("discovered_assets", {}).get("subdomains", [])
-        targets = set([self.target] + subdomains)
+        # 3. Exploitation Phase Gate (exploit)
+        elif p_lower in ("exploit", "exploitation"):
+            vulns = getattr(self.ctx, "vulnerabilities", [])
+            if not vulns:
+                return True
+            exploit_results = getattr(self.ctx, "exploit_results", [])
+            if len(exploit_results) >= len(vulns) or len(exploit_results) >= 3:
+                return True
+            return False
 
-        # Check if port scanning & tech fingerprinting ran for primary target and subdomains
-        required_pairs = {f"port_scanning:{t}" for t in targets}
-        return required_pairs.issubset(executed_recon)
+        return False
 
     def _aggregate_wave_results(self, agents: List[Any], results: List[Any]) -> None:
         """Aggregate findings and discovered assets from executed agent wave into shared context and database."""
@@ -1827,9 +1924,16 @@ CRITICAL RULES:
                         self.ctx.subdomains.append(sub)
 
             # 4. Aggregate technologies
-            techs = res_data.get("technologies") or {}
+            techs = res_data.get("technologies") or res_data.get("tech") or res_data.get("tech_stack") or {}
+            target_host = self.ctx.target.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0]
             if isinstance(techs, dict):
-                self.ctx.technologies.update(techs)
+                for k, v in techs.items():
+                    if isinstance(v, list):
+                        self.ctx.add_technologies(k, v)
+                    else:
+                        self.ctx.add_technologies(target_host, [f"{k}:{v}" if v != "detected" else k])
+            elif isinstance(techs, list) and techs:
+                self.ctx.add_technologies(target_host, techs)
 
             # 5. Persist to KnowledgeStore if available
             if hasattr(self, "store") and self.store:
@@ -1848,3 +1952,107 @@ CRITICAL RULES:
                         )
                 except Exception as e:
                     logger.warning(f"Failed to persist wave aggregation to knowledge store: {e}")
+
+    async def _run_phase_osint_reconnaissance(self):
+        """
+        OSINT Reconnaissance Phase (Weeks 13-14)
+        
+        Objectives:
+        1. Enumerate employees and extract email patterns
+        2. Scan public code repositories for credentials
+        3. Analyze DNS/mail infrastructure
+        4. Discover all subdomains and virtual hosts
+        5. Correlate findings with threat intelligence
+        """
+        logger.info("\n>>> PHASE 0: OSINT RECONNAISSANCE")
+        logger.info("=" * 60)
+        
+        try:
+            # Extract target info
+            target_domain = self.ctx.target.replace('https://', '').replace('http://', '').split('/')[0]
+            company_name = self._extract_company_name(target_domain)
+            
+            logger.info(f"Target Domain: {target_domain}")
+            logger.info(f"Company Name: {company_name}")
+            
+            # Run OSINT reconnaissance
+            osint_results = await self.osint_orchestrator.run_phase_osint_reconnaissance(
+                domain=target_domain,
+                company_name=company_name
+            )
+            
+            # Store results
+            self.ctx.update('osint_findings', osint_results)
+            
+            # Generate summary
+            summary = self.osint_orchestrator.generate_osint_summary_report()
+            logger.info(f"OSINT Summary:\n{json.dumps(summary, indent=2)}")
+            
+            logger.info(">>> OSINT Reconnaissance Complete")
+            logger.info("=" * 60)
+            
+        except Exception as e:
+            logger.error(f"OSINT Reconnaissance failed: {e}")
+            self.ctx.update('osint_failed', True)
+
+    def _extract_company_name(self, domain: str) -> str:
+        """Extract company name from domain."""
+        # Remove TLD
+        parts = domain.split('.')
+        if len(parts) > 1:
+            return parts[0]
+        return domain
+    
+    async def _run_phase_deep_reconnaissance(self):
+        """Use OSINT findings to guide further reconnaissance."""
+        emp_count = len(getattr(self.ctx, "discovered_employees", []) or self.ctx.get("discovered_employees", []) or [])
+        cred_count = len(getattr(self.ctx, "leaked_credentials", []) or self.ctx.get("leaked_credentials", []) or [])
+        sub_count = len(getattr(self.ctx, "discovered_subdomains", []) or self.ctx.get("discovered_subdomains", []) or [])
+        bucket_count = len(getattr(self.ctx, "cloud_buckets", []) or self.ctx.get("cloud_buckets", []) or [])
+        threat_count = len(getattr(self.ctx, "threat_correlations", []) or self.ctx.get("threat_correlations", []) or [])
+        
+        # Update brain prompt
+        osint_context = f"""
+        OSINT RECONNAISSANCE COMPLETE:
+        - Discovered Employees: {emp_count}
+        - Leaked Credentials: {cred_count}
+        - Subdomains Found: {sub_count}
+        - Cloud Buckets: {bucket_count}
+        - Threat Correlations: {threat_count}
+        
+        Use these findings to prioritize scanning targets.
+        Focus on discovered subdomains and hosts found in threat feeds.
+        """
+        
+        # Include in next phase planning log
+        logger.info(f"OSINT context generated for DEEP_RECONNAISSANCE: {osint_context.strip()}")
+
+    async def _capture_requests(self):
+        """Phase 1b: Intercept HTTP traffic across target via RequestCapturer."""
+        try:
+            from core.request_capture import RequestCapturer
+            capturer = RequestCapturer(max_pages=12, max_depth=2)
+            capture_res = await asyncio.to_thread(capturer.capture, self.target)
+            if capture_res and capture_res.requests:
+                capturer.store(capture_res, self.ctx)
+                logger.info(f"[capture] Intercepted {len(capture_res.requests)} live HTTP requests across {len(capture_res.pages)} pages")
+            else:
+                err_msg = capture_res.error if capture_res else "no requests captured"
+                logger.warning(f"[capture] {err_msg}")
+        except Exception as e:
+            logger.warning(f"[capture] Failed to capture requests: {e}")
+
+    async def _persist_captured_requests(self):
+        """Persist intercepted requests into findings database / knowledge store."""
+        captured = getattr(self.ctx, "captured_requests", [])
+        if captured and hasattr(self, "store") and self.store:
+            try:
+                for req in captured:
+                    self.store.add_asset(
+                        asset_type="captured_request",
+                        value=getattr(req, "url", ""),
+                        metadata={"method": getattr(req, "method", "GET"), "status": getattr(req, "status", 0)}
+                    )
+                logger.info(f"[capture] Persisted {len(captured)} captured requests to KnowledgeStore")
+            except Exception as e:
+                logger.warning(f"Failed to persist captured requests: {e}")
