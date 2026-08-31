@@ -6,7 +6,6 @@ Run: python test_live_intelligence.py
 """
 
 import asyncio
-import json
 import sys
 import os
 
@@ -18,8 +17,8 @@ if hasattr(sys.stderr, 'reconfigure'):
 # Add project root to sys.path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from core.config import get_config
-from core.intelligence_fetcher import IntelligenceFetcher
+from core.common.config import get_config
+from core.intelligence.intelligence_fetcher import IntelligenceFetcher
 
 
 async def run_live_tests():

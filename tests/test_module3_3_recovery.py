@@ -3,12 +3,10 @@ Unit test suite for Phase 3 Module 3.3: Fallback & Recovery Strategies (core/rec
 """
 
 import unittest
-from core.authorization import TargetScopeValidator
-from core.recovery_strategies import (
+from core.security.authorization import TargetScopeValidator
+from core.common.recovery_strategies import (
     retry_with_backoff,
-    FallbackRecoveryManager,
-    ERROR_MAPPING,
-    TOOL_CHAINS
+    FallbackRecoveryManager
 )
 
 

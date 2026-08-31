@@ -5,16 +5,15 @@ Strictly offline_mode support, rate-limited (1 req/sec) external calls, and loca
 """
 
 import difflib
-import gzip
 import json
 import logging
 import time
 import urllib.parse
 import urllib.request
-from core.database import DatabaseManager
+from core.memory.database import DatabaseManager
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Set, Any
+from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
 

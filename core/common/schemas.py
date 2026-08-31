@@ -3,7 +3,7 @@ Strict Pydantic schemas for all framework communication.
 Single source of truth for schema definitions.
 """
 
-from pydantic import BaseModel, Field, model_validator, root_validator
+from pydantic import BaseModel, Field, model_validator
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Literal, Union
 from enum import Enum

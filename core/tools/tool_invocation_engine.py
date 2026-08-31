@@ -2,7 +2,7 @@ import logging
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
 from enum import Enum
-from core.schemas import ToolInvocation, ToolResult
+from core.common.schemas import ToolInvocation, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +43,44 @@ class ToolInvocationEngine:
             audit_context=context.audit_context
         )
 
-        # Both paths converge here at ToolGateway for security, caching, audit trail
-        result = await self.gateway.execute(invocation, context.auth_context)
-        
-        logger.info(f"Tool invocation completed with success: {result.success}")
-        return result
+        try:
+            # Both paths converge here at ToolGateway for security, caching, audit trail
+            result = await self.gateway.execute(invocation, context.auth_context)
+            
+            if not result.success:
+                self._handle_tool_failure(invocation, result)
+            else:
+                stdout_len = len(str(result.stdout or ""))
+                stderr_len = len(str(result.stderr or ""))
+                logger.info(f"Tool invocation completed with success: {result.success} | stdout: {stdout_len} bytes | stderr: {stderr_len} bytes")
+                
+            return result
+        except Exception as e:
+            logger.error(f"Critical engine failure executing {invocation.tool_id}: {e}", exc_info=True)
+            from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus, ErrorInfo, ErrorType
+            result = SchemaToolResult(
+                tool=invocation.tool_id or invocation.operation or "unknown",
+                capability=invocation.operation or "unknown",
+                status=ToolExecutionStatus.FAILED,
+                target=invocation.target,
+                error=ErrorInfo(
+                    error_type=ErrorType.EXECUTION_ERROR,
+                    message=f"Critical engine failure: {str(e)}",
+                    tool=invocation.tool_id
+                )
+            )
+            self._handle_tool_failure(invocation, result)
+            return result
+
+    def _handle_tool_failure(self, invocation: ToolInvocation, result: ToolResult):
+        """Diagnostic logging for failed tools, outputting stderr/stdout captures."""
+        logger.warning(f"TASK_FAILED: Tool={result.tool} target={result.target} status={result.status}")
+        if result.error:
+            logger.warning(f"Error Type: {result.error.error_type.name} - {result.error.message}")
+        if getattr(result, "stderr", None):
+            logger.warning(f"Stderr capture: {str(result.stderr)[:500]}")
+        if getattr(result, "stdout", None):
+            logger.info(f"Stdout capture: {str(result.stdout)[:500]}")
 
     async def invoke_from_capability(
         self, capability: str, target: str, params: Dict[str, Any], 

@@ -159,7 +159,7 @@ class SharedContext:
          logger.info(f"SHARED_CONTEXT_UPDATE: key=technologies[{host}], count={len(self.technologies[host])}")
 
     def add_vulnerability(self, vuln: Dict) -> bool:
-        from core.dedup_tracker import DeduplicationTracker
+        from core.memory.dedup_tracker import DeduplicationTracker
         with self._lock:
             vuln_type = str(vuln.get("type") or vuln.get("vuln_type") or "").lower().strip()
             proof = str(vuln.get("proof") or vuln.get("details") or "").strip()
@@ -191,7 +191,7 @@ class SharedContext:
                     return False
 
             # Route through FalsePositiveFilter
-            from core.fp_filter import FalsePositiveFilter
+            from core.reporting.fp_filter import FalsePositiveFilter
             fp_filter = FalsePositiveFilter()
             should_report, reason = fp_filter.should_report_finding(vuln)
             if not should_report:

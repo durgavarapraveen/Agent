@@ -10,10 +10,10 @@ Two agent types:
 import logging
 from typing import Dict, Union
 
-from core.dynamic_agent import DynamicAgent
-from core.tool_registry import ToolRegistry
-from core.shared_context import SharedContext
-from core.schemas import CapabilityType
+from core.orchestration.dynamic_agent import DynamicAgent
+from core.tools.tool_registry import ToolRegistry
+from core.memory.shared_context import SharedContext
+from core.common.schemas import CapabilityType
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ class AgentSpawner:
 
         logger.info(f"GRAVITY_VECTOR: task='{objective[:50]}' vector='{gravity_vector}'")
 
-        from core.dedup_tracker import DeduplicationTracker
+        from core.memory.dedup_tracker import DeduplicationTracker
         dedup = DeduplicationTracker()
 
         # Only compare gravity vectors when target field is populated and valid
@@ -158,7 +158,7 @@ class AgentSpawner:
 
         if not allowed_tools and not is_exploit:
             try:
-                from core.capability_resolver import CapabilityResolver
+                from core.orchestration.capability_resolver import CapabilityResolver
                 resolver = CapabilityResolver()
                 resolved = resolver.resolve_tools(capability=capability_name, objective=objective)
                 if resolved:
@@ -215,7 +215,7 @@ class AgentSpawner:
                         vuln_type, target_params, max_steps):
         """Create UniversalExploitAgent"""
         from agents.exploit_agent import UniversalExploitAgent
-        from core.config import get_config
+        from core.common.config import get_config
 
         config = get_config()
         tier = config.get("MAX_EXPLOITATION_TIER", "POC")

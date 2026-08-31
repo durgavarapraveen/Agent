@@ -1,6 +1,6 @@
 import pytest
-from core.schemas import TaskSpec, CapabilityType, TaskStatus
-from core.task_manager import TaskManager
+from core.common.schemas import TaskSpec, CapabilityType, TaskStatus
+from core.orchestration.task_manager import TaskManager
 from orchestrator.scheduler import Scheduler
 
 @pytest.fixture
@@ -81,7 +81,7 @@ class TestTaskScheduler:
         assert task2.status == TaskStatus.QUEUED
 
     def test_different_targets_not_deduplicated(self, scheduler, task_manager):
-        from core.authorization import TargetScopeValidator
+        from core.security.authorization import TargetScopeValidator
         TargetScopeValidator.set(TargetScopeValidator(["example.com", "sub.example.com"]))
         
         spec1 = TaskSpec(

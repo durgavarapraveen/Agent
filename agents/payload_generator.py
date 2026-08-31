@@ -4,7 +4,7 @@ Customizes exploit payloads for target environment
 """
 
 import logging
-from typing import Optional, Dict, List
+from typing import List
 from enum import Enum
 
 from agents.llm_client import LLMClient, TaskTier

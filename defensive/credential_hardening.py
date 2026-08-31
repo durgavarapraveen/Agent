@@ -9,8 +9,8 @@ import os
 import re
 import stat
 import subprocess
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from dataclasses import dataclass
+from typing import Dict, List, Any
 
 logger = logging.getLogger(__name__)
 

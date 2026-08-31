@@ -12,11 +12,11 @@ Wraps the entire AntiGravity scanning pipeline:
 import logging
 from typing import Dict, List, Optional, Any
 
-from core.legal_validator import LegalValidator, ScopeViolationException
-from core.audit_logger import AuditLogger
-from core.retention_policy import RetentionPolicy
-from core.encryption import encrypt, decrypt
-from core.compliance_mapper import ComplianceMapper
+from core.security.legal_validator import LegalValidator
+from core.security.audit_logger import AuditLogger
+from core.memory.retention_policy import RetentionPolicy
+from core.security.encryption import encrypt, decrypt
+from core.reporting.compliance_mapper import ComplianceMapper
 
 logger = logging.getLogger(__name__)
 

@@ -5,8 +5,8 @@ Computes dynamic composite ranking scores for tools based on trust, performance,
 
 import logging
 from typing import List, Tuple, Optional
-from core.tool_intelligence import ToolProfile
-from core.schemas import TaskSpec
+from core.tools.tool_intelligence import ToolProfile
+from core.common.schemas import TaskSpec
 
 logger = logging.getLogger(__name__)
 

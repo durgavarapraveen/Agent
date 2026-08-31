@@ -6,7 +6,7 @@ Single source of truth for discovered information.
 import logging
 from typing import Dict, List, Optional, Set
 from datetime import datetime
-from core.schemas import Evidence, KnowledgeItem, Finding
+from core.common.schemas import Evidence, KnowledgeItem, Finding
 
 logger = logging.getLogger(__name__)
 

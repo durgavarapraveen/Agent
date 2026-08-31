@@ -3,8 +3,7 @@ Unit tests for ToolResultFormatter.
 Tests 5 tool compression rules and 3-sentence formatting.
 """
 
-import pytest
-from core.result_formatter import ToolResultFormatter
+from core.common.result_formatter import ToolResultFormatter
 
 
 def test_subfinder_compression():

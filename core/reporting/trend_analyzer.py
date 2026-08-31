@@ -7,10 +7,9 @@ recurring vulnerability detection, and predictive trend analysis using scipy lin
 
 import json
 import logging
-import time
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Tuple
-from core.database import DatabaseManager
+from datetime import datetime
+from typing import Dict, List, Any
+from core.memory.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
 

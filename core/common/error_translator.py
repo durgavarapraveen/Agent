@@ -6,7 +6,7 @@ Transforms raw tool stderr/exceptions into concise, classified error prompts wit
 import logging
 import re
 from enum import Enum
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
 

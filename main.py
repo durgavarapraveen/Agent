@@ -29,10 +29,9 @@ if sys.platform.startswith("win"):
 for _dir in ("data/db", "reports", "loot", ".audit_logs"):
     os.makedirs(_dir, exist_ok=True)
 
-from core.config import load_config
-from core.central_brain import CentralBrain
-from core.meta_brain import MetaBrain
-from agents.llm_harness_adapter import initialize_llm, get_llm, close_llm
+from core.common.config import load_config
+from core.orchestration.central_brain import CentralBrain
+from core.orchestration.meta_brain import MetaBrain
 
 
 _LOG_FMT = '[%(asctime)s] %(name)s - %(levelname)s - %(message)s'
@@ -77,7 +76,7 @@ async def run_single(target: str, auth_file: str = None, tier: str = "POC"):
 
     scope = {"domains": [target], "max_tier": tier}
     brain = CentralBrain(target=target, scope=scope)
-    await brain.run(auth_document=auth_document)
+    await brain.run_main_loop(auth_document=auth_document)
 
 
 async def run_multi(targets: list, auth_file: str = None):
@@ -126,7 +125,7 @@ Examples:
 
     if args.auto_approve:
         os.environ["AUTO_APPROVE_EXPLOITS"] = "true"
-        from core.consent import get_consent
+        from core.security.consent import get_consent
         get_consent().set_auto_approve(True)
         logger.info("Auto-approve exploits enabled via CLI.")
 
@@ -155,7 +154,7 @@ Examples:
     logger.info(f"Compliance frameworks: {config.config['COMPLIANCE_FRAMEWORKS']}")
 
     if args.reset_dedup:
-        from core.dedup_tracker import DeduplicationTracker
+        from core.memory.dedup_tracker import DeduplicationTracker
         DeduplicationTracker().reset_all()
 
     logger.info("=" * 60)

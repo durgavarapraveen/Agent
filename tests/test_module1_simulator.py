@@ -8,11 +8,11 @@ import json
 import tempfile
 import unittest
 
-from core.authorization import TargetScopeValidator
-from core.shared_context import SharedContext
-from core.lateral_movement import LateralMovementPlanner
-from core.credential_simulator import CredentialSimulator
-from core.persistence_auditor import PersistenceAuditor
+from core.security.authorization import TargetScopeValidator
+from core.memory.shared_context import SharedContext
+from core.exploitation.lateral_movement import LateralMovementPlanner
+from core.exploitation.credential_simulator import CredentialSimulator
+from core.exploitation.persistence_auditor import PersistenceAuditor
 
 
 class TestModule1PostExploitationSimulator(unittest.TestCase):

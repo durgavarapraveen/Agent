@@ -16,7 +16,7 @@ actions to carry out via existing managers.
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List
 
 logger = logging.getLogger(__name__)
 

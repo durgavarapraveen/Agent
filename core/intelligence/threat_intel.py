@@ -13,12 +13,11 @@ import json
 import logging
 import urllib.request
 import urllib.parse
-import hashlib
 import ssl
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
 from dataclasses import dataclass
 from datetime import datetime
-from core.database import DatabaseManager
+from core.memory.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
 

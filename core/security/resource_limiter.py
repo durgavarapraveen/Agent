@@ -5,15 +5,12 @@ Per-tool CPU, RAM, and open file descriptor capping, tool-specific timeouts
 with partial output capture, daemonized global scan timer, and psutil tracking.
 """
 
-import json
 import logging
 import os
 import subprocess
-import sys
 import threading
 import time
-from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple, Callable
+from typing import Dict, List, Optional, Any, Callable
 
 import psutil
 

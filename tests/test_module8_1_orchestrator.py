@@ -4,7 +4,7 @@ Unit tests for Phase 8 Module 8.1: Parallel Task Orchestrator (core/orchestrator
 
 import time
 import unittest
-from core.orchestrator_v2 import ParallelOrchestrator, TaskPriority
+from core.orchestration.orchestrator_v2 import ParallelOrchestrator, TaskPriority
 
 
 def dummy_worker(x: int) -> int:

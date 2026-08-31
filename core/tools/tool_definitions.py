@@ -4,10 +4,10 @@ Single source of truth for tool/capability mapping.
 """
 
 import logging
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
-from core.schemas import CapabilityType
+from core.common.schemas import CapabilityType
 
 logger = logging.getLogger(__name__)
 

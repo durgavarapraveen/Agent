@@ -7,9 +7,9 @@ historical FP verdict learning, and auto-validation thresholds.
 from __future__ import annotations
 
 import logging
-from core.database import DatabaseManager
+from core.memory.database import DatabaseManager
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
 

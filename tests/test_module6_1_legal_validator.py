@@ -4,7 +4,7 @@ Unit tests for Phase 6 Module 6.1: Automated Legal Validator (core/legal_validat
 
 import os
 import unittest
-from core.legal_validator import LegalValidator, ScopeViolationException
+from core.security.legal_validator import LegalValidator, ScopeViolationException
 
 
 class TestModule6_1_LegalValidator(unittest.TestCase):

@@ -5,12 +5,12 @@ Validates proposed LLM tool strategies against ToolKnowledgeStore, scope policie
 
 import logging
 from typing import List, Dict, Any, Optional
-from core.tool_intelligence import ToolProfile, TargetContext
-from core.tool_knowledge_store import ToolKnowledgeStore
-from core.tool_adapter import ToolAdapter, ToolInvocation
-from core.exceptions import ToolValidationError
-from core.authorization import TargetScopeValidator
-from core.schemas import TaskSpec
+from core.tools.tool_intelligence import ToolProfile, TargetContext
+from core.tools.tool_knowledge_store import ToolKnowledgeStore
+from core.tools.tool_adapter import ToolAdapter, ToolInvocation
+from core.common.exceptions import ToolValidationError
+from core.security.authorization import TargetScopeValidator
+from core.common.schemas import TaskSpec
 
 logger = logging.getLogger(__name__)
 

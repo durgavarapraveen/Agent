@@ -5,12 +5,12 @@ No real external network calls are made (mocked via unittest.mock).
 """
 
 import unittest
-from unittest.mock import patch, AsyncMock, MagicMock
+from unittest.mock import patch, MagicMock
 import logging
 import io
 import httpx
 
-from core.censys_client import CensysClient
+from core.intelligence.censys_client import CensysClient
 from tools.censys_tool import CensysTool
 
 

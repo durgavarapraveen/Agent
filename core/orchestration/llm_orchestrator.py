@@ -4,14 +4,13 @@ Wraps CentralBrain and coordinates pentest memory retrieval, adaptive prompt bui
 fallback/recovery execution, and token optimization prior to LLM interaction.
 """
 
-import json
 import logging
 from typing import Dict, List, Optional, Any
 
-from core.pentest_memory import PentestMemoryEngine
+from core.memory.pentest_memory import PentestMemoryEngine
 from core.prompts.adaptive import AdaptivePromptEngine
-from core.recovery_strategies import FallbackRecoveryManager
-from core.token_optimizer import TokenOptimizer
+from core.common.recovery_strategies import FallbackRecoveryManager
+from core.common.token_optimizer import TokenOptimizer
 
 logger = logging.getLogger(__name__)
 

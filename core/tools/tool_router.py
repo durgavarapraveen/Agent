@@ -1,6 +1,6 @@
 import logging
 from typing import List, Any
-from core.schemas import ToolInvocation, ToolResult, ToolDefinition
+from core.common.schemas import ToolInvocation, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ class ToolRouter:
         capable_tools = self._get_tools_for_operation(invocation.operation)
         
         if not capable_tools:
-            from core.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus, ErrorInfo, ErrorType
+            from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus, ErrorInfo, ErrorType
             return SchemaToolResult(
                 tool=invocation.tool_id or invocation.operation or "unknown",
                 capability=invocation.operation or "unknown",
@@ -86,18 +86,20 @@ class ToolRouter:
                 if target:
                     # Strip http(s):// for tools that expect domain names
                     domain = target.replace("https://", "").replace("http://", "").split("/")[0]
+                    # Also derive a base domain for tools that fail on subdomains or just need the root
+                    base_domain = domain[4:] if domain.startswith("www.") else domain
                     if tname == "subfinder":
-                        invocation.params["command"] = f"subfinder -d {domain} -silent"
+                        invocation.params["command"] = f"subfinder -d {base_domain} -silent"
                     elif tname == "assetfinder":
-                        invocation.params["command"] = f"assetfinder --subs-only {domain}"
+                        invocation.params["command"] = f"assetfinder --subs-only {base_domain}"
                     elif tname == "amass":
-                        invocation.params["command"] = f"amass enum -d {domain} -passive"
+                        invocation.params["command"] = f"amass enum -d {base_domain} -passive"
                     elif tname == "dnsenum":
-                        invocation.params["command"] = f"dnsenum {domain}"
+                        invocation.params["command"] = f"dnsenum {base_domain}"
                     elif tname == "fierce":
-                        invocation.params["command"] = f"fierce --domain {domain}"
+                        invocation.params["command"] = f"fierce --domain {base_domain}"
                     elif tname == "httpx":
-                        invocation.params["command"] = f"echo {domain} | httpx -silent -title -tech-detect -status-code"
+                        invocation.params["command"] = f"httpx-toolkit -u {target} -silent -title -tech-detect -status-code"
                     elif tname == "nuclei":
                         invocation.params["command"] = f"nuclei -u {target} -silent"
                     elif tname == "nmap":
@@ -130,7 +132,7 @@ class ToolRouter:
                     elif tname == "sslyze":
                         invocation.params["command"] = f"sslyze {domain}"
                     elif tname == "theharvester":
-                        invocation.params["command"] = f"theHarvester -d {domain} -b all -l 100"
+                        invocation.params["command"] = f"theHarvester -d {base_domain} -b all -l 100"
                     elif tname == "wpscan":
                         invocation.params["command"] = f"wpscan --url {target} --enumerate vp,vt --no-banner"
                     else:
@@ -176,7 +178,7 @@ class ToolRouter:
                 # However, many run methods in tool_registry wrap asyncio.run, so we just call them directly.
                 raw_result = best_tool.run(**invocation.params)
                 
-            from core.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus
+            from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus
             
             result = SchemaToolResult(
                 tool=best_tool.name,
@@ -189,7 +191,7 @@ class ToolRouter:
                 duration_seconds=time.time() - start_time
             )
         except Exception as e:
-            from core.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus, ErrorInfo, ErrorType
+            from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus, ErrorInfo, ErrorType
             result = SchemaToolResult(
                 tool=best_tool.name,
                 capability=invocation.operation,
@@ -299,7 +301,7 @@ class ToolRouter:
             "waf_detection": ["wafw00f", "httpx", "whatweb"],
             "employee_enumeration": ["theharvester"],
             "github_scanning": ["http_request"],
-            "dns_intelligence": ["dig", "whois", "dnsenum"],
+            "dns_intelligence": ["dig", "whois", "dnsenum", "dns_lookup"],
             "threat_intelligence": ["http_request"],
         }
         
@@ -318,7 +320,7 @@ class EffectivenessDB:
     """Track which tools work best on what targets"""
     
     def __init__(self):
-        from core.database import DatabaseManager
+        from core.memory.database import DatabaseManager
         self.db = DatabaseManager
         with self.db.get_connection() as conn:
             with conn.cursor() as cur:

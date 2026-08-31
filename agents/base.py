@@ -1,14 +1,14 @@
 import asyncio
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Dict, Any, Optional, List, TYPE_CHECKING
+from typing import Dict, Any, Optional, TYPE_CHECKING
 import logging
 
 if TYPE_CHECKING:
-    from core.context import ExecutionContext
+    pass
 
-from core.models import AgentState, AgentInfo, AgentResult, Task, TaskProposal
-from core.events import EventType
+from core.common.models import AgentState, AgentInfo, AgentResult, Task, TaskProposal
+from core.common.events import EventType
 
 logger = logging.getLogger(__name__)
 

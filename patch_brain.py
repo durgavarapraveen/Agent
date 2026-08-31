@@ -1,5 +1,3 @@
-import re
-import os
 
 filepath = r"c:\Users\durga\Desktop\Projects\outputs\core\central_brain.py"
 with open(filepath, 'r', encoding='utf-8') as f:
@@ -7,12 +5,12 @@ with open(filepath, 'r', encoding='utf-8') as f:
 
 # 1. Add imports
 import_block = """
-from core.tool_invocation_engine import ToolInvocationEngine, InvocationSource
-from core.execution_mode import ExecutionMode, get_execution_config
-from core.tool_gateway import ToolGateway
-from core.claude_agent_loop import ClaudeAgentLoop
+from core.tools.tool_invocation_engine import ToolInvocationEngine, InvocationSource
+from core.orchestration.execution_mode import ExecutionMode, get_execution_config
+from core.tools.tool_gateway import ToolGateway
+from core.orchestration.claude_agent_loop import ClaudeAgentLoop
 """
-content = content.replace("from core.schemas import (", import_block + "\nfrom core.schemas import (")
+content = content.replace("from core.common.schemas import (", import_block + "\nfrom core.common.schemas import (")
 
 # 2. Add to __init__
 init_hook = "self.task_manager = TaskManager()"

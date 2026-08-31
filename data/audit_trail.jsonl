@@ -8,3 +8,5 @@
 {"event_type": "SCOPE_VIOLATION", "target": "192.168.99.99", "domain": null, "scope_match": false, "document_hash": "N/A", "severity": "CRITICAL", "timestamp": "2026-08-29T16:17:56.908823"}
 {"event_type": "AUTHORIZATION_CHECK", "target": "10.0.0.5", "domain": "api.target.test", "scope_match": true, "document_hash": "manual", "timestamp": "2026-08-31T10:05:37.546629"}
 {"event_type": "SCOPE_VIOLATION", "target": "192.168.99.99", "domain": null, "scope_match": false, "document_hash": "N/A", "severity": "CRITICAL", "timestamp": "2026-08-31T10:05:37.547349"}
+{"event_type": "AUTHORIZATION_CHECK", "target": "10.0.0.5", "domain": "api.target.test", "scope_match": true, "document_hash": "manual", "timestamp": "2026-08-31T14:22:39.927151"}
+{"event_type": "SCOPE_VIOLATION", "target": "192.168.99.99", "domain": null, "scope_match": false, "document_hash": "N/A", "severity": "CRITICAL", "timestamp": "2026-08-31T14:22:39.928498"}

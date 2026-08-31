@@ -12,10 +12,8 @@ Tests:
 """
 
 import asyncio
-import json
 import sys
 import os
-import pytest
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
@@ -25,9 +23,9 @@ if hasattr(sys.stderr, 'reconfigure'):
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from core.intelligence_fetcher import IntelligenceFetcher
-from core.knowledge_base import KnowledgeBase
-from core.tool_installer import ToolInstaller
+from core.intelligence.intelligence_fetcher import IntelligenceFetcher
+from core.memory.knowledge_base import KnowledgeBase
+from core.tools.tool_installer import ToolInstaller
 
 
 async def _test_nvd_async():

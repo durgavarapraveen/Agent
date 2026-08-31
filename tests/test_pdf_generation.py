@@ -1,5 +1,5 @@
 import os
-from core.shared_context import SharedContext
+from core.memory.shared_context import SharedContext
 from core.reporting import EnterpriseReporter
 
 def test_enterprise_report_pdf_generation():

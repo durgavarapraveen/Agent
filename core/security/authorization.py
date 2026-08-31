@@ -6,7 +6,7 @@ import re
 import logging
 from typing import List, Optional
 from urllib.parse import urlparse
-from core.exceptions import AuthorizationError
+from core.common.exceptions import AuthorizationError
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ class TargetScopeValidator:
     def get(cls) -> 'TargetScopeValidator':
         if cls._instance is None:
             # Fallback default target if validator has not been set yet
-            from core.config import get_config
+            from core.common.config import get_config
             target = get_config().get("TARGET", "example.com")
             cls._instance = cls([target])
         return cls._instance

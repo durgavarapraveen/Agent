@@ -6,9 +6,9 @@ import os
 import tempfile
 import unittest
 
-from core.authorization import TargetScopeValidator
-from core.patch_tracker import PatchTracker
-from core.vulnerability_intelligence import VulnerabilityIntelligence
+from core.security.authorization import TargetScopeValidator
+from core.intelligence.patch_tracker import PatchTracker
+from core.intelligence.vulnerability_intelligence import VulnerabilityIntelligence
 
 
 class TestModule24PatchIntel(unittest.TestCase):

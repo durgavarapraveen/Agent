@@ -13,8 +13,7 @@ from typing import Optional, Dict, Any, List, Tuple
 
 import httpx
 
-from core.config import get_config
-from core.schemas import NormalizedLLMResponse
+from core.common.schemas import NormalizedLLMResponse
 
 
 
@@ -40,7 +39,7 @@ class TaskTier(Enum):
     LARGE = "large"
 
 from agents.llm_harness_adapter import get_llm, initialize_llm
-from agents.universal_llm_harness import TaskTier as HarnessTaskTier, LLMResponse
+from agents.universal_llm_harness import TaskTier as HarnessTaskTier
 
 class LLMProvider(ABC):
     """Base provider interface (Deprecated - routing to Universal Harness)"""

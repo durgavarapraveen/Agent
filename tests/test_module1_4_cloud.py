@@ -3,8 +3,8 @@ Unit test suite for Module 1.4: Cloud Infrastructure Scanner (core/cloud_scanner
 """
 
 import unittest
-from core.authorization import TargetScopeValidator
-from core.cloud_scanner import CloudInfrastructureScanner
+from core.security.authorization import TargetScopeValidator
+from core.intelligence.cloud_scanner import CloudInfrastructureScanner
 
 
 class TestModule14CloudScanner(unittest.TestCase):

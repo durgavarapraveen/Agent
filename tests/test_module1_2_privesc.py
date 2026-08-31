@@ -2,11 +2,9 @@
 Unit tests for Module 1.2: Privilege Escalation Detector (core/privesc_detector.py).
 """
 
-import os
-import tempfile
 import unittest
 
-from core.privesc_detector import PrivescDetector
+from core.exploitation.privesc_detector import PrivescDetector
 
 
 class TestModule12PrivescDetector(unittest.TestCase):

@@ -1,6 +1,6 @@
-from core.osint_engine import OSINTDatabase
-from core.threat_intel import ThreatIntelDatabase
-from core.subdomain_enum import SubdomainDatabase
+from core.intelligence.osint_engine import OSINTDatabase
+from core.intelligence.threat_intel import ThreatIntelDatabase
+from core.intelligence.subdomain_enum import SubdomainDatabase
 
 def test_database_singleton_instances():
     # 1. OSINTDatabase

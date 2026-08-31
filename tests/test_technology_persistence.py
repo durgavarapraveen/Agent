@@ -1,7 +1,7 @@
-from core.shared_context import SharedContext
-from core.request_capture import RequestCapturer, CaptureResult, CapturedRequest
-from core.capability_worker import CapabilityWorker
-from core.tool_registry import ToolRegistry
+from core.memory.shared_context import SharedContext
+from core.exploitation.request_capture import RequestCapturer, CaptureResult, CapturedRequest
+from core.orchestration.capability_worker import CapabilityWorker
+from core.tools.tool_registry import ToolRegistry
 
 def test_request_capture_technology_extraction_and_persistence():
     ctx = SharedContext("https://mampg.org")

@@ -6,7 +6,7 @@ LLM does not make retry decisions.
 
 import logging
 from typing import Optional, Dict, Any, Union
-from core.schemas import ToolResult, ErrorType, ErrorInfo, ToolExecutionStatus, RetryDecisionType
+from core.common.schemas import ToolResult, ToolExecutionStatus, RetryDecisionType
 
 logger = logging.getLogger(__name__)
 

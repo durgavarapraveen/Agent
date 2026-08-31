@@ -1,11 +1,9 @@
 import pytest
-import asyncio
 from datetime import datetime
 
-from core.models import Task, Finding, Evidence, AgentInfo, AgentResult, AgentState, FindingSeverity
-from core.events import EventBus, EventType, Event
-from core.context import ExecutionContext
-from core.exceptions import ScopeViolationException
+from core.common.models import Task, Finding, Evidence, AgentInfo, AgentState, FindingSeverity
+from core.common.events import EventBus, EventType, Event
+from core.memory.context import ExecutionContext
 
 @pytest.fixture
 def event_bus():

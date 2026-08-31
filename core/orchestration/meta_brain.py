@@ -10,8 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
-from core.central_brain import CentralBrain
-from core.config import get_config
+from core.orchestration.central_brain import CentralBrain
+from core.common.config import get_config
 
 logger = logging.getLogger(__name__)
 

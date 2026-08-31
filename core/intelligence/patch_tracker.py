@@ -8,7 +8,7 @@ import csv
 import logging
 import os
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
 

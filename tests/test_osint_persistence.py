@@ -1,7 +1,6 @@
-import pytest
-from core.shared_context import SharedContext
-from core.osint_engine import Employee, LeakedCredential
-from core.osint_integration import OSINTOrchestrator
+from core.memory.shared_context import SharedContext
+from core.intelligence.osint_engine import Employee
+from core.intelligence.osint_integration import OSINTOrchestrator
 from core.reporting import EnterpriseReporter
 
 def test_osint_employee_storage_and_harvesting():

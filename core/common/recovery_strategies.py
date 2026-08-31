@@ -10,8 +10,7 @@ import re
 import time
 from typing import Callable, Dict, List, Optional, Tuple, Any
 
-from core.authorization import TargetScopeValidator
-from core.exceptions import ScopeViolationException
+from core.security.authorization import TargetScopeValidator
 
 logger = logging.getLogger(__name__)
 

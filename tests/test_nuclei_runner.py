@@ -5,16 +5,16 @@ Unit tests for core/nuclei_runner.py module.
 import asyncio
 import json
 import unittest
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, AsyncMock
 
-from core.nuclei_runner import NucleiRunner
-from core.shared_context import SharedContext
+from core.tools.nuclei_runner import NucleiRunner
+from core.memory.shared_context import SharedContext
 
 
 class TestNucleiRunner(unittest.TestCase):
 
     def setUp(self):
-        from core.dedup_tracker import DeduplicationTracker
+        from core.memory.dedup_tracker import DeduplicationTracker
         DeduplicationTracker().reset_all()
 
     def test_find_templates_for(self):

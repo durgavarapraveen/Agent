@@ -7,13 +7,13 @@ No LLM calls occur in the execution loop.
 import logging
 import re
 from typing import Dict, Any, List, Optional
-from core.schemas import (
+from core.common.schemas import (
     CapabilityType, ToolResult, AgentResult, ToolExecutionStatus,
-    RetryDecisionType, Finding, Evidence
+    RetryDecisionType, Finding
 )
-from core.tool_adapter import ToolAdapter, ToolInvocation
-from core.retry_policy import RetryPolicy
-from core.exceptions import ToolValidationError
+from core.tools.tool_adapter import ToolAdapter, ToolInvocation
+from core.common.retry_policy import RetryPolicy
+from core.common.exceptions import ToolValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +104,7 @@ class CapabilityWorker:
 
     def _get_tool_chain_for_capability(self, capability: CapabilityType, objective: str = "") -> List[str]:
         """Dynamically resolve prioritized list of tools for each capability via CapabilityResolver"""
-        from core.capability_resolver import CapabilityResolver
+        from core.orchestration.capability_resolver import CapabilityResolver
         resolver = CapabilityResolver()
         resolved_profiles = resolver.resolve_tools(capability=capability.value, objective=objective)
         if resolved_profiles:
@@ -120,7 +120,7 @@ class CapabilityWorker:
         params: Dict[str, Any]
     ) -> ToolResult:
         """Execute a single tool with deterministic RetryPolicy and PartialResult handling"""
-        from core.tool_knowledge_store import ToolKnowledgeStore
+        from core.tools.tool_knowledge_store import ToolKnowledgeStore
         store = ToolKnowledgeStore.get_instance()
         from urllib.parse import urlparse
         attempt = 1
@@ -152,7 +152,7 @@ class CapabilityWorker:
                     if raw_prof and not isinstance(raw_prof, dict):
                         target_profile = raw_prof
                     else:
-                        from core.target_profiler import TargetProfiler
+                        from core.intelligence.target_profiler import TargetProfiler
                         try:
                             target_profile = TargetProfiler.profile_target(target, self.ctx)
                         except Exception:
@@ -232,11 +232,11 @@ class CapabilityWorker:
         raw_res: Dict[str, Any]
     ) -> ToolResult:
         """Process tool output into ToolResult, applying deduplication, significance filtering, token compression, and error translation."""
-        from core.config import get_config
-        from core.dedup_tracker import DeduplicationTracker
-        from core.error_translator import ErrorTranslator
-        from core.result_formatter import ToolResultFormatter
-        from core.significance_filter import SignificanceFilter
+        from core.common.config import get_config
+        from core.memory.dedup_tracker import DeduplicationTracker
+        from core.common.error_translator import ErrorTranslator
+        from core.common.result_formatter import ToolResultFormatter
+        from core.reporting.significance_filter import SignificanceFilter
 
         config = get_config()
         stdout = raw_res.get("output") or raw_res.get("stdout") or ""
@@ -372,7 +372,7 @@ class CapabilityWorker:
 
         # Clean target root
         root_domain = target.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0].strip().lower()
-        from core.subdomain_enum import extract_apex_domain
+        from core.intelligence.subdomain_enum import extract_apex_domain
         apex_domain = extract_apex_domain(root_domain)
 
         # 1. Subfinder & Subdomain tools: parse JSON or line-by-line text

@@ -2,9 +2,8 @@
 Unit tests for Phase 6 Module 6.4: Encryption at Rest (core/encryption.py)
 """
 
-import os
 import unittest
-from core.encryption import (
+from core.security.encryption import (
     encrypt,
     decrypt,
     re_encrypt_data,

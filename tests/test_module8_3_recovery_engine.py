@@ -6,8 +6,7 @@ import os
 import shutil
 import tempfile
 import unittest
-from pathlib import Path
-from core.recovery_engine import RecoveryEngine
+from core.common.recovery_engine import RecoveryEngine
 
 
 class TestModule8_3_RecoveryEngine(unittest.TestCase):

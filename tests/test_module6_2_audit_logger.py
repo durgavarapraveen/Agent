@@ -5,7 +5,7 @@ Unit tests for Phase 6 Module 6.2: Immutable Audit Logger (core/audit_logger.py)
 import json
 import os
 import unittest
-from core.audit_logger import AuditLogger, mask_sensitive_pii
+from core.security.audit_logger import AuditLogger
 
 
 class TestModule6_2_AuditLogger(unittest.TestCase):

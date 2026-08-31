@@ -4,8 +4,6 @@ Provides HTTP endpoints for pentesting tools
 """
 
 import asyncio
-import json
-import subprocess
 import logging
 from aiohttp import web
 from typing import Dict, Any

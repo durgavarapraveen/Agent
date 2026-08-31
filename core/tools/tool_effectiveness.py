@@ -11,7 +11,7 @@ Inspired by HexStrike AI's IntelligentDecisionEngine + AttackChain.
 import logging
 from typing import Any, Dict, List, Optional
 
-from core.target_profiler import TargetProfile, TargetType, TechnologyStack
+from core.intelligence.target_profiler import TargetProfile, TargetType, TechnologyStack
 
 logger = logging.getLogger(__name__)
 

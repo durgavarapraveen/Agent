@@ -1,6 +1,6 @@
 import pytest
 from scope.manager import ScopeManager
-from core.exceptions import ScopeViolationException
+from core.common.exceptions import ScopeViolationException
 
 @pytest.fixture
 def scope_manager():

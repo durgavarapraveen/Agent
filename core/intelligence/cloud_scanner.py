@@ -5,12 +5,9 @@ Enforces TargetScopeValidator checks, dry-run guarantees, and Detection Mapping 
 """
 
 import logging
-import re
-import subprocess
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
 
-from core.authorization import TargetScopeValidator
-from core.exceptions import ScopeViolationException
+from core.security.authorization import TargetScopeValidator
 
 logger = logging.getLogger(__name__)
 

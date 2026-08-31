@@ -12,7 +12,7 @@ import os
 import re
 import sqlite3
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, Tuple
 
 logger = logging.getLogger(__name__)
 

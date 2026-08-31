@@ -8,10 +8,10 @@ import logging
 import re
 from typing import Dict, List, Optional, Tuple
 
-from core.config import get_config
-from core.intelligence_fetcher import IntelligenceFetcher
-from core.knowledge_base import KnowledgeBase
-from core.tool_installer import ToolInstaller
+from core.common.config import get_config
+from core.intelligence.intelligence_fetcher import IntelligenceFetcher
+from core.memory.knowledge_base import KnowledgeBase
+from core.tools.tool_installer import ToolInstaller
 
 logger = logging.getLogger(__name__)
 

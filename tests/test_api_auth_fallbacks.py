@@ -1,8 +1,8 @@
 import asyncio
-from core.subdomain_enum import CertificateTransparencyScanner
-from core.osint_engine import GitHubScanner
-from core.threat_intel import AbuseChIntelligence, ThreatIntelDatabase
-from core.censys_client import CensysClient
+from core.intelligence.subdomain_enum import CertificateTransparencyScanner
+from core.intelligence.osint_engine import GitHubScanner
+from core.intelligence.threat_intel import AbuseChIntelligence, ThreatIntelDatabase
+from core.intelligence.censys_client import CensysClient
 
 def test_subdomain_scanner_multi_source_fallback():
     async def _test():

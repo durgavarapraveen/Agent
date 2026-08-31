@@ -5,12 +5,11 @@ Tests Layer 1 (Dedup), Layer 2 (Significance Filter & Compression & Error Transl
 
 import time
 import pytest
-from typing import Dict, Any
 
-from core.capability_worker import CapabilityWorker
-from core.config import get_config
-from core.schemas import CapabilityType, ToolExecutionStatus
-from core.tool_registry import ToolRegistry
+from core.orchestration.capability_worker import CapabilityWorker
+from core.common.config import get_config
+from core.common.schemas import ToolExecutionStatus
+from core.tools.tool_registry import ToolRegistry
 
 
 class DummySharedContext(list):

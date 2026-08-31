@@ -8,7 +8,7 @@ Uses a local technique table (no network dependency).
 
 import logging
 from typing import Dict, List
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 

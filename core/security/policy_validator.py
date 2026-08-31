@@ -8,7 +8,7 @@ Policy validation layer - deterministic enforcement of:
 import logging
 import re
 from typing import Dict, List, Optional, Tuple
-from core.schemas import CapabilityRequest, ErrorInfo, ErrorType
+from core.common.schemas import ErrorInfo, ErrorType
 
 logger = logging.getLogger(__name__)
 

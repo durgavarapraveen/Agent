@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 from typing import Dict, List, Optional, Tuple, Any
 
-from core.authorization import TargetScopeValidator
+from core.security.authorization import TargetScopeValidator
 
 logger = logging.getLogger(__name__)
 

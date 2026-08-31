@@ -12,20 +12,36 @@ from enum import Enum
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Any, List
+from dataclasses import dataclass, field
+
+@dataclass
+class PhaseConfig:
+    MAX_CONSECUTIVE_FAILURES: int = 2
+    TIMEOUT_MINUTES: int = 10
+    MAX_ITERATIONS: int = 20
+
+@dataclass
+class PhaseState:
+    phase_name: str
+    start_time: datetime = field(default_factory=datetime.now)
+    iterations: int = 0
+    failure_count: int = 0
+    consecutive_failures: int = 0
+    objective_met: bool = False
+
 
 from agents.llm_client import LLMClient, TaskTier
 from agents.authorization import AuthorizationManager
-from core.shared_context import SharedContext
-from core.tool_registry import ToolRegistry
-from core.agent_spawner import AgentSpawner
-from core.token_optimizer import TokenOptimizer
-from core.chain_integration import ChainManager
-from core.post_exploit import PostExploitManager
+from core.memory.shared_context import SharedContext
+from core.tools.tool_registry import ToolRegistry
+from core.orchestration.agent_spawner import AgentSpawner
+from core.exploitation.chain_integration import ChainManager
+from core.exploitation.post_exploit import PostExploitManager
 from core.reporting import EnterpriseReporter
-from core.metrics import MetricsTracker
-from core.automation import AutomationEngine
-from core.consent import get_consent
-from core.request_capture import RequestCapturer
+from core.reporting.metrics import MetricsTracker
+from core.orchestration.automation import AutomationEngine
+from core.security.consent import get_consent
+from core.exploitation.request_capture import RequestCapturer
 from validation import gate as confidence_gate, DedupStore
 from compliance import ComplianceReporter, available_frameworks
 
@@ -33,28 +49,28 @@ from knowledge.store import KnowledgeStore as PersistentKnowledgeStore
 import os
 import uuid
 
-from core.stores import KnowledgeStore, EvidenceStore, FindingStore
-from core.task_manager import TaskManager
+from core.memory.stores import KnowledgeStore, EvidenceStore, FindingStore
+from core.orchestration.task_manager import TaskManager
 from orchestrator.scheduler import Scheduler
-from core.context_resolver import ContextResolver
+from core.memory.context_resolver import ContextResolver
 
-from core.tool_invocation_engine import ToolInvocationEngine, InvocationSource
-from core.execution_mode import ExecutionMode, get_execution_config
-from core.tool_gateway import ToolGateway
-from core.claude_agent_loop import ClaudeAgentLoop
+from core.tools.tool_invocation_engine import ToolInvocationEngine
+from core.orchestration.execution_mode import get_execution_config
+from core.tools.tool_gateway import ToolGateway
+from core.orchestration.claude_agent_loop import ClaudeAgentLoop
 
-from core.schemas import (
+from core.common.schemas import (
     BrainDecision, BrainDecisionAction, ExecutionState, TaskSpec,
     SuccessCriterion, SuccessCriterionType, CapabilityType
 )
 
-from core.osint_integration import OSINTOrchestrator
-from core.threat_intel import ThreatIntelligenceEngine
-from core.subdomain_enum import SubdomainEnumerationEngine
-from core.target_profiler import TargetProfiler
-from core.tool_effectiveness import ToolEffectivenessEngine
-from core.api_reconstructor import APIReconstructor
-from core.poc_generator import POCGenerator
+from core.intelligence.osint_integration import OSINTOrchestrator
+from core.intelligence.threat_intel import ThreatIntelligenceEngine
+from core.intelligence.subdomain_enum import SubdomainEnumerationEngine
+from core.intelligence.target_profiler import TargetProfiler
+from core.tools.tool_effectiveness import ToolEffectivenessEngine
+from core.exploitation.api_reconstructor import APIReconstructor
+from core.exploitation.poc_generator import POCGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -131,11 +147,43 @@ class CentralBrain:
             if self.ctx.exploit_results or len(self.ctx.agents_spawned) >= 10:
                 return ExecutionPhase.REPORTING
         return None
+        
+    def _should_exit_phase(self) -> bool:
+        if not hasattr(self, 'phase_state') or not hasattr(self, 'phase_config'):
+            return False
+            
+        state = self.phase_state
+        config = self.phase_config
+        
+        if (datetime.now() - state.start_time).total_seconds() > (config.TIMEOUT_MINUTES * 60):
+            logger.warning(f"Phase {state.phase_name} timed out.")
+            return True
+        if state.iterations >= config.MAX_ITERATIONS:
+            logger.warning(f"Phase {state.phase_name} reached max iterations.")
+            return True
+        if state.consecutive_failures >= config.MAX_CONSECUTIVE_FAILURES:
+            logger.warning(f"Phase {state.phase_name} reached consecutive failure threshold.")
+            return True
+        if state.objective_met:
+            logger.info(f"Phase {state.phase_name} objective met.")
+            return True
+            
+        return False
+        
+    def _transition_to_next_phase(self):
+        next_phase = self._evaluate_phase_transition()
+        if next_phase:
+            self.transition_phase(next_phase)
+        else:
+            self.current_phase = None
 
-    def __init__(self, target: str, scope: Dict = None):
-        from core.dedup_tracker import DeduplicationTracker
+    def __init__(self, target: str, scope: Dict = None, resume_checkpoint: str = None):
+        from core.memory.dedup_tracker import DeduplicationTracker
+        from core.orchestration.checkpointer import Checkpointer
+        
         self.llm = LLMClient.get()
         self.ctx = SharedContext(target, scope)
+        self.checkpointer = Checkpointer()
         self.tools = ToolRegistry()
         self.spawner = AgentSpawner(self.tools, self.ctx)
         self.auth = AuthorizationManager()
@@ -145,9 +193,14 @@ class CentralBrain:
         self.report_dir = Path("reports")
         self.report_dir.mkdir(exist_ok=True)
         self.failed_tools = set()  # NEW: Brain-level tool failure tracking
-        self.consecutive_agent_failures = 0  # NEW: Track failure streak
-        self.max_consecutive_failures = 3
         self.current_phase = ExecutionPhase.RECON
+        self.phase_config = PhaseConfig()
+        self.phase_history = []
+        
+        from core.security.compliance_gate import ComplianceGate, ScopeValidator, ComplianceAuditLogger
+        scope_val = ScopeValidator(authorized_targets=scope.get("domains") or [target] if scope else [target])
+        self.compliance_gate = ComplianceGate(scope_validator=scope_val, audit_logger=ComplianceAuditLogger())
+
         self.chain_mgr = ChainManager(self.ctx, self.spawner)  # Phase 2: Chain system
         self.tier = (self.ctx.scope.get("max_tier") or "POC").upper()
         self.post_exploit = None  # Phase 3: Post-exploitation (lazy, needs foothold)
@@ -178,7 +231,7 @@ class CentralBrain:
         self.scope = scope or {}
         
         # Initialize target scope validation
-        from core.authorization import TargetScopeValidator
+        from core.security.authorization import TargetScopeValidator
         auth_targets = self.scope.get("domains") or self.scope.get("authorized_targets") or [target]
         TargetScopeValidator.set(TargetScopeValidator(auth_targets))
         
@@ -195,8 +248,8 @@ class CentralBrain:
         
         # Phase 3 Configuration
         self.execution_config = get_execution_config()
-        from core.audit_logger import AuditLogger
-        from core.tool_cache import ToolResultCache
+        from core.security.audit_logger import AuditLogger
+        from core.tools.tool_cache import ToolResultCache
         self.audit_logger = AuditLogger()
         self.tool_cache = ToolResultCache()
         # Use existing registry and stores for the gateway
@@ -207,16 +260,53 @@ class CentralBrain:
         self.task_manager = TaskManager()
         self.scheduler = Scheduler(self.task_manager)
         self.context_resolver = ContextResolver(self.knowledge_store)
+        
+        if resume_checkpoint:
+            logger.info(f"Resuming from checkpoint: {resume_checkpoint}")
+            state = self.checkpointer.load_checkpoint(resume_checkpoint)
+            if state:
+                self.checkpointer.apply_checkpoint(self, state)
 
-    async def run(self, auth_document: str = ""):
-        """Main entry point. Runs full pentest autonomously."""
+    async def _heartbeat_loop(self):
+        while True:
+            try:
+                await asyncio.sleep(30)
+                if not hasattr(self, 'phase_state') or not self.current_phase:
+                    continue
+                    
+                pending = self.task_manager.get_pending_tasks() if hasattr(self, 'task_manager') else []
+                pending_count = len(pending) if pending else 0
+                
+                logger.info(
+                    f"[HEARTBEAT] {datetime.now().isoformat(timespec='seconds')} | "
+                    f"Phase: {self.current_phase.value} | "
+                    f"Pending Tasks: {pending_count} | "
+                    f"Failure Streak: {self.phase_state.consecutive_failures}"
+                )
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[HEARTBEAT] Error: {e}")
 
-        logger.info("=" * 60)
-        logger.info("AUTONOMOUS PENTESTING BRAIN")
-        logger.info("=" * 60)
-        logger.info(f"Target: {self.ctx.target}")
-        logger.info("=" * 60)
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def run_with_heartbeat(self):
+        task = asyncio.create_task(self._heartbeat_loop())
+        try:
+            yield
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
+    async def run_main_loop(self, auth_document: str = ""):
+        """Main entry point. Runs full pentest autonomously via state machine."""
+        logger.info("=" * 60)
+        logger.info("AUTONOMOUS PENTESTING BRAIN (STATE MACHINE)")
+        logger.info("=" * 60)
+        
         # Phase 0: Parse authorization
         if auth_document:
             await self._parse_authorization(auth_document)
@@ -224,7 +314,7 @@ class CentralBrain:
         logger.info("\nValidating tools...")
         await self.tools.validate_tools()
 
-        # HexStrike Intelligence: Profile target before any scanning
+        # HexStrike Intelligence: Profile target
         logger.info("\n>>> TARGET INTELLIGENCE: Profiling target...")
         try:
             self.target_profile = TargetProfiler.profile_target(self.ctx.target, self.ctx)
@@ -233,101 +323,97 @@ class CentralBrain:
         except Exception as e:
             logger.warning(f"Target profiling failed (non-fatal): {e}")
 
-        # Phase 1: Deep recon
-        logger.info("\n>>> PHASE 1: DEEP RECONNAISSANCE")
-        await self._run_phase("recon")
-        
-        enable_osint = os.getenv("ENABLE_OSINT", os.getenv("OSINT_ENABLE", "true")).lower() in ("true", "1", "yes", "on")
-        if enable_osint:
-            logger.info("Running OSINT Reconnaissance...")
-            await self._run_phase("OSINT_RECONNAISSANCE")
-        else:
-            logger.info("Skipping OSINT Reconnaissance (ENABLE_OSINT=false)")
+        try:
+            from contextlib import asynccontextmanager
+        except ImportError:
+            pass
 
-        await self._run_phase("DEEP_RECONNAISSANCE")
-        await self._persist_recon_findings()
-
-        # Phase 1b: Intercept live HTTP traffic across the site (for exploit replay)
-        await self._capture_requests()
-        await self._persist_captured_requests()
-
-        # Phase 1c: Reconstruct API routes & secrets from client-side JavaScript bundles
-        await self._analyze_client_scripts()
-
-        # Phase 2: Vulnerability analysis & technology-matched Nuclei scanning
-        logger.info("\n>>> PHASE 2: VULNERABILITY ANALYSIS")
-        from core.nuclei_runner import NucleiRunner
-        nuclei_runner = NucleiRunner()
-        await nuclei_runner.scan_context_technologies(self.ctx, timeout=60)
-        await self._run_phase("analyze")
-        await self._persist_vulnerabilities()
-
-        # Phase 3: Build attack graph and detect chains
-        logger.info("\n>>> PHASE 3: ATTACK CHAIN ANALYSIS")
-        chain_plan = None
-        if self.ctx.vulnerabilities:
-            self.chain_mgr.build_graph()
-            chains = self.chain_mgr.detect_chains(max_chains=5)
-            if chains:
-                chain_plan = self.chain_mgr.get_exploitation_plan()
-                logger.info(f"Found {len(chains)} attack chains")
-                for i, c in enumerate(chains[:3]):
-                    logger.info(f"  #{i+1} {c.description} (score={c.score:.3f})")
-            else:
-                logger.info("No attack chains found, falling back to direct exploitation")
-                plan = await self._generate_exploit_plan()
-        else:
-            logger.info("No vulnerabilities found. Skipping exploitation.")
-
-        if chain_plan and chain_plan.get("top_chains"):
-            approved = await self._human_approval(chain_plan)
-            if approved:
-                # Phase 4: Chain-based exploitation
-                logger.info("\n>>> PHASE 4: CHAIN EXPLOITATION")
-                result = await self.chain_mgr.llm_select_and_execute()
-                if result:
-                    logger.info(f"Chain result: {result.status} "
-                                f"({result.steps_completed}/{result.steps_total})")
-                    if result.final_impact:
-                        logger.info(f"Impact: {result.final_impact}")
-
-                    # Try more chains if first succeeded
-                    if result.status == "completed":
-                        suggestions = self.chain_mgr.suggest_next_exploits()
-                        if suggestions:
-                            logger.info(f"Follow-up suggestions: {len(suggestions)}")
-                            # Run additional exploitation phase for follow-ups
-                            await self._run_phase("exploit")
-                            await self._persist_exploit_results()
-                else:
-                    logger.warning("Chain execution failed, falling back to direct exploitation")
-                    await self._run_phase("exploit")
-                    await self._persist_exploit_results()
-        elif self.ctx.vulnerabilities:
-            plan = await self._generate_exploit_plan()
-            if plan and plan.get("exploits"):
-                approved = await self._human_approval(plan)
-                if approved:
-                    logger.info("\n>>> PHASE 4: DIRECT EXPLOITATION")
-                    await self._run_phase("exploit")
-                    await self._persist_exploit_results()
-
-        # Phase 6: Post-exploitation (privesc / lateral / persistence / MITRE)
-        await self._run_post_exploitation()
-
-        # Phase 5: Automated finding retest & report generation
-        logger.info("\n>>> PHASE 5: FINDING RETEST & REPORT GENERATION")
-        if self.ctx.vulnerabilities:
-            from core.retest_engine import RetestEngine
-            retest_engine = RetestEngine()
-            await retest_engine.retest_findings(self.ctx.vulnerabilities)
-        await self._generate_report()
-
+        async with self.run_with_heartbeat():
+            while self.current_phase:
+                logger.info(f"\n>>> ENTERING MAIN PHASE: {self.current_phase.value}")
+                await self.run_phase(self.current_phase.value)
+                
+                # Record state
+                if hasattr(self, 'phase_state'):
+                    self.phase_history.append(self.phase_state)
+                    
+                self.checkpointer.save_checkpoint(self)
+                self._transition_to_next_phase()
+            
         duration = (datetime.now() - self.start_time).total_seconds()
         logger.info(f"\nCompleted in {duration:.0f}s")
         logger.info(f"Agents spawned: {len(self.ctx.agents_spawned)}")
         logger.info(f"Vulnerabilities: {len(self.ctx.vulnerabilities)}")
         logger.info(f"Exploits executed: {len(self.ctx.exploit_results)}")
+
+    async def run_phase(self, phase: str):
+        self.phase_state = PhaseState(phase_name=phase)
+        
+        if phase == ExecutionPhase.RECON.value:
+            await self._run_phase("recon")
+            enable_osint = os.getenv("ENABLE_OSINT", os.getenv("OSINT_ENABLE", "true")).lower() in ("true", "1", "yes", "on")
+            if enable_osint:
+                logger.info("Running OSINT Reconnaissance...")
+                await self._run_phase("OSINT_RECONNAISSANCE")
+            await self._run_phase("DEEP_RECONNAISSANCE")
+            await self._persist_recon_findings()
+            await self._capture_requests()
+            await self._persist_captured_requests()
+            await self._analyze_client_scripts()
+            
+        elif phase == ExecutionPhase.ACTIVE_SCANNING.value:
+            from core.tools.nuclei_runner import NucleiRunner
+            nuclei_runner = NucleiRunner()
+            await nuclei_runner.scan_context_technologies(self.ctx, timeout=60)
+            await self._run_phase("analyze")
+            await self._persist_vulnerabilities()
+            
+        elif phase == ExecutionPhase.EXPLOITATION.value:
+            # Compliance Gate check
+            check = self.compliance_gate.check_before_exploit(self.ctx.target)
+            if not check.authorized:
+                logger.warning(f"Compliance check failed: {check.reason}. Skipping EXPLOIT phase.")
+                return
+                
+            chain_plan = None
+            if self.ctx.vulnerabilities:
+                self.chain_mgr.build_graph()
+                chains = self.chain_mgr.detect_chains(max_chains=5)
+                if chains:
+                    chain_plan = self.chain_mgr.get_exploitation_plan()
+                    logger.info(f"Found {len(chains)} attack chains")
+                else:
+                    logger.info("No attack chains found, falling back to direct exploitation")
+                    plan = await self._generate_exploit_plan()
+            
+            if chain_plan and chain_plan.get("top_chains"):
+                approved = await self._human_approval(chain_plan)
+                if approved:
+                    result = await self.chain_mgr.llm_select_and_execute()
+                    if result and result.status == "completed":
+                        suggestions = self.chain_mgr.suggest_next_exploits()
+                        if suggestions:
+                            await self._run_phase("exploit")
+                            await self._persist_exploit_results()
+                    else:
+                        await self._run_phase("exploit")
+                        await self._persist_exploit_results()
+            elif self.ctx.vulnerabilities:
+                plan = await self._generate_exploit_plan()
+                if plan and plan.get("exploits"):
+                    approved = await self._human_approval(plan)
+                    if approved:
+                        await self._run_phase("exploit")
+                        await self._persist_exploit_results()
+                        
+            await self._run_post_exploitation()
+            
+        elif phase == ExecutionPhase.REPORTING.value:
+            if self.ctx.vulnerabilities:
+                from core.reporting.retest_engine import RetestEngine
+                retest_engine = RetestEngine()
+                await retest_engine.retest_findings(self.ctx.vulnerabilities)
+            await self._generate_report()
 
     async def _capture_requests(self):
         """Phase 1b: crawl the site with a headless browser and intercept every
@@ -451,15 +537,15 @@ class CentralBrain:
         logger.info(f"--- Running Approach A for phase: {phase} ---")
         
         session_id = f"session_{phase}"
-        from core.authorization import AuthContext
+        from core.security.authorization import AuthContext
         allowed_tools = list(self.tools.tools.keys()) if hasattr(self, 'tools') and hasattr(self.tools, 'tools') else []
         auth_context = AuthContext(allowed_tools=allowed_tools, has_elevated_privilege=True, target_profile=getattr(self, 'target_profile', None))
         agents_this_phase = 0
-        max_agents = self.max_agents_per_phase
+        max_agents = self.phase_config.MAX_ITERATIONS if hasattr(self, 'phase_config') else 20
         task_history = []
         consecutive_duplicate_rounds = 0
         
-        from core.hexstrike_decision_engine import IntelligentDecisionEngine
+        from core.orchestration.hexstrike_decision_engine import IntelligentDecisionEngine
         hex_engine = IntelligentDecisionEngine()
         target_profile = hex_engine.analyze_target(self.ctx.target)
         attack_chain = hex_engine.create_attack_chain(target_profile, objective="comprehensive")
@@ -471,7 +557,17 @@ class CentralBrain:
                 hex_suggestions += f"- Tool: {step.tool}, Parameters: {step.parameters}, Success Prob: {step.success_probability:.2f}\n"
 
         while agents_this_phase < max_agents:
-            summary = self.ctx.get_full_summary(max_chars=800)
+            if hasattr(self, 'phase_state'):
+                self.phase_state.iterations = agents_this_phase
+                if self._should_exit_phase():
+                    logger.warning(f"Phase {phase} exit conditions met.")
+                    break
+                    
+            summary = self.ctx.get_full_summary(max_chars=8000)
+            
+            from core.common.token_optimizer import TokenOptimizer
+            token_opt = TokenOptimizer()
+            compressed_summary = token_opt.compress_context(summary)
             
             history_text = "\n".join([
                 f"- {'✓' if h['success'] else '✗'} {h['capability']} on {h['target']} (tool: {h.get('tool', 'auto')})"
@@ -481,7 +577,7 @@ class CentralBrain:
             prompt = (
                 f"Identify capability requests for phase {phase}.\n"
                 f"Target: {self.ctx.target}\n"
-                f"Current Context Summary:\n{summary}\n\n"
+                f"Current Context Summary:\n{compressed_summary}\n\n"
                 f"Already Executed Tasks in this phase:\n{history_text}\n\n"
                 f"{hex_suggestions}\n"
                 f"Evaluate the HexStrike suggestions against the current context. If they have already been run or are unnecessary, do not use them. Otherwise, prioritize them.\n"
@@ -491,7 +587,7 @@ class CentralBrain:
             
             response = await self.llm.generate_response(prompt, system=BRAIN_SYSTEM)
             
-            from core.normalizer import PlannerResponseNormalizer
+            from core.common.normalizer import PlannerResponseNormalizer
             try:
                 decision = PlannerResponseNormalizer.normalize(response.content)
             except Exception as e:
@@ -631,7 +727,7 @@ class CentralBrain:
 
     async def _run_phase_approach_b(self, phase: str):
         logger.info(f"--- Running Approach B for phase: {phase} ---")
-        from core.tool_use_executor import ToolUseExecutor
+        from core.tools.tool_use_executor import ToolUseExecutor
         
         # Claude Agent Loop creation
         executor = ToolUseExecutor(self.tool_invocation_engine)
@@ -640,7 +736,7 @@ class CentralBrain:
             invocation_engine=self.tool_invocation_engine
         )
         objective = f"Execute tasks for phase {phase}"
-        from core.authorization import AuthContext
+        from core.security.authorization import AuthContext
         allowed_tools = list(self.tools.tools.keys()) if hasattr(self, 'tools') and hasattr(self.tools, 'tools') else []
         auth_context = AuthContext(allowed_tools=allowed_tools, has_elevated_privilege=True, target_profile=getattr(self, 'target_profile', None))
         
@@ -653,7 +749,7 @@ class CentralBrain:
 
     def _parse_deepseek_response(self, response_text: str) -> List[TaskSpec]:
         # Helper to parse DeepSeek json and return TaskSpec objects
-        from core.normalizer import PlannerResponseNormalizer
+        from core.common.normalizer import PlannerResponseNormalizer
         try:
             decision = PlannerResponseNormalizer.normalize(response_text)
             return decision.tasks
@@ -665,14 +761,27 @@ class CentralBrain:
     async def _run_phase_legacy(self, phase: str):
         """LLM-driven loop with agent history, dedup, failed tool filtering, and circuit-breaker."""
         agents_this_phase = 0
+        if hasattr(self, 'phase_state'):
+            self.phase_state.consecutive_failures = 0
         self.consecutive_agent_failures = 0
         agent_history = []  # Track what each agent did
         completed_objectives = set()  # Prevent duplicate tasks
 
         phase_prompt = self._load_phase_prompt(phase)
 
-        while agents_this_phase < self.max_agents_per_phase:
-            summary = self.ctx.get_full_summary(max_chars=800)
+        max_agents = self.phase_config.MAX_ITERATIONS if hasattr(self, 'phase_config') else 20
+        while agents_this_phase < max_agents:
+            if hasattr(self, 'phase_state'):
+                self.phase_state.iterations = agents_this_phase
+                if self._should_exit_phase():
+                    logger.warning(f"Phase {phase} exit conditions met.")
+                    break
+                    
+            summary = self.ctx.get_full_summary(max_chars=8000)
+            
+            from core.common.token_optimizer import TokenOptimizer
+            token_opt = TokenOptimizer()
+            compressed_summary = token_opt.compress_context(summary)
 
             # ── Build failed tools warning ──
             failed_tools_warning = ""
@@ -704,12 +813,10 @@ class CentralBrain:
                     chain_context += f"  - {er.get('type','?')}: {'SUCCESS' if er.get('success') else 'FAILED'}\n"
 
             # ── Context truncation ──
-            _MAX_SUMMARY_CHARS = 800
-            if len(summary) > _MAX_SUMMARY_CHARS:
-                summary = summary[:_MAX_SUMMARY_CHARS] + "..."
+            _MAX_SUMMARY_CHARS = 8000
+            if len(compressed_summary) > _MAX_SUMMARY_CHARS:
+                compressed_summary = compressed_summary[:_MAX_SUMMARY_CHARS] + "..."
 
-            # ── Circuit-breaker hint ──
-            consecutive_failures_per_objective = {}
 
             circuit_breaker_hint = ""
             if self.consecutive_agent_failures >= 2:
@@ -762,10 +869,10 @@ class CentralBrain:
                 f"{history_section}"
                 f"\n--- DISCOVERED CONTEXT ---\n"
                 f"{db_context_str}\n"
-                f"\nSummary:\n{summary}\n"
+                f"\nSummary:\n{compressed_summary}\n"
                 f"{chain_context}"
                 f"{circuit_breaker_hint}"
-                f"Tasks completed: {agents_this_phase}/{self.max_agents_per_phase}\n\n"
+                f"Tasks completed: {agents_this_phase}/{max_agents}\n\n"
                 f"Based on data above, output JSON for next task. "
                 f"If phase complete, output: {{\"action\": \"phase_complete\"}}\n"
                 f"Do not repeat completed tasks. Output ONLY valid JSON.\n"
@@ -787,7 +894,7 @@ class CentralBrain:
             raw_content = ""
 
             from agents.llm_client import validate_json_payload
-            from core.normalizer import PlannerResponseNormalizer
+            from core.common.normalizer import PlannerResponseNormalizer
 
             for attempt in range(max_retries):
                 logger.info(f"[CentralBrain] Brain decision attempt {attempt + 1}/{max_retries} initiated.")
@@ -867,7 +974,7 @@ class CentralBrain:
                         full_target = base_url
 
                     # 4. Scope validation
-                    from core.authorization import TargetScopeValidator
+                    from core.security.authorization import TargetScopeValidator
                     from urllib.parse import urlparse
                     parsed_host = urlparse(full_target).hostname or full_target.split("/")[0].split(":")[0]
                     scope_pass = TargetScopeValidator.get().is_authorized(parsed_host)
@@ -1592,7 +1699,7 @@ class CentralBrain:
 
     async def _spawn_and_run_agent(self, spec: Dict):
         """Spawn single agent and run it"""
-        from core.dynamic_agent import DynamicAgent
+        from core.orchestration.dynamic_agent import DynamicAgent
         
         objective = spec.get("objective", "")
         tools = spec.get("tools", [])
@@ -1631,7 +1738,7 @@ class CentralBrain:
 
     async def _spawn_multiple_agents(self, specs: list):
         """Spawn multiple agents and run in parallel"""
-        from core.dynamic_agent import DynamicAgent
+        from core.orchestration.dynamic_agent import DynamicAgent
         
         logger.info(f"  Spawning {len(specs)} agents in parallel...")
         
@@ -1755,7 +1862,7 @@ CRITICAL RULES:
     def _active_frameworks(self):
         """Compliance frameworks selected via --frameworks (defaults to all)."""
         try:
-            from core.config import get_config
+            from core.common.config import get_config
             fw = get_config().config.get("COMPLIANCE_FRAMEWORKS")
             if fw:
                 return fw
@@ -2327,7 +2434,7 @@ CRITICAL RULES:
     async def _capture_requests(self):
         """Phase 1b: Intercept HTTP traffic across target via RequestCapturer."""
         try:
-            from core.request_capture import RequestCapturer
+            from core.exploitation.request_capture import RequestCapturer
             capturer = RequestCapturer(max_pages=12, max_depth=2)
             capture_res = await asyncio.to_thread(capturer.capture, self.target)
             if capture_res and capture_res.requests:

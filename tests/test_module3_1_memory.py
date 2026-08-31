@@ -6,7 +6,7 @@ import os
 import tempfile
 import unittest
 
-from core.pentest_memory import anonymize_text, hash_hostname, PentestMemoryEngine
+from core.memory.pentest_memory import anonymize_text, hash_hostname, PentestMemoryEngine
 
 
 class TestModule31PentestMemory(unittest.TestCase):

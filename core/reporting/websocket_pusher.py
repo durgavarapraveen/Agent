@@ -10,7 +10,7 @@ import gzip
 import json
 import logging
 import time
-from typing import Dict, List, Optional, Any, Set, Tuple
+from typing import Dict, List, Any, Set, Tuple
 
 import websockets
 

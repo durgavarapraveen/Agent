@@ -5,11 +5,10 @@ Header: Authorization: Bearer <CENSYS_PAT>
 """
 
 import logging
-import re
 from typing import Dict, Any, Optional
 import httpx
 
-from core.config import get_config
+from core.common.config import get_config
 
 logger = logging.getLogger(__name__)
 

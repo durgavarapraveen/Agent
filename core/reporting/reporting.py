@@ -15,7 +15,7 @@ import html
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,7 @@ class EncryptedTrendStore:
         return bytes(out)
 
     def _init_db(self):
-        from core.database import DatabaseManager
+        from core.memory.database import DatabaseManager
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -102,7 +102,7 @@ class EncryptedTrendStore:
 
     def record_scan(self, target: str, severity_counts: Dict[str, int], critical_count: int, risk_score: float):
         import json, time
-        from core.database import DatabaseManager
+        from core.memory.database import DatabaseManager
         payload = {
             "target": target,
             "counts": severity_counts,
@@ -124,7 +124,7 @@ class EncryptedTrendStore:
 
     def get_target_history(self, target: str) -> List[Dict]:
         import json
-        from core.database import DatabaseManager
+        from core.memory.database import DatabaseManager
         records = []
         try:
             with DatabaseManager.get_connection() as conn:

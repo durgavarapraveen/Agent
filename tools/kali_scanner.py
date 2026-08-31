@@ -5,13 +5,11 @@ No additional Docker image pulls needed
 """
 
 import subprocess
-import json
 import logging
 import re
 import asyncio
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
-from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 

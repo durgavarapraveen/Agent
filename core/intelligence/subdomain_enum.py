@@ -15,7 +15,7 @@ import logging
 import re
 import urllib.request
 import urllib.parse
-from core.database import DatabaseManager
+from core.memory.database import DatabaseManager
 import asyncio
 from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass
@@ -509,7 +509,7 @@ class CertificateTransparencyScanner:
         """Query Censys for certificates using Censys Platform API (PAT authentication)."""
         subdomains = []
         try:
-            from core.censys_client import CensysClient
+            from core.intelligence.censys_client import CensysClient
             client = CensysClient()
             if not client.is_configured:
                 return subdomains

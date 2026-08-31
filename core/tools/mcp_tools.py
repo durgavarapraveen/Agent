@@ -3,11 +3,10 @@ MCP Tools Registry - Connect to Model Context Protocol servers for pentesting
 Supports: Hexstrike, Metasploit, Kali tools, Nuclei, Nikto
 """
 
-import json
 import logging
 import asyncio
 import aiohttp
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any, Optional
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)

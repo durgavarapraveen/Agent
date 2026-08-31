@@ -7,14 +7,13 @@ graceful degradation fallbacks (LLM, DB, tool missing), and audit trail logging.
 
 import json
 import logging
-import os
 import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Callable
 
-from core.encryption import encrypt, decrypt
-from core.audit_logger import AuditLogger
+from core.security.encryption import encrypt, decrypt
+from core.security.audit_logger import AuditLogger
 
 logger = logging.getLogger(__name__)
 

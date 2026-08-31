@@ -8,10 +8,9 @@ Inspired by HexStrike AI's dynamic wordlist selection.
 """
 
 import logging
-import os
 from pathlib import Path
 from typing import Dict, List, Optional
-from core.target_profiler import TargetProfile, TechnologyStack
+from core.intelligence.target_profiler import TargetProfile
 
 logger = logging.getLogger(__name__)
 

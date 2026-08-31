@@ -4,8 +4,8 @@ Replace failed_tools set with deterministic error handling.
 """
 
 import logging
-from typing import Dict, Optional
-from core.schemas import ErrorType, ErrorInfo
+from typing import Optional
+from core.common.schemas import ErrorType, ErrorInfo
 
 logger = logging.getLogger(__name__)
 

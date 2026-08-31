@@ -17,8 +17,8 @@ import time
 logging.basicConfig(level=logging.INFO,
                     format="[%(levelname)s] %(name)s: %(message)s")
 
-from core.request_capture import RequestCapturer
-from core.shared_context import SharedContext
+from core.exploitation.request_capture import RequestCapturer
+from core.memory.shared_context import SharedContext
 
 
 def main():

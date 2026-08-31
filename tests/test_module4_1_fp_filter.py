@@ -6,7 +6,7 @@ import os
 import tempfile
 import unittest
 
-from core.fp_filter import FalsePositiveFilter, FP_PATTERNS
+from core.reporting.fp_filter import FalsePositiveFilter
 
 
 class TestModule41FPFilter(unittest.TestCase):

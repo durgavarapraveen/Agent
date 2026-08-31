@@ -20,7 +20,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Dict, Optional, List, Any, Tuple
+from typing import Dict, Optional, List, Any
 
 import httpx
 
@@ -367,10 +367,15 @@ class DeepSeekProvider(LLMProvider):
                 r = await client.post(
                     f"{self.base_url}/chat/completions",
                     headers={"Authorization": f"Bearer {self.api_key}"},
-                    json={"model": self.small_model, "messages": [{"role": "user", "content": "test"}]}
+                    json={"model": self.small_model, "messages": [{"role": "user", "content": "test"}], "max_tokens": 10}
                 )
-                return r.status_code == 200
-        except:
+                if r.status_code == 200:
+                    return True
+                else:
+                    logger.warning(f"[DeepSeek] Availability check failed: {r.status_code} - {r.text}")
+                    return False
+        except Exception as e:
+            logger.warning(f"[DeepSeek] Availability check exception: {e}")
             return False
     
     def get_small_model(self) -> str:

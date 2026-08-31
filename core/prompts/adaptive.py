@@ -4,11 +4,10 @@ Loads industry-specific variants (healthcare, finance, retail, default), enforce
 (shallow, poc, deep), dynamically injects error recovery instructions, and tracks A/B prompt performance.
 """
 
-import json
 import logging
 import os
-from typing import Dict, List, Optional, Any
-from core.database import DatabaseManager
+from typing import Optional
+from core.memory.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
 

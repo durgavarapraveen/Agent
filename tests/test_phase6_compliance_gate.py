@@ -2,10 +2,9 @@
 End-to-End integration tests for Phase 6 Master Orchestrator (core/compliance_gate.py)
 """
 
-import os
 import unittest
-from core.compliance_gate import ComplianceGate
-from core.legal_validator import ScopeViolationException
+from core.reporting.compliance_gate import ComplianceGate
+from core.security.legal_validator import ScopeViolationException
 
 
 class TestPhase6_ComplianceGate(unittest.TestCase):

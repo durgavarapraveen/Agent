@@ -5,7 +5,7 @@ Nodes = vulnerabilities, Edges = "leads to" relationships.
 """
 
 import logging
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 from dataclasses import dataclass, field
 from collections import defaultdict
 

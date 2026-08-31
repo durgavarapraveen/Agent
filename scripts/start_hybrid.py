@@ -6,11 +6,10 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 sys.stdout.reconfigure(encoding='utf-8')
 
-from core.execution_mode import get_execution_config, ExecutionMode
-from core.central_brain import CentralBrain
-from core.mcp_server import MCPBridgeServer
-from core.hybrid_executor_logger import HybridExecutorLogger
-from core.tool_gateway import ToolGateway
+from core.orchestration.execution_mode import get_execution_config, ExecutionMode
+from core.orchestration.central_brain import CentralBrain
+from core.tools.mcp_server import MCPBridgeServer
+from core.common.hybrid_executor_logger import HybridExecutorLogger
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)

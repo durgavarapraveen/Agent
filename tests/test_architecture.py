@@ -4,21 +4,20 @@ Run: pytest test_architecture.py -v
 """
 
 import pytest
-from datetime import datetime
 import json
-from core.schemas import (
+from core.common.schemas import (
     TaskSpec, TaskStatus, CapabilityType, BrainDecision, BrainDecisionAction,
-    ToolResult, ErrorInfo, ErrorType, Evidence, KnowledgeItem, SuccessCriterion,
+    ToolResult, ErrorType, Evidence, KnowledgeItem, SuccessCriterion,
     SuccessCriterionType
 )
-from core.task_manager import TaskManager, Task, TaskStateTransitionError
+from core.orchestration.task_manager import TaskManager, Task, TaskStateTransitionError
 from orchestrator.scheduler import Scheduler
-from core.tool_definitions import CapabilityRegistry
-from core.error_classifier import ErrorClassifier
-from core.result_normalizers import NormalizerFactory, DNSResultNormalizer
-from core.policy_validator import PolicyValidator, ScopeValidator
-from core.stores import EvidenceStore, KnowledgeStore, FindingStore
-from core.context_resolver import ContextResolver
+from core.tools.tool_definitions import CapabilityRegistry
+from core.common.error_classifier import ErrorClassifier
+from core.common.result_normalizers import NormalizerFactory
+from core.security.policy_validator import PolicyValidator, ScopeValidator
+from core.memory.stores import EvidenceStore, KnowledgeStore
+from core.memory.context_resolver import ContextResolver
 
 
 class TestTaskStateTransitions:
@@ -324,7 +323,7 @@ class TestCentralBrain:
     """Test central brain decision-making"""
     
     def test_brain_creates_structured_decision(self):
-        from core.central_brain import CentralBrain
+        from core.orchestration.central_brain import CentralBrain
         brain = CentralBrain("example.com")
         state = brain.get_execution_state()
         
@@ -507,7 +506,7 @@ class TestArchitecturalRegressions:
 
     # I. Different task parameters
     def test_different_task_parameters(self):
-        from core.authorization import TargetScopeValidator
+        from core.security.authorization import TargetScopeValidator
         TargetScopeValidator.set(TargetScopeValidator(["example.com", "speshway.com"]))
         
         tm = TaskManager()
@@ -524,7 +523,7 @@ class TestArchitecturalRegressions:
     # J. Invalid tool invocation
     @pytest.mark.anyio
     async def test_invalid_tool_invocation(self):
-        from core.tool_validation import ToolInvocationValidator, ToolValidationError
+        from core.tools.tool_validation import ToolInvocationValidator, ToolValidationError
         registry = CapabilityRegistry()
         validator = ToolInvocationValidator(registry)
         
@@ -538,8 +537,8 @@ class TestArchitecturalRegressions:
 
     # K. Unauthorized target
     def test_unauthorized_target(self):
-        from core.authorization import TargetScopeValidator
-        from core.exceptions import AuthorizationError
+        from core.security.authorization import TargetScopeValidator
+        from core.common.exceptions import AuthorizationError
         
         validator = TargetScopeValidator(["example.com"])
         # In-scope
@@ -553,12 +552,12 @@ class TestArchitecturalRegressions:
     # L. Valid tool invocation
     @pytest.mark.anyio
     async def test_valid_tool_invocation(self):
-        from core.tool_validation import ToolInvocationValidator
+        from core.tools.tool_validation import ToolInvocationValidator
         registry = CapabilityRegistry()
         validator = ToolInvocationValidator(registry)
         
         # Valid nmap call to authorized target (configured as example.com)
-        from core.authorization import TargetScopeValidator
+        from core.security.authorization import TargetScopeValidator
         TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
         
         validator.validate("nmap", {"target": "example.com", "timeout": 60})
@@ -572,7 +571,7 @@ class TestArchitecturalRegressions:
 
     # N. No-progress loop
     def test_no_progress_loop(self):
-        from core.progress import ProgressEvaluator, ProgressSnapshot
+        from core.orchestration.progress import ProgressEvaluator, ProgressSnapshot
         evaluator = ProgressEvaluator()
         
         snap = ProgressSnapshot(
@@ -601,8 +600,8 @@ class TestP0Reliability:
 
     # TEST 1: Planner cannot return raw command.
     def test_1_planner_cannot_return_raw_command(self):
-        from core.tool_adapter import ToolAdapter, ToolInvocation
-        from core.exceptions import ToolValidationError
+        from core.tools.tool_adapter import ToolAdapter, ToolInvocation
+        from core.common.exceptions import ToolValidationError
 
         # Direct bash command attempt is forbidden
         inv = ToolInvocation(tool="bash", operation="exec", params={"command": "rm -rf /"})
@@ -612,7 +611,7 @@ class TestP0Reliability:
 
     # TEST 2: Structured ToolInvocation works.
     def test_2_structured_tool_invocation_works(self):
-        from core.tool_adapter import ToolAdapter, ToolInvocation
+        from core.tools.tool_adapter import ToolAdapter, ToolInvocation
 
         inv = ToolInvocation(
             tool="nmap",
@@ -631,8 +630,8 @@ class TestP0Reliability:
 
     # TEST 3: Generic bash cannot be selected by the LLM.
     def test_3_generic_bash_cannot_be_selected(self):
-        from core.tool_registry import ToolRegistry
-        from core.tool_validation import ToolInvocationValidator, ToolValidationError
+        from core.tools.tool_registry import ToolRegistry
+        from core.tools.tool_validation import ToolInvocationValidator, ToolValidationError
 
         reg = ToolRegistry()
         # bash and sh must not be present in ToolRegistry
@@ -645,8 +644,8 @@ class TestP0Reliability:
 
     # TEST 4: Canonical PlannerDecision is enforced.
     def test_4_canonical_planner_decision_enforced(self):
-        from core.normalizer import PlannerResponseNormalizer
-        from core.schemas import BrainDecisionAction, BrainDecision
+        from core.common.normalizer import PlannerResponseNormalizer
+        from core.common.schemas import BrainDecisionAction, BrainDecision
 
         raw_llm_json = {
             "action": "spawn_tasks",
@@ -667,7 +666,7 @@ class TestP0Reliability:
 
     # TEST 5: "agents" and "agent_specs" do not leak into core code.
     def test_5_agents_and_agent_specs_do_not_leak(self):
-        from core.normalizer import PlannerResponseNormalizer
+        from core.common.normalizer import PlannerResponseNormalizer
 
         raw_drift_1 = {
             "action": "spawn_agents",
@@ -701,7 +700,7 @@ class TestP0Reliability:
     # TEST 7: Task dependency prevents premature execution.
     def test_7_task_dependency_prevents_premature_execution(self):
         from orchestrator.scheduler import Scheduler
-        from core.authorization import TargetScopeValidator
+        from core.security.authorization import TargetScopeValidator
         TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
 
         tm = TaskManager()
@@ -728,7 +727,7 @@ class TestP0Reliability:
 
     # TEST 8: Identical semantic tasks are deduplicated.
     def test_8_identical_semantic_tasks_deduplicated(self):
-        from core.authorization import TargetScopeValidator
+        from core.security.authorization import TargetScopeValidator
         TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
 
         tm = TaskManager()
@@ -751,7 +750,7 @@ class TestP0Reliability:
 
     # TEST 9: Different parameters create different tasks.
     def test_9_different_parameters_create_different_tasks(self):
-        from core.authorization import TargetScopeValidator
+        from core.security.authorization import TargetScopeValidator
         TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
 
         tm = TaskManager()
@@ -774,7 +773,7 @@ class TestP0Reliability:
 
     # TEST 10: Completed task is not executed again.
     def test_10_completed_task_not_executed_again(self):
-        from core.authorization import TargetScopeValidator
+        from core.security.authorization import TargetScopeValidator
         TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
 
         tm = TaskManager()
@@ -794,7 +793,7 @@ class TestP0Reliability:
 
     # TEST 11: Successful task completes through SuccessCriterion.
     def test_11_successful_task_completes_through_success_criterion(self):
-        from core.task_evaluator import TaskCompletionEvaluator, CompletionStatus
+        from core.orchestration.task_evaluator import TaskCompletionEvaluator, CompletionStatus
 
         spec = TaskSpec(
             objective="Port scan example.com",
@@ -811,9 +810,9 @@ class TestP0Reliability:
     # TEST 12: max_steps does NOT mark a task successful.
     @pytest.mark.anyio
     async def test_12_max_steps_does_not_mark_task_successful(self):
-        from core.dynamic_agent import DynamicAgent
-        from core.tool_registry import ToolRegistry
-        from core.shared_context import SharedContext
+        from core.orchestration.dynamic_agent import DynamicAgent
+        from core.tools.tool_registry import ToolRegistry
+        from core.memory.shared_context import SharedContext
         from unittest.mock import AsyncMock, patch
 
         ctx = SharedContext("example.com")
@@ -837,7 +836,7 @@ class TestP0Reliability:
 
     # TEST 13: A successful deterministic task does not require another LLM planning call.
     def test_13_successful_deterministic_task_no_extra_llm_call(self):
-        from core.task_evaluator import TaskCompletionEvaluator, CompletionStatus
+        from core.orchestration.task_evaluator import TaskCompletionEvaluator, CompletionStatus
 
         spec = TaskSpec(
             objective="Check SSL Certificate",
@@ -850,8 +849,8 @@ class TestP0Reliability:
 
     # TEST 14: Invalid tool arguments fail BEFORE reaching the shell.
     def test_14_invalid_tool_arguments_fail_before_shell(self):
-        from core.tool_validation import ToolInvocationValidator, ToolValidationError
-        from core.tool_registry import ToolRegistry
+        from core.tools.tool_validation import ToolInvocationValidator, ToolValidationError
+        from core.tools.tool_registry import ToolRegistry
 
         reg = ToolRegistry()
         validator = ToolInvocationValidator(reg)
@@ -861,7 +860,7 @@ class TestP0Reliability:
             validator.validate("nmap", {"target": "example.com", "timeout": 99999})
 
         # Missing target for nmap in ToolAdapter must raise ToolValidationError
-        from core.tool_adapter import ToolAdapter, ToolInvocation
+        from core.tools.tool_adapter import ToolAdapter, ToolInvocation
         with pytest.raises(ToolValidationError):
             ToolAdapter.adapt(ToolInvocation(tool="nmap", operation="port_scan", params={}))
 
@@ -871,8 +870,8 @@ class TestPhaseArchitectureRefinements:
 
     # TEST 1: Planner cannot request specific tools. Normalized into capability.
     def test_1_planner_cannot_request_specific_tools(self):
-        from core.normalizer import PlannerResponseNormalizer
-        from core.schemas import CapabilityType
+        from core.common.normalizer import PlannerResponseNormalizer
+        from core.common.schemas import CapabilityType
 
         raw = {
             "action": "spawn_tasks",
@@ -893,10 +892,10 @@ class TestPhaseArchitectureRefinements:
     # TEST 2: EndpointDiscoveryAgent executes without LLM calls.
     @pytest.mark.anyio
     async def test_2_endpoint_discovery_executes_without_llm_calls(self):
-        from core.capability_worker import CapabilityWorker
-        from core.schemas import CapabilityType
-        from core.tool_registry import ToolRegistry
-        from core.shared_context import SharedContext
+        from core.orchestration.capability_worker import CapabilityWorker
+        from core.common.schemas import CapabilityType
+        from core.tools.tool_registry import ToolRegistry
+        from core.memory.shared_context import SharedContext
         from unittest.mock import AsyncMock, patch
 
         ctx = SharedContext("example.com")
@@ -926,8 +925,8 @@ class TestPhaseArchitectureRefinements:
 
     # TEST 3: Agent does not decide retry (RetryPolicy handles deterministically).
     def test_3_agent_does_not_decide_retry(self):
-        from core.retry_policy import RetryPolicy
-        from core.schemas import RetryDecisionType, ToolExecutionStatus
+        from core.common.retry_policy import RetryPolicy
+        from core.common.schemas import RetryDecisionType
 
         # Timeout should retry
         res_timeout = {"status": "failed", "error": "Connection timed out", "returncode": 124}
@@ -947,10 +946,10 @@ class TestPhaseArchitectureRefinements:
 
     # TEST 4: Scheduler blocks dependent task (A depends on B, B incomplete: A cannot start).
     def test_4_scheduler_blocks_dependent_task(self):
-        from core.task_manager import TaskManager
+        from core.orchestration.task_manager import TaskManager
         from orchestrator.scheduler import Scheduler
-        from core.schemas import TaskSpec, CapabilityType
-        from core.authorization import TargetScopeValidator
+        from core.common.schemas import TaskSpec, CapabilityType
+        from core.security.authorization import TargetScopeValidator
         TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
 
         tm = TaskManager()
@@ -968,10 +967,10 @@ class TestPhaseArchitectureRefinements:
 
     # TEST 5: After B succeeds: A becomes READY.
     def test_5_after_b_succeeds_a_becomes_ready(self):
-        from core.task_manager import TaskManager
+        from core.orchestration.task_manager import TaskManager
         from orchestrator.scheduler import Scheduler
-        from core.schemas import TaskSpec, CapabilityType
-        from core.authorization import TargetScopeValidator
+        from core.common.schemas import TaskSpec, CapabilityType
+        from core.security.authorization import TargetScopeValidator
         TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
 
         tm = TaskManager()
@@ -995,9 +994,9 @@ class TestPhaseArchitectureRefinements:
 
     # TEST 6: Duplicate semantic tasks are not created.
     def test_6_duplicate_semantic_tasks_are_not_created(self):
-        from core.task_manager import TaskManager
-        from core.schemas import TaskSpec, CapabilityType
-        from core.authorization import TargetScopeValidator
+        from core.orchestration.task_manager import TaskManager
+        from core.common.schemas import TaskSpec, CapabilityType
+        from core.security.authorization import TargetScopeValidator
         TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
 
         tm = TaskManager()
@@ -1013,9 +1012,9 @@ class TestPhaseArchitectureRefinements:
 
     # TEST 7: Partial tool result is accepted (Tool returns data + warning -> PARTIAL_SUCCESS).
     def test_7_partial_tool_result_accepted(self):
-        from core.capability_worker import CapabilityWorker
-        from core.schemas import ToolExecutionStatus
-        from core.tool_registry import ToolRegistry
+        from core.orchestration.capability_worker import CapabilityWorker
+        from core.common.schemas import ToolExecutionStatus
+        from core.tools.tool_registry import ToolRegistry
 
         worker = CapabilityWorker("AGENT-P", ToolRegistry(), None)
         raw_res = {
@@ -1032,8 +1031,8 @@ class TestPhaseArchitectureRefinements:
 
     # TEST 8: Task completion does not require LLM.
     def test_8_task_completion_does_not_require_llm(self):
-        from core.task_evaluator import TaskCompletionEvaluator, CompletionStatus
-        from core.schemas import TaskSpec, CapabilityType
+        from core.orchestration.task_evaluator import TaskCompletionEvaluator, CompletionStatus
+        from core.common.schemas import TaskSpec, CapabilityType
 
         spec = TaskSpec(
             objective="Port Scan",
@@ -1050,8 +1049,8 @@ class TestPhaseArchitectureRefinements:
 
     # TEST 9: Agent cannot execute arbitrary shell commands.
     def test_9_agent_cannot_execute_arbitrary_shell_commands(self):
-        from core.tool_adapter import ToolAdapter, ToolInvocation
-        from core.exceptions import ToolValidationError
+        from core.tools.tool_adapter import ToolAdapter, ToolInvocation
+        from core.common.exceptions import ToolValidationError
 
         inv = ToolInvocation(tool="bash", operation="exec", params={"command": "whoami"})
         with pytest.raises(ToolValidationError) as exc:
@@ -1060,8 +1059,8 @@ class TestPhaseArchitectureRefinements:
 
     # TEST 10: Existing authorization tests continue passing.
     def test_10_existing_authorization_tests_continue_passing(self):
-        from core.authorization import TargetScopeValidator
-        from core.exceptions import AuthorizationError
+        from core.security.authorization import TargetScopeValidator
+        from core.common.exceptions import AuthorizationError
 
         val = TargetScopeValidator(["example.com", "*.speshway.com"])
         val.validate("example.com")
@@ -1076,9 +1075,9 @@ class TestDynamicToolIntelligencePlatform:
 
     # TEST 1: Add new tool without code changes. Register only, Agent discovers it.
     def test_1_add_new_tool_without_code_changes(self):
-        from core.tool_knowledge_store import ToolKnowledgeStore
-        from core.tool_intelligence import ToolProfile
-        from core.capability_resolver import CapabilityResolver
+        from core.tools.tool_knowledge_store import ToolKnowledgeStore
+        from core.tools.tool_intelligence import ToolProfile
+        from core.orchestration.capability_resolver import CapabilityResolver
 
         store = ToolKnowledgeStore()
         new_tool = ToolProfile(
@@ -1098,11 +1097,11 @@ class TestDynamicToolIntelligencePlatform:
 
     # TEST 2: Unknown tool from LLM is rejected.
     def test_2_unknown_tool_from_llm_is_rejected(self):
-        from core.execution_planner import ExecutionPlanner
-        from core.tool_intelligence import TargetContext
-        from core.schemas import TaskSpec, CapabilityType
-        from core.exceptions import ToolValidationError
-        from core.authorization import TargetScopeValidator
+        from core.orchestration.execution_planner import ExecutionPlanner
+        from core.tools.tool_intelligence import TargetContext
+        from core.common.schemas import TaskSpec, CapabilityType
+        from core.common.exceptions import ToolValidationError
+        from core.security.authorization import TargetScopeValidator
         TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
 
         planner = ExecutionPlanner()
@@ -1116,10 +1115,10 @@ class TestDynamicToolIntelligencePlatform:
 
     # TEST 3: LLM cannot bypass ToolRegistry / ExecutionPlanner.
     def test_3_llm_cannot_bypass_tool_registry(self):
-        from core.execution_planner import ExecutionPlanner
-        from core.tool_intelligence import TargetContext
-        from core.schemas import TaskSpec, CapabilityType
-        from core.exceptions import ToolValidationError
+        from core.orchestration.execution_planner import ExecutionPlanner
+        from core.tools.tool_intelligence import TargetContext
+        from core.common.schemas import TaskSpec, CapabilityType
+        from core.common.exceptions import ToolValidationError
 
         planner = ExecutionPlanner()
         task = TaskSpec(objective="Run bash command", capability=CapabilityType.ENDPOINT_DISCOVERY)
@@ -1132,8 +1131,8 @@ class TestDynamicToolIntelligencePlatform:
 
     # TEST 4: Tool discovery does not execute immediately.
     def test_4_tool_discovery_does_not_execute_immediately(self):
-        from core.tool_discovery import ToolDiscoveryAgent, ToolCandidate
-        from core.tool_knowledge_store import ToolKnowledgeStore
+        from core.tools.tool_discovery import ToolDiscoveryAgent
+        from core.tools.tool_knowledge_store import ToolKnowledgeStore
         from unittest.mock import patch
 
         store = ToolKnowledgeStore()
@@ -1148,7 +1147,7 @@ class TestDynamicToolIntelligencePlatform:
 
     # TEST 5: Bad tool source is rejected.
     def test_5_bad_tool_source_is_rejected(self):
-        from core.tool_discovery import ToolValidationPipeline, ToolCandidate
+        from core.tools.tool_discovery import ToolValidationPipeline, ToolCandidate
 
         candidate_bad_source = ToolCandidate(
             name="evil_tool",
@@ -1171,8 +1170,8 @@ class TestDynamicToolIntelligencePlatform:
 
     # TEST 6: Tool ranking improves after successful execution.
     def test_6_tool_ranking_improves_after_successful_execution(self):
-        from core.tool_intelligence import ToolProfile
-        from core.tool_ranking import ToolRankingEngine
+        from core.tools.tool_intelligence import ToolProfile
+        from core.tools.tool_ranking import ToolRankingEngine
 
         tool_a = ToolProfile(name="toolA", trust_score=0.80, performance_score=0.80, success_rate=0.80)
         tool_b = ToolProfile(name="toolB", trust_score=0.85, performance_score=0.85, success_rate=0.85)
@@ -1192,10 +1191,10 @@ class TestDynamicToolIntelligencePlatform:
     # TEST 7: DynamicAgent works without hardcoded tools.
     @pytest.mark.anyio
     async def test_7_dynamic_agent_works_without_hardcoded_tools(self):
-        from core.dynamic_agent import ControlledDynamicAgent
-        from core.tool_registry import ToolRegistry
-        from core.shared_context import SharedContext
-        from core.authorization import TargetScopeValidator
+        from core.orchestration.dynamic_agent import ControlledDynamicAgent
+        from core.tools.tool_registry import ToolRegistry
+        from core.memory.shared_context import SharedContext
+        from core.security.authorization import TargetScopeValidator
         from unittest.mock import AsyncMock, patch
 
         TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
@@ -1221,9 +1220,9 @@ class TestDynamicToolIntelligencePlatform:
 
     # TEST 8: Existing TaskManager tests continue passing.
     def test_8_existing_task_manager_continues_passing(self):
-        from core.task_manager import TaskManager
-        from core.schemas import TaskSpec, CapabilityType, TaskStatus
-        from core.authorization import TargetScopeValidator
+        from core.orchestration.task_manager import TaskManager
+        from core.common.schemas import TaskSpec, CapabilityType, TaskStatus
+        from core.security.authorization import TargetScopeValidator
         TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
 
         tm = TaskManager()
@@ -1243,9 +1242,9 @@ class TestPhaseTransitionsAndActiveScanning:
     """Test stateful phase transitions and active vulnerability scanning planning"""
 
     def test_state_machine_phase_transitions(self):
-        from core.central_brain import CentralBrain, ExecutionPhase
-        from core.authorization import TargetScopeValidator
-        from core.dedup_tracker import DeduplicationTracker
+        from core.orchestration.central_brain import CentralBrain, ExecutionPhase
+        from core.security.authorization import TargetScopeValidator
+        from core.memory.dedup_tracker import DeduplicationTracker
 
         DeduplicationTracker().reset_all()
         TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
@@ -1274,7 +1273,7 @@ class TestPhaseTransitionsAndActiveScanning:
         assert brain.current_phase == ExecutionPhase.EXPLOITATION
 
     def test_execution_planner_active_scan(self):
-        from core.execution_planner import ExecutionPlanner
+        from core.orchestration.execution_planner import ExecutionPlanner
 
         planner = ExecutionPlanner()
         steps = planner.plan_active_vulnerability_scan(
@@ -1292,9 +1291,9 @@ class TestCompoundRiskGraphEngine:
     """Test theoretical security dependency graph engine and compound risk analysis"""
 
     def test_compound_risk_analysis_auth_and_admin(self):
-        from core.chain_detector import ChainDetector
-        from core.vuln_graph import VulnGraph
-        from core.relationship_db import RelationshipDB
+        from core.exploitation.chain_detector import ChainDetector
+        from core.reporting.vuln_graph import VulnGraph
+        from core.memory.relationship_db import RelationshipDB
 
         detector = ChainDetector(VulnGraph(), RelationshipDB())
 
@@ -1324,9 +1323,9 @@ class TestCompoundRiskGraphEngine:
         assert "RBAC" in risk["remediation_chain"][0] or "Role-Based Access Control" in risk["remediation_chain"][0]
 
     def test_compound_risk_analysis_session_and_reflection(self):
-        from core.chain_detector import ChainDetector
-        from core.vuln_graph import VulnGraph
-        from core.relationship_db import RelationshipDB
+        from core.exploitation.chain_detector import ChainDetector
+        from core.reporting.vuln_graph import VulnGraph
+        from core.memory.relationship_db import RelationshipDB
 
         detector = ChainDetector(VulnGraph(), RelationshipDB())
 
@@ -1356,9 +1355,9 @@ class TestCompoundRiskGraphEngine:
         assert "HttpOnly" in risk["remediation_chain"][0]
 
     def test_compound_risk_analysis_upload_and_directory(self):
-        from core.chain_detector import ChainDetector
-        from core.vuln_graph import VulnGraph
-        from core.relationship_db import RelationshipDB
+        from core.exploitation.chain_detector import ChainDetector
+        from core.reporting.vuln_graph import VulnGraph
+        from core.memory.relationship_db import RelationshipDB
 
         detector = ChainDetector(VulnGraph(), RelationshipDB())
 

@@ -4,15 +4,15 @@ Unit tests for core/payload_tester.py defensive vulnerability verification modul
 
 import unittest
 from unittest.mock import patch, MagicMock
-from core.payload_tester import PayloadTester
-from core.shared_context import SharedContext
+from core.exploitation.payload_tester import PayloadTester
+from core.memory.shared_context import SharedContext
 
 
 
 class TestPayloadTester(unittest.TestCase):
 
     def setUp(self):
-        from core.dedup_tracker import DeduplicationTracker
+        from core.memory.dedup_tracker import DeduplicationTracker
         DeduplicationTracker().reset_all()
 
     @patch("urllib.request.urlopen")

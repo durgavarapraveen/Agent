@@ -5,7 +5,7 @@ Agents request context semantically, framework resolves from knowledge store.
 
 import logging
 from typing import Dict, List, Any, Optional
-from core.stores import KnowledgeStore
+from core.memory.stores import KnowledgeStore
 
 logger = logging.getLogger(__name__)
 

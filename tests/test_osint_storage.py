@@ -2,17 +2,15 @@
 Tests for OSINT Storage, Intelligence Engines, Database Persistence, and Reporting
 """
 
-import os
 import pytest
 from datetime import datetime
 
-from core.osint_engine import OSINTDatabase, Employee, LeakedCredential, DomainIntelligence
-from core.threat_intel import ThreatIntelDatabase, ThreatIndicator, ReputationScore, CompromisedService
-from core.subdomain_enum import SubdomainDatabase, Subdomain, VirtualHost, CloudStorageBucket
+from core.intelligence.osint_engine import OSINTDatabase, Employee, LeakedCredential, DomainIntelligence
+from core.intelligence.threat_intel import ThreatIntelDatabase, ThreatIndicator, ReputationScore
+from core.intelligence.subdomain_enum import SubdomainDatabase, Subdomain, VirtualHost, CloudStorageBucket
 from core.reporting import EnterpriseReporter
-from core.shared_context import SharedContext
-from core.schemas import CapabilityType
-from core.config import Config
+from core.memory.shared_context import SharedContext
+from core.common.schemas import CapabilityType
 
 
 @pytest.fixture

@@ -3,9 +3,8 @@ Unit tests for Phase 8 Module 8.5: Result Streaming & Real-Time Progress (core/w
 """
 
 import asyncio
-import json
 import unittest
-from core.websocket_pusher import RealtimeStreamServer
+from core.reporting.websocket_pusher import RealtimeStreamServer
 
 
 class TestModule8_5_WebSocketPusher(unittest.IsolatedAsyncioTestCase):

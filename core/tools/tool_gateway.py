@@ -1,11 +1,9 @@
 import asyncio
-import time
 import logging
-from typing import Dict, Any, Optional
-from core.schemas import ToolInvocation, ToolResult, ToolDefinition
-from core.audit_logger import AuditLogger
-from core.authorization import AuthContext
-from core.resource_limiter import ResourceLimiter
+from typing import Optional
+from core.common.schemas import ToolInvocation, ToolResult
+from core.security.authorization import AuthContext
+from core.security.resource_limiter import ResourceLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +25,8 @@ class ToolGateway:
         self.cache = cache_db
         self.audit = audit_logger
         self.resource_limiter = ResourceLimiter()
+        from aiolimiter import AsyncLimiter
+        self.rate_limiter = AsyncLimiter(max_rate=5, time_period=60)
     
     async def execute(self, invocation: ToolInvocation, 
                      auth_context: AuthContext) -> ToolResult:
@@ -47,7 +47,7 @@ class ToolGateway:
         # STEP 1: Authorization & Scope
         if not await self._authorize(invocation, auth_context):
             self.audit.log_denial(invocation, auth_context)
-            from core.schemas import ErrorInfo, ErrorType
+            from core.common.schemas import ErrorInfo, ErrorType
             return ToolResult(
                 tool=invocation.tool_id or invocation.operation or "unknown",
                 capability=invocation.operation or "unknown",
@@ -67,7 +67,7 @@ class ToolGateway:
         # STEP 3: Resource Check
         if not self.resource_limiter.can_allocate(invocation.tool_id):
             logger.warning(f"Resource limit: {invocation.tool_id}")
-            from core.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus, ErrorInfo, ErrorType
+            from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus, ErrorInfo, ErrorType
             return SchemaToolResult(
                 tool=invocation.tool_id or invocation.operation or "unknown",
                 capability=invocation.operation or "unknown",
@@ -82,11 +82,22 @@ class ToolGateway:
         
         # STEP 4: Execute (with timeout)
         try:
+            if invocation.tool_id and not self._is_tool_available(invocation.tool_id):
+                raise FileNotFoundError(f"Tool binary for {invocation.tool_id} is not installed or available.")
+
             logger.info(f"Executing: operation={invocation.operation} tool_id={invocation.tool_id} target={invocation.target}")
-            result = await asyncio.wait_for(
-                self._execute_tool(invocation, auth_context),
-                timeout=300  # 5 min timeout
-            )
+            
+            timeout_val = invocation.params.get("timeout", 30)
+            
+            async with self.rate_limiter:
+                result = await asyncio.wait_for(
+                    self._execute_tool(invocation, auth_context),
+                    timeout=timeout_val
+                )
+            
+            if not result.success:
+                raise RuntimeError(result.error.message if result.error else "Tool execution failed")
+                
         except asyncio.TimeoutError:
             logger.error(f"Timeout: {invocation.tool_id}")
             result = await self._handle_timeout(invocation, auth_context)
@@ -112,7 +123,7 @@ class ToolGateway:
                         auth_context: Optional[AuthContext]) -> bool:
         """Check: user can run this tool on this target"""
         if auth_context is None:
-            from core.authorization import AuthContext
+            from core.security.authorization import AuthContext
             allowed_tools = list(self.registry.tools.keys()) if hasattr(self.registry, 'tools') else []
             auth_context = AuthContext(allowed_tools=allowed_tools, has_elevated_privilege=True)
         
@@ -126,7 +137,8 @@ class ToolGateway:
         
         # Check specific tool restrictions
         tool_def = self.registry.get(invocation.tool_id) if invocation.tool_id else None
-        if tool_def and tool_def.restricted and not auth_context.has_elevated_privilege:
+        is_restricted = getattr(tool_def, 'restricted', False) if tool_def else False
+        if is_restricted and not auth_context.has_elevated_privilege:
             return False
         
         return True
@@ -134,7 +146,7 @@ class ToolGateway:
     async def _execute_tool(self, invocation: ToolInvocation, 
                            auth_context: AuthContext) -> ToolResult:
         """Route to ToolRouter (next layer)"""
-        from core.tool_router import ToolRouter
+        from core.tools.tool_router import ToolRouter
         
         router = ToolRouter(self.registry)
         return await router.route_and_execute(invocation, auth_context)
@@ -142,29 +154,49 @@ class ToolGateway:
     async def _handle_timeout(self, invocation: ToolInvocation,
                              auth_context: AuthContext) -> ToolResult:
         """Handle tool execution timeout"""
-        from core.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus, ErrorInfo, ErrorType
+        from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus, ErrorInfo, ErrorType
+        from core.common.error_translator import ErrorTranslator
+        
+        tool_id = invocation.tool_id or invocation.operation or "unknown"
+        translation = ErrorTranslator.translate(tool_id, "timeout", exit_code=1, target=invocation.target)
+        
         return SchemaToolResult(
-            tool=invocation.tool_id or invocation.operation or "unknown",
+            tool=tool_id,
             capability=invocation.operation or "unknown",
             status=ToolExecutionStatus.TIMEOUT,
             target=invocation.target,
+            data={"error_human": translation.get("formatted_report")},
             error=ErrorInfo(
                 error_type=ErrorType.TIMEOUT,
-                message=f"Tool {invocation.tool_id or invocation.operation} timed out after 300s",
+                message=f"Tool {tool_id} timed out after 300s",
                 retryable=True,
-                tool=invocation.tool_id
+                tool=tool_id
             )
         )
     
     async def _handle_error(self, invocation: ToolInvocation, 
                            auth_context: AuthContext, error: Exception) -> ToolResult:
         """Try fallback tool"""
-        tool_def = self.registry.get(invocation.tool_id)
+        tool_id = invocation.tool_id or invocation.operation or "unknown"
+        error_msg = str(error)
         
-        if tool_def and tool_def.fallback_tools:
-            logger.info(f"Trying fallback for {invocation.tool_id}")
+        from core.common.error_translator import ErrorTranslator
+        translation = ErrorTranslator.translate(tool_id, error_msg, exit_code=1, target=invocation.target)
+        logger.error(f"Translated Error: {translation['formatted_report']}")
+        
+        tool_def = self.registry.get(tool_id)
+        fallback_tools = list(getattr(tool_def, "fallback_tools", [])) if tool_def else []
+        
+        alt_tool = translation.get("alternative_tool")
+        if alt_tool and alt_tool not in fallback_tools and alt_tool != tool_id:
+            fallback_tools.insert(0, alt_tool)
             
-            for fallback_id in tool_def.fallback_tools:
+        if fallback_tools:
+            logger.info(f"Trying fallbacks for {tool_id}: {fallback_tools}")
+            
+            for fallback_id in fallback_tools:
+                if not self._is_tool_available(fallback_id):
+                    continue
                 try:
                     fallback_invocation = ToolInvocation(
                         tool_id=fallback_id,
@@ -176,23 +208,28 @@ class ToolGateway:
                     )
                     
                     result = await self._execute_tool(fallback_invocation, auth_context)
-                    result.fallback_used = invocation.tool_id
-                    return result
+                    if result.success:
+                        result.fallback_used = fallback_id
+                        return result
+                    else:
+                        logger.warning(f"Fallback {fallback_id} returned failure: {result.error.message if result.error else 'Unknown'}")
                 except Exception as e:
                     logger.warning(f"Fallback {fallback_id} also failed: {e}")
                     continue
         
         # No fallback worked
-        from core.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus, ErrorInfo, ErrorType
+        from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus, ErrorInfo, ErrorType
         return SchemaToolResult(
-            tool=invocation.tool_id or invocation.operation or "unknown",
+            tool=tool_id,
             capability=invocation.operation or "unknown",
             status=ToolExecutionStatus.FAILED,
             target=invocation.target,
+            data={"error_human": translation.get("formatted_report")},
             error=ErrorInfo(
                 error_type=ErrorType.EXECUTION_ERROR,
-                message=str(error),
-                tool=invocation.tool_id
+                message=translation.get("formatted_report", error_msg),
+                retryable=translation.get("should_retry", False),
+                tool=tool_id
             )
         )
     
@@ -210,3 +247,15 @@ class ToolGateway:
         
         key = f"{invocation.operation}:{invocation.tool_id}:{invocation.target}:{json.dumps(invocation.params, sort_keys=True)}"
         return hashlib.md5(key.encode()).hexdigest()
+
+    def _is_tool_available(self, tool_id: str) -> bool:
+        """Pre-flight check to verify tool is available."""
+        if not tool_id:
+            return True
+        tool_def = self.registry.get(tool_id)
+        if tool_def and tool_def.__class__.__name__ == "KaliTool":
+            import shutil
+            if not shutil.which(tool_id) and not shutil.which(tool_id.lower()):
+                logger.warning(f"Pre-flight check failed: {tool_id} binary not found in PATH")
+                return False
+        return True

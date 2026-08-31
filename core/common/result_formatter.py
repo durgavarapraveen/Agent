@@ -3,9 +3,8 @@ Tool Result Formatter with Token Compression.
 Reduces LLM context size by 85-95% for tool execution outputs while maintaining decision quality.
 """
 
-import json
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
 

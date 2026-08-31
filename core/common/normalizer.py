@@ -7,9 +7,9 @@ flows into the TaskManager and core application.
 import json
 import logging
 from uuid import uuid4
-from typing import Dict, Any, Union, Optional
-from core.schemas import BrainDecision, BrainDecisionAction, TaskSpec, CapabilityType, SuccessCriterion, SuccessCriterionType
-from core.exceptions import AutonomousPentestException
+from typing import Dict, Any, Union
+from core.common.schemas import BrainDecision, BrainDecisionAction, TaskSpec, CapabilityType, SuccessCriterion, SuccessCriterionType
+from core.common.exceptions import AutonomousPentestException
 
 logger = logging.getLogger(__name__)
 

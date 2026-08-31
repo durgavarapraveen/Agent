@@ -48,6 +48,7 @@ class KaliDockerExecutor:
         "whatweb": "whatweb",
         "wafw00f": "wafw00f",
         "httpx": "httpx-toolkit",
+        "httpx-toolkit": "httpx-toolkit",
         "katana": "katana",
         "arjun": "arjun",
         "paramspider": "paramspider",

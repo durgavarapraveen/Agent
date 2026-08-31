@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from validation.dedup import (fingerprint, generate_dedup_key, DedupStore, NEW, RECURRING, RESOLVED)
+from validation.dedup import (fingerprint, generate_dedup_key, DedupStore, NEW, RECURRING)
 
 
 class TestFingerprint(unittest.TestCase):
@@ -44,7 +44,7 @@ class TestFingerprint(unittest.TestCase):
 class TestDedupStore(unittest.TestCase):
 
     def setUp(self):
-        from core.dedup_tracker import DeduplicationTracker
+        from core.memory.dedup_tracker import DeduplicationTracker
         DeduplicationTracker().reset_all()
         self.tmp = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False)
         self.tmp.close()
@@ -86,7 +86,7 @@ class TestDedupStore(unittest.TestCase):
         self.assertEqual(len(out["report"]), 0)
 
     def test_distinct_missing_headers_on_same_host_are_not_deduplicated(self):
-        from core.shared_context import SharedContext
+        from core.memory.shared_context import SharedContext
 
         ctx = SharedContext("target.com")
 

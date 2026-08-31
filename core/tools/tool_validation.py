@@ -5,8 +5,8 @@ Ensures tool execution is safe, authorized, and syntactically valid.
 
 import logging
 from typing import Dict, Any
-from core.exceptions import ToolValidationError
-from core.authorization import TargetScopeValidator
+from core.common.exceptions import ToolValidationError
+from core.security.authorization import TargetScopeValidator
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ class ToolInvocationValidator:
                 raise ToolValidationError("Command parameter must be a string")
 
             # Check safe patterns via PolicyValidator
-            from core.policy_validator import PolicyValidator
+            from core.security.policy_validator import PolicyValidator
             scope = TargetScopeValidator.get().authorized_scope
             policy = PolicyValidator(scope)
             cmd_ok, err = policy.validate_command(command)

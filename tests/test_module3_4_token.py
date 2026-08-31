@@ -6,9 +6,9 @@ import os
 import tempfile
 import unittest
 
-from core.authorization import TargetScopeValidator
-from core.token_optimizer import TokenOptimizer
-from core.llm_orchestrator import LLMOrchestrator
+from core.security.authorization import TargetScopeValidator
+from core.common.token_optimizer import TokenOptimizer
+from core.orchestration.llm_orchestrator import LLMOrchestrator
 
 
 class TestModule34TokenOptimizer(unittest.TestCase):

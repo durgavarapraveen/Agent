@@ -6,9 +6,7 @@ Maps detected technologies to official Nuclei template tags and executes non-blo
 import asyncio
 import json
 import logging
-import os
 import shutil
-import urllib.parse
 from typing import Dict, List, Optional, Any, Union
 
 logger = logging.getLogger(__name__)

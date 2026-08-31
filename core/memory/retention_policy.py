@@ -7,18 +7,16 @@ cascade GDPR customer data deletion, and monthly deletion proof compliance repor
 
 import csv
 import hashlib
-import json
 import logging
 import os
 import shutil
 import sqlite3
-import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, Any
 
-from core.encryption import encrypt, decrypt
-from core.audit_logger import AuditLogger
+from core.security.encryption import encrypt
+from core.security.audit_logger import AuditLogger
 
 logger = logging.getLogger(__name__)
 

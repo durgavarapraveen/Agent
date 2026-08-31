@@ -4,16 +4,12 @@ No hardcoded logic. LLM decides what tool to run, reads output, repeats.
 Gets ONLY the context the brain decided is relevant.
 """
 
-import json
 import logging
-import re
-import asyncio
 from typing import Dict, List, Optional
-from datetime import datetime
 
-from agents.llm_client import LLMClient, TaskTier
-from core.tool_registry import ToolRegistry, ToolResult
-from core.shared_context import SharedContext
+from agents.llm_client import LLMClient
+from core.tools.tool_registry import ToolRegistry
+from core.memory.shared_context import SharedContext
 
 logger = logging.getLogger(__name__)
 
@@ -213,12 +209,11 @@ class DynamicAgent:
 
     async def execute(self):
         """Execute objective via CapabilityResolver and ExecutionPlanner on the Tool Intelligence platform"""
-        from core.capability_worker import CapabilityWorker
-        from core.normalizer import PlannerResponseNormalizer
-        from core.task_evaluator import TaskCompletionEvaluator, CompletionStatus
-        from core.tool_intelligence import TargetContext
-        from core.capability_resolver import CapabilityResolver
-        from core.execution_planner import ExecutionPlanner
+        from core.orchestration.capability_worker import CapabilityWorker
+        from core.common.normalizer import PlannerResponseNormalizer
+        from core.orchestration.task_evaluator import TaskCompletionEvaluator, CompletionStatus
+        from core.tools.tool_intelligence import TargetContext
+        from core.orchestration.capability_resolver import CapabilityResolver
 
         # 1. Normalize target and resolve canonical capability
         raw_target = self.ctx.target if hasattr(self.ctx, "target") else "unknown"

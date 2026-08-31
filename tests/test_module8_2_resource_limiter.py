@@ -2,11 +2,10 @@
 Unit tests for Phase 8 Module 8.2: Resource Limits & Timeouts (core/resource_limiter.py)
 """
 
-import os
 import sys
 import time
 import unittest
-from core.resource_limiter import ResourceLimiter, ResourceViolationError
+from core.security.resource_limiter import ResourceLimiter
 
 
 class TestModule8_2_ResourceLimiter(unittest.TestCase):

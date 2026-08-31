@@ -18,14 +18,13 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from contextlib import contextmanager
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 
 
-from core.database import DatabaseManager
+from core.memory.database import DatabaseManager
 
 NEW = "new"
 RECURRING = "recurring"
@@ -165,7 +164,6 @@ class DedupStore:
                 rows = c.fetchall()
                 fps = [r[0] for r in rows]
                 if fps:
-                    from psycopg2.extras import execute_values
                     # Update all resolved findings
                     for fp in fps:
                         c.execute(

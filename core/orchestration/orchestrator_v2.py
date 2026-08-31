@@ -10,13 +10,10 @@ import asyncio
 import concurrent.futures
 import json
 import logging
-import os
 import queue
-import sys
 import time
 from enum import IntEnum
-from pathlib import Path
-from typing import Dict, List, Optional, Any, Callable, Tuple
+from typing import Dict, List, Any, Callable
 
 import aiohttp
 

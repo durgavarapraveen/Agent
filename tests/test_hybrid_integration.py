@@ -1,13 +1,12 @@
-import os
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 
-from core.execution_mode import ExecutionConfig, ExecutionMode
-from core.tool_invocation_engine import ToolInvocationEngine, InvocationSource
-from core.tool_gateway import ToolGateway
-from core.schemas import ToolResult, ToolInvocation
-from core.hybrid_executor_logger import HybridExecutorLogger
-from core.central_brain import CentralBrain
+from core.orchestration.execution_mode import ExecutionConfig, ExecutionMode
+from core.tools.tool_invocation_engine import ToolInvocationEngine
+from core.tools.tool_gateway import ToolGateway
+from core.common.schemas import ToolInvocation
+from core.common.hybrid_executor_logger import HybridExecutorLogger
+from core.orchestration.central_brain import CentralBrain
 from scripts.set_execution_mode import main as set_mode_main
 
 # --- 1. Test execution mode detection ---

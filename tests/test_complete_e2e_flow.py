@@ -2,12 +2,11 @@ import os
 import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch, MagicMock
-from core.central_brain import CentralBrain
-from core.shared_context import SharedContext
+from core.orchestration.central_brain import CentralBrain
+from core.memory.shared_context import SharedContext
 from core.reporting import EnterpriseReporter
-from core.osint_engine import OSINTDatabase, Employee, DomainIntelligence
-from core.subdomain_enum import SubdomainDatabase, Subdomain
-from core.threat_intel import ThreatIntelDatabase, ThreatIndicator
+from core.intelligence.osint_engine import Employee
+from core.intelligence.subdomain_enum import Subdomain
 
 class TestCompleteE2EFlow(unittest.TestCase):
     """End-to-End Test for AntiGravity CentralBrain with & without OSINT."""

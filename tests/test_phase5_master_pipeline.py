@@ -5,7 +5,7 @@ End-to-End integration tests for Phase 5 Master Orchestrator (core/reporting_eng
 import os
 import shutil
 import unittest
-from core.reporting_engine import ReportingEngine
+from core.reporting.reporting_engine import ReportingEngine
 
 
 class TestPhase5_MasterPipeline(unittest.TestCase):

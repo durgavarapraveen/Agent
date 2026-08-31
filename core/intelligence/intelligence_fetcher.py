@@ -7,7 +7,6 @@ import asyncio
 import logging
 import re
 from typing import Dict, List, Optional
-from urllib.parse import quote_plus
 
 import httpx
 
@@ -31,7 +30,7 @@ class IntelligenceFetcher:
     async def search_censys(self, query: str, per_page: int = 10) -> Optional[Dict]:
         """Search Censys hosts/certificates using PAT authentication."""
         try:
-            from core.censys_client import CensysClient
+            from core.intelligence.censys_client import CensysClient
             client = CensysClient(api_token=self.censys_pat)
             if not client.is_configured:
                 logger.debug("Censys PAT not configured, skipping Censys query")

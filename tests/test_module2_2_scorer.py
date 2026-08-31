@@ -6,7 +6,7 @@ import os
 import tempfile
 import unittest
 
-from core.contextual_scorer import parse_cvss_vector, check_exploit_availability, ContextualScorer
+from core.reporting.contextual_scorer import parse_cvss_vector, check_exploit_availability, ContextualScorer
 
 
 class TestModule22Scorer(unittest.TestCase):

@@ -3,7 +3,7 @@ Unit tests for Phase 5 Module 5.3: Remediation Engine (core/remediation_engine.p
 """
 
 import unittest
-from core.remediation_engine import RemediationEngine
+from core.reporting.remediation_engine import RemediationEngine
 
 
 class TestModule5_3_RemediationEngine(unittest.TestCase):

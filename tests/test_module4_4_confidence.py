@@ -6,9 +6,9 @@ import os
 import tempfile
 import unittest
 
-from core.authorization import TargetScopeValidator
-from validation.confidence import ConfidenceCalibrator, AUTO_ACCEPT_THRESHOLD
-from core.quality_gate import QualityGate
+from core.security.authorization import TargetScopeValidator
+from validation.confidence import ConfidenceCalibrator
+from core.reporting.quality_gate import QualityGate
 
 
 class TestModule44Confidence(unittest.TestCase):

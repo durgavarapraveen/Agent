@@ -1,13 +1,12 @@
-import pytest
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
-from core.shared_context import SharedContext
-from core.request_capture import CapturedRequest
-from core.chain_executor import ChainExecutor, StepResult, ChainResult
-from core.chain_detector import ScoredChain
-from core.chain_integration import ChainManager
-from core.vuln_graph import VulnGraph
-from core.relationship_db import RelationshipDB
+from core.memory.shared_context import SharedContext
+from core.exploitation.request_capture import CapturedRequest
+from core.exploitation.chain_executor import ChainExecutor, ChainResult
+from core.exploitation.chain_detector import ScoredChain
+from core.exploitation.chain_integration import ChainManager
+from core.reporting.vuln_graph import VulnGraph
+from core.memory.relationship_db import RelationshipDB
 
 def test_captured_request_object_context_generation():
     ctx = SharedContext("https://example.com")

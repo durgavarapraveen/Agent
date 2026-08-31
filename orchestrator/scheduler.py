@@ -4,10 +4,9 @@ Deterministic scheduling logic owned by framework, not LLM.
 """
 
 import logging
-from typing import Dict, List, Set, Optional
-from datetime import datetime
-from core.schemas import TaskStatus, TaskSpec
-from core.task_manager import TaskManager, Task
+from typing import Dict, List
+from core.common.schemas import TaskStatus, TaskSpec
+from core.orchestration.task_manager import TaskManager, Task
 
 logger = logging.getLogger(__name__)
 

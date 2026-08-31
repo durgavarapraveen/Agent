@@ -4,7 +4,7 @@ Unit tests for Phase 5 Module 5.5: Custom Report Builder (core/report_builder.py
 
 import json
 import unittest
-from core.report_builder import CustomReportBuilder
+from core.reporting.report_builder import CustomReportBuilder
 
 
 class TestModule5_5_ReportBuilder(unittest.TestCase):

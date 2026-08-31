@@ -9,7 +9,6 @@ import socket
 import ssl
 import asyncio
 from typing import Dict, List, Optional
-from urllib.parse import urlparse
 
 import httpx
 
@@ -124,7 +123,7 @@ class PythonHTTPTool(Tool):
             # Check for 403 / WAF and auto-attempt bypass headers if initially blocked
             bypassed = False
             if resp.status_code == 403 and (headers is None or "X-Forwarded-For" not in headers):
-                from core.waf_evasion import WAFEvasionManager
+                from core.exploitation.waf_evasion import WAFEvasionManager
                 waf = WAFEvasionManager.detect_waf(dict(resp.headers), resp.text[:2000], resp.status_code)
                 bypass_hdrs = dict(headers or {})
                 bypass_hdrs.update(WAFEvasionManager.get_403_bypass_headers(url))
@@ -491,8 +490,8 @@ class ToolRegistry:
             params = {}
 
         # Validate invocation parameters and authorization
-        from core.tool_validation import ToolInvocationValidator
-        from core.exceptions import ToolValidationError, AuthorizationError
+        from core.tools.tool_validation import ToolInvocationValidator
+        from core.common.exceptions import ToolValidationError, AuthorizationError
         validator = ToolInvocationValidator(self)
         try:
             validator.validate(tool_name, params)

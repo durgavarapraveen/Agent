@@ -8,7 +8,7 @@ import csv
 import logging
 import os
 import re
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, Optional, Tuple, Any
 
 try:
     import joblib

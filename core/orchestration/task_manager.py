@@ -3,13 +3,12 @@ Task state machine and deterministic task management.
 Framework owns task lifecycle, not LLM.
 """
 
-import hashlib
 import json
 import logging
 from datetime import datetime
-from typing import Dict, List, Optional, Set, Tuple
-from core.schemas import TaskSpec, TaskStatus, SuccessCriterion
-from core.exceptions import AutonomousPentestException
+from typing import Dict, List, Optional, Tuple
+from core.common.schemas import TaskSpec, TaskStatus
+from core.common.exceptions import AutonomousPentestException
 
 logger = logging.getLogger(__name__)
 
@@ -105,9 +104,10 @@ class TaskManager:
     """Centralized task lifecycle and deduplication management"""
     
     def __init__(self):
+        from core.memory.dedup_tracker import DedupTracker
         self.tasks: Dict[str, Task] = {}
-        self.task_signatures: Dict[str, str] = {}  # signature -> task_id
-        
+        self.dedup_tracker = DedupTracker()
+
     def create_task(self, spec: TaskSpec) -> Task:
         """Create new task"""
         import uuid
@@ -115,7 +115,7 @@ class TaskManager:
             spec.task_id = str(uuid.uuid4())
 
         # Validate scope targets at task creation time
-        from core.authorization import TargetScopeValidator
+        from core.security.authorization import TargetScopeValidator
         target = spec.inputs.get("target") or spec.inputs.get("url") or spec.inputs.get("domain") or spec.inputs.get("host")
         if target:
             TargetScopeValidator.get().validate(target)
@@ -142,7 +142,7 @@ class TaskManager:
 
         duplicate = self.find_duplicate_task(spec)
         if duplicate:
-            from core.schemas import TaskStatus
+            from core.common.schemas import TaskStatus
             if duplicate.status in (TaskStatus.COMPLETED, TaskStatus.RUNNING, TaskStatus.CREATED, TaskStatus.QUEUED, TaskStatus.WAITING_DEPENDENCY):
                 target = str(spec.inputs.get("target") or spec.inputs.get("url") or spec.inputs.get("domain") or spec.inputs.get("host") or spec.objective or "").strip()
                 logger.info(f"TASK_DEDUPLICATED: Reusing existing task={duplicate.spec.task_id} (status={duplicate.status.value}) for proposed capability={spec.capability.value} target='{target}'")
@@ -172,6 +172,7 @@ class TaskManager:
         task.transition_to(TaskStatus.COMPLETED)
         if result:
             task.result = result
+        self.dedup_tracker.mark_completed(self.generate_task_signature(task.spec))
         return task
     
     def fail_task(self, task_id: str, error: str = "") -> Task:
@@ -179,6 +180,7 @@ class TaskManager:
         task = self.get_task(task_id)
         task.error = error
         task.transition_to(TaskStatus.FAILED)
+        self.dedup_tracker.mark_failed(self.generate_task_signature(task.spec), permanent=False)
         return task
     
     def timeout_task(self, task_id: str) -> Task:
@@ -209,6 +211,11 @@ class TaskManager:
     def get_all_tasks(self) -> List[Task]:
         """Get all tasks"""
         return list(self.tasks.values())
+        
+    def get_pending_tasks(self) -> List[Task]:
+        """Get tasks that are in a pending state (queued or waiting)"""
+        from core.common.schemas import TaskStatus
+        return [t for t in self.tasks.values() if t.status in (TaskStatus.QUEUED, TaskStatus.WAITING_DEPENDENCY)]
     
     def get_tasks_by_status(self, status: TaskStatus) -> List[Task]:
         """Get tasks filtered by status"""
@@ -267,8 +274,15 @@ class TaskManager:
     def find_duplicate_task(self, spec: TaskSpec) -> Optional[Task]:
         """Check if equivalent task exists"""
         sig = self.generate_task_signature(spec)
-        if sig in self.task_signatures:
-            existing_id = self.task_signatures[sig]
+        with self.dedup_tracker._lock:
+            if sig in self.dedup_tracker._completed_tasks:
+                existing_id = self.dedup_tracker._completed_tasks[sig].task_id
+            elif sig in self.dedup_tracker._active_tasks:
+                existing_id = self.dedup_tracker._active_tasks[sig].task_id
+            else:
+                existing_id = None
+                
+        if existing_id:
             existing_task = self.tasks.get(existing_id)
             if existing_task:
                 return existing_task
@@ -277,7 +291,13 @@ class TaskManager:
     def register_task_signature(self, spec: TaskSpec, task_id: str) -> None:
         """Register task signature for deduplication"""
         sig = self.generate_task_signature(spec)
-        self.task_signatures[sig] = task_id
+        target = spec.inputs.get("target") or spec.inputs.get("url") or spec.inputs.get("domain") or spec.inputs.get("host") or ""
+        self.dedup_tracker.register_task(
+            task_hash=sig, 
+            task_id=task_id, 
+            capability=spec.capability.value, 
+            target=str(target)
+        )
     
     def should_create_task(self, spec: TaskSpec) -> Tuple[bool, Optional[str]]:
         """Determine if task should be created"""

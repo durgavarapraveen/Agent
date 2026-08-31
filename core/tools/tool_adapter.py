@@ -12,7 +12,7 @@ import json
 import logging
 from typing import Dict, Any, Optional
 from pydantic import BaseModel, Field
-from core.exceptions import ToolValidationError
+from core.common.exceptions import ToolValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class NmapAdapter:
         args = [f"-{timing}"]
 
         if profile:
-            from core.target_profiler import TargetType
+            from core.intelligence.target_profiler import TargetType
             if profile.target_type == TargetType.WEB_APPLICATION:
                 # Web-focused scan: service detection + default scripts + common web ports
                 args = [f"-{timing}", "-sV", "-sC"]
@@ -73,7 +73,7 @@ class SubfinderAdapter:
     @staticmethod
     def subdomain_discovery(target: str, params: Dict[str, Any], profile=None) -> Dict[str, Any]:
         clean_target = target.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0].strip()
-        from core.subdomain_enum import extract_apex_domain
+        from core.intelligence.subdomain_enum import extract_apex_domain
         apex = extract_apex_domain(clean_target)
         # Use apex domain if available to discover all sibling subdomains
         query_domain = apex if apex else clean_target
@@ -88,7 +88,7 @@ class AmassAdapter:
     @staticmethod
     def passive_enum(target: str, params: Dict[str, Any], profile=None) -> Dict[str, Any]:
         clean_target = target.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0].strip()
-        from core.subdomain_enum import extract_apex_domain
+        from core.intelligence.subdomain_enum import extract_apex_domain
         apex = extract_apex_domain(clean_target)
         query_domain = apex if apex else clean_target
         return {"command": f"amass enum -passive -d {query_domain}"}
@@ -158,8 +158,8 @@ class GobusterAdapter:
     """Stack-aware directory bruteforcing with smart wordlists."""
     @staticmethod
     def dir_scan(target: str, params: Dict[str, Any], profile=None) -> Dict[str, Any]:
-        from core.smart_wordlists import SmartWordlistManager
-        from core.waf_evasion import WAFEvasionManager
+        from core.tools.smart_wordlists import SmartWordlistManager
+        from core.exploitation.waf_evasion import WAFEvasionManager
 
         default_wl = SmartWordlistManager.get_wordlist_for_profile(profile)
         w = params.get("wordlist", default_wl)
@@ -189,7 +189,7 @@ class FeroxbusterAdapter:
     """Stack-aware recursive directory discovery."""
     @staticmethod
     def scan(target: str, params: Dict[str, Any], profile=None) -> Dict[str, Any]:
-        from core.smart_wordlists import SmartWordlistManager
+        from core.tools.smart_wordlists import SmartWordlistManager
         default_wl = SmartWordlistManager.get_wordlist_for_profile(profile)
         w = params.get("wordlist", default_wl)
         flags = [f"-u {target}", f"-w {w}"]
@@ -208,7 +208,7 @@ class FFufAdapter:
     """Stack-aware fuzzer with tailored wordlists."""
     @staticmethod
     def fuzz(target: str, params: Dict[str, Any], profile=None) -> Dict[str, Any]:
-        from core.smart_wordlists import SmartWordlistManager
+        from core.tools.smart_wordlists import SmartWordlistManager
         default_wl = SmartWordlistManager.get_wordlist_for_profile(profile)
         w = params.get("wordlist", default_wl)
         flags = [f"-u {target}", f"-w {w}"]
@@ -232,7 +232,7 @@ class NucleiAdapter:
         flags = [f"-u {target}"]
 
         if profile:
-            from core.target_profiler import TechnologyStack
+            from core.intelligence.target_profiler import TechnologyStack
             # Severity filter
             severity = params.get("severity", "critical,high")
             flags.append(f"--severity {severity}")
@@ -279,7 +279,7 @@ class SqlmapAdapter:
     """Stack-aware SQL injection scanner with dynamic WAF bypass tampers."""
     @staticmethod
     def scan(target: str, params: Dict[str, Any], profile=None) -> Dict[str, Any]:
-        from core.waf_evasion import WAFEvasionManager
+        from core.exploitation.waf_evasion import WAFEvasionManager
         flags = [f"-u {target}", "--batch"]
 
         if profile:
@@ -404,7 +404,7 @@ def _get_extensions_for_profile(profile) -> str:
     """Return comma-separated file extensions based on detected tech stack."""
     if not profile or not hasattr(profile, "technologies"):
         return ""
-    from core.target_profiler import TechnologyStack
+    from core.intelligence.target_profiler import TechnologyStack
     exts = set()
     for tech in profile.technologies:
         if tech in (TechnologyStack.PHP, TechnologyStack.WORDPRESS,

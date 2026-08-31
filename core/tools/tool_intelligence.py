@@ -8,7 +8,6 @@ from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
 from urllib.parse import urlparse
 import re
-import socket
 import logging
 
 logger = logging.getLogger(__name__)

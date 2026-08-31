@@ -13,10 +13,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
-from core.risk_prioritizer import RiskPrioritizer
-from core.remediation_engine import RemediationEngine
-from core.trend_analyzer import TrendAnalyzer
-from core.report_builder import CustomReportBuilder
+from core.reporting.risk_prioritizer import RiskPrioritizer
+from core.reporting.remediation_engine import RemediationEngine
+from core.reporting.trend_analyzer import TrendAnalyzer
+from core.reporting.report_builder import CustomReportBuilder
 
 logger = logging.getLogger(__name__)
 

@@ -6,7 +6,7 @@ LLM provides target/query; authentication credentials (CENSYS_PAT) are handled s
 import logging
 from typing import Any, Dict
 from tools.base import Tool, ToolInputSchema, ToolOutputSchema, ToolPermission
-from core.censys_client import CensysClient
+from core.intelligence.censys_client import CensysClient
 
 logger = logging.getLogger(__name__)
 

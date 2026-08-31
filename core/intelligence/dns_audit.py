@@ -6,7 +6,7 @@ against domain spoofing and email misuse.
 """
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 try:
     import dns.resolver

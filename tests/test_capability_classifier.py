@@ -1,5 +1,5 @@
-from core.normalizer import PlannerResponseNormalizer
-from core.schemas import CapabilityType
+from core.common.normalizer import PlannerResponseNormalizer
+from core.common.schemas import CapabilityType
 
 def test_objective_capability_inference():
     # 1. Subdomain and DNS discovery

@@ -1,12 +1,11 @@
 import json
 import uuid
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from datetime import datetime
 import logging
-import psycopg2
 from psycopg2.extras import RealDictCursor
 
-from core.database import DatabaseManager
+from core.memory.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
 

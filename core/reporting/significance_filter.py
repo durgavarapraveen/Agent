@@ -4,8 +4,8 @@ Filters raw tool findings to keep high-impact security findings while removing n
 """
 
 import logging
-from typing import Any, Dict, List
-from core.token_optimizer import TokenOptimizer
+from typing import Any, Dict
+from core.common.token_optimizer import TokenOptimizer
 
 logger = logging.getLogger(__name__)
 

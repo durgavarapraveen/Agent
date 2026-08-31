@@ -4,12 +4,9 @@ Demonstrates seamless connectivity, data flow, logging, legal scope validation, 
 parallel orchestrator execution, state checkpointing, and real-time streaming for an example domain.
 """
 
-import json
 import logging
 import os
-import sys
 import tempfile
-import time
 
 # Configure logging format to stdout
 logging.basicConfig(
@@ -19,23 +16,19 @@ logging.basicConfig(
 logger = logging.getLogger("AntiGravityMasterPipeline")
 
 # Import Core Modules Across All 8 Phases
-from core.authorization import TargetScopeValidator
-from core.legal_validator import LegalValidator
-from core.audit_logger import AuditLogger
-from core.encryption import encrypt, decrypt
-from core.vulnerability_intelligence import VulnerabilityIntelligence
-from core.llm_orchestrator import LLMOrchestrator
-from core.quality_gate import QualityGate
-from core.risk_prioritizer import RiskPrioritizer
-from core.remediation_engine import RemediationEngine
-from core.trend_analyzer import TrendAnalyzer
-from core.report_builder import CustomReportBuilder
-from core.compliance_mapper import ComplianceMapper
-from core.compliance_gate import ComplianceGate
-from core.orchestrator_v2 import ParallelOrchestrator, TaskPriority
-from core.resource_limiter import ResourceLimiter
-from core.recovery_engine import RecoveryEngine
-from core.websocket_pusher import RealtimeStreamServer
+from core.security.authorization import TargetScopeValidator
+from core.security.legal_validator import LegalValidator
+from core.security.audit_logger import AuditLogger
+from core.intelligence.vulnerability_intelligence import VulnerabilityIntelligence
+from core.orchestration.llm_orchestrator import LLMOrchestrator
+from core.reporting.quality_gate import QualityGate
+from core.reporting.risk_prioritizer import RiskPrioritizer
+from core.reporting.report_builder import CustomReportBuilder
+from core.reporting.compliance_mapper import ComplianceMapper
+from core.orchestration.orchestrator_v2 import ParallelOrchestrator
+from core.security.resource_limiter import ResourceLimiter
+from core.common.recovery_engine import RecoveryEngine
+from core.reporting.websocket_pusher import RealtimeStreamServer
 
 
 def run_master_pipeline(example_domain: str = "example.com", example_ip: str = "93.184.215.14"):

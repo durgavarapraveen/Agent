@@ -14,14 +14,13 @@ Usage in central_brain:
 """
 
 import logging
-import asyncio
 from typing import Dict, List, Optional
 from datetime import datetime
 
-from core.osint_engine import OSINTEngine, EmployeeEnumerator, GitHubScanner, DNSMailIntelligence
-from core.threat_intel import ThreatIntelligenceEngine, AbuseChIntelligence
-from core.subdomain_enum import SubdomainEnumerationEngine, CertificateTransparencyScanner
-from core.shared_context import SharedContext
+from core.intelligence.osint_engine import OSINTEngine
+from core.intelligence.threat_intel import ThreatIntelligenceEngine
+from core.intelligence.subdomain_enum import SubdomainEnumerationEngine
+from core.memory.shared_context import SharedContext
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +210,7 @@ class OSINTOrchestrator:
         
         # Profile target for intelligent OSINT orchestration
         try:
-            from core.target_profiler import TargetProfiler
+            from core.intelligence.target_profiler import TargetProfiler
             target_url = f"https://{domain}" if not domain.startswith(("http://", "https://")) else domain
             profile = TargetProfiler.profile_target(target_url, self.ctx)
             self.ctx.update('target_profile', profile.to_dict())

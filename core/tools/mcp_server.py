@@ -1,9 +1,7 @@
 import fastmcp
 import asyncio
 import logging
-from core.schemas import ToolDefinition
-from core.tool_registry import ToolRegistry
-from core.tool_gateway import ToolGateway
+from core.tools.tool_gateway import ToolGateway
 
 try:
     import fastmcp
@@ -66,8 +64,8 @@ class MCPBridgeServer:
         async def execute_tool(name: str, arguments: dict):
             """Claude calls tool → routes through ToolGateway"""
             
-            from core.schemas import ToolInvocation
-            from core.authorization import AuthContext
+            from core.common.schemas import ToolInvocation
+            from core.security.authorization import AuthContext
             
             logger.info(f"MCP client called: {name}")
             

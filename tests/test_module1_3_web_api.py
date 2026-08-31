@@ -3,9 +3,9 @@ Unit test suite for Module 1.3: Web Application Advanced Testing & API Security 
 """
 
 import unittest
-from core.authorization import TargetScopeValidator
-from core.web_advanced import WebAdvancedTester
-from core.api_testing import APISecurityTester
+from core.security.authorization import TargetScopeValidator
+from core.exploitation.web_advanced import WebAdvancedTester
+from core.exploitation.api_testing import APISecurityTester
 
 
 class TestModule13WebAndAPITesting(unittest.TestCase):

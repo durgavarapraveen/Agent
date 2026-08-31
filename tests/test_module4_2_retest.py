@@ -8,8 +8,8 @@ import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 
-from core.authorization import TargetScopeValidator
-from core.retest_engine import RetestEngine, BASELINE_FILE, REGRESSION_REPORT_FILE
+from core.security.authorization import TargetScopeValidator
+from core.reporting.retest_engine import RetestEngine
 
 
 class TestModule42RetestEngine(unittest.TestCase):

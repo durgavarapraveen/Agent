@@ -4,7 +4,7 @@ Unit tests for Phase 5 Module 5.4: Trend Analyzer (core/trend_analyzer.py)
 
 import os
 import unittest
-from core.trend_analyzer import TrendAnalyzer
+from core.reporting.trend_analyzer import TrendAnalyzer
 
 
 class TestModule5_4_TrendAnalyzer(unittest.TestCase):

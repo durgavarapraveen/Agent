@@ -8,9 +8,7 @@ and emergency 90% warning degradation logging.
 
 import json
 import logging
-import os
-import re
-from typing import Dict, List, Optional, Set, Tuple, Any
+from typing import Dict, List, Any
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +205,47 @@ class TokenOptimizer:
             "reduction_percent": reduction_percent,
             "compressed_payload": final_payload
         }
+
+    def compress_context(self, context_str: str) -> str:
+        """
+        Compresses a full SharedContext summary string down to reduce token usage.
+        Replaces massive raw text with a condensed format.
+        """
+        token_count = self.count_tokens(context_str)
+        token_ratio = token_count / float(self.token_limit)
+        
+        if token_ratio <= 0.50:
+            return context_str # Keep original if well under limit
+            
+        logger.info(f"[TokenOptimizer] Compressing context summary. Original tokens: {token_count}")
+        
+        # Simple truncation/compression for now - extract key sections and limit lengths
+        lines = context_str.splitlines()
+        compressed_lines = []
+        
+        for line in lines:
+            # Keep structural headers but compress the payload
+            if line.startswith("TARGET:"):
+                compressed_lines.append(line)
+            elif line.startswith("SUBDOMAINS"):
+                compressed_lines.append(line[:100] + ("..." if len(line) > 100 else ""))
+            elif line.startswith("PORTS"):
+                compressed_lines.append(line[:150] + ("..." if len(line) > 150 else ""))
+            elif line.startswith("TECH"):
+                compressed_lines.append(line[:150] + ("..." if len(line) > 150 else ""))
+            elif line.startswith("ENDPOINTS"):
+                compressed_lines.append(line[:300] + ("..." if len(line) > 300 else ""))
+            elif line.startswith("VULNERABILITIES"):
+                compressed_lines.append(line) # Keep title
+            elif line.startswith("  ["): # Vuln list items
+                compressed_lines.append(line[:200])
+            elif len(compressed_lines) < 20: # Just keep some early structural stuff
+                compressed_lines.append(line[:200])
+                
+        result = "\n".join(compressed_lines)
+        new_tokens = self.count_tokens(result)
+        logger.info(f"[TokenOptimizer] Compressed tokens: {new_tokens} (saved {token_count - new_tokens})")
+        return result
 
     # Static utility methods preserved for backward compatibility
     @staticmethod

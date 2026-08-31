@@ -3,7 +3,7 @@ Unit tests for Phase 6 Module 6.5: Framework-Specific Compliance Mapper (core/co
 """
 
 import unittest
-from core.compliance_mapper import ComplianceMapper
+from core.reporting.compliance_mapper import ComplianceMapper
 
 
 class TestModule6_5_ComplianceMapper(unittest.TestCase):

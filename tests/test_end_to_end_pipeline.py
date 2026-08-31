@@ -4,18 +4,17 @@ Validates that all modules are interconnected, data flows seamlessly between pha
 and results match expected outputs for sample targets.
 """
 
-import json
 import os
 import tempfile
 import unittest
 
-from core.authorization import TargetScopeValidator
-from core.lateral_movement import LateralMovementPlanner
-from core.credential_simulator import CredentialSimulator
-from core.persistence_auditor import PersistenceAuditor
-from core.vulnerability_intelligence import VulnerabilityIntelligence
-from core.llm_orchestrator import LLMOrchestrator
-from core.quality_gate import QualityGate
+from core.security.authorization import TargetScopeValidator
+from core.exploitation.lateral_movement import LateralMovementPlanner
+from core.exploitation.credential_simulator import CredentialSimulator
+from core.exploitation.persistence_auditor import PersistenceAuditor
+from core.intelligence.vulnerability_intelligence import VulnerabilityIntelligence
+from core.orchestration.llm_orchestrator import LLMOrchestrator
+from core.reporting.quality_gate import QualityGate
 
 
 class TestEndToEndPipeline(unittest.TestCase):

@@ -11,7 +11,7 @@ import os
 import sqlite3
 import threading
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -211,3 +211,72 @@ class DeduplicationTracker:
                 logger.info("DEDUP_CACHE_RESET: cleared all deduplication entries")
             finally:
                 conn.close()
+
+
+from dataclasses import dataclass
+from typing import Set, Optional
+
+@dataclass(frozen=True)
+class TaskRecord:
+    task_hash: str
+    task_id: str
+    capability: str
+    target: str
+
+class DedupTracker:
+    """Thread-safe, in-memory deduplication tracker for Tasks to prevent redundant execution."""
+    
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._active_tasks: Dict[str, TaskRecord] = {}
+        self._completed_tasks: Dict[str, TaskRecord] = {}
+        self._failed_tasks: Set[str] = set()
+        self._permanent_failures: Set[str] = set()
+
+    def get_task_hash(self, capability: str, target: str, params: dict) -> str:
+        data = f"{capability}:{target}:{json.dumps(params, sort_keys=True)}"
+        return hashlib.sha256(data.encode()).hexdigest()
+
+    def register_task(self, task_hash: str, task_id: str, capability: str = "", target: str = "") -> Optional[str]:
+        """
+        Registers a task. If it's already active or completed, returns the existing task_id.
+        Otherwise returns None.
+        """
+        with self._lock:
+            if task_hash in self._completed_tasks:
+                return self._completed_tasks[task_hash].task_id
+            if task_hash in self._active_tasks:
+                return self._active_tasks[task_hash].task_id
+                
+            self._active_tasks[task_hash] = TaskRecord(
+                task_hash=task_hash, 
+                task_id=task_id, 
+                capability=capability, 
+                target=target
+            )
+            return None
+
+    def mark_completed(self, task_hash: str):
+        with self._lock:
+            if task_hash in self._active_tasks:
+                record = self._active_tasks.pop(task_hash)
+                self._completed_tasks[task_hash] = record
+                
+    def mark_failed(self, task_hash: str, permanent: bool = False):
+        with self._lock:
+            if task_hash in self._active_tasks:
+                self._active_tasks.pop(task_hash)
+            
+            if permanent:
+                self._permanent_failures.add(task_hash)
+            else:
+                self._failed_tasks.add(task_hash)
+                
+    def get_stats(self) -> dict:
+        with self._lock:
+            return {
+                "active": len(self._active_tasks),
+                "completed": len(self._completed_tasks),
+                "failed": len(self._failed_tasks),
+                "permanent_failures": len(self._permanent_failures)
+            }

@@ -2,8 +2,8 @@ import json
 import time
 import logging
 from typing import Optional
-from core.database import DatabaseManager
-from core.schemas import ToolResult
+from core.memory.database import DatabaseManager
+from core.common.schemas import ToolResult
 
 logger = logging.getLogger(__name__)
 

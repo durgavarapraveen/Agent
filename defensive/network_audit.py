@@ -4,7 +4,6 @@ Audits SMB/service exposure, identity/trust paths, and multi-subnet pivot points
 """
 
 import logging
-import re
 import socket
 import subprocess
 from dataclasses import dataclass, field

@@ -6,7 +6,7 @@ import os
 import shutil
 import unittest
 from datetime import datetime, timedelta
-from core.retention_policy import RetentionPolicy
+from core.memory.retention_policy import RetentionPolicy
 
 
 class TestModule6_3_RetentionPolicy(unittest.TestCase):

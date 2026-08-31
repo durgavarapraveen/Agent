@@ -5,10 +5,10 @@ Dynamically resolves and ranks the most suitable tools for a given capability wi
 
 import logging
 from typing import List, Optional
-from core.schemas import TaskSpec, CapabilityType
-from core.tool_intelligence import ToolProfile
-from core.tool_knowledge_store import ToolKnowledgeStore
-from core.tool_ranking import ToolRankingEngine
+from core.common.schemas import TaskSpec
+from core.tools.tool_intelligence import ToolProfile
+from core.tools.tool_knowledge_store import ToolKnowledgeStore
+from core.tools.tool_ranking import ToolRankingEngine
 
 logger = logging.getLogger(__name__)
 

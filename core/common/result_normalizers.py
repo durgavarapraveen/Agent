@@ -4,10 +4,9 @@ Preserve information during normalization.
 """
 
 import logging
-import json
 import re
-from typing import Dict, List, Any, Optional
-from core.schemas import ToolResult, Evidence, KnowledgeItem
+from typing import List
+from core.common.schemas import ToolResult, Evidence, KnowledgeItem
 
 logger = logging.getLogger(__name__)
 

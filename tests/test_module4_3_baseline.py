@@ -7,7 +7,7 @@ import os
 import tempfile
 import unittest
 
-from core.baseline import BaselineManager, sha256_hash
+from core.reporting.baseline import BaselineManager, sha256_hash
 
 
 class TestModule43Baseline(unittest.TestCase):

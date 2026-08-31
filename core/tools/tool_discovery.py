@@ -7,8 +7,8 @@ import logging
 import re
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
-from core.tool_intelligence import ToolProfile
-from core.tool_knowledge_store import ToolKnowledgeStore
+from core.tools.tool_intelligence import ToolProfile
+from core.tools.tool_knowledge_store import ToolKnowledgeStore
 
 logger = logging.getLogger(__name__)
 

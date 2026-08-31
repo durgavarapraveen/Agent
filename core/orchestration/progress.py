@@ -3,9 +3,9 @@ Scan progress tracking and loop detection layer.
 """
 
 import logging
-from typing import List, Dict
+from typing import List
 from pydantic import BaseModel
-from core.schemas import ExecutionState
+from core.common.schemas import ExecutionState
 
 logger = logging.getLogger(__name__)
 

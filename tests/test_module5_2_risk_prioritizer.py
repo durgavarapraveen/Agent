@@ -3,7 +3,7 @@ Unit tests for Phase 5 Module 5.2: Risk Prioritization (core/risk_prioritizer.py
 """
 
 import unittest
-from core.risk_prioritizer import (
+from core.reporting.risk_prioritizer import (
     compute_exploitability_score,
     compute_business_impact,
     RiskPrioritizer

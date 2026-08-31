@@ -5,7 +5,7 @@ Centralized repository for dynamic tool profiles, capabilities, and execution me
 
 import logging
 from typing import Dict, List, Optional, Any
-from core.tool_intelligence import ToolProfile
+from core.tools.tool_intelligence import ToolProfile
 
 logger = logging.getLogger(__name__)
 

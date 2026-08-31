@@ -5,8 +5,7 @@ and records findings into SharedContext and Enterprise Reports.
 """
 
 import logging
-import os
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any, Optional
 
 from defensive.network_audit import NetworkAuditor
 from defensive.credential_hardening import CredentialHardeningAuditor, SecretScanner
