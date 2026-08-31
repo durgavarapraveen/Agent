@@ -37,6 +37,12 @@ from core.stores import KnowledgeStore, EvidenceStore, FindingStore
 from core.task_manager import TaskManager
 from orchestrator.scheduler import Scheduler
 from core.context_resolver import ContextResolver
+
+from core.tool_invocation_engine import ToolInvocationEngine, InvocationSource
+from core.execution_mode import ExecutionMode, get_execution_config
+from core.tool_gateway import ToolGateway
+from core.claude_agent_loop import ClaudeAgentLoop
+
 from core.schemas import (
     BrainDecision, BrainDecisionAction, ExecutionState, TaskSpec,
     SuccessCriterion, SuccessCriterionType, CapabilityType
@@ -186,6 +192,18 @@ class CentralBrain:
         self.finding_store = FindingStore()
 
         # Framework components
+        
+        # Phase 3 Configuration
+        self.execution_config = get_execution_config()
+        from core.audit_logger import AuditLogger
+        from core.tool_cache import ToolResultCache
+        self.audit_logger = AuditLogger()
+        self.tool_cache = ToolResultCache()
+        # Use existing registry and stores for the gateway
+        self.tool_gateway = ToolGateway(self.tools, self.tool_cache, self.audit_logger)
+        self.tool_invocation_engine = ToolInvocationEngine(self.tool_gateway)
+        logger.info(f"Hybrid Mode Initialized: {self.execution_config.mode.name}")
+
         self.task_manager = TaskManager()
         self.scheduler = Scheduler(self.task_manager)
         self.context_resolver = ContextResolver(self.knowledge_store)
@@ -414,7 +432,237 @@ class CentralBrain:
             )
             logger.info(f"Scope: {result['domains']}, tier: {result.get('max_tier')}")
 
+
     async def _run_phase(self, phase: str):
+        if self.execution_config.should_use_mode_a_primary():
+            try:
+                await self._run_phase_approach_a(phase)
+            except Exception as e:
+                logger.exception(f"Approach A failed: {e}")
+                if self.execution_config.can_fallback_to_b():
+                    logger.info("Falling back to Approach B...")
+                    await self._run_phase_approach_b(phase)
+        elif self.execution_config.should_use_mode_b_primary():
+            await self._run_phase_approach_b(phase)
+        else:
+            await self._run_phase_legacy(phase)
+
+    async def _run_phase_approach_a(self, phase: str):
+        logger.info(f"--- Running Approach A for phase: {phase} ---")
+        
+        session_id = f"session_{phase}"
+        from core.authorization import AuthContext
+        allowed_tools = list(self.tools.tools.keys()) if hasattr(self, 'tools') and hasattr(self.tools, 'tools') else []
+        auth_context = AuthContext(allowed_tools=allowed_tools, has_elevated_privilege=True, target_profile=getattr(self, 'target_profile', None))
+        agents_this_phase = 0
+        max_agents = self.max_agents_per_phase
+        task_history = []
+        consecutive_duplicate_rounds = 0
+        
+        from core.hexstrike_decision_engine import IntelligentDecisionEngine
+        hex_engine = IntelligentDecisionEngine()
+        target_profile = hex_engine.analyze_target(self.ctx.target)
+        attack_chain = hex_engine.create_attack_chain(target_profile, objective="comprehensive")
+        
+        hex_suggestions = ""
+        if attack_chain and attack_chain.steps:
+            hex_suggestions = "HexStrike Intelligent Engine suggests prioritizing the following tools and parameters:\n"
+            for step in attack_chain.steps[:3]:  # Top 3 suggestions per prompt
+                hex_suggestions += f"- Tool: {step.tool}, Parameters: {step.parameters}, Success Prob: {step.success_probability:.2f}\n"
+
+        while agents_this_phase < max_agents:
+            summary = self.ctx.get_full_summary(max_chars=800)
+            
+            history_text = "\n".join([
+                f"- {'✓' if h['success'] else '✗'} {h['capability']} on {h['target']} (tool: {h.get('tool', 'auto')})"
+                for h in task_history[-5:]
+            ]) if task_history else "None yet"
+
+            prompt = (
+                f"Identify capability requests for phase {phase}.\n"
+                f"Target: {self.ctx.target}\n"
+                f"Current Context Summary:\n{summary}\n\n"
+                f"Already Executed Tasks in this phase:\n{history_text}\n\n"
+                f"{hex_suggestions}\n"
+                f"Evaluate the HexStrike suggestions against the current context. If they have already been run or are unnecessary, do not use them. Otherwise, prioritize them.\n"
+                f"If the phase is complete or no more tasks are needed, output: {{\"action\": \"phase_complete\"}}\n"
+                f"CRITICAL: Do NOT repeat any capability or task that is listed in Already Executed Tasks."
+            )
+            
+            response = await self.llm.generate_response(prompt, system=BRAIN_SYSTEM)
+            
+            from core.normalizer import PlannerResponseNormalizer
+            try:
+                decision = PlannerResponseNormalizer.normalize(response.content)
+            except Exception as e:
+                logger.error(f"Failed to parse LLM response: {e}")
+                break
+                
+            if decision.action in (BrainDecisionAction.COMPLETE, BrainDecisionAction.PHASE_COMPLETE):
+                logger.info(f"Phase {phase} complete.")
+                break
+                
+            tasks = decision.tasks
+            if not tasks:
+                logger.info("No tasks returned. Exiting phase.")
+                break
+                
+            executed_any = False
+            for task in tasks:
+                capability = task.capability.value if hasattr(task.capability, 'value') else task.capability
+                target = task.inputs.get('target', self.ctx.target)
+                params = task.inputs.get('params', {})
+                
+                logger.info(f"Invoking capability: {capability} on {target}")
+                
+                real_task, created = self.task_manager.get_or_create_task(task)
+                actual_task_id = real_task.spec.task_id
+                
+                if not created:
+                    logger.info(f"Task {actual_task_id} is a duplicate, skipping execution.")
+                    continue
+                    
+                executed_any = True
+                
+                try:
+                    self.task_manager.start_task(actual_task_id)
+                except Exception as e:
+                    logger.debug(f"Task {actual_task_id} couldn't be started: {e}")
+
+                result = await self.tool_invocation_engine.invoke_from_capability(
+                    capability, target, params, session_id, auth_context
+                )
+                
+                tool_name = result.tool if hasattr(result, 'tool') else 'unknown'
+                
+                if result.success:
+                    self.task_manager.complete_task(actual_task_id, {"status": "success", "result": result.data or result.stdout[:200]})
+                else:
+                    self.task_manager.fail_task(actual_task_id, f"Tool invocation failed for capability {capability}")
+                    
+                # Ingest findings into shared context & knowledge store
+                self._ingest_approach_a_result(capability, target, result)
+                self.ctx.log_agent(
+                    agent_id=actual_task_id,
+                    objective=getattr(task, 'objective', capability),
+                    status="completed" if result.success else "failed",
+                    result_summary=str(result.data or result.stdout)[:200]
+                )
+                
+                task_history.append({
+                    "task_id": actual_task_id,
+                    "capability": capability,
+                    "target": target,
+                    "tool": tool_name,
+                    "success": result.success
+                })
+                logger.info(f"Executed task {actual_task_id} with result: {result.success}")
+                
+            if not executed_any:
+                consecutive_duplicate_rounds += 1
+                if consecutive_duplicate_rounds >= 1:
+                    logger.info("All tasks in wave were duplicates or already executed. Advancing phase to avoid looping.")
+                    break
+            else:
+                consecutive_duplicate_rounds = 0
+                
+            agents_this_phase += 1
+
+            # Check phase gate after each execution wave
+            db_context = {
+                "completed_tasks": [(h["capability"], h["target"]) for h in task_history if h["success"]],
+                "discovered_assets": {
+                    "subdomains": getattr(self.ctx, "subdomains", []),
+                    "open_ports": getattr(self.ctx, "ports", {})
+                }
+            }
+            if self._evaluate_phase_gate(phase, db_context):
+                logger.info(f"Phase gate satisfied for phase {phase}. Advancing to next phase.")
+                break
+
+    def _ingest_approach_a_result(self, capability: str, target: str, result: Any) -> None:
+        """Parse and ingest tool results into SharedContext and knowledge stores."""
+        if not result or not result.success:
+            return
+        
+        stdout = getattr(result, "stdout", "") or ""
+        data = getattr(result, "data", {}) or {}
+        
+        # 1. Ingest Subdomains
+        domain_pattern = re.compile(r'^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$')
+        discovered_subs = set(data.get("subdomains", []) or data.get("domains", []))
+        if stdout:
+            for line in stdout.splitlines():
+                clean = line.strip()
+                if clean and domain_pattern.match(clean) and not clean.startswith("[") and not clean.startswith("http"):
+                    discovered_subs.add(clean)
+        
+        if discovered_subs:
+            self.ctx.add_subdomains(list(discovered_subs), source=getattr(result, "tool", capability))
+            if hasattr(self, "persistent_knowledge_store") and self.persistent_knowledge_store:
+                for sub in discovered_subs:
+                    try:
+                        self.persistent_knowledge_store.add_asset(self.target_id, "subdomain", sub)
+                    except Exception:
+                        pass
+        
+        # 2. Ingest Technologies & HTTP status
+        techs = data.get("technologies") or data.get("tech") or []
+        target_host = target.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0]
+        if techs:
+            self.ctx.add_technologies(target_host, techs if isinstance(techs, list) else [str(techs)])
+        elif stdout and ("[" in stdout or "http" in stdout):
+            for line in stdout.splitlines()[:5]:
+                if "[" in line and "]" in line:
+                    parts = re.findall(r'\[(.*?)\]', line)
+                    if parts:
+                        self.ctx.add_technologies(target_host, parts[:4])
+                        break
+        
+        # 3. Ingest Open Ports
+        ports = data.get("ports") or data.get("open_ports") or []
+        if not ports and stdout:
+            for line in stdout.splitlines():
+                match = re.search(r'(\d+)/tcp\s+open\s+(\S+)', line)
+                if match:
+                    ports.append({"port": int(match.group(1)), "service": match.group(2)})
+        if ports:
+            self.ctx.add_ports(target_host, ports)
+
+    async def _run_phase_approach_b(self, phase: str):
+        logger.info(f"--- Running Approach B for phase: {phase} ---")
+        from core.tool_use_executor import ToolUseExecutor
+        
+        # Claude Agent Loop creation
+        executor = ToolUseExecutor(self.tool_invocation_engine)
+        claude_loop = ClaudeAgentLoop(
+            tool_use_executor=executor, 
+            invocation_engine=self.tool_invocation_engine
+        )
+        objective = f"Execute tasks for phase {phase}"
+        from core.authorization import AuthContext
+        allowed_tools = list(self.tools.tools.keys()) if hasattr(self, 'tools') and hasattr(self.tools, 'tools') else []
+        auth_context = AuthContext(allowed_tools=allowed_tools, has_elevated_privilege=True, target_profile=getattr(self, 'target_profile', None))
+        
+        session_id = f"session_{phase}_b"
+        result = await claude_loop.run(objective, auth_context, session_id)
+        
+        # ToolUseExecutor is assumed to be part of ClaudeAgentLoop internally intercepting calls
+        
+        logger.info(f"Claude Loop completed for {phase}")
+
+    def _parse_deepseek_response(self, response_text: str) -> List[TaskSpec]:
+        # Helper to parse DeepSeek json and return TaskSpec objects
+        from core.normalizer import PlannerResponseNormalizer
+        try:
+            decision = PlannerResponseNormalizer.normalize(response_text)
+            return decision.tasks
+        except Exception as e:
+            logger.error(f"Failed to parse LLM response: {e}")
+            return []
+
+
+    async def _run_phase_legacy(self, phase: str):
         """LLM-driven loop with agent history, dedup, failed tool filtering, and circuit-breaker."""
         agents_this_phase = 0
         self.consecutive_agent_failures = 0

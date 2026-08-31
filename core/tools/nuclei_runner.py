@@ -129,6 +129,9 @@ class NucleiRunner:
         if process_returncode != 0 and stderr_bytes:
             err_msg = stderr_bytes.decode("utf-8", errors="ignore").strip()
             logger.warning(f"NUCLEI_STDERR: returncode={process_returncode} msg='{err_msg[:200]}'")
+            if "no templates provided" in err_msg.lower() and tags_str != "cve,misconfig,exposure,tech":
+                logger.info("[NucleiRunner] Tag filter matched 0 templates, falling back to standard templates: 'cve,misconfig,exposure,tech'")
+                return await self.execute_template(target, "cve,misconfig,exposure,tech", timeout=timeout)
 
         stdout_text = stdout_bytes.decode("utf-8", errors="ignore")
         for line in stdout_text.splitlines():

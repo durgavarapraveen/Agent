@@ -70,12 +70,10 @@ def mask_sensitive_data(text: str, enabled: bool = True) -> str:
 
 
 class EncryptedTrendStore:
-    """Stores historical scan trend metrics in an encrypted SQLite database table."""
+    """Stores historical scan trend metrics in an encrypted PostgreSQL database table."""
 
-    def __init__(self, db_path: str = "data/historical_trends.sqlite"):
+    def __init__(self):
         import os
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._key_bytes = os.environ.get("TREND_STORE_KEY", "AntiGravityTrendSecretKey2026").encode("utf-8")
         self._init_db()
 
@@ -86,23 +84,25 @@ class EncryptedTrendStore:
         return bytes(out)
 
     def _init_db(self):
-        import sqlite3
-        conn = sqlite3.connect(self.db_path)
+        from core.database import DatabaseManager
         try:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS scan_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    target TEXT NOT NULL,
-                    encrypted_data BLOB NOT NULL
-                )
-            """)
-            conn.commit()
-        finally:
-            conn.close()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS scan_history (
+                            id SERIAL PRIMARY KEY,
+                            timestamp TEXT NOT NULL,
+                            target TEXT NOT NULL,
+                            encrypted_data BYTEA NOT NULL
+                        )
+                    """)
+                    conn.commit()
+        except Exception as e:
+            logger.error(f"EncryptedTrendStore init failed: {e}")
 
     def record_scan(self, target: str, severity_counts: Dict[str, int], critical_count: int, risk_score: float):
-        import json, sqlite3, time
+        import json, time
+        from core.database import DatabaseManager
         payload = {
             "target": target,
             "counts": severity_counts,
@@ -113,28 +113,31 @@ class EncryptedTrendStore:
         raw_bytes = json.dumps(payload).encode("utf-8")
         enc_blob = self._xor_cipher(raw_bytes)
         ts = datetime.now().isoformat()
-        conn = sqlite3.connect(self.db_path)
         try:
-            conn.execute("INSERT INTO scan_history (timestamp, target, encrypted_data) VALUES (?, ?, ?)",
-                         (ts, target, enc_blob))
-            conn.commit()
-        finally:
-            conn.close()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("INSERT INTO scan_history (timestamp, target, encrypted_data) VALUES (%s, %s, %s)",
+                                 (ts, target, enc_blob))
+                    conn.commit()
+        except Exception as e:
+            logger.error(f"EncryptedTrendStore record_scan failed: {e}")
 
     def get_target_history(self, target: str) -> List[Dict]:
-        import json, sqlite3
+        import json
+        from core.database import DatabaseManager
         records = []
-        conn = sqlite3.connect(self.db_path)
         try:
-            cursor = conn.execute("SELECT encrypted_data FROM scan_history WHERE target = ? ORDER BY id ASC", (target,))
-            for row in cursor.fetchall():
-                try:
-                    dec_bytes = self._xor_cipher(row[0])
-                    records.append(json.loads(dec_bytes.decode("utf-8")))
-                except Exception:
-                    pass
-        finally:
-            conn.close()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT encrypted_data FROM scan_history WHERE target = %s ORDER BY id ASC", (target,))
+                    for row in cursor.fetchall():
+                        try:
+                            dec_bytes = self._xor_cipher(row[0])
+                            records.append(json.loads(dec_bytes.decode("utf-8")))
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.error(f"EncryptedTrendStore get_target_history failed: {e}")
         return records
 
     def get_average_critical(self, target: str) -> float:

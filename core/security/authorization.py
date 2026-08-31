@@ -146,3 +146,21 @@ class TargetScopeValidator:
         # Validate all extracted targets
         for t in set(targets):
             self.validate(t)
+
+class AuthContext:
+    """Authorization context for tool invocations"""
+    def __init__(self, allowed_tools: Optional[List[str]] = None, 
+                 has_elevated_privilege: bool = False, 
+                 target_profile=None):
+        self.allowed_tools = allowed_tools or []
+        self.has_elevated_privilege = has_elevated_privilege
+        self.target_profile = target_profile
+        self.validator = TargetScopeValidator.get()
+
+    def can_scan_target(self, target: str) -> bool:
+        return self.validator.is_authorized(target)
+
+    def log_denial(self, tool_name: str, target: str, reason: str):
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"AuthContext Denial: tool={tool_name} target={target} reason={reason}")

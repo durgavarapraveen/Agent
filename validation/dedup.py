@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -26,25 +25,11 @@ from typing import Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
-@contextmanager
-def _connect(path: str):
-    """sqlite connection that actually CLOSES on exit.
-
-    `with sqlite3.connect(...)` only commits/rolls back — it leaves the handle
-    open, which locks the file on Windows. This wrapper commits and closes.
-    """
-    conn = sqlite3.connect(path)
-    try:
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
+from core.database import DatabaseManager
 
 NEW = "new"
 RECURRING = "recurring"
 RESOLVED = "resolved"
-
-DEFAULT_DB = ".findings_history.sqlite"
 
 
 def generate_dedup_key(capability: str, target: str, resource: str = "") -> str:
@@ -111,21 +96,21 @@ class DedupResult:
 
 
 class DedupStore:
-    """Tracks finding fingerprints across scans in SQLite."""
+    """Tracks finding fingerprints across scans in PostgreSQL."""
 
-    def __init__(self, db_path: str = DEFAULT_DB):
-        self.db_path = db_path
+    def __init__(self):
         self._init()
 
     def _init(self):
-        with _connect(self.db_path) as c:
-            c.execute(
-                "CREATE TABLE IF NOT EXISTS findings_history ("
-                "fingerprint TEXT PRIMARY KEY, cve_id TEXT, file_path TEXT, "
-                "function_name TEXT, package_version TEXT, severity TEXT, "
-                "first_seen REAL, last_seen REAL, last_scan_id TEXT, "
-                "status TEXT)")
-            c.commit()
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as c:
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS findings_history ("
+                    "fingerprint TEXT PRIMARY KEY, cve_id TEXT, file_path TEXT, "
+                    "function_name TEXT, package_version TEXT, severity TEXT, "
+                    "first_seen REAL, last_seen REAL, last_scan_id TEXT, "
+                    "status TEXT)")
+                conn.commit()
 
     def classify(self, finding: Dict, scan_id: str) -> DedupResult:
         """Classify one finding for the current scan and update history."""
@@ -137,49 +122,57 @@ class DedupStore:
         severity = str(finding.get("severity", "")).upper()
         now = time.time()
 
-        with _connect(self.db_path) as c:
-            row = c.execute(
-                "SELECT severity, first_seen FROM findings_history WHERE fingerprint=?",
-                (fp,)).fetchone()
-
-            if row is None:
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as c:
                 c.execute(
-                    "INSERT INTO findings_history(fingerprint, cve_id, file_path, "
-                    "function_name, package_version, severity, first_seen, last_seen, "
-                    "last_scan_id, status) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                    (fp, finding.get("cve_id", ""),
-                     finding.get("file_path", finding.get("location", "")),
-                     finding.get("function_name", ""),
-                     finding.get("package_version", ""),
-                     severity, now, now, scan_id, NEW))
-                c.commit()
-                return DedupResult(fp, NEW, severity, "", False, False, now, now)
+                    "SELECT severity, first_seen FROM findings_history WHERE fingerprint=%s",
+                    (fp,))
+                row = c.fetchone()
 
-            prev_sev = str(row[0] or "").upper()
-            first_seen = row[1] or now
-            changed = prev_sev != severity
-            c.execute(
-                "UPDATE findings_history SET severity=?, last_seen=?, "
-                "last_scan_id=?, status=? WHERE fingerprint=?",
-                (severity, now, scan_id, RECURRING, fp))
-            c.commit()
-            return DedupResult(
-                fp, RECURRING, severity, prev_sev, changed,
-                suppressed=not changed, first_seen=first_seen, last_seen=now)
+                if row is None:
+                    c.execute(
+                        "INSERT INTO findings_history(fingerprint, cve_id, file_path, "
+                        "function_name, package_version, severity, first_seen, last_seen, "
+                        "last_scan_id, status) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                        (fp, finding.get("cve_id", ""),
+                         finding.get("file_path", finding.get("location", "")),
+                         finding.get("function_name", ""),
+                         finding.get("package_version", ""),
+                         severity, now, now, scan_id, NEW))
+                    conn.commit()
+                    return DedupResult(fp, NEW, severity, "", False, False, now, now)
+
+                prev_sev = str(row[0] or "").upper()
+                first_seen = row[1] or now
+                changed = prev_sev != severity
+                c.execute(
+                    "UPDATE findings_history SET severity=%s, last_seen=%s, "
+                    "last_scan_id=%s, status=%s WHERE fingerprint=%s",
+                    (severity, now, scan_id, RECURRING, fp))
+                conn.commit()
+                return DedupResult(
+                    fp, RECURRING, severity, prev_sev, changed,
+                    suppressed=not changed, first_seen=first_seen, last_seen=now)
 
     def mark_resolved(self, scan_id: str) -> List[str]:
         """Findings not seen in this scan_id are resolved. Returns their fingerprints."""
-        with _connect(self.db_path) as c:
-            rows = c.execute(
-                "SELECT fingerprint FROM findings_history "
-                "WHERE last_scan_id != ? AND status != ?",
-                (scan_id, RESOLVED)).fetchall()
-            fps = [r[0] for r in rows]
-            if fps:
-                c.executemany(
-                    "UPDATE findings_history SET status=? WHERE fingerprint=?",
-                    [(RESOLVED, fp) for fp in fps])
-                c.commit()
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as c:
+                c.execute(
+                    "SELECT fingerprint FROM findings_history "
+                    "WHERE last_scan_id != %s AND status != %s",
+                    (scan_id, RESOLVED))
+                rows = c.fetchall()
+                fps = [r[0] for r in rows]
+                if fps:
+                    from psycopg2.extras import execute_values
+                    # Update all resolved findings
+                    for fp in fps:
+                        c.execute(
+                            "UPDATE findings_history SET status=%s WHERE fingerprint=%s",
+                            (RESOLVED, fp)
+                        )
+                    conn.commit()
         return fps
 
     def process_scan(self, findings: List[Dict], scan_id: str) -> Dict:

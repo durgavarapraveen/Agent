@@ -1,45 +1,28 @@
-# AntiGravity Platform Requirements
-
-# Core Framework & Async
-aiohttp>=3.9.1
-asyncio>=3.4.3
-websockets>=17.1
-requests>=2.31.0
-urllib3>=2.7.0
-httpx>=0.25.0
-
-# Cryptography & Security Governance
-cryptography>=50.0.1
-cffi>=2.1.1
-
-# Data Models & Parsing
-pydantic>=2.13.4
-pydantic_core>=2.46.4
-PyYAML>=6.0.3
-python-dotenv>=1.0.0
-Jinja2>=3.1.6
-
-# Reporting & Visualization
-reportlab>=5.0.1
-weasyprint>=69.0
-xhtml2pdf>=0.2.11
-matplotlib>=3.11.1
-numpy>=2.5.2
-scipy>=1.18.1
-Pillow>=12.3.0
-
-# ML & FP Filtering
-scikit-learn>=1.4.0
-playwright>=1.40.0
-
-# System Performance & Monitoring
-psutil>=7.2.2
-
-# LLM & AI Integration
-groq>=1.6.0
-tiktoken>=0.14.0
-
-# Testing Framework
-pytest>=9.1.1
-pluggy>=1.6.0
-anyio>=4.14.2
+aiohttp
+anthropic
+boto3
+botocore
+cryptography
+dnspython
+python-docx
+python-dotenv
+fastmcp
+httpx
+impacket
+jinja2
+joblib
+matplotlib
+numpy
+psutil
+pydantic
+pypdf
+pytest
+reportlab
+scipy
+scikit-learn
+tiktoken
+tree_sitter
+weasyprint
+websockets
+xhtml2pdf
+PyYAML

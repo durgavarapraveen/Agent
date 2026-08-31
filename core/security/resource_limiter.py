@@ -48,6 +48,11 @@ class ResourceLimiter:
         self.active_processes: List[subprocess.Popen] = []
         self._global_timer: Optional[threading.Timer] = None
 
+    def can_allocate(self, tool_id: str) -> bool:
+        """Check if resources are available to run this tool"""
+        # A simple check for now, can be expanded to check CPU/RAM
+        return True
+
     def start_global_scan_timer(self, timeout_sec: float = 86400.0, callback: Optional[Callable] = None) -> threading.Timer:
         """
         Start daemonized global scan timer.

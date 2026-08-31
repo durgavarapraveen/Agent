@@ -7,8 +7,8 @@ Loads industry-specific variants (healthcare, finance, retail, default), enforce
 import json
 import logging
 import os
-import sqlite3
 from typing import Dict, List, Optional, Any
+from core.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
@@ -50,18 +50,19 @@ class AdaptivePromptEngine:
 
     def _init_db(self):
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS prompt_ab_runs (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        variant_key TEXT,
-                        target_type TEXT,
-                        findings_count INTEGER,
-                        success_rate REAL,
-                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                conn.commit()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS prompt_ab_runs (
+                            id SERIAL PRIMARY KEY,
+                            variant_key TEXT,
+                            target_type TEXT,
+                            findings_count INTEGER,
+                            success_rate REAL,
+                            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                    conn.commit()
         except Exception as e:
             logger.error(f"[AdaptivePrompt] DB init error: {e}")
 
@@ -111,12 +112,13 @@ class AdaptivePromptEngine:
     def log_run_result(self, variant_key: str, target_type: str, findings_count: int, success_rate: float):
         """Log prompt variant run result for A/B testing analysis."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
-                    INSERT INTO prompt_ab_runs (variant_key, target_type, findings_count, success_rate)
-                    VALUES (?, ?, ?, ?)
-                """, (variant_key, target_type, findings_count, success_rate))
-                conn.commit()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO prompt_ab_runs (variant_key, target_type, findings_count, success_rate)
+                        VALUES (%s, %s, %s, %s)
+                    """, (variant_key, target_type, findings_count, success_rate))
+                    conn.commit()
         except Exception as e:
             logger.debug(f"[AdaptivePrompt] Log run result error: {e}")
 
@@ -126,26 +128,26 @@ class AdaptivePromptEngine:
         "Suggested prompt: finance/deep based on 85% success rate across 10 scans."
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT COUNT(*) FROM prompt_ab_runs WHERE target_type=?", (target_type,))
-                count = cur.fetchone()[0]
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) FROM prompt_ab_runs WHERE target_type=%s", (target_type,))
+                    count = cur.fetchone()[0]
 
-                if count >= 10:
-                    cur.execute("""
-                        SELECT variant_key, AVG(success_rate) as avg_sr
-                        FROM prompt_ab_runs
-                        WHERE target_type=?
-                        GROUP BY variant_key
-                        ORDER BY avg_sr DESC
-                        LIMIT 1
-                    """, (target_type,))
-                    row = cur.fetchone()
-                    if row:
-                        variant_key, avg_sr = row[0], row[1]
-                        suggestion = f"Suggested prompt: {variant_key} based on {int(avg_sr * 100)}% success rate across {count} scans."
-                        print(f"[A/B Prompt Optimization] {suggestion}")
-                        return suggestion
+                    if count >= 10:
+                        cur.execute("""
+                            SELECT variant_key, AVG(success_rate) as avg_sr
+                            FROM prompt_ab_runs
+                            WHERE target_type=%s
+                            GROUP BY variant_key
+                            ORDER BY avg_sr DESC
+                            LIMIT 1
+                        """, (target_type,))
+                        row = cur.fetchone()
+                        if row:
+                            variant_key, avg_sr = row[0], row[1]
+                            suggestion = f"Suggested prompt: {variant_key} based on {int(avg_sr * 100)}% success rate across {count} scans."
+                            print(f"[A/B Prompt Optimization] {suggestion}")
+                            return suggestion
         except Exception as e:
             logger.debug(f"[AdaptivePrompt] Suggestion error: {e}")
 

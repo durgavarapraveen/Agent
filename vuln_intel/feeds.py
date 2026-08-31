@@ -8,10 +8,10 @@ import difflib
 import gzip
 import json
 import logging
-import sqlite3
 import time
 import urllib.parse
 import urllib.request
+from core.database import DatabaseManager
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional, Set, Any
@@ -45,104 +45,111 @@ class FeedResult:
 
 
 class VulnerabilityDatabase:
-    """SQLite database manager for NVD CVEs, GitHub Advisories, and Zero-Day Hints."""
+    """PostgreSQL database manager for NVD CVEs, GitHub Advisories, and Zero-Day Hints."""
 
-    def __init__(self, db_path: str = "vuln_intel.sqlite"):
-        self.db_path = db_path
+    def __init__(self):
         self._init_db()
 
     def _init_db(self):
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                # 1. cves table
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS cves (
-                        id TEXT PRIMARY KEY,
-                        published_date TEXT,
-                        cvss_v3_vector TEXT,
-                        cvss_v3_base_score REAL,
-                        description TEXT,
-                        affected_software TEXT
-                    )
-                """)
-                # 2. package_vulnerabilities table
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS package_vulnerabilities (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        cve_id TEXT,
-                        ecosystem TEXT,
-                        package_name TEXT,
-                        vulnerable_version_range TEXT,
-                        FOREIGN KEY(cve_id) REFERENCES cves(id)
-                    )
-                """)
-                # 3. zero_day_hints table
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS zero_day_hints (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        service_name TEXT,
-                        version TEXT,
-                        detection_timestamp TEXT,
-                        trigger_payload TEXT,
-                        confidence_score REAL,
-                        reason TEXT
-                    )
-                """)
-                # 4. feed_meta table
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS feed_meta (
-                        feed_name TEXT PRIMARY KEY,
-                        last_modified_date TEXT
-                    )
-                """)
-                conn.commit()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    # 1. cves table
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS cves (
+                            id TEXT PRIMARY KEY,
+                            published_date TEXT,
+                            cvss_v3_vector TEXT,
+                            cvss_v3_base_score REAL,
+                            description TEXT,
+                            affected_software TEXT
+                        )
+                    """)
+                    # 2. package_vulnerabilities table
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS package_vulnerabilities (
+                            id SERIAL PRIMARY KEY,
+                            cve_id TEXT,
+                            ecosystem TEXT,
+                            package_name TEXT,
+                            vulnerable_version_range TEXT,
+                            FOREIGN KEY(cve_id) REFERENCES cves(id)
+                        )
+                    """)
+                    # 3. zero_day_hints table
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS zero_day_hints (
+                            id SERIAL PRIMARY KEY,
+                            service_name TEXT,
+                            version TEXT,
+                            detection_timestamp TEXT,
+                            trigger_payload TEXT,
+                            confidence_score REAL,
+                            reason TEXT
+                        )
+                    """)
+                    # 4. feed_meta table
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS feed_meta (
+                            feed_name TEXT PRIMARY KEY,
+                            last_modified_date TEXT
+                        )
+                    """)
+                    conn.commit()
+            logger.info("VulnerabilityDatabase initialized via PostgreSQL")
         except Exception as e:
             logger.error(f"[VulnDB] Init error: {e}")
 
     def insert_cve(self, cve_id: str, pub_date: str, cvss_vector: str, cvss_score: float, desc: str, software: str):
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
-                    INSERT OR REPLACE INTO cves (id, published_date, cvss_v3_vector, cvss_v3_base_score, description, affected_software)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (cve_id, pub_date, cvss_vector, cvss_score, desc, software))
-                conn.commit()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO cves (id, published_date, cvss_v3_vector, cvss_v3_base_score, description, affected_software)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (id) DO UPDATE SET
+                        published_date = EXCLUDED.published_date, cvss_v3_vector = EXCLUDED.cvss_v3_vector,
+                        cvss_v3_base_score = EXCLUDED.cvss_v3_base_score, description = EXCLUDED.description,
+                        affected_software = EXCLUDED.affected_software
+                    """, (cve_id, pub_date, cvss_vector, cvss_score, desc, software))
+                    conn.commit()
         except Exception as e:
             logger.debug(f"[VulnDB] insert_cve error: {e}")
 
     def insert_package_vuln(self, cve_id: str, ecosystem: str, package_name: str, version_range: str):
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
-                    INSERT INTO package_vulnerabilities (cve_id, ecosystem, package_name, vulnerable_version_range)
-                    VALUES (?, ?, ?, ?)
-                """, (cve_id, ecosystem, package_name, version_range))
-                conn.commit()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO package_vulnerabilities (cve_id, ecosystem, package_name, vulnerable_version_range)
+                        VALUES (%s, %s, %s, %s)
+                    """, (cve_id, ecosystem, package_name, version_range))
+                    conn.commit()
         except Exception as e:
             logger.debug(f"[VulnDB] insert_package_vuln error: {e}")
 
     def record_zero_day_hint(self, service_name: str, version: str, payload: str, confidence: float = 0.3, reason: str = "Unusual anomaly detected"):
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
-                    INSERT INTO zero_day_hints (service_name, version, detection_timestamp, trigger_payload, confidence_score, reason)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (service_name, version, datetime.now().isoformat(), payload, confidence, reason))
-                conn.commit()
-                logger.info(f"[ZeroDayHint] Flagged 0-day candidate for {service_name}:{version} (Confidence: {confidence*100:.0f}%)")
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO zero_day_hints (service_name, version, detection_timestamp, trigger_payload, confidence_score, reason)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                    """, (service_name, version, datetime.now().isoformat(), payload, confidence, reason))
+                    conn.commit()
+                    logger.info(f"[ZeroDayHint] Flagged 0-day candidate for {service_name}:{version} (Confidence: {confidence*100:.0f}%)")
         except Exception as e:
             logger.debug(f"[VulnDB] record_zero_day_hint error: {e}")
 
     def get_all_cves(self) -> List[Dict[str, Any]]:
         results = []
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                cur = conn.cursor()
-                cur.execute("SELECT * FROM cves ORDER BY cvss_v3_base_score DESC")
-                for row in cur.fetchall():
-                    results.append(dict(row))
+            from psycopg2.extras import RealDictCursor
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("SELECT * FROM cves ORDER BY cvss_v3_base_score DESC")
+                    for row in cur.fetchall():
+                        results.append(dict(row))
         except Exception:
             pass
         return results
@@ -151,11 +158,11 @@ class VulnerabilityDatabase:
 class FeedClient:
     """Async & synchronous multi-source vulnerability intelligence feed client with offline mode support."""
 
-    def __init__(self, timeout: int = 5, api_key: Optional[str] = None, offline_mode: bool = True, db_path: str = "vuln_intel.sqlite"):
+    def __init__(self, timeout: int = 5, api_key: Optional[str] = None, offline_mode: bool = True):
         self.timeout = timeout
         self.api_key = api_key
         self.offline_mode = offline_mode
-        self.db = VulnerabilityDatabase(db_path)
+        self.db = VulnerabilityDatabase()
         self.cache: Dict[str, List[Dict[str, Any]]] = {}
         self.cisa_kev_cache: Optional[Dict[str, Any]] = None
 

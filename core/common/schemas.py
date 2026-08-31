@@ -3,7 +3,7 @@ Strict Pydantic schemas for all framework communication.
 Single source of truth for schema definitions.
 """
 
-from pydantic import BaseModel, Field, validator, root_validator
+from pydantic import BaseModel, Field, model_validator, root_validator
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Literal, Union
 from enum import Enum
@@ -172,6 +172,11 @@ class ToolResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
+    @property
+    def success(self) -> bool:
+        val = self.status.value if hasattr(self.status, "value") else str(self.status)
+        return str(val).upper() in ("SUCCESS", "PARTIAL_SUCCESS")
+
 
 
 class SuccessCriterion(BaseModel):
@@ -204,7 +209,7 @@ class TaskSpec(BaseModel):
     # Use for explicit retries, tool-failure recovery, or re-scan requests.
     force_reexecute: bool = False
 
-    @root_validator(pre=True)
+    @model_validator(mode='before')
     def normalize_task_spec(cls, values):
         if not isinstance(values, dict):
             return values
@@ -310,7 +315,7 @@ class BrainDecision(BaseModel):
     reason: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
-    @root_validator(pre=True)
+    @model_validator(mode='before')
     def normalize_brain_decision(cls, values):
         if not isinstance(values, dict):
             return values
@@ -352,3 +357,24 @@ class ExecutionState(BaseModel):
 
 # Canonical aliases
 PlannerDecision = BrainDecision
+
+
+class ToolInvocation(BaseModel):
+    """Tool execution request"""
+    tool_id: str
+    operation: Optional[str] = None
+    target: str
+    params: Dict[str, Any] = Field(default_factory=dict)
+    session_id: str
+    audit_context: Optional[Dict[str, Any]] = None
+
+
+class ToolDefinition(BaseModel):
+    """Tool metadata and characteristics"""
+    tool_id: str
+    category: str = "generic"
+    estimated_time_sec: int = 60
+    false_positive_rate: float = 0.1
+    effectiveness_scores: Dict[str, float] = Field(default_factory=dict)
+    restricted: bool = False
+    fallback_tools: List[str] = Field(default_factory=list)

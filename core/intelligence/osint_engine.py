@@ -17,7 +17,7 @@ import asyncio
 from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass
 from datetime import datetime
-import sqlite3
+from core.database import DatabaseManager
 import hashlib
 
 logger = logging.getLogger(__name__)
@@ -63,120 +63,93 @@ class DomainIntelligence:
 
 
 class OSINTDatabase:
-    """SQLite database for OSINT findings (Singleton per db_path)."""
-    _instances: Dict[str, "OSINTDatabase"] = {}
+    """PostgreSQL database for OSINT findings."""
 
-    def __new__(cls, db_path: str = "data/db/osint_findings.sqlite"):
-        if db_path != ":memory:" and db_path in cls._instances:
-            return cls._instances[db_path]
-        instance = super().__new__(cls)
-        instance._initialized = False
-        if db_path != ":memory:":
-            cls._instances[db_path] = instance
-        return instance
-
-    def __init__(self, db_path: str = "data/db/osint_findings.sqlite"):
-        if getattr(self, "_initialized", False):
-            return
-        self.db_path = db_path
-        self._memory_conn = None
+    def __init__(self):
         self._init_db()
-        self._initialized = True
-
-    def _get_connection(self) -> sqlite3.Connection:
-        if self.db_path == ":memory:":
-            if self._memory_conn is None:
-                self._memory_conn = sqlite3.connect(":memory:")
-            return self._memory_conn
-        import os
-        os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
-        return sqlite3.connect(self.db_path)
 
     def _init_db(self):
-        """Initialize database schema."""
+        """Initialize database schema in PostgreSQL."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            
-            # Employees table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS employees (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL,
-                    email TEXT UNIQUE NOT NULL,
-                    role TEXT,
-                    domain TEXT,
-                    source TEXT,
-                    confidence REAL,
-                    discovered_date TEXT,
-                    UNIQUE(email, domain)
-                )
-            """)
-            
-            # Leaked credentials table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS leaked_credentials (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    username TEXT,
-                    email TEXT,
-                    password_hash TEXT,
-                    service TEXT,
-                    repo_path TEXT,
-                    severity TEXT,
-                    url TEXT UNIQUE,
-                    discovered_date TEXT
-                )
-            """)
-            
-            # Domain intelligence table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS domain_intelligence (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    domain TEXT UNIQUE,
-                    mx_records TEXT,
-                    spf_policy TEXT,
-                    dkim_enabled INTEGER,
-                    dmarc_policy TEXT,
-                    mail_server_versions TEXT,
-                    ns_records TEXT,
-                    ip_ranges TEXT,
-                    discovered_date TEXT
-                )
-            """)
-            
-            # Email pattern table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS email_patterns (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    domain TEXT,
-                    pattern TEXT UNIQUE,
-                    confidence REAL,
-                    examples TEXT,  -- JSON array
-                    discovered_date TEXT
-                )
-            """)
-            
-            conn.commit()
-            if self.db_path != ":memory:":
-                conn.close()
-            logger.info(f"OSINTDatabase initialized: {self.db_path}")
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    # Employees table
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS employees (
+                            id SERIAL PRIMARY KEY,
+                            name TEXT NOT NULL,
+                            email TEXT UNIQUE NOT NULL,
+                            role TEXT,
+                            domain TEXT,
+                            source TEXT,
+                            confidence REAL,
+                            discovered_date TEXT,
+                            UNIQUE(email, domain)
+                        )
+                    """)
+                    
+                    # Leaked credentials table
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS leaked_credentials (
+                            id SERIAL PRIMARY KEY,
+                            username TEXT,
+                            email TEXT,
+                            password_hash TEXT,
+                            service TEXT,
+                            repo_path TEXT,
+                            severity TEXT,
+                            url TEXT UNIQUE,
+                            discovered_date TEXT
+                        )
+                    """)
+                    
+                    # Domain intelligence table
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS domain_intelligence (
+                            id SERIAL PRIMARY KEY,
+                            domain TEXT UNIQUE,
+                            mx_records TEXT,
+                            spf_policy TEXT,
+                            dkim_enabled INTEGER,
+                            dmarc_policy TEXT,
+                            mail_server_versions TEXT,
+                            ns_records TEXT,
+                            ip_ranges TEXT,
+                            discovered_date TEXT
+                        )
+                    """)
+                    
+                    # Email pattern table
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS email_patterns (
+                            id SERIAL PRIMARY KEY,
+                            domain TEXT,
+                            pattern TEXT UNIQUE,
+                            confidence REAL,
+                            examples TEXT,
+                            discovered_date TEXT
+                        )
+                    """)
+                    conn.commit()
+            logger.info("OSINTDatabase initialized via PostgreSQL")
         except Exception as e:
             logger.error(f"OSINTDatabase init failed: {e}")
 
     def save_employee(self, employee: Employee) -> bool:
         """Save discovered employee."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT OR REPLACE INTO employees
-                (name, email, role, domain, source, confidence, discovered_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (employee.name, employee.email, employee.role, employee.domain,
-                  employee.source, employee.confidence, employee.discovered_date))
-            conn.commit()
-            if self.db_path != ":memory:":
-                conn.close()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO employees
+                        (name, email, role, domain, source, confidence, discovered_date)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (email, domain) DO UPDATE SET
+                        name = EXCLUDED.name, role = EXCLUDED.role, 
+                        source = EXCLUDED.source, confidence = EXCLUDED.confidence
+                    """, (employee.name, employee.email, employee.role, employee.domain,
+                          employee.source, employee.confidence, employee.discovered_date))
+                    conn.commit()
             return True
         except Exception as e:
             logger.error(f"Failed to save employee {employee.email}: {e}")
@@ -185,18 +158,18 @@ class OSINTDatabase:
     def save_credential(self, cred: LeakedCredential) -> bool:
         """Save leaked credential."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
             pwd_hash = hashlib.sha256(cred.password.encode()).hexdigest() if cred.password else None
-            cursor.execute("""
-                INSERT OR REPLACE INTO leaked_credentials
-                (username, email, password_hash, service, repo_path, severity, url, discovered_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (cred.username, cred.email, pwd_hash, cred.service,
-                  cred.found_in_repo, cred.severity, cred.url, cred.discovered_date))
-            conn.commit()
-            if self.db_path != ":memory:":
-                conn.close()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO leaked_credentials
+                        (username, email, password_hash, service, repo_path, severity, url, discovered_date)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (url) DO UPDATE SET
+                        severity = EXCLUDED.severity
+                    """, (cred.username, cred.email, pwd_hash, cred.service,
+                          cred.found_in_repo, cred.severity, cred.url, cred.discovered_date))
+                    conn.commit()
             return True
         except Exception as e:
             logger.error(f"Failed to save credential: {e}")
@@ -205,20 +178,22 @@ class OSINTDatabase:
     def save_domain_intel(self, intel: DomainIntelligence) -> bool:
         """Save domain intelligence."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT OR REPLACE INTO domain_intelligence
-                (domain, mx_records, spf_policy, dkim_enabled, dmarc_policy, 
-                 mail_server_versions, ns_records, ip_ranges, discovered_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (intel.domain, json.dumps(intel.mx_records), intel.spf_policy,
-                  int(intel.dkim_enabled), intel.dmarc_policy,
-                  json.dumps(intel.mail_server_versions), json.dumps(intel.ns_records),
-                  json.dumps(intel.ip_ranges), intel.discovered_date))
-            conn.commit()
-            if self.db_path != ":memory:":
-                conn.close()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO domain_intelligence
+                        (domain, mx_records, spf_policy, dkim_enabled, dmarc_policy, 
+                         mail_server_versions, ns_records, ip_ranges, discovered_date)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (domain) DO UPDATE SET
+                        mx_records = EXCLUDED.mx_records, spf_policy = EXCLUDED.spf_policy,
+                        dkim_enabled = EXCLUDED.dkim_enabled, dmarc_policy = EXCLUDED.dmarc_policy,
+                        ns_records = EXCLUDED.ns_records, ip_ranges = EXCLUDED.ip_ranges
+                    """, (intel.domain, json.dumps(intel.mx_records), intel.spf_policy,
+                          int(intel.dkim_enabled), intel.dmarc_policy,
+                          json.dumps(intel.mail_server_versions), json.dumps(intel.ns_records),
+                          json.dumps(intel.ip_ranges), intel.discovered_date))
+                    conn.commit()
             return True
         except Exception as e:
             logger.error(f"Failed to save domain intel for {intel.domain}: {e}")
@@ -227,16 +202,14 @@ class OSINTDatabase:
     def get_employees(self, domain: Optional[str] = None) -> List[Employee]:
         """Retrieve employees."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            if domain:
-                cursor.execute("SELECT * FROM employees WHERE domain = ?", (domain,))
-            else:
-                cursor.execute("SELECT * FROM employees")
-            rows = cursor.fetchall()
-            if self.db_path != ":memory:":
-                conn.close()
-            
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    if domain:
+                        cursor.execute("SELECT * FROM employees WHERE domain = %s", (domain,))
+                    else:
+                        cursor.execute("SELECT * FROM employees")
+                    rows = cursor.fetchall()
+                    
             employees = []
             for row in rows:
                 employees.append(Employee(
@@ -251,16 +224,14 @@ class OSINTDatabase:
     def get_credentials(self, severity: Optional[str] = None) -> List[LeakedCredential]:
         """Retrieve leaked credentials."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            if severity:
-                cursor.execute("SELECT * FROM leaked_credentials WHERE severity = ?", (severity,))
-            else:
-                cursor.execute("SELECT * FROM leaked_credentials")
-            rows = cursor.fetchall()
-            if self.db_path != ":memory:":
-                conn.close()
-            
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    if severity:
+                        cursor.execute("SELECT * FROM leaked_credentials WHERE severity = %s", (severity,))
+                    else:
+                        cursor.execute("SELECT * FROM leaked_credentials")
+                    rows = cursor.fetchall()
+                    
             credentials = []
             for row in rows:
                 credentials.append(LeakedCredential(
@@ -276,16 +247,13 @@ class OSINTDatabase:
     def count_employees(self, domain: Optional[str] = None) -> int:
         """Count employees."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            if domain:
-                cursor.execute("SELECT COUNT(*) FROM employees WHERE domain = ?", (domain,))
-            else:
-                cursor.execute("SELECT COUNT(*) FROM employees")
-            count = cursor.fetchone()[0]
-            if self.db_path != ":memory:":
-                conn.close()
-            return count
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    if domain:
+                        cursor.execute("SELECT COUNT(*) FROM employees WHERE domain = %s", (domain,))
+                    else:
+                        cursor.execute("SELECT COUNT(*) FROM employees")
+                    return cursor.fetchone()[0]
         except Exception as e:
             logger.error(f"Failed to count employees: {e}")
             return 0

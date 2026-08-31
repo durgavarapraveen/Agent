@@ -7,7 +7,7 @@ historical FP verdict learning, and auto-validation thresholds.
 from __future__ import annotations
 
 import logging
-import sqlite3
+from core.database import DatabaseManager
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -150,35 +150,36 @@ def gate(findings: List[Dict]) -> Dict[str, List[Dict]]:
 class ConfidenceCalibrator:
     """Confidence calibration engine with empirical matrix, dynamic modifiers, and FP history learning."""
 
-    def __init__(self, db_path: str = "confidence_learning.sqlite"):
-        self.db_path = db_path
+    def __init__(self):
         self._init_db()
 
     def _init_db(self):
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS fp_history (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        finding_type TEXT,
-                        confidence_at_time REAL,
-                        user_verdict TEXT,
-                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                conn.commit()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS fp_history (
+                            id SERIAL PRIMARY KEY,
+                            finding_type TEXT,
+                            confidence_at_time REAL,
+                            user_verdict TEXT,
+                            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                    conn.commit()
         except Exception as e:
             logger.error(f"[ConfidenceCalibrator] DB init error: {e}")
 
     def record_fp_verdict(self, finding_type: str, confidence_score: float, verdict: str):
         """Record user feedback verdict (FP or TP) for offline confidence learning."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
-                    INSERT INTO fp_history (finding_type, confidence_at_time, user_verdict)
-                    VALUES (?, ?, ?)
-                """, (finding_type.strip().upper(), confidence_score, verdict.strip().upper()))
-                conn.commit()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO fp_history (finding_type, confidence_at_time, user_verdict)
+                        VALUES (%s, %s, %s)
+                    """, (finding_type.strip().upper(), confidence_score, verdict.strip().upper()))
+                    conn.commit()
         except Exception as e:
             logger.debug(f"[ConfidenceCalibrator] Record verdict error: {e}")
 
@@ -186,15 +187,15 @@ class ConfidenceCalibrator:
         """If a specific finding_type consistently gets flagged as FP by users (>=80% FP), apply penalty -0.15."""
         f_clean = finding_type.strip().upper()
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT user_verdict FROM fp_history WHERE finding_type=?", (f_clean,))
-                rows = cur.fetchall()
-                if len(rows) >= 5:
-                    fp_count = sum(1 for r in rows if r[0] == "FP")
-                    if (fp_count / float(len(rows))) >= 0.80:
-                        logger.info(f"[ConfidenceCalibrator] Applying permanent FP penalty (-0.15) for '{f_clean}'")
-                        return -0.15
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT user_verdict FROM fp_history WHERE finding_type=%s", (f_clean,))
+                    rows = cur.fetchall()
+                    if len(rows) >= 5:
+                        fp_count = sum(1 for r in rows if r[0] == "FP")
+                        if (fp_count / float(len(rows))) >= 0.80:
+                            logger.info(f"[ConfidenceCalibrator] Applying permanent FP penalty (-0.15) for '{f_clean}'")
+                            return -0.15
         except Exception as e:
             logger.debug(f"[ConfidenceCalibrator] FP penalty query error: {e}")
         return 0.0

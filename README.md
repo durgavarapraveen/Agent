@@ -18,7 +18,7 @@
   - **Phase 7 (OSINT & EASM)**: Certificate Transparency, employee enumeration, cloud bucket discovery, and dark web/leak database correlation.
 - **Docker & Kali Linux Integration**: Containerized security tools via `KaliDockerExecutor` with auto-provisioning capabilities.
 - **Thread-Safe Shared Memory (`SharedContext`)**: Synchronized real-time state sharing across all worker agents and orchestrators.
-- **SQLite Persistence Engine**: Persistent storage for OSINT, threat intelligence, subdomains, findings, and A/B test prompt analytics.
+- **PostgreSQL & pgvector Engine**: Highly scalable persistent storage for OSINT, threat intelligence, and vector-based semantic search across findings and context.
 
 ---
 
@@ -26,7 +26,7 @@
 
 | Domain | Integrated Tools & Technologies |
 |---|---|
-| **Core Framework** | Python 3.13+, Asyncio, Pydantic v2, Pytest, `threading.Lock` thread-safety |
+| **Core Framework** | Python 3.13+, Asyncio, Pydantic v2, Pytest, `threading.Lock`, PostgreSQL, `pgvector` |
 | **LLM & AI Engine** | Groq / LLM API (`LLMClient`), Prompt A/B Testing, Fallback Decision Trees |
 | **Recon & OSINT** | Sublist3r, `crt.sh` (CT Logs), `dnspython`, Shodan, Censys, AbuseIPDB, VirusTotal, GitHub Scanner |
 | **Scanners & Encoders** | Nmap, Naabu, Katana, Nuclei (v3+), SQLMap, OWASP ZAP, FFuf, HTTPx |
@@ -55,6 +55,9 @@ source .venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Start PostgreSQL and Kali services
+docker compose up -d
 ```
 
 ### 2. Configure Environment Variables
@@ -166,7 +169,7 @@ python main.py --target example.com --frameworks pci,soc2,hipaa
 - **Authorization Enforcement**: Every target must pass `TargetScopeValidator.is_authorized()` check before any network request or tool execution.
 - **Strict Read-Only OSINT**: OSINT modules passively query public records (CT logs, DNS, public breach databases) without, invasive probing.
 - **Non-Destructive Exploitation**: Exploitation modules operate under strict `POC` (Proof-of-Concept) constraints by default, preventing data loss or service disruption.
-- **Audit Logging**: All actions, tool commands, and LLM prompts are logged locally in `pentest.log` and SQLite databases for full auditability.
+- **Audit Logging**: All actions, tool commands, and LLM prompts are logged locally in `pentest.log` and PostgreSQL databases for full auditability.
 
 ---
 

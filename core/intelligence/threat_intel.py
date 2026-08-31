@@ -11,14 +11,14 @@ Real-time correlation with discovered assets.
 
 import json
 import logging
-import sqlite3
-import ssl
 import urllib.request
 import urllib.parse
 import hashlib
+import ssl
 from typing import Dict, List, Optional, Set
 from dataclasses import dataclass
 from datetime import datetime
+from core.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
@@ -75,137 +75,111 @@ class CompromisedService:
 
 
 class ThreatIntelDatabase:
-    """SQLite database for threat intelligence (Singleton per db_path)."""
-    _instances: Dict[str, "ThreatIntelDatabase"] = {}
+    """PostgreSQL database for threat intelligence."""
 
-    def __new__(cls, db_path: str = "data/db/threat_intel.sqlite"):
-        if db_path != ":memory:" and db_path in cls._instances:
-            return cls._instances[db_path]
-        instance = super().__new__(cls)
-        instance._initialized = False
-        if db_path != ":memory:":
-            cls._instances[db_path] = instance
-        return instance
-
-    def __init__(self, db_path: str = "data/db/threat_intel.sqlite"):
-        if getattr(self, "_initialized", False):
-            return
-        self.db_path = db_path
-        self._memory_conn = None
+    def __init__(self):
         self._init_db()
-        self._initialized = True
-
-    def _get_connection(self) -> sqlite3.Connection:
-        if self.db_path == ":memory:":
-            if self._memory_conn is None:
-                self._memory_conn = sqlite3.connect(":memory:")
-            return self._memory_conn
-        import os
-        os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
-        return sqlite3.connect(self.db_path)
 
     def _init_db(self):
         """Initialize threat intelligence schema."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            
-            # Threat indicators table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS threat_indicators (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    type TEXT,
-                    value TEXT UNIQUE,
-                    threat_type TEXT,
-                    severity TEXT,
-                    sources TEXT,  -- JSON array
-                    first_seen TEXT,
-                    last_seen TEXT,
-                    description TEXT,
-                    confidence REAL,
-                    discovered_date TEXT
-                )
-            """)
-            
-            # Reputation scores table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS reputation_scores (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    asset TEXT UNIQUE,
-                    overall_score REAL,
-                    detection_engines INTEGER,
-                    threat_types TEXT,  -- JSON array
-                    abuse_reports INTEGER,
-                    first_flagged TEXT,
-                    last_flagged TEXT,
-                    whitelisted INTEGER,
-                    checked_date TEXT
-                )
-            """)
-            
-            # Compromised services table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS compromised_services (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    service_name TEXT,
-                    ip_address TEXT,
-                    port INTEGER,
-                    threat_type TEXT,
-                    confirmed INTEGER,
-                    source TEXT,
-                    remediation_advice TEXT,
-                    confidence REAL,
-                    discovered_date TEXT,
-                    UNIQUE(ip_address, port)
-                )
-            """)
-            
-            # Feed metadata table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS feed_metadata (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    feed_name TEXT UNIQUE,
-                    last_updated TEXT,
-                    indicator_count INTEGER,
-                    success_rate REAL
-                )
-            """)
-            
-            # Correlation events table (asset x threat)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS correlation_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    asset TEXT,
-                    threat_value TEXT,
-                    correlation_type TEXT,
-                    severity TEXT,
-                    alert_sent INTEGER,
-                    event_date TEXT
-                )
-            """)
-            
-            conn.commit()
-            if self.db_path != ":memory:":
-                conn.close()
-            logger.info(f"ThreatIntelDatabase initialized: {self.db_path}")
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    # Threat indicators table
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS threat_indicators (
+                            id SERIAL PRIMARY KEY,
+                            type TEXT,
+                            value TEXT UNIQUE,
+                            threat_type TEXT,
+                            severity TEXT,
+                            sources TEXT,
+                            first_seen TEXT,
+                            last_seen TEXT,
+                            description TEXT,
+                            confidence REAL,
+                            discovered_date TEXT
+                        )
+                    """)
+                    
+                    # Reputation scores table
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS reputation_scores (
+                            id SERIAL PRIMARY KEY,
+                            asset TEXT UNIQUE,
+                            overall_score REAL,
+                            detection_engines INTEGER,
+                            threat_types TEXT,
+                            abuse_reports INTEGER,
+                            first_flagged TEXT,
+                            last_flagged TEXT,
+                            whitelisted INTEGER,
+                            checked_date TEXT
+                        )
+                    """)
+                    
+                    # Compromised services table
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS compromised_services (
+                            id SERIAL PRIMARY KEY,
+                            service_name TEXT,
+                            ip_address TEXT,
+                            port INTEGER,
+                            threat_type TEXT,
+                            confirmed INTEGER,
+                            source TEXT,
+                            remediation_advice TEXT,
+                            confidence REAL,
+                            discovered_date TEXT,
+                            UNIQUE(ip_address, port)
+                        )
+                    """)
+                    
+                    # Feed metadata table
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS feed_metadata (
+                            id SERIAL PRIMARY KEY,
+                            feed_name TEXT UNIQUE,
+                            last_updated TEXT,
+                            indicator_count INTEGER,
+                            success_rate REAL
+                        )
+                    """)
+                    
+                    # Correlation events table (asset x threat)
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS correlation_events (
+                            id SERIAL PRIMARY KEY,
+                            asset TEXT,
+                            threat_value TEXT,
+                            correlation_type TEXT,
+                            severity TEXT,
+                            alert_sent INTEGER,
+                            event_date TEXT
+                        )
+                    """)
+                    conn.commit()
+            logger.info("ThreatIntelDatabase initialized via PostgreSQL")
         except Exception as e:
             logger.error(f"ThreatIntelDatabase init failed: {e}")
 
     def save_threat_indicator(self, indicator: ThreatIndicator) -> bool:
         """Save threat indicator."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT OR REPLACE INTO threat_indicators
-                (type, value, threat_type, severity, sources, first_seen, last_seen, description, confidence, discovered_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (indicator.type, indicator.value, indicator.threat_type, indicator.severity,
-                  json.dumps(indicator.sources), indicator.first_seen, indicator.last_seen,
-                  indicator.description, indicator.confidence, datetime.now().isoformat()))
-            conn.commit()
-            if self.db_path != ":memory:":
-                conn.close()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO threat_indicators
+                        (type, value, threat_type, severity, sources, first_seen, last_seen, description, confidence, discovered_date)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (value) DO UPDATE SET
+                        severity = EXCLUDED.severity, sources = EXCLUDED.sources,
+                        last_seen = EXCLUDED.last_seen, description = EXCLUDED.description,
+                        confidence = EXCLUDED.confidence
+                    """, (indicator.type, indicator.value, indicator.threat_type, indicator.severity,
+                          json.dumps(indicator.sources), indicator.first_seen, indicator.last_seen,
+                          indicator.description, indicator.confidence, datetime.now().isoformat()))
+                    conn.commit()
             return True
         except Exception as e:
             logger.error(f"Failed to save threat indicator: {e}")
@@ -214,19 +188,21 @@ class ThreatIntelDatabase:
     def save_reputation_score(self, score: ReputationScore) -> bool:
         """Save reputation score."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT OR REPLACE INTO reputation_scores
-                (asset, overall_score, detection_engines, threat_types, abuse_reports, first_flagged, last_flagged, whitelisted, checked_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (score.asset, score.overall_score, score.detection_engines,
-                  json.dumps(score.threat_types), score.abuse_reports,
-                  score.first_flagged, score.last_flagged, int(score.whitelisted),
-                  datetime.now().isoformat()))
-            conn.commit()
-            if self.db_path != ":memory:":
-                conn.close()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO reputation_scores
+                        (asset, overall_score, detection_engines, threat_types, abuse_reports, first_flagged, last_flagged, whitelisted, checked_date)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (asset) DO UPDATE SET
+                        overall_score = EXCLUDED.overall_score, detection_engines = EXCLUDED.detection_engines,
+                        threat_types = EXCLUDED.threat_types, abuse_reports = EXCLUDED.abuse_reports,
+                        last_flagged = EXCLUDED.last_flagged, whitelisted = EXCLUDED.whitelisted, checked_date = EXCLUDED.checked_date
+                    """, (score.asset, score.overall_score, score.detection_engines,
+                          json.dumps(score.threat_types), score.abuse_reports,
+                          score.first_flagged, score.last_flagged, int(score.whitelisted),
+                          datetime.now().isoformat()))
+                    conn.commit()
             return True
         except Exception as e:
             logger.error(f"Failed to save reputation score: {e}")
@@ -235,18 +211,19 @@ class ThreatIntelDatabase:
     def save_compromised_service(self, service: CompromisedService) -> bool:
         """Save compromised service."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT OR REPLACE INTO compromised_services
-                (service_name, ip_address, port, threat_type, confirmed, source, remediation_advice, confidence, discovered_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (service.service_name, service.ip_address, service.port,
-                  service.threat_type, int(service.confirmed), service.source,
-                  service.remediation_advice, service.confidence, datetime.now().isoformat()))
-            conn.commit()
-            if self.db_path != ":memory:":
-                conn.close()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO compromised_services
+                        (service_name, ip_address, port, threat_type, confirmed, source, remediation_advice, confidence, discovered_date)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (ip_address, port) DO UPDATE SET
+                        threat_type = EXCLUDED.threat_type, confirmed = EXCLUDED.confirmed,
+                        remediation_advice = EXCLUDED.remediation_advice, confidence = EXCLUDED.confidence
+                    """, (service.service_name, service.ip_address, service.port,
+                          service.threat_type, int(service.confirmed), service.source,
+                          service.remediation_advice, service.confidence, datetime.now().isoformat()))
+                    conn.commit()
             return True
         except Exception as e:
             logger.error(f"Failed to save compromised service: {e}")
@@ -255,13 +232,11 @@ class ThreatIntelDatabase:
     def get_threat_indicators_for_asset(self, asset: str) -> List[ThreatIndicator]:
         """Get threat indicators for an asset."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM threat_indicators WHERE value = ?", (asset,))
-            rows = cursor.fetchall()
-            if self.db_path != ":memory:":
-                conn.close()
-            
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT * FROM threat_indicators WHERE value = %s", (asset,))
+                    rows = cursor.fetchall()
+                    
             indicators = []
             for row in rows:
                 indicators.append(ThreatIndicator(
@@ -277,13 +252,11 @@ class ThreatIntelDatabase:
     def get_threat_indicators_by_source(self, source_name: str) -> List[ThreatIndicator]:
         """Get threat indicators containing a specific source from cache."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM threat_indicators WHERE sources LIKE ?", (f'%"{source_name}"%',))
-            rows = cursor.fetchall()
-            if self.db_path != ":memory:":
-                conn.close()
-            
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT * FROM threat_indicators WHERE sources LIKE %s", (f'%"{source_name}"%',))
+                    rows = cursor.fetchall()
+                    
             indicators = []
             for row in rows:
                 indicators.append(ThreatIndicator(
@@ -299,13 +272,11 @@ class ThreatIntelDatabase:
     def get_critical_threats(self) -> List[ThreatIndicator]:
         """Get all critical threat indicators."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM threat_indicators WHERE severity = 'critical' ORDER BY discovered_date DESC")
-            rows = cursor.fetchall()
-            if self.db_path != ":memory:":
-                conn.close()
-            
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT * FROM threat_indicators WHERE severity = 'critical' ORDER BY discovered_date DESC")
+                    rows = cursor.fetchall()
+                    
             indicators = []
             for row in rows:
                 indicators.append(ThreatIndicator(

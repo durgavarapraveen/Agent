@@ -161,14 +161,14 @@ class KaliDockerExecutor:
         return os.path.exists("/.dockerenv") or (os.name != "nt" and shutil.which("nmap") is not None)
 
     @classmethod
-    def is_tool_installed(cls, tool: str) -> bool:
+    def is_tool_installed(cls, tool: str, bypass_cache: bool = False) -> bool:
         """Check if tool exists in container or local environment"""
         import shutil
         if shutil.which(tool):
             return True
         if tool in cls._installed_tools:
             return True
-        if tool in cls._checked_tools:
+        if not bypass_cache and tool in cls._checked_tools:
             return False
 
         if cls.is_native_environment():
@@ -200,10 +200,13 @@ class KaliDockerExecutor:
             return False
 
         logger.info(f"[KaliDockerExecutor] Auto-installing missing tool '{tool}' (apt package: {package})...")
-        install_cmd = f"docker exec {container} bash -c 'apt-get update && apt-get install -y {package}'"
         try:
-            r = subprocess.run(install_cmd, shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=120)
-            if r.returncode == 0 and cls.is_tool_installed(tool):
+            # Run update and install as separate commands to avoid shell quote escaping issues on Windows
+            up_res = subprocess.run(f"docker exec {container} apt-get update", shell=True, capture_output=True, timeout=120)
+            if up_res.returncode != 0:
+                subprocess.run(f'docker exec {container} bash -c "rm -rf /var/lib/apt/lists/* && apt-get update"', shell=True, capture_output=True, timeout=120)
+            r = subprocess.run(f"docker exec {container} apt-get install -y --no-install-recommends {package}", shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=120)
+            if r.returncode == 0 and cls.is_tool_installed(tool, bypass_cache=True):
                 logger.info(f"[KaliDockerExecutor] Successfully installed '{tool}'")
                 cls._installed_tools.add(tool)
                 return True

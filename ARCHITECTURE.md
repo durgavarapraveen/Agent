@@ -43,11 +43,11 @@ graph TD
         CentralBrain --> Reporter[EnterpriseReporter]
     end
 
-    subgraph "Persistence Layer (SQLite)"
-        OSINT --> OSINTDB[(data/db/osint_findings.sqlite)]
-        SubdomainEnum --> SubDB[(data/db/subdomains.sqlite)]
-        ThreatIntel --> ThreatDB[(data/db/threat_intel.sqlite)]
-        CentralBrain --> KnowledgeDB[(findings.db / vuln_intel.sqlite)]
+    subgraph "Persistence Layer (PostgreSQL & pgvector)"
+        OSINT --> OSINTDB[(hexstrike_db: osint_findings)]
+        SubdomainEnum --> SubDB[(hexstrike_db: subdomains)]
+        ThreatIntel --> ThreatDB[(hexstrike_db: threat_intel)]
+        CentralBrain --> KnowledgeDB[(hexstrike_db: vuln_intel, embeddings)]
     end
 
     Reporter -->|Generates| Reports[HTML & PDF Reports / Executive Summaries]
@@ -102,12 +102,12 @@ graph TD
 
 1. **Input & Scope Check**: `main.py` passes target input to `TargetScopeValidator`. Out-of-scope requests are immediately blocked.
 2. **Context Population**: Agents execute tasks and push structured results to `SharedContext`.
-3. **Database Sync**:
-   - `OSINTDatabase` -> `data/db/osint_findings.sqlite`
-   - `SubdomainDatabase` -> `data/db/subdomains.sqlite`
-   - `ThreatIntelDatabase` -> `data/db/threat_intel.sqlite`
-   - `PersistentKnowledgeStore` -> `findings.db`
-4. **Report Construction**: `EnterpriseReporter` reads from `SharedContext` and SQLite databases to produce consolidated reports in the `reports/` folder.
+3. **Database Sync (PostgreSQL)**:
+   - `OSINTDatabase` -> `osint_findings` table
+   - `SubdomainDatabase` -> `subdomains` table
+   - `ThreatIntelDatabase` -> `threat_intel` table
+   - `PersistentKnowledgeStore` -> `vuln_intel` and `embeddings` (pgvector) tables
+4. **Report Construction**: `EnterpriseReporter` reads from `SharedContext` and PostgreSQL databases to produce consolidated reports in the `reports/` folder.
 
 ---
 

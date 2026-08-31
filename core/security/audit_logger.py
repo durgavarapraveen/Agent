@@ -96,6 +96,38 @@ class AuditLogger:
         except Exception:
             return None
 
+    def log_cache_hit(self, cache_key: str, invocation: Any) -> None:
+        """Log when a tool execution was served from cache"""
+        self.log_event(
+            action="CACHE_HIT",
+            target=getattr(invocation, 'target', 'unknown'),
+            details=json.dumps({
+                "tool_id": getattr(invocation, 'tool_id', "unknown"),
+                "cache_key": cache_key
+            })
+        )
+
+    def log_denial(self, invocation: Any, auth_context: Any):
+        """Log an authorization denial."""
+        target = getattr(invocation, 'target', 'unknown')
+        tool = getattr(invocation, 'tool_id', getattr(invocation, 'operation', 'unknown'))
+        self.log_event("DENY_TOOL", target, f"Denied tool {tool}")
+
+    def log_tool_execution(self, invocation: Any, result: Any, auth_context: Any) -> None:
+        """Log a completed tool execution."""
+        tool = getattr(invocation, 'tool_id', getattr(invocation, 'operation', 'unknown'))
+        target = getattr(invocation, 'target', 'unknown')
+        success = getattr(result, 'success', False)
+        self.log_event(
+            action="TOOL_EXEC",
+            target=target,
+            details=json.dumps({
+                "tool": tool,
+                "success": success,
+                "duration": getattr(result, 'duration_seconds', 0),
+            })
+        )
+
     def log_event(self, action: str, target: str, details: str, user: str = "system@antigravity") -> Dict[str, Any]:
         """
         Append a new tamper-evident hash-chained event to audit.log.

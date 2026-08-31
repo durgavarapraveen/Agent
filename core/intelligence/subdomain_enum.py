@@ -15,7 +15,7 @@ import logging
 import re
 import urllib.request
 import urllib.parse
-import sqlite3
+from core.database import DatabaseManager
 import asyncio
 from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass
@@ -90,121 +90,95 @@ class CloudStorageBucket:
 
 
 class SubdomainDatabase:
-    """SQLite database for subdomains and virtual hosts (Singleton per db_path)."""
-    _instances: Dict[str, "SubdomainDatabase"] = {}
+    """PostgreSQL database for subdomains and virtual hosts."""
 
-    def __new__(cls, db_path: str = "data/db/subdomains.sqlite"):
-        if db_path != ":memory:" and db_path in cls._instances:
-            return cls._instances[db_path]
-        instance = super().__new__(cls)
-        instance._initialized = False
-        if db_path != ":memory:":
-            cls._instances[db_path] = instance
-        return instance
-
-    def __init__(self, db_path: str = "data/db/subdomains.sqlite"):
-        if getattr(self, "_initialized", False):
-            return
-        self.db_path = db_path
-        self._memory_conn = None
+    def __init__(self):
         self._init_db()
-        self._initialized = True
-
-    def _get_connection(self) -> sqlite3.Connection:
-        if self.db_path == ":memory:":
-            if self._memory_conn is None:
-                self._memory_conn = sqlite3.connect(":memory:")
-            return self._memory_conn
-        import os
-        os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
-        return sqlite3.connect(self.db_path)
 
     def _init_db(self):
         """Initialize database schema."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            
-            # Subdomains table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS subdomains (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT UNIQUE NOT NULL,
-                    domain TEXT,
-                    ip_addresses TEXT,  -- JSON array
-                    cname TEXT,
-                    cdn TEXT,
-                    cloud_storage TEXT,
-                    certificate_issuer TEXT,
-                    certificate_not_before TEXT,
-                    certificate_not_after TEXT,
-                    status_code INTEGER,
-                    title TEXT,
-                    technologies TEXT,  -- JSON array
-                    source TEXT,
-                    confidence REAL,
-                    discovered_date TEXT
-                )
-            """)
-            
-            # Virtual hosts table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS virtual_hosts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    host_header TEXT,
-                    target_ip TEXT,
-                    status_code INTEGER,
-                    title TEXT,
-                    server_header TEXT,
-                    technologies TEXT,  -- JSON array
-                    confidence REAL,
-                    discovered_date TEXT,
-                    UNIQUE(host_header, target_ip)
-                )
-            """)
-            
-            # Cloud storage buckets table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS cloud_storage_buckets (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    bucket_name TEXT UNIQUE,
-                    bucket_type TEXT,
-                    target_domain TEXT,
-                    region TEXT,
-                    public INTEGER,
-                    files_count INTEGER,
-                    accessible_paths TEXT,  -- JSON array
-                    discovered_date TEXT
-                )
-            """)
-            
-            conn.commit()
-            if self.db_path != ":memory:":
-                conn.close()
-            logger.info(f"SubdomainDatabase initialized: {self.db_path}")
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    # Subdomains table
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS subdomains (
+                            id SERIAL PRIMARY KEY,
+                            name TEXT UNIQUE NOT NULL,
+                            domain TEXT,
+                            ip_addresses TEXT,
+                            cname TEXT,
+                            cdn TEXT,
+                            cloud_storage TEXT,
+                            certificate_issuer TEXT,
+                            certificate_not_before TEXT,
+                            certificate_not_after TEXT,
+                            status_code INTEGER,
+                            title TEXT,
+                            technologies TEXT,
+                            source TEXT,
+                            confidence REAL,
+                            discovered_date TEXT
+                        )
+                    """)
+                    
+                    # Virtual hosts table
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS virtual_hosts (
+                            id SERIAL PRIMARY KEY,
+                            host_header TEXT,
+                            target_ip TEXT,
+                            status_code INTEGER,
+                            title TEXT,
+                            server_header TEXT,
+                            technologies TEXT,
+                            confidence REAL,
+                            discovered_date TEXT,
+                            UNIQUE(host_header, target_ip)
+                        )
+                    """)
+                    
+                    # Cloud storage buckets table
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS cloud_storage_buckets (
+                            id SERIAL PRIMARY KEY,
+                            bucket_name TEXT UNIQUE,
+                            bucket_type TEXT,
+                            target_domain TEXT,
+                            region TEXT,
+                            public INTEGER,
+                            files_count INTEGER,
+                            accessible_paths TEXT,
+                            discovered_date TEXT
+                        )
+                    """)
+                    conn.commit()
+            logger.info("SubdomainDatabase initialized via PostgreSQL")
         except Exception as e:
             logger.error(f"SubdomainDatabase init failed: {e}")
 
     def save_subdomain(self, subdomain: Subdomain) -> bool:
         """Save discovered subdomain."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT OR REPLACE INTO subdomains
-                (name, domain, ip_addresses, cname, cdn, cloud_storage, certificate_issuer,
-                 certificate_not_before, certificate_not_after, status_code, title, technologies,
-                 source, confidence, discovered_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (subdomain.name, subdomain.domain, json.dumps(subdomain.ip_addresses),
-                  subdomain.cname, subdomain.cdn, subdomain.cloud_storage,
-                  subdomain.certificate_issuer, subdomain.certificate_not_before,
-                  subdomain.certificate_not_after, subdomain.status_code, subdomain.title,
-                  json.dumps(subdomain.technologies), subdomain.source, subdomain.confidence,
-                  subdomain.discovered_date))
-            conn.commit()
-            if self.db_path != ":memory:":
-                conn.close()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO subdomains
+                        (name, domain, ip_addresses, cname, cdn, cloud_storage, certificate_issuer,
+                         certificate_not_before, certificate_not_after, status_code, title, technologies,
+                         source, confidence, discovered_date)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (name) DO UPDATE SET
+                        ip_addresses = EXCLUDED.ip_addresses, cname = EXCLUDED.cname, cdn = EXCLUDED.cdn,
+                        cloud_storage = EXCLUDED.cloud_storage, status_code = EXCLUDED.status_code,
+                        title = EXCLUDED.title, technologies = EXCLUDED.technologies
+                    """, (subdomain.name, subdomain.domain, json.dumps(subdomain.ip_addresses),
+                          subdomain.cname, subdomain.cdn, subdomain.cloud_storage,
+                          subdomain.certificate_issuer, subdomain.certificate_not_before,
+                          subdomain.certificate_not_after, subdomain.status_code, subdomain.title,
+                          json.dumps(subdomain.technologies), subdomain.source, subdomain.confidence,
+                          subdomain.discovered_date))
+                    conn.commit()
             return True
         except Exception as e:
             logger.error(f"Failed to save subdomain: {e}")
@@ -213,18 +187,19 @@ class SubdomainDatabase:
     def save_virtual_host(self, vhost: VirtualHost) -> bool:
         """Save virtual host."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT OR REPLACE INTO virtual_hosts
-                (host_header, target_ip, status_code, title, server_header, technologies, confidence, discovered_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (vhost.host_header, vhost.target_ip, vhost.status_code, vhost.title,
-                  vhost.server_header, json.dumps(vhost.technologies), vhost.confidence,
-                  vhost.discovered_date))
-            conn.commit()
-            if self.db_path != ":memory:":
-                conn.close()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO virtual_hosts
+                        (host_header, target_ip, status_code, title, server_header, technologies, confidence, discovered_date)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (host_header, target_ip) DO UPDATE SET
+                        status_code = EXCLUDED.status_code, title = EXCLUDED.title,
+                        server_header = EXCLUDED.server_header, technologies = EXCLUDED.technologies
+                    """, (vhost.host_header, vhost.target_ip, vhost.status_code, vhost.title,
+                          vhost.server_header, json.dumps(vhost.technologies), vhost.confidence,
+                          vhost.discovered_date))
+                    conn.commit()
             return True
         except Exception as e:
             logger.error(f"Failed to save virtual host: {e}")
@@ -233,18 +208,18 @@ class SubdomainDatabase:
     def save_cloud_bucket(self, bucket: CloudStorageBucket) -> bool:
         """Save cloud storage bucket."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT OR REPLACE INTO cloud_storage_buckets
-                (bucket_name, bucket_type, target_domain, region, public, files_count, accessible_paths, discovered_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (bucket.bucket_name, bucket.bucket_type, bucket.target_domain,
-                  bucket.region, int(bucket.public), bucket.files_count,
-                  json.dumps(bucket.accessible_paths), bucket.discovered_date))
-            conn.commit()
-            if self.db_path != ":memory:":
-                conn.close()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO cloud_storage_buckets
+                        (bucket_name, bucket_type, target_domain, region, public, files_count, accessible_paths, discovered_date)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (bucket_name) DO UPDATE SET
+                        public = EXCLUDED.public, files_count = EXCLUDED.files_count, accessible_paths = EXCLUDED.accessible_paths
+                    """, (bucket.bucket_name, bucket.bucket_type, bucket.target_domain,
+                          bucket.region, int(bucket.public), bucket.files_count,
+                          json.dumps(bucket.accessible_paths), bucket.discovered_date))
+                    conn.commit()
             return True
         except Exception as e:
             logger.error(f"Failed to save cloud bucket: {e}")
@@ -253,16 +228,14 @@ class SubdomainDatabase:
     def get_subdomains(self, domain: Optional[str] = None) -> List[Subdomain]:
         """Retrieve subdomains."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            if domain:
-                cursor.execute("SELECT * FROM subdomains WHERE domain = ? ORDER BY discovered_date DESC", (domain,))
-            else:
-                cursor.execute("SELECT * FROM subdomains ORDER BY discovered_date DESC")
-            rows = cursor.fetchall()
-            if self.db_path != ":memory:":
-                conn.close()
-            
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    if domain:
+                        cursor.execute("SELECT * FROM subdomains WHERE domain = %s ORDER BY discovered_date DESC", (domain,))
+                    else:
+                        cursor.execute("SELECT * FROM subdomains ORDER BY discovered_date DESC")
+                    rows = cursor.fetchall()
+                    
             subdomains = []
             for row in rows:
                 subdomains.append(Subdomain(
@@ -281,16 +254,13 @@ class SubdomainDatabase:
     def count_subdomains(self, domain: Optional[str] = None) -> int:
         """Count subdomains."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            if domain:
-                cursor.execute("SELECT COUNT(*) FROM subdomains WHERE domain = ?", (domain,))
-            else:
-                cursor.execute("SELECT COUNT(*) FROM subdomains")
-            count = cursor.fetchone()[0]
-            if self.db_path != ":memory:":
-                conn.close()
-            return count
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    if domain:
+                        cursor.execute("SELECT COUNT(*) FROM subdomains WHERE domain = %s", (domain,))
+                    else:
+                        cursor.execute("SELECT COUNT(*) FROM subdomains")
+                    return cursor.fetchone()[0]
         except Exception as e:
             logger.error(f"Failed to count subdomains: {e}")
             return 0
