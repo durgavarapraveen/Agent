@@ -398,21 +398,29 @@ class DeepSeekProvider(LLMProvider):
             )
         
         start_time = datetime.now()
-        messages = [
-            {"role": "system", "content": system or "You are a helpful assistant."},
-            {"role": "user", "content": prompt}
-        ]
-        
+        is_reasoner = "reasoner" in model
+
+        if is_reasoner:
+            # deepseek-reasoner does not support system role, temperature, or response_format
+            user_content = f"{system}\n\n{prompt}" if system else prompt
+            messages = [{"role": "user", "content": user_content}]
+        else:
+            messages = [
+                {"role": "system", "content": system or "You are a helpful assistant."},
+                {"role": "user", "content": prompt}
+            ]
+
         payload = {
             "model": model,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": temperature,
             "stream": False
         }
-        
-        if response_format == "json":
-            payload["response_format"] = {"type": "json_object"}
+
+        if not is_reasoner:
+            payload["temperature"] = temperature
+            if response_format == "json":
+                payload["response_format"] = {"type": "json_object"}
         
         try:
             if not self.session:
@@ -429,7 +437,11 @@ class DeepSeekProvider(LLMProvider):
             if r.status_code == 200:
                 data = r.json()
                 choice = data["choices"][0]
-                content = choice.get("message", {}).get("content", "")
+                message = choice.get("message", {})
+                content = message.get("content") or ""
+                reasoning_content = message.get("reasoning_content") or ""
+                if not content and reasoning_content:
+                    content = reasoning_content
                 usage = data.get("usage", {})
                 
                 # Calculate cost
@@ -629,7 +641,11 @@ class GroqProvider(LLMProvider):
             if r.status_code == 200:
                 data = r.json()
                 choice = data["choices"][0]
-                content = choice.get("message", {}).get("content", "")
+                message = choice.get("message", {})
+                content = message.get("content") or ""
+                reasoning_content = message.get("reasoning_content") or ""
+                if not content and reasoning_content:
+                    content = reasoning_content
                 usage = data.get("usage", {})
                 
                 structured = self._parse_json_response(content) if response_format == "json" else None

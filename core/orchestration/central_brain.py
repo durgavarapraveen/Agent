@@ -65,8 +65,6 @@ from core.common.schemas import (
 )
 
 from core.intelligence.osint_integration import OSINTOrchestrator
-from core.intelligence.threat_intel import ThreatIntelligenceEngine
-from core.intelligence.subdomain_enum import SubdomainEnumerationEngine
 from core.intelligence.target_profiler import TargetProfiler
 from core.tools.tool_effectiveness import ToolEffectivenessEngine
 from core.exploitation.api_reconstructor import APIReconstructor
@@ -209,8 +207,8 @@ class CentralBrain:
         self.automation = AutomationEngine(self.ctx)
         self.reporter = EnterpriseReporter(self.ctx, report_dir=str(self.report_dir))
         self.osint_orchestrator = OSINTOrchestrator(self.ctx)
-        self.threat_engine = ThreatIntelligenceEngine()
-        self.subdomain_engine = SubdomainEnumerationEngine()
+        self.threat_engine = self.osint_orchestrator.threat_engine
+        self.subdomain_engine = self.osint_orchestrator.subdomain_engine
 
         # HexStrike Intelligence Layer
         self.target_profile = None  # Populated in run() after tool validation
@@ -533,6 +531,111 @@ class CentralBrain:
         else:
             await self._run_phase_legacy(phase)
 
+    def _deterministic_fallback(self, phase: str, executed_caps: set = None):
+        """Return a BrainDecision with default tasks when the LLM planner fails.
+
+        Only injects tasks whose capability has NOT already been executed in this
+        phase, so the fallback adds missing coverage (port scan, SSL, dirs, etc.)
+        instead of repeating work the planner already produced.
+        """
+        from core.common.schemas import BrainDecision, BrainDecisionAction, TaskSpec, CapabilityType
+        from uuid import uuid4
+
+        executed_caps = executed_caps or set()
+        target = self.ctx.target
+        phase_lower = phase.lower()
+
+        # Full task catalog per phase — the deterministic safety-net.
+        all_tasks = []
+        if "recon" in phase_lower:
+            all_tasks = [
+                TaskSpec(task_id=str(uuid4()), objective=f"Enumerate subdomains of {target} using subfinder",
+                         capability=CapabilityType.DNS_ENUMERATION,
+                         inputs={"target": target, "tools_hint": ["subfinder"]}),
+                TaskSpec(task_id=str(uuid4()), objective=f"Scan open ports on {target} using nmap",
+                         capability=CapabilityType.PORT_SCANNING,
+                         inputs={"target": target, "tools_hint": ["nmap"]}),
+                TaskSpec(task_id=str(uuid4()), objective=f"Fingerprint technologies on {target} using whatweb",
+                         capability=CapabilityType.TECHNOLOGY_FINGERPRINTING,
+                         inputs={"target": target, "tools_hint": ["whatweb"]}),
+                TaskSpec(task_id=str(uuid4()), objective=f"Check SSL/TLS configuration on {target} using sslscan",
+                         capability=CapabilityType.TLS_ANALYSIS,
+                         inputs={"target": target, "tools_hint": ["sslscan"]}),
+            ]
+        elif "osint" in phase_lower:
+            all_tasks = [
+                TaskSpec(task_id=str(uuid4()), objective=f"Enumerate subdomains of {target} using amass",
+                         capability=CapabilityType.DNS_ENUMERATION,
+                         inputs={"target": target, "tools_hint": ["amass"]}),
+                TaskSpec(task_id=str(uuid4()), objective=f"Detect WAF on {target} using wafw00f",
+                         capability=CapabilityType.TECHNOLOGY_FINGERPRINTING,
+                         inputs={"target": target, "tools_hint": ["wafw00f"]}),
+                TaskSpec(task_id=str(uuid4()), objective=f"Check SSL/TLS configuration on {target} using sslscan",
+                         capability=CapabilityType.TLS_ANALYSIS,
+                         inputs={"target": target, "tools_hint": ["sslscan"]}),
+            ]
+        elif "deep" in phase_lower:
+            all_tasks = [
+                TaskSpec(task_id=str(uuid4()), objective=f"Discover hidden directories and files on {target} using ffuf with common wordlist",
+                         capability=CapabilityType.ENDPOINT_DISCOVERY,
+                         inputs={"target": target, "tools_hint": ["ffuf"]}),
+                TaskSpec(task_id=str(uuid4()), objective=f"Crawl {target} for endpoints and links using katana",
+                         capability=CapabilityType.WEB_CRAWLING,
+                         inputs={"target": target, "tools_hint": ["katana"]}),
+                TaskSpec(task_id=str(uuid4()), objective=f"Run nikto web server scan on {target}",
+                         capability=CapabilityType.VULNERABILITY_SCANNING,
+                         inputs={"target": target, "tools_hint": ["nikto"]}),
+                TaskSpec(task_id=str(uuid4()), objective=f"Check HTTP security headers on {target}",
+                         capability=CapabilityType.HTTP_ANALYSIS,
+                         inputs={"target": target, "tools_hint": ["httpx"]}),
+            ]
+        elif "scan" in phase_lower or "analyz" in phase_lower:
+            all_tasks = [
+                TaskSpec(task_id=str(uuid4()), objective=f"Run nuclei vulnerability scan on {target} with cve,misconfig,exposure templates",
+                         capability=CapabilityType.VULNERABILITY_SCANNING,
+                         inputs={"target": target, "tools_hint": ["nuclei"]}),
+                TaskSpec(task_id=str(uuid4()), objective=f"Run vulnerability scan on {target} using nikto",
+                         capability=CapabilityType.VULNERABILITY_SCANNING,
+                         inputs={"target": target, "tools_hint": ["nikto"]}),
+                TaskSpec(task_id=str(uuid4()), objective=f"Discover hidden directories on {target} using ffuf",
+                         capability=CapabilityType.ENDPOINT_DISCOVERY,
+                         inputs={"target": target, "tools_hint": ["ffuf"]}),
+                TaskSpec(task_id=str(uuid4()), objective=f"Test for CORS misconfiguration on {target}",
+                         capability=CapabilityType.HTTP_ANALYSIS,
+                         inputs={"target": target, "tools_hint": ["httpx"]}),
+            ]
+
+        elif "exploit" in phase_lower:
+            api_paths = []
+            if hasattr(self.ctx, 'endpoints'):
+                api_paths = [e.get('url', '') for e in (self.ctx.endpoints or [])
+                             if '/api' in e.get('url', '').lower()]
+            api_target = api_paths[0] if api_paths else f"{target}/api/"
+            all_tasks = [
+                TaskSpec(task_id=str(uuid4()), objective=f"Run nuclei exploitation templates on {target} with tags cve,rce,sqli,xss,lfi",
+                         capability=CapabilityType.VULNERABILITY_SCANNING,
+                         inputs={"target": target, "tools_hint": ["nuclei"]}),
+                TaskSpec(task_id=str(uuid4()), objective=f"Enumerate API endpoints at {api_target} using ffuf",
+                         capability=CapabilityType.ENDPOINT_DISCOVERY,
+                         inputs={"target": api_target, "tools_hint": ["ffuf"]}),
+            ]
+
+        # Filter out capabilities already executed
+        tasks = [t for t in all_tasks if t.capability.value not in executed_caps]
+
+        if not tasks:
+            logger.info(f"DETERMINISTIC_FALLBACK: All capabilities already covered for phase '{phase}'")
+            return None
+
+        logger.info(f"DETERMINISTIC_FALLBACK: Injecting {len(tasks)} missing tasks for phase '{phase}' "
+                     f"(already ran: {executed_caps})")
+        return BrainDecision(
+            action=BrainDecisionAction.SPAWN_AGENTS,
+            thought=f"LLM planner failed. Using deterministic fallback for {phase}.",
+            reason="planner_fallback",
+            tasks=tasks,
+        )
+
     async def _run_phase_approach_a(self, phase: str):
         logger.info(f"--- Running Approach A for phase: {phase} ---")
         
@@ -585,14 +688,26 @@ class CentralBrain:
                 f"CRITICAL: Do NOT repeat any capability or task that is listed in Already Executed Tasks."
             )
             
-            response = await self.llm.generate_response(prompt, system=BRAIN_SYSTEM)
-            
+            response = await self.llm.generate_response(prompt, system=BRAIN_SYSTEM, response_format="json")
+
             from core.common.normalizer import PlannerResponseNormalizer
-            try:
-                decision = PlannerResponseNormalizer.normalize(response.content)
-            except Exception as e:
-                logger.error(f"Failed to parse LLM response: {e}")
-                break
+            decision = None
+            for _attempt in range(2):
+                try:
+                    decision = PlannerResponseNormalizer.normalize(response.content)
+                    break
+                except Exception as e:
+                    if _attempt == 0:
+                        logger.warning(f"Planner parse failed (attempt 1), retrying: {e}")
+                        response = await self.llm.generate_response(prompt, system=BRAIN_SYSTEM, response_format="json")
+                    else:
+                        logger.error(f"Planner parse failed after retry: {e}")
+
+            if decision is None:
+                executed_caps = {h.get('capability') for h in task_history}
+                decision = self._deterministic_fallback(phase, executed_caps)
+                if decision is None:
+                    break
                 
             if decision.action in (BrainDecisionAction.COMPLETE, BrainDecisionAction.PHASE_COMPLETE):
                 logger.info(f"Phase {phase} complete.")
@@ -607,7 +722,14 @@ class CentralBrain:
             for task in tasks:
                 capability = task.capability.value if hasattr(task.capability, 'value') else task.capability
                 target = task.inputs.get('target', self.ctx.target)
-                params = task.inputs.get('params', {})
+                params = dict(task.inputs.get('params', {}) or {})
+                # FIX: propagate objective + requested tool so ToolRouter can honor
+                # the planner's tool choice (subfinder/amass/etc) instead of defaulting
+                # to the first tool in op_map order.
+                params.setdefault('objective', task.objective)
+                _tool_hint = task.inputs.get('tools_hint') or task.inputs.get('tools')
+                if _tool_hint:
+                    params.setdefault('preferred_tool', _tool_hint[0] if isinstance(_tool_hint, list) else _tool_hint)
                 
                 logger.info(f"Invoking capability: {capability} on {target}")
                 
@@ -685,13 +807,17 @@ class CentralBrain:
         data = getattr(result, "data", {}) or {}
         
         # 1. Ingest Subdomains
-        domain_pattern = re.compile(r'^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$')
+        # FIX: extract hostnames from ANY output format (dnsenum/fierce/assetfinder emit
+        # column-formatted reports, not bare-domain-per-line). Scope matches to the apex.
         discovered_subs = set(data.get("subdomains", []) or data.get("domains", []))
-        if stdout:
-            for line in stdout.splitlines():
-                clean = line.strip()
-                if clean and domain_pattern.match(clean) and not clean.startswith("[") and not clean.startswith("http"):
-                    discovered_subs.add(clean)
+        apex = target.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0].lower()
+        apex = apex[4:] if apex.startswith("www.") else apex
+        if stdout and apex:
+            host_re = re.compile(r'\b((?:[a-zA-Z0-9_-]+\.)+[a-zA-Z]{2,})\.?\b')
+            for match in host_re.findall(stdout):
+                host = match.rstrip('.').lower()
+                if host == apex or host.endswith('.' + apex):
+                    discovered_subs.add(host)
         
         if discovered_subs:
             self.ctx.add_subdomains(list(discovered_subs), source=getattr(result, "tool", capability))
@@ -724,6 +850,176 @@ class CentralBrain:
                     ports.append({"port": int(match.group(1)), "service": match.group(2)})
         if ports:
             self.ctx.add_ports(target_host, ports)
+
+        # 4. Ingest Endpoints from ffuf/feroxbuster/gobuster/dirb output
+        if capability in ("endpoint_discovery", "web_crawling") and stdout:
+            endpoints = []
+            for line in stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                # ffuf CSV-style: URL  [Status: 200, Size: 1234, ...]
+                m = re.search(r'(https?://\S+)\s+\[Status:\s*(\d+)', line)
+                if m:
+                    endpoints.append({"url": m.group(1), "status": int(m.group(2))})
+                    continue
+                # gobuster/feroxbuster: STATUS  SIZE  URL
+                m = re.search(r'^(\d{3})\s+\S+\s+(https?://\S+)', line)
+                if m:
+                    endpoints.append({"url": m.group(2), "status": int(m.group(1))})
+                    continue
+                # bare URL lines (katana output)
+                m = re.match(r'^(https?://\S+)$', line)
+                if m:
+                    endpoints.append({"url": m.group(1), "status": 0})
+            if endpoints:
+                if hasattr(self.ctx, 'add_endpoints'):
+                    self.ctx.add_endpoints(endpoints, source=getattr(result, "tool", capability))
+                elif hasattr(self.ctx, 'endpoints'):
+                    existing = getattr(self.ctx, 'endpoints', []) or []
+                    seen_urls = {e.get('url') for e in existing if isinstance(e, dict)}
+                    for ep in endpoints:
+                        if ep['url'] not in seen_urls:
+                            existing.append(ep)
+                            seen_urls.add(ep['url'])
+                    self.ctx.endpoints = existing
+                logger.info(f"Ingested {len(endpoints)} endpoints from {getattr(result, 'tool', capability)}")
+
+        # 5. Ingest Vulnerability findings from nikto/nuclei output
+        if capability == "vulnerability_scanning" and stdout:
+            vulns = []
+            tool_name = getattr(result, "tool", "unknown")
+            for line in stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                # nuclei JSONL output (preferred — machine-parseable)
+                if line.startswith("{") and '"template-id"' in line or '"template_id"' in line:
+                    try:
+                        import json as _json
+                        ndata = _json.loads(line)
+                        info = ndata.get("info", {})
+                        tid = ndata.get("template-id") or ndata.get("template_id") or "unknown"
+                        title = info.get("name") or tid
+                        sev = (info.get("severity") or "medium").upper()
+                        matched_at = ndata.get("matched-at") or ndata.get("matched") or target
+                        classification = info.get("classification", {})
+                        cve_ids = classification.get("cve-id") or classification.get("cve_id") or []
+                        if isinstance(cve_ids, str):
+                            cve_ids = [cve_ids]
+                        vulns.append({
+                            "type": "NUCLEI_MATCH",
+                            "title": f"Nuclei: {title}",
+                            "severity": sev,
+                            "target": target,
+                            "location": matched_at,
+                            "template_id": tid,
+                            "cve": ", ".join(cve_ids) if cve_ids else "",
+                            "proof": f"Nuclei template '{tid}' matched at {matched_at}",
+                            "details": info.get("description", f"Template {tid} matched"),
+                            "tool": "nuclei",
+                        })
+                        continue
+                    except Exception:
+                        pass
+                # nikto: + OSVDB-XXXX: description  OR  + description
+                m = re.match(r'^\+\s+(OSVDB-\d+:\s*)?(.+)', line)
+                _nikto_noise = (
+                    "+ Target", "+ Start", "+ End", "+ Server:",
+                    "+ SSL Info:", "+ Platform:", "+ No CGI Dir",
+                    "+ Scan terminated", "+ host(s) tested",
+                    "+ Multiple IPs", "+ Hostname:",
+                )
+                if m and not any(line.startswith(p) for p in _nikto_noise):
+                    osvdb = (m.group(1) or "").strip().rstrip(":")
+                    desc = m.group(2).strip()
+                    if len(desc) > 10 and not re.match(r'^\d+\s+host\(s\)\s+tested', desc):
+                        sev = "MEDIUM"
+                        if any(k in desc.lower() for k in ("xss", "inject", "rce", "remote code", "execution")):
+                            sev = "HIGH"
+                        elif any(k in desc.lower() for k in ("missing", "header", "cookie", "info", "uncommon")):
+                            sev = "LOW"
+                        vulns.append({
+                            "type": "NIKTO_FINDING",
+                            "title": desc[:120],
+                            "severity": sev,
+                            "target": target,
+                            "location": target,
+                            "proof": f"nikto: {line.strip()}",
+                            "details": desc,
+                            "tool": tool_name,
+                            "osvdb": osvdb,
+                        })
+                        continue
+                # nuclei plaintext: [template-id] [severity] [protocol] URL
+                m = re.match(r'^\[([^\]]+)\]\s+\[([^\]]+)\]\s+\[([^\]]+)\]\s+(\S+)', line)
+                if m:
+                    vulns.append({
+                        "type": "NUCLEI_MATCH",
+                        "title": f"Nuclei: {m.group(1)}",
+                        "severity": m.group(2).upper(),
+                        "target": target,
+                        "location": m.group(4),
+                        "template_id": m.group(1),
+                        "proof": line,
+                        "details": f"Template {m.group(1)} matched at {m.group(4)}",
+                        "tool": "nuclei",
+                    })
+            if vulns:
+                for v in vulns:
+                    if hasattr(self.ctx, 'add_vulnerability'):
+                        self.ctx.add_vulnerability(v)
+                logger.info(f"Ingested {len(vulns)} vulnerability findings from {tool_name}")
+
+        # 6. Ingest TLS findings from sslscan output
+        if capability == "tls_analysis" and stdout:
+            tls_findings = []
+            if "SSLv2" in stdout or "SSLv3" in stdout:
+                for line in stdout.splitlines():
+                    if re.search(r'SSL(?:v[23])\s+\d+\s+bits\s+\S+\s+Accepted', line):
+                        tls_findings.append({
+                            "type": "TLS_WEAKNESS",
+                            "title": f"Deprecated SSL protocol accepted: {line.strip()[:80]}",
+                            "severity": "HIGH",
+                            "target": target,
+                            "location": target,
+                            "proof": line.strip(),
+                            "details": "Server accepts deprecated SSL protocol version",
+                            "tool": "sslscan",
+                        })
+            if "Heartbleed" in stdout and "vulnerable" in stdout.lower() and "not vulnerable" not in stdout.lower():
+                tls_findings.append({
+                    "type": "TLS_WEAKNESS",
+                    "title": "Heartbleed vulnerability detected",
+                    "severity": "CRITICAL",
+                    "target": target, "location": target,
+                    "proof": "sslscan Heartbleed test positive",
+                    "details": "Server is vulnerable to Heartbleed (CVE-2014-0160)",
+                    "tool": "sslscan",
+                })
+            if tls_findings:
+                for v in tls_findings:
+                    if hasattr(self.ctx, 'add_vulnerability'):
+                        self.ctx.add_vulnerability(v)
+                logger.info(f"Ingested {len(tls_findings)} TLS findings from sslscan")
+
+        # 7. Convert missing security headers from profiling into findings
+        if capability in ("http_analysis", "technology_fingerprinting") and stdout:
+            header_vulns = []
+            important_headers = {
+                "X-Frame-Options": ("Missing X-Frame-Options header", "Clickjacking protection not enabled"),
+                "Content-Security-Policy": ("Missing Content-Security-Policy header", "No CSP policy configured"),
+                "Strict-Transport-Security": ("Missing HSTS header", "HSTS not enforced"),
+                "X-Content-Type-Options": ("Missing X-Content-Type-Options header", "MIME sniffing protection not enabled"),
+            }
+            response_headers = set()
+            for line in stdout.splitlines():
+                for hdr in important_headers:
+                    if hdr.lower() in line.lower():
+                        response_headers.add(hdr)
+            for hdr, (title, detail) in important_headers.items():
+                if hdr not in response_headers and "missing" not in capability:
+                    pass  # Only flag from explicit header checks
 
     async def _run_phase_approach_b(self, phase: str):
         logger.info(f"--- Running Approach B for phase: {phase} ---")
@@ -1369,12 +1665,44 @@ class CentralBrain:
                         )
                 logger.info(f"  ✓ Persisted {len(self.ctx.endpoints)} endpoints")
             
+            # ── Missing Security Headers → Vulnerability Findings ──
+            profile = getattr(self.ctx, 'target_profile', None) or {}
+            if isinstance(profile, dict):
+                sec_headers = profile.get("security_headers", {})
+            else:
+                sec_headers = getattr(profile, 'security_headers', {}) or {}
+            important_headers = {
+                "X-Frame-Options": ("Missing X-Frame-Options header", "Clickjacking protection not enabled — site can be framed by malicious pages"),
+                "Content-Security-Policy": ("Missing Content-Security-Policy header", "No CSP policy — increased XSS risk"),
+                "Strict-Transport-Security": ("Missing HSTS header", "HSTS not enforced — vulnerable to SSL stripping"),
+                "X-Content-Type-Options": ("Missing X-Content-Type-Options header", "MIME sniffing protection not enabled"),
+            }
+            present_lower = {k.lower() for k in (sec_headers or {})}
+            header_findings = 0
+            for hdr, (title, detail) in important_headers.items():
+                if hdr.lower() not in present_lower:
+                    vuln = {
+                        "type": "MISSING_HEADER",
+                        "title": title,
+                        "severity": "LOW",
+                        "target": self.ctx.target,
+                        "location": self.ctx.target,
+                        "proof": f"HTTP response missing {hdr} header",
+                        "details": detail,
+                        "tool": "profiler",
+                    }
+                    if hasattr(self.ctx, 'add_vulnerability'):
+                        self.ctx.add_vulnerability(vuln)
+                        header_findings += 1
+            if header_findings:
+                logger.info(f"  ✓ Added {header_findings} missing security header findings")
+
             # ── Summary ──
             logger.info(f"Persisted: {len(getattr(self.ctx, 'subdomains', []))} subdomains, "
                         f"{len(getattr(self.ctx, 'ips', []))} IPs, "
                         f"{len(getattr(self.ctx, 'ports', {}))} hosts with ports, "
                         f"{len(getattr(self.ctx, 'endpoints', []))} endpoints")
-                        
+
         except Exception as e:
             logger.error(f"Failed to persist recon findings: {e}")
             import traceback

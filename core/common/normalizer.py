@@ -23,6 +23,73 @@ class PlannerResponseNormalizer:
     """Canonical normalizer for LLM planner outputs"""
 
     @classmethod
+    def _loads_lenient(cls, text: str):
+        """Parse JSON from a possibly-noisy LLM response.
+
+        Handles: markdown ```json fences, reasoning/prose prefixes, and trailing text
+        by extracting the first balanced {...} object. Returns dict/list or None.
+        """
+        import re as _re
+        if not text or not text.strip():
+            return None
+        t = text.strip()
+
+        # 1. Strip a ```json ... ``` (or ``` ... ```) fence if present.
+        fence = _re.search(r"```(?:json)?\s*(.*?)```", t, _re.DOTALL)
+        if fence:
+            t = fence.group(1).strip()
+
+        # 2. Direct parse.
+        try:
+            return json.loads(t)
+        except Exception:
+            pass
+
+        # 3. Extract balanced {...} blocks and pick the best one.
+        #    Scoring: prefer objects with plan-relevant keys (action/agents/tasks),
+        #    then by number of keys, then by size. This avoids picking empty `{}`
+        #    or small example snippets from chain-of-thought reasoning.
+        _PLAN_KEYS = {"action", "agents", "tasks", "agent_specs", "agent_spec", "task_spec"}
+        candidates = []
+        start = t.find('{')
+        while start != -1:
+            depth = 0
+            in_str = False
+            esc = False
+            for i in range(start, len(t)):
+                ch = t[i]
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif ch == '\\':
+                        esc = True
+                    elif ch == '"':
+                        in_str = False
+                    continue
+                if ch == '"':
+                    in_str = True
+                elif ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            obj = json.loads(t[start:i + 1])
+                            if isinstance(obj, dict):
+                                has_plan_keys = len(set(obj.keys()) & _PLAN_KEYS)
+                                num_keys = len(obj)
+                                size = i - start + 1
+                                candidates.append((has_plan_keys, num_keys, size, obj))
+                        except Exception:
+                            pass
+                        break
+            start = t.find('{', start + 1)
+        if candidates:
+            candidates.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+            return candidates[0][3]
+        return None
+
+    @classmethod
     def normalize(cls, raw: Union[Dict[str, Any], str, None]) -> BrainDecision:
         """
         Convert raw LLM response dict/json into a canonical BrainDecision.
@@ -36,11 +103,13 @@ class PlannerResponseNormalizer:
             return raw
 
         if isinstance(raw, str):
-            try:
-                raw = json.loads(raw)
-            except Exception as e:
-                logger.error(f"PLANNER_DECISION_REJECTED: Invalid JSON ({e})")
-                raise PlannerSchemaError(f"Invalid JSON from planner: {e}")
+            parsed = cls._loads_lenient(raw)
+            if parsed is None:
+                logger.error("PLANNER_DECISION_REJECTED: Invalid JSON (no JSON object found in response)")
+                logger.debug(f"RAW_LLM_RESPONSE (first 500 chars): {raw[:500]}")
+                raise PlannerSchemaError("Invalid JSON from planner: no JSON object found")
+            raw = parsed
+            logger.debug(f"PARSED_LLM_JSON keys={list(raw.keys()) if isinstance(raw, dict) else type(raw).__name__}")
 
         if not isinstance(raw, dict):
             logger.error("PLANNER_DECISION_REJECTED: Planner output is not a dictionary")
@@ -97,7 +166,8 @@ class PlannerResponseNormalizer:
                 canonical_tasks.append(task_spec)
 
             if canonical_action in (BrainDecisionAction.SPAWN_AGENTS, BrainDecisionAction.SPAWN_TASKS) and not canonical_tasks:
-                logger.error("PLANNER_DECISION_REJECTED: Final agents/tasks array is empty after normalization")
+                logger.error(f"PLANNER_DECISION_REJECTED: Final agents/tasks array is empty after normalization")
+                logger.warning(f"PLANNER_DEBUG: action='{raw_action}' raw_tasks_count={len(raw_tasks)} raw_keys={list(raw.keys())}")
                 raise PlannerSchemaError("Action requires non-empty agents/tasks list")
 
             thought = raw.get("thought") or raw.get("thinking") or raw.get("reason") or ""
@@ -119,6 +189,25 @@ class PlannerResponseNormalizer:
             logger.error(f"PLANNER_DECISION_REJECTED: Schema validation error: {e}")
             raise PlannerSchemaError(f"Schema normalization failed: {e}")
 
+    # Known tool binaries the planner may name in an objective.
+    KNOWN_TOOLS = (
+        "subfinder", "amass", "assetfinder", "dnsenum", "fierce", "httpx", "whatweb",
+        "wafw00f", "nmap", "masscan", "rustscan", "nuclei", "nikto", "sqlmap", "wpscan",
+        "dalfox", "katana", "gau", "waybackurls", "gobuster", "feroxbuster", "ffuf",
+        "dirsearch", "dirb", "sslscan", "sslyze", "hydra", "john", "hashcat",
+        "theharvester", "arjun", "paramspider", "dig", "whois",
+    )
+
+    @classmethod
+    def _extract_tools_from_text(cls, text: str) -> list:
+        """Return known tool names mentioned in free text (word-boundary matched)."""
+        import re as _re
+        if not text:
+            return []
+        low = text.lower()
+        found = [t for t in cls.KNOWN_TOOLS if _re.search(r'\b' + _re.escape(t) + r'\b', low)]
+        return found
+
     @classmethod
     def _normalize_task_spec(cls, data: Dict[str, Any]) -> TaskSpec:
         """Normalize an individual task specification"""
@@ -139,14 +228,27 @@ class PlannerResponseNormalizer:
         max_steps = data.get("max_steps") or data.get("max_retries") or 10
         max_retries = data.get("max_retries") or data.get("max_steps") or 3
 
-        # Inputs - strip raw 'tools' to prevent LLM tool commanding
+        # Inputs - move raw 'tools' to 'tools_hint' (advisory only; the framework's
+        # ToolRouter still picks the actual tool). Keeping it: (a) lets the router prefer
+        # the requested tool, and (b) makes distinct tools (subfinder vs amass) produce
+        # distinct task signatures so they aren't wrongly deduplicated into one run.
         inputs = data.get("inputs") or {}
         if not inputs and "target" in data:
             inputs["target"] = data["target"]
         if "params" in data and isinstance(data["params"], dict):
             inputs.update(data["params"])
-        if "tools" in inputs:
-            del inputs["tools"]
+        # Also capture a top-level 'tools' hint from the task spec, not just inputs.
+        _raw_tools = inputs.pop("tools", None) or data.get("tools")
+        if _raw_tools:
+            inputs["tools_hint"] = _raw_tools if isinstance(_raw_tools, list) else [_raw_tools]
+        else:
+            # Fallback: the planner often names the tool only in the objective text
+            # ("...using amass...", "...using subfinder..."). Extract it so distinct
+            # tools produce distinct task signatures (avoiding wrong dedup) and the
+            # router can honor the preference.
+            _extracted = cls._extract_tools_from_text(objective)
+            if _extracted:
+                inputs["tools_hint"] = _extracted
 
         # Success criteria
         raw_criteria = data.get("success_criteria") or []
@@ -258,33 +360,33 @@ class PlannerResponseNormalizer:
             (r'\b(?:port\s+scan(?:ning)?|open\s+(?:[a-z0-9_\-]+\s+)?ports?|scan\s+(?:[a-z0-9_\-]+\s+)?ports?|port\s+and\s+service|nmap|masscan|tcp\s+scan|udp\s+scan|service\s+(?:scan|detection))\b',
              CapabilityType.PORT_SCANNING, 0.98),
 
-            # 2. Subdomain & DNS enumeration (Prioritize subdomain discovery objectives)
-            (r'\b(?:subdomains?|dns\s+records?|dns\s+enumeration|dns\s+lookup|resolve\s+(?:ips?|ip\s+addresses)|domain\s+enumeration|dns\s+brute|subfinder|amass|crt\.sh)\b',
-             CapabilityType.DNS_ENUMERATION, 0.95),
+            # 2. HTTP & Header Analysis — BEFORE dns_enumeration so "headers audit on subdomains" doesn't match dns
+            (r'\b(?:security\s+headers?|headers?\s+audit|headers?\s+check|missing\s+headers?|csp|cors|cookie\s+(?:flag|security)|http\s+(?:security|header)|x-frame|hsts|x-content-type)\b',
+             CapabilityType.HTTP_ANALYSIS, 0.97),
 
-            # 3. Vulnerability scanning & Exploitation
+            # 3. TLS Analysis — BEFORE dns_enumeration so "TLS/SSL configuration" doesn't fall through
+            (r'\b(?:ssl|tls|cipher|certificate|sslscan|sslyze|openssl|starttls|weak\s+(?:cipher|ssl|tls))\b',
+             CapabilityType.TLS_ANALYSIS, 0.96),
+
+            # 4. Vulnerability scanning & Exploitation
             (r'\b(?:exploit|payload|vuln|vulnerability|nuclei|cve|sqli|rce|idor|ssrf|xss|lfi|rfi|ssti|xxe|injection|upload\s+bypass)\b',
              CapabilityType.VULNERABILITY_SCANNING, 0.95),
 
-            # 4. Endpoint & Directory discovery
+            # 5. Subdomain & DNS enumeration
+            (r'\b(?:subdomain\s+(?:enum|discov|brute|scan)|enumerate\s+subdomains?|dns\s+records?|dns\s+enumeration|dns\s+lookup|resolve\s+(?:ips?|ip\s+addresses)|domain\s+enumeration|dns\s+brute|subfinder|amass|crt\.sh)\b',
+             CapabilityType.DNS_ENUMERATION, 0.95),
+
+            # 6. Endpoint & Directory discovery
             (r'\b(?:hidden\s+directories|directories|gobuster|feroxbuster|ffuf|endpoints?|crawl|katana|directory\s+(?:brute|scan|discovery))\b',
              CapabilityType.ENDPOINT_DISCOVERY, 0.95),
 
-            # 5. Technology fingerprinting
+            # 7. Technology fingerprinting
             (r'\b(?:tech\s+stack|technology\s+stack|technologies|framework|cms|web\s+server|whatweb|wafw00f|fingerprint)\b',
              CapabilityType.TECHNOLOGY_FINGERPRINTING, 0.95),
 
-            # 6. Authentication testing
+            # 8. Authentication testing
             (r'\b(?:authenticate|login|credentials|auth_bypass|auth|brute\s+force|hydra)\b',
              CapabilityType.AUTHENTICATION_TESTING, 0.95),
-
-            # 7. HTTP & Header Analysis
-            (r'\b(?:header|security\s+headers|csp|cors|cookie|config)\b',
-             CapabilityType.HTTP_ANALYSIS, 0.95),
-
-            # 8. TLS Analysis
-            (r'\b(?:ssl|tls|cipher|certificate|sslscan|openssl|starttls)\b',
-             CapabilityType.TLS_ANALYSIS, 0.95),
 
             # 9. JavaScript Analysis
             (r'\b(?:js|javascript|bundle|source\s+map)\b',

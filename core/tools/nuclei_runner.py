@@ -34,6 +34,30 @@ TECH_TAG_MAP = {
     "jenkins": "jenkins",
     "kubernetes": "k8s,kubernetes",
     "docker": "docker",
+    "cloudflare": "cloudflare",
+    "next.js": "nextjs",
+    "nextjs": "nextjs",
+    "jira": "jira",
+    "gitlab": "gitlab",
+    "phpmyadmin": "phpmyadmin",
+    "webpack": "tech",
+    "tailwind": "tech",
+    "bootstrap": "tech",
+    "vercel": "tech",
+    "netlify": "tech",
+    "aws": "aws",
+    "amazon": "aws",
+    "azure": "azure",
+    "google": "gcloud",
+    "node": "nodejs",
+    "nodejs": "nodejs",
+}
+
+# Generic nuclei tags that are valid to pass through even without a tech map entry.
+VALID_GENERIC_TAGS = {
+    "cve", "misconfig", "exposure", "tech", "default-login", "panel", "config",
+    "tokens", "exposures", "takeover", "cors", "ssrf", "xss", "sqli", "lfi",
+    "rce", "redirect", "disclosure", "cnvd", "oast", "network", "ssl", "dns",
 }
 
 
@@ -47,15 +71,16 @@ class NucleiRunner:
         """
         Map a detected technology name to official Nuclei template tags.
         """
-        import re
         tech_clean = (tech or "").strip().lower()
         for key, tags in TECH_TAG_MAP.items():
             if key in tech_clean:
                 return tags
-        # If it contains slashes, path characters, or invalid tag symbols (e.g. css/stylesheets), ignore it
-        if "/" in tech_clean or not re.match(r'^[a-z0-9_\-]+$', tech_clean):
-            return ""
-        return tech_clean
+        # Only pass through if it's a known-valid generic nuclei tag. Everything else
+        # (HTTP status codes like "200", bundler names like "webpack", header names like
+        # "hsts") is NOT a valid template tag and would yield "no templates provided".
+        if tech_clean in VALID_GENERIC_TAGS:
+            return tech_clean
+        return ""
 
     async def execute_template(
         self,
@@ -73,8 +98,12 @@ class NucleiRunner:
         else:
             tags_str = str(tech_tags).strip()
 
-        # Ensure general/fallback tags map to standard Nuclei template categories if needed
-        split_tags = [t.strip() for t in tags_str.split(",") if t.strip() and "/" not in t]
+        # Ensure general/fallback tags map to standard Nuclei template categories if needed.
+        # Drop path-like ("/"), purely numeric (HTTP status codes), and empty tokens.
+        split_tags = [
+            t.strip() for t in tags_str.split(",")
+            if t.strip() and "/" not in t and not t.strip().isdigit()
+        ]
         if not split_tags or "general" in split_tags:
             tags_str = "cve,misconfig,exposure,tech"
         else:
@@ -198,8 +227,10 @@ class NucleiRunner:
 
         for host, techs in tech_dict.items():
             tags = [self.find_templates_for(t) for t in techs if t]
-            if not tags:
-                tags = ["cve", "default"]
+            tags = [t for t in tags if t]  # drop empties from unmapped/invalid tech names
+            # Always include broad vulnerability categories alongside tech-specific tags
+            tags.extend(["cve", "misconfig", "exposure"])
+            tags = list(dict.fromkeys(tags))  # dedupe preserving order
 
             findings = await self.execute_template(host, tags, timeout=timeout)
             for f in findings:

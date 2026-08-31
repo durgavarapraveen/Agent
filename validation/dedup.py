@@ -55,7 +55,7 @@ def generate_dedup_key(capability: str, target: str, resource: str = "") -> str:
 
 def fingerprint(cve_id: str = "", file_path: str = "",
                 function_name: str = "", package_version: str = "",
-                target: str = "") -> str:
+                target: str = "", title: str = "", vuln_type: str = "") -> str:
     """Stable SHA-256 fingerprint for a finding."""
     target_clean = (target or "").strip().lower()
     if "://" in target_clean:
@@ -69,6 +69,8 @@ def fingerprint(cve_id: str = "", file_path: str = "",
         (function_name or "").strip(),
         (package_version or "").strip(),
         target_clean,
+        (title or "").strip().lower(),
+        (vuln_type or "").strip().upper(),
     ])
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -114,10 +116,12 @@ class DedupStore:
     def classify(self, finding: Dict, scan_id: str) -> DedupResult:
         """Classify one finding for the current scan and update history."""
         target_val = finding.get("target") or finding.get("host") or finding.get("domain") or ""
+        title_val = finding.get("title") or finding.get("name") or ""
+        type_val = finding.get("type") or finding.get("vuln_type") or ""
         fp = fingerprint(
             finding.get("cve_id", ""), finding.get("file_path", finding.get("location", "")),
             finding.get("function_name", ""), finding.get("package_version", ""),
-            target=target_val)
+            target=target_val, title=title_val, vuln_type=type_val)
         severity = str(finding.get("severity", "")).upper()
         now = time.time()
 

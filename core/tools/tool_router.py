@@ -93,7 +93,7 @@ class ToolRouter:
                     elif tname == "assetfinder":
                         invocation.params["command"] = f"assetfinder --subs-only {base_domain}"
                     elif tname == "amass":
-                        invocation.params["command"] = f"amass enum -d {base_domain} -passive"
+                        invocation.params["command"] = f"amass enum -d {base_domain} -passive -timeout 3"
                     elif tname == "dnsenum":
                         invocation.params["command"] = f"dnsenum {base_domain}"
                     elif tname == "fierce":
@@ -101,9 +101,9 @@ class ToolRouter:
                     elif tname == "httpx":
                         invocation.params["command"] = f"httpx-toolkit -u {target} -silent -title -tech-detect -status-code"
                     elif tname == "nuclei":
-                        invocation.params["command"] = f"nuclei -u {target} -silent"
+                        invocation.params["command"] = f"nuclei -u {target} -tags cve,misconfig,exposure -jsonl -silent -severity low,medium,high,critical"
                     elif tname == "nmap":
-                        invocation.params["command"] = f"nmap -sV -F {domain}"
+                        invocation.params["command"] = f"nmap -sT -sV -F --unprivileged {domain}"
                     elif tname == "masscan":
                         invocation.params["command"] = f"masscan {domain} -p1-1000 --rate=1000"
                     elif tname == "whatweb":
@@ -170,6 +170,10 @@ class ToolRouter:
             # Remove 'target' from params for tools that don't expect it as a kwarg
             if "target" in invocation.params and best_tool.__class__.__name__ in ("KaliTool", "PythonDNSTool", "PythonSSLTool", "PythonPortScanTool"):
                 invocation.params.pop("target", None)
+
+            # Strip routing-only params that tools don't accept as kwargs
+            invocation.params.pop("objective", None)
+            invocation.params.pop("preferred_tool", None)
 
             if inspect.iscoroutinefunction(best_tool.run):
                 raw_result = await best_tool.run(**invocation.params)

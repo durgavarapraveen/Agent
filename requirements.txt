@@ -17,7 +17,7 @@ psutil
 pydantic
 pypdf
 pytest
-reportlab
+reportlab<4.0
 scipy
 scikit-learn
 tiktoken

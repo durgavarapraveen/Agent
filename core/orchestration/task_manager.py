@@ -260,7 +260,10 @@ class TaskManager:
                 norm_inputs[k] = v
 
         inputs_str = json.dumps(norm_inputs, sort_keys=True)
-        tools_str = ",".join(sorted(spec.inputs.get("tools", [])))
+        _tools = spec.inputs.get("tools") or spec.inputs.get("tools_hint") or []
+        if isinstance(_tools, str):
+            _tools = [_tools]
+        tools_str = ",".join(sorted(str(t) for t in _tools))
         
         sig_parts = [
             spec.capability.value,

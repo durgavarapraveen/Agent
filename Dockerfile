@@ -196,8 +196,14 @@ RUN pip install --upgrade pip setuptools wheel && \
     fastapi \
     uvicorn \
     weasyprint \
+    "reportlab<4.0" \
     xhtml2pdf \
-    psycopg2-binary
+    psycopg2-binary \
+    playwright
+
+# Install the Chromium browser Playwright drives (with its OS dependencies) so the
+# in-container request-capture crawler works instead of falling back to the host.
+RUN playwright install --with-deps chromium
 
 
 # ============================================================
@@ -206,6 +212,9 @@ RUN pip install --upgrade pip setuptools wheel && \
 
 COPY --from=go-builder /go/bin/subfinder /usr/local/bin/subfinder
 COPY --from=go-builder /go/bin/httpx /usr/local/bin/httpx
+# The tool router invokes the ProjectDiscovery binary as `httpx-toolkit` (Kali's name
+# for it, to avoid clashing with the python3-httpx library). Provide that alias.
+RUN ln -sf /usr/local/bin/httpx /usr/local/bin/httpx-toolkit
 COPY --from=go-builder /go/bin/dnsx /usr/local/bin/dnsx
 COPY --from=go-builder /go/bin/katana /usr/local/bin/katana
 COPY --from=go-builder /go/bin/nuclei /usr/local/bin/nuclei

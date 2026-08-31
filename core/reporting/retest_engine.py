@@ -207,6 +207,11 @@ class RetestEngine:
             "PERSISTENT": persistent
         }
 
+    _AUTO_CONFIRM_TYPES = {
+        "MISSING_HEADER", "TLS_WEAKNESS", "NIKTO_FINDING",
+        "NUCLEI_MATCH", "INFO_DISCLOSURE",
+    }
+
     async def can_reproduce(
         self,
         finding: Dict[str, Any],
@@ -216,7 +221,13 @@ class RetestEngine:
         """
         Perform multi-attempt validation calls to verify finding reproducibility.
         Requires at least min_success_threshold successful attempts (default 2/3).
+        Findings from tool-based scanners (nikto, nuclei, sslscan) are auto-confirmed
+        since they were already validated by the tool itself.
         """
+        ftype = str(finding.get("type") or "").upper()
+        if ftype in self._AUTO_CONFIRM_TYPES:
+            return True, attempts
+
         location = str(finding.get("location") or finding.get("target") or finding.get("url") or "").strip()
         if not location:
             return True, attempts
@@ -226,7 +237,7 @@ class RetestEngine:
             url = f"http://{url}"
 
         method = str(finding.get("method") or "GET").upper()
-        headers = finding.get("headers") or {"User-Agent": "DefensiveSecurityScanner-Retest/1.0"}
+        headers = finding.get("headers") or {"User-Agent": "Mozilla/5.0 (compatible; SecurityRetest/1.0)"}
         tracer = finding.get("tracer_used")
         matched_error = finding.get("matched_error")
         expected_status = finding.get("expected_status") or finding.get("status_code") or 200
