@@ -1,163 +1,211 @@
 import logging
+from core.coverage.catalog import SecurityTestCatalog
+from core.coverage.applicability import ApplicabilityEngine
+from core.coverage.coverage_state import CoverageStateV2, TestRunState
+from core.domain.coverage import TestState
+from core.domain.endpoint import Endpoint
+from core.domain.evidence import SecurityEvidence
+from typing import List, Dict, Optional
+from datetime import datetime
 import json
 import os
-from typing import Dict, List, Optional
-
-from core.coverage.catalog import TestCatalog
-from core.coverage.applicability import ApplicabilityEngine
-from core.coverage.coverage_state import CoverageStateStore
-from core.coverage.test_definition import TestState, SecurityTestDefinition
-from core.memory.shared_context_v2 import SharedContextV2
 
 logger = logging.getLogger(__name__)
 
-
 class CoverageEngine:
-    """Orchestrates test state transitions, enforces deterministic coverage rules, and handles persistence."""
-
-    def __init__(self, shared_context: SharedContextV2, persistence_path: str = "coverage_state.json"):
-        self.shared_context = shared_context
-        self.catalog = TestCatalog()
-        self.applicability = ApplicabilityEngine(shared_context)
-        self.state_store = CoverageStateStore()
-        self.persistence_path = persistence_path
+    def __init__(self, test_catalog: SecurityTestCatalog):
+        self.catalog = test_catalog
+        self.state = CoverageStateV2()
+        self.applicability_engine = ApplicabilityEngine()
         
-    def initialize_coverage(self):
-        """Evaluate applicability and seed the initial state store."""
-        category_counts: Dict[str, Dict[str, int]] = {}
-        for cat in self.catalog.CATEGORIES:
-            category_counts[cat] = {"applicable": 0, "total": 0}
-            
+    def initialize(self, target_endpoints: List[Endpoint]) -> CoverageStateV2:
+        """
+        Calculates baseline applicability across known endpoints.
+        """
         all_tests = self.catalog.get_all_tests()
         
+        applicable_count = 0
+        not_applicable_count = 0
+        unknown_count = 0
+        
         for test in all_tests:
-            category_counts[test.category]["total"] += 1
-            if self.applicability.is_applicable(test):
-                self.state_store.init_test(test.test_id, TestState.READY)
-                category_counts[test.category]["applicable"] += 1
+            is_applicable_anywhere = False
+            
+            for endpoint in target_endpoints:
+                if endpoint.endpoint_id not in self.state.endpoint_coverage_map:
+                    self.state.endpoint_coverage_map[endpoint.endpoint_id] = {}
+                    
+                # Evaluate rules
+                endpoint_applicable = True
+                if not test.applicability_rules:
+                    # If no rules, assume universally applicable
+                    endpoint_applicable = True
+                else:
+                    # ALL rules must match (AND condition implicitly)
+                    for rule in test.applicability_rules:
+                        if not self.applicability_engine.evaluate_rule(rule, endpoint):
+                            endpoint_applicable = False
+                            break
+                            
+                if endpoint_applicable:
+                    is_applicable_anywhere = True
+                    self.state.endpoint_coverage_map[endpoint.endpoint_id][test.test_id] = TestRunState(
+                        status=TestState.READY
+                    )
+                else:
+                    self.state.endpoint_coverage_map[endpoint.endpoint_id][test.test_id] = TestRunState(
+                        status=TestState.NOT_APPLICABLE
+                    )
+            
+            # Global test state
+            if is_applicable_anywhere:
+                self.state.coverage_map[test.test_id] = TestRunState(status=TestState.READY)
+                applicable_count += 1
+                logger.info(f"COVERAGE_UPDATE test={test.test_id} status=READY")
+                print(f"COVERAGE_UPDATE test={test.test_id} status=READY")
             else:
-                self.state_store.init_test(test.test_id, TestState.NOT_APPLICABLE)
-
+                self.state.coverage_map[test.test_id] = TestRunState(status=TestState.NOT_APPLICABLE)
+                not_applicable_count += 1
+                
         logger.info("COVERAGE_INITIALIZED")
-        for cat in self.catalog.CATEGORIES:
-            if category_counts[cat]["total"] > 0:
-                msg = f"{cat.ljust(20)} {category_counts[cat]['applicable']}/{category_counts[cat]['total']}"
-                print(msg)
-                logger.info(msg)
-                
-        self._push_to_shared_context()
-        self.save_coverage()
-
-    def report_capability_coverage(self, capability_name: str, covered_test_ids: List[str], findings: List[Dict], tool_success: bool):
-        """
-        Each capability must report what security classes it actually covered.
-        A generic tool returning 0 findings does not imply unrelated classes are complete.
-        """
-        for test_id in covered_test_ids:
-            self.evaluate_test_result(test_id, findings, tool_success)
-            
-        self._detect_gaps()
-        self._push_to_shared_context()
-        self.save_coverage()
+        print("COVERAGE_INITIALIZED")
+        logger.info(f"applicable_tests={applicable_count}")
+        print(f"applicable_tests={applicable_count}")
+        logger.info(f"not_applicable_tests={not_applicable_count}")
+        print(f"not_applicable_tests={not_applicable_count}")
+        logger.info(f"unknown_tests={unknown_count}")
+        print(f"unknown_tests={unknown_count}")
         
-        # Check if complete
-        self._check_completion()
+        return self.state
 
-    def evaluate_test_result(self, test_id: str, tool_findings: List[Dict], tool_success: bool):
-        """
-        Critical Rule: A scanner returning zero findings must never mark a vulnerability 
-        class as complete unless the corresponding coverage rule says the class was actually tested.
-        """
-        test = self.catalog.get_test(test_id)
-        if not test:
-            logger.warning(f"Evaluating unknown test {test_id}")
-            return
+    def mark_applicable(self, test_id: str, endpoint_id: str, applicable: bool):
+        if endpoint_id not in self.state.endpoint_coverage_map:
+            self.state.endpoint_coverage_map[endpoint_id] = {}
             
-        current_state = self.state_store.get_test_state(test_id)
-        if current_state in [TestState.NOT_APPLICABLE, TestState.CONFIRMED]:
-            return
-            
-        previous_state = current_state
-            
-        if len(tool_findings) > 0:
-            # We found something, the test is confirmed
-            self.state_store.update_test_state(test_id, TestState.CONFIRMED)
-            logger.info(f"COVERAGE_UPDATE: Test {test_id} marked CONFIRMED due to findings.")
+        status = TestState.READY if applicable else TestState.NOT_APPLICABLE
+        if test_id not in self.state.endpoint_coverage_map[endpoint_id]:
+            self.state.endpoint_coverage_map[endpoint_id][test_id] = TestRunState(status=status)
         else:
-            # Zero findings. Did the tool actually succeed and test it properly?
-            if tool_success:
-                # Based on our deterministic rule, a successful scan with zero findings 
-                # means the test is REJECTED (as in, the vulnerability is rejected/not present)
-                self.state_store.update_test_state(test_id, TestState.REJECTED)
-                logger.info(f"COVERAGE_UPDATE: Test {test_id} marked REJECTED (no findings but tool succeeded).")
-            else:
-                self.state_store.update_test_state(test_id, TestState.BLOCKED)
-                logger.info(f"COVERAGE_UPDATE: Test {test_id} marked BLOCKED (no findings, tool failed/unreliable).")
-                
-        if previous_state != self.state_store.get_test_state(test_id):
-            self.save_coverage()
+            self.state.endpoint_coverage_map[endpoint_id][test_id].status = status
+            
+        logger.info(f"COVERAGE_UPDATE test={test_id} endpoint={endpoint_id} status={status.value}")
+        print(f"COVERAGE_UPDATE test={test_id} endpoint={endpoint_id} status={status.value}")
 
-    def _detect_gaps(self):
-        """Detect and log coverage gaps for the LLM to reason over."""
-        states = self.state_store.get_all_states()
+    def mark_tested(self, test_id: str, endpoint_id: Optional[str], status: TestState, evidence: SecurityEvidence = None):
+        """
+        Mark a test completely finished for an endpoint. 
+        Note: DO NOT mark the global test as CONFIRMED/REJECTED unless all endpoints are complete.
+        """
+        # Endpoint specific updates
+        if endpoint_id:
+            if endpoint_id in self.state.endpoint_coverage_map and test_id in self.state.endpoint_coverage_map[endpoint_id]:
+                run_state = self.state.endpoint_coverage_map[endpoint_id][test_id]
+                run_state.status = status
+                run_state.last_executed = datetime.utcnow()
+                if evidence:
+                    run_state.evidence_collected.append(evidence)
+                    
+            # Re-evaluate Global State
+            self._recalculate_global_state(test_id)
+            
+        else:
+            # If applied globally
+            if test_id in self.state.coverage_map:
+                run_state = self.state.coverage_map[test_id]
+                run_state.status = status
+                run_state.last_executed = datetime.utcnow()
+                if evidence:
+                    run_state.evidence_collected.append(evidence)
+                    
+                logger.info(f"COVERAGE_UPDATE test={test_id} status={status.value}")
+                print(f"COVERAGE_UPDATE test={test_id} status={status.value}")
+
+    def _recalculate_global_state(self, test_id: str):
+        """
+        Recalculates the global test state based on its children endpoints.
+        Rule: A scanner returning zero findings must never mark a vulnerability class 
+        as complete globally unless all applicable endpoints are explicitly REJECTED/CONFIRMED.
+        """
+        applicable_endpoints = []
+        for ep_id, test_map in self.state.endpoint_coverage_map.items():
+            if test_id in test_map and test_map[test_id].status != TestState.NOT_APPLICABLE:
+                applicable_endpoints.append(test_map[test_id])
+                
+        if not applicable_endpoints:
+            return
+            
+        # If any endpoint is CONFIRMED, the whole class is practically CONFIRMED (we found the vuln!)
+        if any(ts.status == TestState.CONFIRMED for ts in applicable_endpoints):
+            self.state.coverage_map[test_id].status = TestState.CONFIRMED
+            logger.info(f"COVERAGE_UPDATE test={test_id} status=CONFIRMED")
+            print(f"COVERAGE_UPDATE test={test_id} status=CONFIRMED")
+            return
+            
+        # Are all applicable endpoints explicitly tested and REJECTED?
+        all_rejected = all(ts.status == TestState.REJECTED for ts in applicable_endpoints)
+        if all_rejected:
+            self.state.coverage_map[test_id].status = TestState.REJECTED
+            logger.info(f"COVERAGE_UPDATE test={test_id} status=REJECTED result=REJECTED")
+            print(f"COVERAGE_UPDATE test={test_id} status=REJECTED result=REJECTED")
+            return
+            
+        # Otherwise, if some are RUNNING, INCONCLUSIVE, READY, it remains NOT finished.
+        self.state.coverage_map[test_id].status = TestState.INCONCLUSIVE
+
+    def get_coverage_gaps(self) -> List[str]:
         gaps = []
-        for test_id, state in states.items():
-            if state in [TestState.NOT_TESTED, TestState.READY, TestState.BLOCKED, TestState.INCONCLUSIVE]:
+        for test_id, run_state in self.state.coverage_map.items():
+            if run_state.status in {TestState.NOT_TESTED, TestState.INCONCLUSIVE, TestState.READY}:
                 gaps.append(test_id)
-                logger.info(f"COVERAGE_GAP_DETECTED: {test_id} is in non-terminal state {state}")
-                
-        self.shared_context.coverage_gaps = gaps
+        return gaps
 
-    def _push_to_shared_context(self):
-        """Add current coverage to SharedContext so DeepSeek can reason over gaps."""
-        states = self.state_store.get_all_states()
+    def get_coverage_status(self) -> Dict[str, int]:
+        counts = {
+            "tests_applicable": 0,
+            "tests_not_applicable": 0,
+            "tests_not_tested": 0,
+            "tests_ready": 0,
+            "tests_running": 0,
+            "tests_confirmed": 0,
+            "tests_rejected": 0,
+            "tests_inconclusive": 0,
+            "tests_blocked": 0
+        }
         
-        # Build metrics mapping category -> total / confirmed / rejected etc
-        metrics = {}
-        for cat in self.catalog.CATEGORIES:
-            cat_tests = self.catalog.get_tests_by_category(cat)
-            cat_metrics = {state.value: 0 for state in TestState}
-            for test in cat_tests:
-                st = self.state_store.get_test_state(test.test_id)
-                cat_metrics[st.value] += 1
-            metrics[cat] = cat_metrics
-            
-        self.shared_context.coverage_metrics = metrics
-        
-    def _check_completion(self):
-        """Check if coverage is fully complete."""
-        states = self.state_store.get_all_states()
-        if not states:
-            return
-            
-        terminal_states = [TestState.CONFIRMED, TestState.REJECTED, TestState.BLOCKED, TestState.NOT_APPLICABLE]
-        
-        for state in states.values():
-            if state not in terminal_states:
-                return
+        for test_id, run_state in self.state.coverage_map.items():
+            s = run_state.status
+            if s != TestState.NOT_APPLICABLE:
+                counts["tests_applicable"] += 1
+            else:
+                counts["tests_not_applicable"] += 1
                 
-        logger.info("COVERAGE_COMPLETE: All deterministic coverage tests reached terminal states.")
-
-    def save_coverage(self):
-        """Persist coverage state to disk."""
-        try:
-            states_str_keys = {k: v.value for k, v in self.state_store.get_all_states().items()}
-            with open(self.persistence_path, "w") as f:
-                json.dump(states_str_keys, f, indent=4)
-        except Exception as e:
-            logger.error(f"Failed to persist coverage state: {e}")
-
-    def load_coverage(self):
-        """Load coverage state from disk."""
-        if not os.path.exists(self.persistence_path):
-            return
+            counts[f"tests_{s.value.lower()}"] += 1
             
-        try:
-            with open(self.persistence_path, "r") as f:
-                states_str_keys = json.load(f)
-                
-            for k, v in states_str_keys.items():
-                self.state_store.update_test_state(k, TestState(v))
-            self._push_to_shared_context()
-        except Exception as e:
-            logger.error(f"Failed to load coverage state: {e}")
+        return counts
+
+    def calculate_coverage_pct(self) -> float:
+        stats = self.get_coverage_status()
+        applicable = stats["tests_applicable"]
+        if applicable == 0:
+            return 100.0
+            
+        finished = stats["tests_confirmed"] + stats["tests_rejected"] + stats["tests_blocked"]
+        return (finished / applicable) * 100.0
+
+    def is_test_terminal(self, test_id: str) -> bool:
+        if test_id not in self.state.coverage_map:
+            return False
+        status = self.state.coverage_map[test_id].status
+        return status in {TestState.CONFIRMED, TestState.REJECTED, TestState.BLOCKED, TestState.NOT_APPLICABLE}
+
+    def get_blocked_tests(self) -> List[str]:
+        blocked = []
+        for test_id, run_state in self.state.coverage_map.items():
+            if run_state.status == TestState.BLOCKED:
+                blocked.append(test_id)
+        return blocked
+        
+    def save_checkpoint(self, path: str = ".antigravity/coverage_state.json"):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(self.state.model_dump_json(indent=2))
