@@ -38,6 +38,7 @@ class SharedContextV2:
         self.vulnerabilities: List[Dict] = []
         self.failed_strategies: List[str] = []
         self.successful_strategies: List[str] = []
+        self.attack_surface_graph = None
 
     def get_target_profile(self) -> Dict:
         with self._lock:
@@ -119,5 +120,6 @@ class SharedContextV2:
                 "execution_mode": self.execution_mode,
                 "parameters": self.parameters,
                 "failed_strategies": self.failed_strategies,
-                "successful_strategies": self.successful_strategies
+                "successful_strategies": self.successful_strategies,
+                "attack_surface_graph_summary": self.attack_surface_graph.print_summary() if self.attack_surface_graph else "None"
             }
