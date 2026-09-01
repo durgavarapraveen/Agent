@@ -39,6 +39,9 @@ class SharedContextV2:
         self.failed_strategies: List[str] = []
         self.successful_strategies: List[str] = []
         self.attack_surface_graph = None
+        self.identities = {} # Added for Phase 6
+        self.sessions = {} # Added for Phase 6
+        self.auth_health_metrics = {} # Added for Phase 6
 
     def get_target_profile(self) -> Dict:
         with self._lock:
@@ -121,5 +124,8 @@ class SharedContextV2:
                 "parameters": self.parameters,
                 "failed_strategies": self.failed_strategies,
                 "successful_strategies": self.successful_strategies,
-                "attack_surface_graph_summary": self.attack_surface_graph.print_summary() if self.attack_surface_graph else "None"
+                "attack_surface_graph_summary": self.attack_surface_graph.print_summary() if self.attack_surface_graph else "None",
+                "identities": list(self.identities.keys()),
+                "sessions_active": len(self.sessions),
+                "auth_health_metrics": self.auth_health_metrics
             }
