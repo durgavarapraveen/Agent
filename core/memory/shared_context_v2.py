@@ -1,131 +1,101 @@
 import json
+from typing import Dict, List, Optional, Any
 import logging
-import threading
-from datetime import datetime
-from typing import Any, Dict, List, Optional
-import re
+from core.domain.endpoint import Endpoint
+from core.domain.identity import Identity
+from core.domain.session import Session
+from core.coverage.coverage_state import CoverageStateV2
 
 logger = logging.getLogger(__name__)
 
-
 class SharedContextV2:
-    """Thread-safe shared memory, optimized for LLM Context Generation."""
+    """
+    Central memory and state orchestrator for Pentest V2.
+    """
+    def __init__(self):
+        self.endpoints: Dict[str, Endpoint] = {}
+        self.identities: Dict[str, Identity] = {}
+        self.sessions: Dict[str, Session] = {}
+        self.coverage_state: Optional[CoverageStateV2] = None
+        
+        self.target_summary = {
+            "tech_stack": [],
+            "auth_types": []
+        }
+        self.execution_mode = "safe"
+        
+    def get_endpoint(self, endpoint_id: str) -> Optional[Endpoint]:
+        return self.endpoints.get(endpoint_id)
+        
+    def get_identity(self, identity_id: str) -> Optional[Identity]:
+        return self.identities.get(identity_id)
+        
+    def get_session(self, session_id: str) -> Optional[Session]:
+        return self.sessions.get(session_id)
+        
+    def get_coverage(self) -> Optional[CoverageStateV2]:
+        return self.coverage_state
+        
+    def get_pending_tests(self) -> List[str]:
+        if not self.coverage_state:
+            return []
+        pending = []
+        for test_id, run_state in self.coverage_state.coverage_map.items():
+            if run_state.status.value in ["NOT_TESTED", "READY", "INCONCLUSIVE"]:
+                pending.append(test_id)
+        return pending
 
-    def __init__(self, target: str, scope: Dict = None):
-        self.target = target
-        self.scope = scope or {}
-        self.created_at = datetime.now().isoformat()
-        self._lock = threading.Lock()
-        self.execution_mode = "autonomous"
-
-        # ── Recon data ──
-        self.subdomains: List[str] = []
-        self.ips: List[str] = []
-        self.ports: Dict[str, List[Dict]] = {}
-        self.technologies: Dict[str, List[str]] = {}
-        self.target_fingerprint: str = ""
-        self.endpoints: List[Dict] = []
-        self.parameters: List[Dict] = []
-        self.identities: List[Dict] = []
-        self.sessions: List[Dict] = []
-        self.coverage_metrics: Dict = {}
-        self.coverage_gaps: List[str] = []
-        self.pending_tests: List[Dict] = []
-        self.tool_capabilities: Dict = {}
-        self.relevant_experiences: List[Dict] = []
-        self.captured_requests: List[Dict] = []
-        self.observations: List[Dict] = []
-        self.vulnerabilities: List[Dict] = []
-        self.failed_strategies: List[str] = []
-        self.successful_strategies: List[str] = []
-        self.attack_surface_graph = None
-        self.identities = {} # Added for Phase 6
-        self.sessions = {} # Added for Phase 6
-        self.auth_health_metrics = {} # Added for Phase 6
-
-    def get_target_profile(self) -> Dict:
-        with self._lock:
-            return {
-                "target": self.target,
-                "scope": self.scope,
-                "technologies": self.technologies,
-                "target_fingerprint": self.target_fingerprint
-            }
-
-    def get_attack_surface(self) -> Dict:
-        with self._lock:
-            return {
-                "subdomains": self.subdomains,
-                "ips": self.ips,
-                "ports": self.ports,
-                "endpoints_count": len(self.endpoints)
-            }
-
-    def get_endpoint(self, endpoint_id: str) -> Optional[Dict]:
-        with self._lock:
-            for ep in self.endpoints:
-                if ep.get("id") == endpoint_id or ep.get("url") == endpoint_id:
-                    return ep
-        return None
-
-    def get_request(self, request_id: str) -> Optional[Dict]:
-        with self._lock:
-            for req in self.captured_requests:
-                if req.get("id") == request_id:
-                    return req
-        return None
-
-    def get_identity(self, identity_id: str) -> Optional[Dict]:
-        with self._lock:
-            for iden in self.identities:
-                if iden.get("id") == identity_id:
-                    return iden
-        return None
-
-    def get_session(self, session_id: str) -> Optional[Dict]:
-        with self._lock:
-            for sess in self.sessions:
-                if sess.get("id") == session_id:
-                    return sess
-        return None
-
-    def get_coverage(self) -> Dict:
-        with self._lock:
-            return {
-                "metrics": self.coverage_metrics,
-                "gaps": self.coverage_gaps
-            }
-
-    def get_pending_tests(self) -> List[Dict]:
-        with self._lock:
-            return self.pending_tests
-
-    def get_relevant_experiences(self) -> List[Dict]:
-        with self._lock:
-            return self.relevant_experiences
+    def build_llm_context(self, task: str, params: Dict[str, Any], memory_retriever=None, tool_learning=None) -> Dict[str, Any]:
+        """
+        Builds a structured prompt context specifically bounded by limits.
+        NEVER includes raw logs.
+        """
+        context = {
+            "task": task,
+            "target_summary": self.target_summary,
+            "execution_mode": self.execution_mode
+        }
+        
+        # Attack surface slice
+        if "endpoint_id" in params:
+            ep = self.get_endpoint(params["endpoint_id"])
+            if ep:
+                context["attack_surface_slice"] = {
+                    "path": ep.path,
+                    "methods": ep.method_set,
+                    "parameters": [p.name for p in ep.parameters],
+                    "auth_required": ep.auth_required
+                }
+                
+        # Identities context
+        context["current_identities"] = [
+            {"id": ident.identity_id, "role": ident.role.value, "auth_state": ident.authentication_state.value}
+            for ident in self.identities.values()
+        ]
+        
+        # Coverage status
+        if self.coverage_state:
+            stats = {}
+            for t_id, run_state in self.coverage_state.coverage_map.items():
+                stats[t_id] = run_state.status.value
+            context["coverage_state"] = stats
             
-    def get_tool_capabilities(self) -> Dict:
-        with self._lock:
-            return self.tool_capabilities
-
-    def build_llm_context(self) -> Dict:
-        """Constructs the optimized context block to feed to DeepSeek."""
-        with self._lock:
-            return {
-                "target_profile": self.get_target_profile(),
-                "attack_surface": self.get_attack_surface(),
-                "coverage": self.get_coverage(),
-                "pending_tests": self.get_pending_tests(),
-                "experiences": self.get_relevant_experiences(),
-                "capabilities": self.get_tool_capabilities(),
-                "observations": self.observations,
-                "vulnerabilities": self.vulnerabilities,
-                "execution_mode": self.execution_mode,
-                "parameters": self.parameters,
-                "failed_strategies": self.failed_strategies,
-                "successful_strategies": self.successful_strategies,
-                "attack_surface_graph_summary": self.attack_surface_graph.print_summary() if self.attack_surface_graph else "None",
-                "identities": list(self.identities.keys()),
-                "sessions_active": len(self.sessions),
-                "auth_health_metrics": self.auth_health_metrics
-            }
+        # Relevant memory and Tools (if engines provided)
+        if memory_retriever and "test_id" in params:
+            # We will fetch up to 3 relevant experiences to keep context small
+            experiences = memory_retriever.retrieve_relevant_experiences(params.get("endpoint_id"), params["test_id"])
+            context["relevant_memory"] = [{"strategy": e["strategy_id"], "outcome": e["outcome"]} for e in experiences[:3]]
+            
+        if tool_learning:
+            # Simplified tool capabilities
+            context["available_tools"] = [
+                {"tool": name, "score": score} for name, score in tool_learning.get_top_tools(params.get("test_id", "all")).items()
+            ]
+            
+        # Log to simulate ContextBuilder size tracking
+        context_str = json.dumps(context)
+        token_estimate = len(context_str) // 4
+        logger.info(f"LLM_CONTEXT_BUILT endpoints={len(self.endpoints)} identities={len(self.identities)} token_estimate={token_estimate}")
+        print(f"LLM_CONTEXT_BUILT endpoints={len(self.endpoints)} identities={len(self.identities)} token_estimate={token_estimate}")
+        
+        return context

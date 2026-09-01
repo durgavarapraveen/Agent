@@ -1,33 +1,31 @@
-import logging
-from typing import List, Dict
-
 from core.memory.experience_store import ExperienceStore
 from core.memory.strategy_store import StrategyStore
 from core.memory.failure_store import FailureStore
+import logging
 
 logger = logging.getLogger(__name__)
 
-
 class MemoryRetriever:
-    """Handles fetching contextually relevant experiences and strategies."""
-
-    def __init__(self, experience_store: ExperienceStore, strategy_store: StrategyStore, failure_store: FailureStore):
-        self.experience_store = experience_store
-        self.strategy_store = strategy_store
-        self.failure_store = failure_store
-
-    def get_relevant_context(self, current_state: Dict) -> Dict:
-        """Fetches relevant context for the current state."""
-        # A simple placeholder logic for retrieval
+    def __init__(self, exp_store: ExperienceStore, strat_store: StrategyStore, fail_store: FailureStore):
+        self.exp_store = exp_store
+        self.strat_store = strat_store
+        self.fail_store = fail_store
         
-        target = current_state.get("target")
+    def retrieve_relevant_experiences(self, endpoint_id: str, test_type: str) -> list:
+        # In a real impl, we'd do vector similarity or more complex joins.
+        # For now, we'll fetch experiences for this test type.
+        # Assuming we can mock endpoint matching for now.
+        experiences = self.exp_store.retrieve_failed_strategies(test_type)
+        return experiences
         
-        relevant_experiences = self.experience_store.get_experiences()
-        successful_strategies = self.strategy_store.get_successful_strategies()
-        failed_tests = self.failure_store.get_failures()
-
-        return {
-            "relevant_experiences": relevant_experiences,
-            "successful_strategies": successful_strategies,
-            "failed_tests": failed_tests
-        }
+    def retrieve_successful_strategies(self, test_type: str) -> list:
+        strategies = self.strat_store.get_strategies_by_test(test_type)
+        # Filter for high global/target success rates
+        return [s for s in strategies if s.get("success_rate_global", 0) > 0.5]
+        
+    def retrieve_failed_strategies(self, test_type: str) -> list:
+        return self.exp_store.retrieve_failed_strategies(test_type)
+        
+    def log_retrieval_stats(self, experiences, avoided):
+        logger.info(f"MEMORY_RETRIEVAL similar_experiences={len(experiences)} failed_strategies_avoided={len(avoided)}")
+        print(f"MEMORY_RETRIEVAL similar_experiences={len(experiences)} failed_strategies_avoided={len(avoided)}")

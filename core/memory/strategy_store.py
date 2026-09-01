@@ -1,34 +1,40 @@
-import logging
-from typing import List, Dict
-from datetime import datetime
-
-logger = logging.getLogger(__name__)
-
+import uuid
+from typing import Dict, List, Any
+from core.memory.database import MemoryDatabase
 
 class StrategyStore:
-    """Store for pentest strategies."""
-
-    def __init__(self):
-        self.strategies: List[Dict] = []
-
-    def record_strategy(self, hypothesis: str, strategy: str, tool: str, outcome: str, 
-                        evidence_quality: str, target_fingerprint: str, endpoint_pattern: str):
-        """Add a detailed strategy execution record."""
-        strategy_record = {
-            "hypothesis": hypothesis,
-            "strategy": strategy,
-            "tool": tool,
-            "outcome": outcome,
-            "evidence_quality": evidence_quality,
-            "target_fingerprint": target_fingerprint,
-            "endpoint_pattern": endpoint_pattern,
-            "timestamp": datetime.now().isoformat()
-        }
-        self.strategies.append(strategy_record)
-        logger.info(f"STRATEGY_SELECTED: strategy={strategy} for tool={tool}")
-
-    def get_successful_strategies(self) -> List[Dict]:
-        return [s for s in self.strategies if s.get("outcome") == "success"]
-
-    def get_failed_strategies(self) -> List[Dict]:
-        return [s for s in self.strategies if s.get("outcome") == "failure"]
+    def __init__(self, db: MemoryDatabase):
+        self.db = db
+        
+    def record_strategy(self, strategy: Dict[str, Any]):
+        cursor = self.db.get_connection().cursor()
+        strat_id = strategy.get("strategy_id", str(uuid.uuid4()))
+        cursor.execute('''
+            INSERT OR REPLACE INTO strategies (
+                strategy_id, test_type, description, tool, prerequisites,
+                success_rate_global, success_rate_target, success_rate_type,
+                success_rate_recent, average_cost_ms, average_duration_ms,
+                evidence_quality, failure_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            strat_id,
+            strategy.get("test_type"),
+            strategy.get("description"),
+            strategy.get("tool"),
+            strategy.get("prerequisites", ""),
+            strategy.get("success_rate_global", 0.0),
+            strategy.get("success_rate_target", 0.0),
+            strategy.get("success_rate_type", 0.0),
+            strategy.get("success_rate_recent", 0.0),
+            strategy.get("average_cost_ms", 0.0),
+            strategy.get("average_duration_ms", 0.0),
+            strategy.get("evidence_quality", 0.0),
+            strategy.get("failure_count", 0)
+        ))
+        self.db.get_connection().commit()
+        return strat_id
+        
+    def get_strategies_by_test(self, test_type: str) -> List[Dict[str, Any]]:
+        cursor = self.db.get_connection().cursor()
+        cursor.execute("SELECT * FROM strategies WHERE test_type = ?", (test_type,))
+        return [dict(row) for row in cursor.fetchall()]
