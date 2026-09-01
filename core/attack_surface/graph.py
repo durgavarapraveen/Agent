@@ -1,190 +1,134 @@
-from enum import Enum
-from typing import Dict, List, Set, Any, Optional
-import uuid
+from typing import List, Dict, Set
+from core.domain.endpoint import Endpoint
+from core.domain.request import CapturedRequest
+from core.domain.parameter import Parameter
+from core.domain.asset import Workflow, Page, DataObject
+from core.attack_surface.endpoint_inventory import EndpointInventory
+from core.attack_surface.request_inventory import RequestInventory
+from core.attack_surface.parameter_inventory import ParameterInventory
+from core.attack_surface.object_inventory import ObjectInventory
+from core.attack_surface.workflow_inventory import WorkflowInventory
 import logging
-from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-class NodeType(str, Enum):
-    HOST = "HOST"
-    APPLICATION = "APPLICATION"
-    PAGE = "PAGE"
-    ENDPOINT = "ENDPOINT"
-    REQUEST = "REQUEST"
-    PARAMETER = "PARAMETER"
-    COOKIE = "COOKIE"
-    TOKEN = "TOKEN"
-    IDENTITY = "IDENTITY"
-    ROLE = "ROLE"
-    OBJECT = "OBJECT"
-    WORKFLOW = "WORKFLOW"
-    RESPONSE = "RESPONSE"
-    FILE = "FILE"
-    TECHNOLOGY = "TECHNOLOGY"
-
-class EdgeType(str, Enum):
-    CALLS = "CALLS"                  # PAGE -> CALLS -> ENDPOINT
-    USES = "USES"                    # REQUEST -> USES -> SESSION/COOKIE
-    BELONGS_TO = "BELONGS_TO"        # SESSION -> BELONGS_TO -> IDENTITY
-    HAS_ROLE = "HAS_ROLE"            # IDENTITY -> HAS_ROLE -> ROLE
-    ACCEPTS = "ACCEPTS"              # ENDPOINT -> ACCEPTS -> PARAMETER
-    RETURNS = "RETURNS"              # ENDPOINT -> RETURNS -> OBJECT
-    DISCOVERED_BY = "DISCOVERED_BY"  # REQUEST -> DISCOVERED_BY -> SOURCE
-    CONTAINS = "CONTAINS"            # WORKFLOW -> CONTAINS -> REQUEST
-
-# Canonical Typed Entities
-class CanonicalNode(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    node_type: NodeType
-    label: str
-
-class CanonicalEndpoint(CanonicalNode):
-    node_type: NodeType = NodeType.ENDPOINT
-    method: str
-    normalized_path: str
-    raw_paths_seen: Set[str] = Field(default_factory=set)
-
-class CanonicalRequest(CanonicalNode):
-    node_type: NodeType = NodeType.REQUEST
-    method: str
-    url: str
-    source: str
-    is_api: bool = False
-
-class CanonicalParameter(CanonicalNode):
-    node_type: NodeType = NodeType.PARAMETER
-    name: str
-    param_type: str  # query, body, header, path
-    
-class CanonicalObject(CanonicalNode):
-    node_type: NodeType = NodeType.OBJECT
-    object_type: str
-    fields: List[str] = Field(default_factory=list)
-
-class CanonicalIdentity(CanonicalNode):
-    node_type: NodeType = NodeType.IDENTITY
-    role: str
-
-class CanonicalWorkflow(CanonicalNode):
-    node_type: NodeType = NodeType.WORKFLOW
-    steps: int
-
-
 class AttackSurfaceGraph:
-    """Central Application Model representing the attack surface."""
-    
     def __init__(self):
-        self.nodes: Dict[str, CanonicalNode] = {}
-        self.edges: Dict[str, Dict[EdgeType, Set[str]]] = {}
-        logger.info("ATTACK_SURFACE_GRAPH_BUILT")
+        self.endpoints = EndpointInventory()
+        self.requests = RequestInventory()
+        self.parameters = ParameterInventory()
+        self.objects = ObjectInventory()
+        self.workflows = WorkflowInventory()
         
-    def add_node(self, node: CanonicalNode) -> CanonicalNode:
-        """Add a node to the graph."""
-        self.nodes[node.id] = node
-        if node.id not in self.edges:
-            self.edges[node.id] = {}
+        # Pages for the PAGE -> CALLS -> ENDPOINT relationships
+        self.pages: Dict[str, Page] = {}
+        # Tracking edge metrics
+        self.edges_count = 0
         
-        # Log specific models
-        if isinstance(node, CanonicalEndpoint):
-            logger.info(f"ENDPOINT_MODEL_CREATED: {node.label}")
-        elif isinstance(node, CanonicalRequest):
-            logger.info(f"REQUEST_MODEL_CREATED: {node.label}")
-        elif isinstance(node, CanonicalParameter):
-            logger.info(f"PARAMETER_MODEL_CREATED: {node.label}")
+    def add_endpoint(self, endpoint: Endpoint):
+        self.endpoints.add_endpoint(endpoint)
+        
+    def add_request(self, request: CapturedRequest):
+        # We need a way to map request to endpoint. 
+        # For this prototype, we'll assume the request has `endpoint_id` set, 
+        # or we find it by matching path + method.
+        # In this simplistic graph builder, we assume endpoint_id is mapped before insertion.
+        ep_id = getattr(request, 'endpoint_id', None)
+        self.requests.add_captured_request(request, endpoint_id=ep_id)
+        if ep_id:
+            self.edges_count += 1 # ENDPOINT -> ACCEPTS -> REQUEST (reverse mapping conceptually)
             
-        return node
-        
-    def add_edge(self, source_id: str, target_id: str, edge_type: EdgeType):
-        """Add a directed edge between two nodes."""
-        if source_id not in self.nodes or target_id not in self.nodes:
-            logger.warning(f"Attempted to link non-existent nodes: {source_id} -> {target_id}")
-            return
+        if request.session_id:
+            self.edges_count += 1 # REQUEST -> USES -> SESSION
             
-        if edge_type not in self.edges[source_id]:
-            self.edges[source_id][edge_type] = set()
+        if request.identity_id:
+            self.edges_count += 1 # SESSION -> BELONGS_TO -> IDENTITY (implied by request having identity)
             
-        self.edges[source_id][edge_type].add(target_id)
-        logger.info(f"GRAPH_RELATIONSHIP_CREATED: {source_id} -> {edge_type.value} -> {target_id}")
+    def add_parameter(self, endpoint_id: str, param: Parameter):
+        self.parameters.add_parameter(endpoint_id, param)
+        self.edges_count += 1 # ENDPOINT -> ACCEPTS -> PARAMETER
         
-    def get_nodes_by_type(self, node_type: NodeType) -> List[CanonicalNode]:
-        """Fetch all nodes of a specific type."""
-        return [n for n in self.nodes.values() if n.node_type == node_type]
-
-    def get_related(self, source_id: str, edge_type: EdgeType) -> List[CanonicalNode]:
-        """Get all nodes connected from a source node by a specific edge type."""
-        if source_id not in self.edges or edge_type not in self.edges[source_id]:
-            return []
-        return [self.nodes[tid] for tid in self.edges[source_id][edge_type]]
+    def add_workflow(self, workflow: Workflow):
+        self.workflows.add_workflow(workflow)
+        for req_id in workflow.request_ids:
+            self.edges_count += 1 # WORKFLOW -> CONTAINS -> REQUEST
+            
+    def add_page_call(self, page_url: str, endpoint_id: str):
+        if page_url not in self.pages:
+            self.pages[page_url] = Page(url=page_url)
+        self.edges_count += 1 # PAGE -> CALLS -> ENDPOINT
         
-    # Queries required by prompt
-    def endpoints_for_identity(self, identity_id: str) -> List[CanonicalEndpoint]:
-        # IDENTITY <- BELONGS_TO <- SESSION <- USES <- REQUEST -> CALLS -> ENDPOINT
-        # Simplified: We map identities directly if needed, but assuming a direct trace:
-        endpoints = set()
-        # Find all requests using this identity's token/session
-        for node in self.nodes.values():
-            if isinstance(node, CanonicalRequest):
-                targets = self.edges.get(node.id, {}).get(EdgeType.USES, set())
-                # if target is a token that belongs to this identity...
-                # (For now, simplified stub returning endpoints if linked directly)
-                pass
-        return list(endpoints)
+    def build_graph(self):
+        # Output summary metrics
+        ep_list = self.endpoints.get_endpoints()
+        req_list = self.requests.get_all_requests()
+        wf_list = list(self.workflows.workflows.values())
+        param_map = self.parameters.by_type
+        total_params = sum(len(plist) for plist in param_map.values())
         
-    def parameters_for_endpoint(self, endpoint_id: str) -> List[CanonicalParameter]:
-        return self.get_related(endpoint_id, EdgeType.ACCEPTS)
+        api_requests = [r for r in req_list if hasattr(r, 'endpoint_id') and r.endpoint_id]
         
-    def requests_for_endpoint(self, endpoint_id: str) -> List[CanonicalRequest]:
-        # Find all requests where REQUEST -> CALLS -> ENDPOINT
-        requests = []
-        for src_id, edges in self.edges.items():
-            if endpoint_id in edges.get(EdgeType.CALLS, set()):
-                requests.append(self.nodes[src_id])
-        return requests
+        logger.info(f"ATTACK_SURFACE_GRAPH_BUILT pages={len(self.pages)} requests={len(req_list)} api_requests={len(api_requests)} endpoints={len(ep_list)} parameters={total_params} workflows={len(wf_list)} graph_edges={self.edges_count}")
+        print(f"ATTACK_SURFACE_GRAPH_BUILT pages={len(self.pages)} requests={len(req_list)} api_requests={len(api_requests)} endpoints={len(ep_list)} parameters={total_params} workflows={len(wf_list)} graph_edges={self.edges_count}")
         
-    def workflows_for_identity(self, identity_id: str) -> List[CanonicalWorkflow]:
-        # Workflows executed by an identity
-        return []
+    # --- Queries ---
+    def endpoints_for_identity(self, identity_id: str) -> List[Endpoint]:
+        matched = []
+        for ep in self.endpoints.get_endpoints():
+            for auth in ep.auth_contexts:
+                if auth.identity_id == identity_id:
+                    matched.append(ep)
+                    break
+        return matched
         
-    def get_apis(self) -> List[CanonicalEndpoint]:
-        # Endpoints where associated requests have is_api=True
-        api_endpoints_ids = set()
-        for node in self.nodes.values():
-            if isinstance(node, CanonicalRequest) and node.is_api:
-                endpoints = self.get_related(node.id, EdgeType.CALLS)
-                for ep in endpoints:
-                    api_endpoints_ids.add(ep.id)
-        return [self.nodes[eid] for eid in api_endpoints_ids]
+    def parameters_for_endpoint(self, endpoint_id: str) -> List[Parameter]:
+        return self.parameters.get_parameters_for_endpoint(endpoint_id)
         
-    def object_identifier_endpoints(self) -> List[CanonicalEndpoint]:
-        # Endpoints that have path parameters like {id}, {uuid}
-        endpoints = []
-        for ep in self.get_nodes_by_type(NodeType.ENDPOINT):
-            if "{" in ep.normalized_path and "}" in ep.normalized_path:
-                endpoints.append(ep)
-        return endpoints
-
-    def count_edges(self) -> int:
-        count = 0
-        for src, edges in self.edges.items():
-            for targets in edges.values():
-                count += len(targets)
-        return count
-
-    def print_summary(self):
-        pages = len(self.get_nodes_by_type(NodeType.PAGE))
-        requests = len(self.get_nodes_by_type(NodeType.REQUEST))
-        api_requests = len([r for r in self.get_nodes_by_type(NodeType.REQUEST) if getattr(r, 'is_api', False)])
-        endpoints = len(self.get_nodes_by_type(NodeType.ENDPOINT))
-        parameters = len(self.get_nodes_by_type(NodeType.PARAMETER))
-        workflows = len(self.get_nodes_by_type(NodeType.WORKFLOW))
-        edges = self.count_edges()
+    def requests_for_endpoint(self, endpoint_id: str) -> List[CapturedRequest]:
+        return self.requests.get_requests_for_endpoint(endpoint_id)
         
-        print("ATTACK_SURFACE_GRAPH")
-        print(f"pages={pages}")
-        print(f"requests={requests}")
-        print(f"api_requests={api_requests}")
-        print(f"endpoints={endpoints}")
-        print(f"parameters={parameters}")
-        print(f"workflows={workflows}")
-        print(f"graph_edges={edges}")
+    def workflows_for_identity(self, identity_id: str) -> List[Workflow]:
+        # A workflow is tied to an identity if any of its requests are tied to that identity.
+        matched_workflows = []
+        for wf in self.workflows.workflows.values():
+            tied = False
+            for req_id in wf.request_ids:
+                req = self.requests.requests.get(req_id)
+                if req and req.identity_id == identity_id:
+                    tied = True
+                    break
+            if tied:
+                matched_workflows.append(wf)
+        return matched_workflows
+        
+    def api_endpoints(self) -> List[Endpoint]:
+        # Assume API endpoints have specific content-types or paths, 
+        # or we just return all endpoints if they represent backend calls.
+        return self.endpoints.get_endpoints()
+        
+    def object_identifier_endpoints(self) -> List[Endpoint]:
+        # Returns endpoints that contain DataObjects
+        matched_eps = []
+        for ep_id in self.objects.by_endpoint.keys():
+            ep = self.endpoints.endpoints.get(ep_id)
+            if ep:
+                matched_eps.append(ep)
+        return matched_eps
+        
+    def endpoints_requiring_auth(self) -> List[Endpoint]:
+        matched = []
+        for ep in self.endpoints.get_endpoints():
+            if ep.auth_required:
+                matched.append(ep)
+        return matched
+        
+    def endpoints_by_parameter_type(self, param_type: str) -> List[Endpoint]:
+        matched_ids = set()
+        params = self.parameters.by_type.get(param_type, [])
+        # We need to map param back to endpoint.
+        for ep_id, plist in self.parameters.by_endpoint.items():
+            for p in plist:
+                if p.parameter_type.value == param_type:
+                    matched_ids.add(ep_id)
+                    
+        return [self.endpoints.endpoints[eid] for eid in matched_ids if eid in self.endpoints.endpoints]

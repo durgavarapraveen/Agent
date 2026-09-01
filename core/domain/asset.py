@@ -17,3 +17,33 @@ class Host(DomainModel):
     ip_address: str = Field(default="")
     applications: List[Application] = Field(default_factory=list)
     technologies: List[Technology] = Field(default_factory=list)
+
+class Page(DomainModel):
+    url: str = Field(...)
+    title: str = Field(default="")
+    
+class Cookie(DomainModel):
+    name: str = Field(...)
+    domain: str = Field(default="")
+    path: str = Field(default="/")
+    secure: bool = Field(default=False)
+    http_only: bool = Field(default=False)
+    
+class Token(DomainModel):
+    name: str = Field(...)
+    token_type: str = Field(default="jwt")
+    
+class File(DomainModel):
+    filename: str = Field(...)
+    extension: str = Field(default="")
+    mime_type: str = Field(default="")
+    
+class DataObject(DomainModel):
+    object_type: str = Field(...)
+    object_id: str = Field(...)
+    
+class Workflow(DomainModel):
+    name: str = Field(...)
+    description: str = Field(default="")
+    request_ids: List[str] = Field(default_factory=list)
+

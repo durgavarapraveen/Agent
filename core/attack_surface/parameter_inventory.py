@@ -1,39 +1,35 @@
+from typing import List, Dict
+from core.domain.parameter import Parameter
 import logging
-from typing import Dict, Any, List
-from core.attack_surface.graph import AttackSurfaceGraph, CanonicalNode, CanonicalParameter, NodeType, EdgeType
 
 logger = logging.getLogger(__name__)
 
-
 class ParameterInventory:
-    """Manages PARAMETER nodes in the graph."""
-
-    def __init__(self, graph: AttackSurfaceGraph):
-        self.graph = graph
-        self._param_cache = {}
-
-    def ingest_parameters(self, endpoint_node: CanonicalNode, parameters: List[Dict[str, Any]]):
-        """
-        Creates PARAMETER nodes and links them to the ENDPOINT via ACCEPTS.
-        parameters: [{"name": "id", "type": "query"}, {"name": "body", "type": "json"}]
-        """
-        for param_data in parameters:
-            param_name = param_data.get("name")
-            param_type = param_data.get("type", "unknown")
+    def __init__(self):
+        # Maps endpoint_id -> list of Parameters
+        self.by_endpoint: Dict[str, List[Parameter]] = {}
+        # Maps parameter type -> list of Parameters globally
+        self.by_type: Dict[str, List[Parameter]] = {}
+        
+    def add_parameter(self, endpoint_id: str, param: Parameter):
+        if endpoint_id not in self.by_endpoint:
+            self.by_endpoint[endpoint_id] = []
             
-            cache_key = f"{endpoint_node.id}::p::{param_name}::{param_type}"
+        # Avoid exact duplicates per endpoint
+        existing_names = {p.name for p in self.by_endpoint[endpoint_id]}
+        if param.name not in existing_names:
+            self.by_endpoint[endpoint_id].append(param)
             
-            if cache_key in self._param_cache:
-                continue
-                
-            param_node = CanonicalParameter(
-                label=param_name,
-                name=param_name,
-                param_type=param_type
-            )
-            self.graph.add_node(param_node)
-            self._param_cache[cache_key] = param_node.id
+            p_type = param.parameter_type.value
+            if p_type not in self.by_type:
+                self.by_type[p_type] = []
+            self.by_type[p_type].append(param)
             
-            # ENDPOINT -> ACCEPTS -> PARAMETER
-            self.graph.add_edge(endpoint_node.id, param_node.id, EdgeType.ACCEPTS)
-            logger.debug(f"Ingested parameter: {param_name} for endpoint {endpoint_node.label}")
+            logger.info(f"PARAMETER_MODEL_CREATED endpoint_id={endpoint_id} parameter={param.name} param_type={p_type}")
+            print(f"PARAMETER_MODEL_CREATED endpoint_id={endpoint_id} parameter={param.name} param_type={p_type}")
+            
+    def get_parameters_for_endpoint(self, endpoint_id: str) -> List[Parameter]:
+        return self.by_endpoint.get(endpoint_id, [])
+        
+    def get_parameters_by_type(self) -> Dict[str, List[Parameter]]:
+        return self.by_type

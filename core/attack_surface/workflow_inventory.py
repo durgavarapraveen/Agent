@@ -1,37 +1,31 @@
+from typing import List, Dict
+from core.domain.asset import Workflow
+from core.domain.request import CapturedRequest
 import logging
-from typing import List
-from core.attack_surface.graph import AttackSurfaceGraph, CanonicalNode, CanonicalWorkflow, NodeType, EdgeType
+import uuid
 
 logger = logging.getLogger(__name__)
 
-
 class WorkflowInventory:
-    """Manages WORKFLOW nodes in the graph."""
-
-    def __init__(self, graph: AttackSurfaceGraph):
-        self.graph = graph
-        self._workflow_cache = {}
-
-    def ingest_workflow(self, workflow_name: str, request_nodes: List[CanonicalNode]) -> CanonicalNode:
-        """
-        Creates a WORKFLOW node and links it to REQUEST nodes via CONTAINS.
-        """
-        cache_key = f"wf::{workflow_name}"
+    def __init__(self):
+        self.workflows: Dict[str, Workflow] = {}
         
-        if cache_key in self._workflow_cache:
-            wf_node_id = self._workflow_cache[cache_key]
-            wf_node = self.graph.nodes[wf_node_id]
-        else:
-            wf_node = CanonicalWorkflow(
-                label=workflow_name,
-                steps=len(request_nodes)
-            )
-            self.graph.add_node(wf_node)
-            self._workflow_cache[cache_key] = wf_node.id
-            logger.debug(f"Created workflow: {workflow_name}")
-            
-        # Link WORKFLOW -> CONTAINS -> REQUEST
-        for req_node in request_nodes:
-            self.graph.add_edge(wf_node.id, req_node.id, EdgeType.CONTAINS)
-            
-        return wf_node
+    def add_workflow(self, workflow: Workflow):
+        self.workflows[workflow.name] = workflow
+        
+    def discover_workflows_from_requests(self, requests: List[CapturedRequest]) -> List[Workflow]:
+        """
+        Simplified heuristic: Groups sequential requests by the same session_id 
+        if they occur within a short timeframe (mocking this logic for now).
+        Returns a list of extracted Workflows.
+        """
+        # For this prototype implementation, we'll just mock discovery
+        # A real implementation would chronologically sort requests per session
+        # and slice them based on time gaps or clear logic sequences.
+        mock_workflow = Workflow(
+            name=f"discovered_workflow_{uuid.uuid4().hex[:8]}",
+            description="Auto-discovered workflow from sequential session requests",
+            request_ids=[req.request_id for req in requests[:5]] # Grabbing first 5 as a mock sequence
+        )
+        self.add_workflow(mock_workflow)
+        return [mock_workflow]

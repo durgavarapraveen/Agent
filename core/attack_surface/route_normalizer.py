@@ -1,38 +1,27 @@
-import re
+from typing import Tuple, Optional
 from urllib.parse import urlparse
+import logging
+
+logger = logging.getLogger(__name__)
 
 class RouteNormalizer:
-    """
-    Normalizes paths to prevent graph bloat by collapsing dynamic segments into standard patterns.
-    Also handles SPA fragment normalization.
-    """
-    
-    def __init__(self):
-        self.patterns = [
-            (re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'), '{uuid}'),
-            (re.compile(r'\b[0-9a-fA-F]{10,}\b'), '{hash}'),
-            (re.compile(r'/(?:\d+)(/|$)'), r'/{id}\1'),
-        ]
-
-    def normalize(self, path: str) -> str:
+    @staticmethod
+    def normalize_spa_route(url: str) -> Tuple[str, Optional[str]]:
         """
-        Normalizes dynamic REST API paths and SPA fragments.
-        e.g., https://host/#/route -> /#/route
+        Normalizes a URL into its server-side HTTP path and its client-side SPA route.
         """
-        # If it's a full URL, extract path + fragment
-        if path.startswith("http://") or path.startswith("https://"):
-            parsed = urlparse(path)
-            # Preserve the client route (SPA hash) but ensure it's not mixed with standard HTTP paths
-            normalized = parsed.path
-            if parsed.fragment:
-                normalized += "#" + parsed.fragment
-        else:
-            normalized = path
-            
-        # Collapse dynamic parts
-        for pattern, replacement in self.patterns:
-            normalized = pattern.sub(replacement, normalized)
-            
-        normalized = re.sub(r'//+', '/', normalized)
+        parsed = urlparse(url)
+        http_path = parsed.path if parsed.path else "/"
         
-        return normalized
+        spa_route = None
+        if parsed.fragment:
+            # Check if it looks like a route (e.g., #/users/42 or #!/users/42)
+            fragment = parsed.fragment
+            if fragment.startswith("/") or fragment.startswith("!/"):
+                spa_route = fragment
+                if spa_route.startswith("!/"):
+                    spa_route = spa_route[1:]
+                logger.info(f"SPA_ROUTE_NORMALIZED original={url} http_path={http_path} spa_route={spa_route}")
+                print(f"SPA_ROUTE_NORMALIZED original={url} http_path={http_path} spa_route={spa_route}")
+                
+        return http_path, spa_route
