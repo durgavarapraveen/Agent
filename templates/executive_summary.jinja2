@@ -1,0 +1,34 @@
+================================================================================
+EXECUTIVE SECURITY ASSESSMENT SUMMARY
+Target: {{ target_name }}
+Date: {{ scan_date }}
+================================================================================
+
+Overall Risk Score: {{ overall_risk_score }} / 10.0
+Total Validated Findings: {{ total_findings }}
+Estimated Remediation Effort: {{ remediation_effort_estimate }} hours
+
+SEVERITY BREAKDOWN:
+  - Critical: {{ critical_count }}
+  - High:     {{ high_count }}
+  - Medium:   {{ medium_count }}
+  - Low:      {{ low_count }}
+
+KEY EXECUTIVE FINDINGS:
+{% for bullet in executive_bullet_points %}
+  • {{ bullet }}
+{% endfor %}
+
+TOP 3 PRIORITY RISKS:
+{% for risk in top_3_risks %}
+  {{ loop.index }}. [{{ risk.severity }}] {{ risk.title }} (Risk Score: {{ risk.risk_score }})
+     CVE: {{ risk.cve_id if risk.cve_id else 'N/A' }}
+     Description: {{ risk.description }}
+{% endfor %}
+
+INDUSTRY BENCHMARK COMPARISON:
+  {{ benchmark_comparison }}
+
+MANDATORY DISCLAIMER:
+  {{ mandatory_disclaimer }}
+================================================================================

@@ -1,71 +1,116 @@
-version: "3.8"
-
 services:
-  # Kali Linux with pentesting tools
-  kali-pentesting:
+
+  # ==========================================================
+  # Comprehensive Kali Cybersecurity Container
+  # ==========================================================
+
+  kali:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: kali-pentesting-mcp
+
+    container_name: kali-pentesting
     hostname: kali-pentesting
 
-    # Port mappings for MCP servers
-    ports:
-      - "9000:9000" # Hexstrike MCP
-      - "9001:9001" # Metasploit MCP
-      - "9002:9002" # Kali tools MCP
-      - "9003:9003" # Nuclei MCP
-      - "9004:9004" # Nikto MCP
+    working_dir: /pentesting
 
     environment:
-      - HEXSTRIKE_API_KEY=${HEXSTRIKE_KEY:-demo}
-      - METASPLOIT_HOST=localhost
-      - METASPLOIT_PORT=9001
-      - KALI_HOST=0.0.0.0
-      - KALI_PORT=9002
-      - PYTHONUNBUFFERED=1
+      PYTHONUNBUFFERED: "1"
 
-    # Volume mounts for persistence
+      # PostgreSQL
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: pentesting_db
+      POSTGRES_USER: pentesting_user
+      POSTGRES_PASSWORD: pentesting_password
+
+      DATABASE_URL: postgresql://pentesting_user:pentesting_password@postgres:5432/pentesting_db
+
     volumes:
-      - ./reports:/pentesting/reports
-      - ./payloads:/pentesting/payloads
-      - ./loot:/pentesting/loot
+      # Project source
+      - .:/pentesting
 
-    # Network
+      # Persistent data
+      - pentesting_data:/pentesting/data
+      - pentesting_reports:/pentesting/reports
+      - pentesting_logs:/pentesting/logs
+      - pentesting_loot:/pentesting/loot
+
     networks:
       - pentesting
 
-    # Resource limits
-    cpus: "2"
-    mem_limit: 2g
+    depends_on:
+      postgres:
+        condition: service_healthy
 
-    # Restart policy
     restart: unless-stopped
 
-    # Logging
+    # Resource limits
+    cpus: "4.0"
+    mem_limit: 6g
+
+    stdin_open: true
+    tty: true
+
     logging:
-      driver: "json-file"
+      driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: "20m"
+        max-file: "5"
 
-    # Health check
+  # ==========================================================
+  # Primary PostgreSQL Database + pgvector
+  # ==========================================================
+
+  postgres:
+    image: pgvector/pgvector:pg16
+
+    container_name: pentesting-postgres
+    hostname: postgres
+
+    environment:
+      POSTGRES_DB: pentesting_db
+      POSTGRES_USER: pentesting_user
+      POSTGRES_PASSWORD: pentesting_password
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+    networks:
+      - pentesting
+
+    restart: unless-stopped
+
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+      test: [ "CMD-SHELL", "pg_isready -U pentesting_user -d pentesting_db" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
-# Networks
+# ============================================================
+# Network
+# ============================================================
+
 networks:
   pentesting:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.25.0.0/16
 
-# Volumes
+# ============================================================
+# Persistent volumes
+# ============================================================
+
 volumes:
+
+  pgdata:
+
   pentesting_data:
-    driver: local
+
+  pentesting_reports:
+
+  pentesting_logs:
+
+  pentesting_loot:

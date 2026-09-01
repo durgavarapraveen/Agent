@@ -2,7 +2,7 @@ import subprocess
 import json
 import logging
 import re
-from typing import Dict, Any, List
+from typing import Dict, Any
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)

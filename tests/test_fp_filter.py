@@ -3,8 +3,8 @@ Unit tests for core/fp_filter.py false positive filtering module.
 """
 
 import unittest
-from core.fp_filter import FalsePositiveFilter
-from core.shared_context import SharedContext
+from core.reporting.fp_filter import FalsePositiveFilter
+from core.memory.shared_context import SharedContext
 
 
 class TestFalsePositiveFilter(unittest.TestCase):

@@ -1,0 +1,6 @@
+# Retail Industry Prompt Variant
+Target Focus: Prioritize e-commerce shopping cart logic, coupon reuse, payment gateway integration, and stock race conditions.
+Allowed Depth Categories:
+- Shallow: Web discovery & basic port scan.
+- PoC: Nuclei e-commerce templates & directory fuzzing.
+- Deep: Full price tampering, inventory race condition, and coupon replay testing.

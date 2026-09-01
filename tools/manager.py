@@ -52,10 +52,12 @@ class ToolManager:
     def _load_default_tools(self):
         """Load default tools."""
         from tools.mock import MockReconTool, MockAPIAnalysisTool, MockSourceAnalysisTool
+        from tools.censys_tool import CensysTool
         
         self.registry.register(MockReconTool(), "reconnaissance")
         self.registry.register(MockAPIAnalysisTool(), "api_analysis")
         self.registry.register(MockSourceAnalysisTool(), "source_analysis")
+        self.registry.register(CensysTool(), "reconnaissance")
     
     async def execute_tool(self, tool_name: str, params: Dict[str, Any],
                           permission_level: ToolPermission = ToolPermission.PASSIVE,

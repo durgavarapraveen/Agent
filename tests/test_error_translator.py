@@ -3,8 +3,7 @@ Unit tests for ErrorTranslator.
 Simulates 10 different tool failure scenarios and verifies actionable recommendations.
 """
 
-import pytest
-from core.error_translator import ErrorTranslator, ErrorCategory
+from core.common.error_translator import ErrorTranslator, ErrorCategory
 
 
 def test_sslscan_econnrefused():

@@ -1,0 +1,4 @@
+cve_id,workaround_description
+CVE-2021-44228,Set JVM flag: -Dlog4j2.formatMsgNoLookups=true or remove JndiLookup class from classpath.
+CVE-2021-41773,Set 'Require all denied' in Apache HTTPD configuration for directory blocks.
+CVE-2017-0143,Disable SMBv1 protocol via Group Policy (GPO) or PowerShell.

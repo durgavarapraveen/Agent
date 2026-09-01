@@ -1,7 +1,135 @@
 """
-Tool Intelligence Model compatibility export.
+Tool Intelligence Model & Target Context.
+Defines dynamic metadata profiles for tools and normalized target contexts.
 """
 
-from core.tool_intelligence import ToolProfile, TargetContext
+from datetime import datetime
+from typing import Dict, Any, List, Optional
+from pydantic import BaseModel, Field
+from urllib.parse import urlparse
+import re
+import logging
 
-__all__ = ["ToolProfile", "TargetContext"]
+logger = logging.getLogger(__name__)
+
+
+class TargetContext(BaseModel):
+    """Normalized target context used across tool invocations and intelligence modules"""
+    raw: str
+    url: Optional[str] = None
+    hostname: Optional[str] = None
+    domain: Optional[str] = None
+    ip: Optional[str] = None
+    port: Optional[int] = None
+    scheme: Optional[str] = None
+
+    @classmethod
+    def from_target(cls, target: str) -> "TargetContext":
+        """Parse raw target string into normalized context"""
+        if not target:
+            return cls(raw="")
+        
+        target = target.strip()
+        scheme = "https"
+        url = target
+        port = None
+        
+        if "://" in target:
+            parsed = urlparse(target)
+            scheme = parsed.scheme or "https"
+            netloc = parsed.netloc
+            url = target
+        else:
+            netloc = target.split("/")[0]
+            url = f"https://{target}"
+
+        if ":" in netloc:
+            host_part, port_str = netloc.split(":", 1)
+            try:
+                port = int(port_str)
+            except ValueError:
+                port = None
+        else:
+            host_part = netloc
+
+        hostname = host_part
+        # Extract base domain
+        parts = hostname.split(".")
+        if len(parts) >= 2 and not re.match(r"^\d+\.\d+\.\d+\.\d+$", hostname):
+            domain = ".".join(parts[-2:])
+        else:
+            domain = hostname
+
+        # IP check
+        ip = None
+        if re.match(r"^\d+\.\d+\.\d+\.\d+$", hostname):
+            ip = hostname
+
+        return cls(
+            raw=target,
+            url=url,
+            hostname=hostname,
+            domain=domain,
+            ip=ip,
+            port=port or (443 if scheme == "https" else 80),
+            scheme=scheme
+        )
+
+
+class ToolProfile(BaseModel):
+    """Dynamic metadata profile for any tool in the intelligence platform"""
+    id: str = Field(default_factory=lambda: "")
+    name: str
+    description: str = ""
+    source: str = "local"  # local, github, mcp, plugin, custom
+    version: Optional[str] = "1.0.0"
+    capabilities: List[str] = Field(default_factory=list)
+    input_schema: Dict[str, Any] = Field(default_factory=dict)
+    output_schema: Dict[str, Any] = Field(default_factory=dict)
+    adapter: Optional[str] = None
+    risk_level: str = "low"  # low, medium, high, critical
+    trust_score: float = 0.90  # 0.0 to 1.0
+    performance_score: float = 0.85  # 0.0 to 1.0
+    success_rate: float = 0.90  # 0.0 to 1.0
+    total_executions: int = 0
+    successful_executions: int = 0
+    failed_executions: int = 0
+    average_duration_seconds: float = 0.0
+    last_tested: Optional[datetime] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        if not self.id:
+            self.id = f"tool_{self.name.lower().strip()}"
+
+    def update_performance(self, success: bool, duration: float, findings_count: int = 0) -> None:
+        """Update metrics after tool execution"""
+        self.total_executions += 1
+        if success:
+            self.successful_executions += 1
+        else:
+            self.failed_executions += 1
+
+        self.success_rate = round(self.successful_executions / max(1, self.total_executions), 3)
+
+        # Update average duration
+        if self.average_duration_seconds == 0:
+            self.average_duration_seconds = duration
+        else:
+            self.average_duration_seconds = round((self.average_duration_seconds * 0.7) + (duration * 0.3), 2)
+
+        # Performance score adjusts with speed & findings
+        if success:
+            bonus = min(0.05, findings_count * 0.01)
+            self.performance_score = min(1.0, round(self.performance_score + 0.02 + bonus, 3))
+            self.trust_score = min(1.0, round(self.trust_score + 0.01, 3))
+        else:
+            self.performance_score = max(0.1, round(self.performance_score - 0.05, 3))
+            self.trust_score = max(0.1, round(self.trust_score - 0.05, 3))
+
+        self.last_tested = datetime.now()
+        logger.info(
+            f"TOOL_PERFORMANCE_UPDATED: tool={self.name} success_rate={self.success_rate} "
+            f"trust_score={self.trust_score} perf_score={self.performance_score}"
+        )

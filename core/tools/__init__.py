@@ -1,7 +1,13 @@
 """
-Tools package exports.
+Core Tools Subpackage
 """
 
-from core.tool_intelligence import ToolProfile, TargetContext
+import sys
+import importlib
 
-__all__ = ["ToolProfile", "TargetContext"]
+def __getattr__(name: str):
+    try:
+        return importlib.import_module(f"core.tools.{name}")
+    except ModuleNotFoundError:
+        pass
+    raise AttributeError(f"module 'core.tools' has no attribute '{name}'")

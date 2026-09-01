@@ -1,9 +1,9 @@
-from typing import List, Optional, Set
+from typing import List, Set
 from urllib.parse import urlparse
 import ipaddress
 import logging
 
-from core.exceptions import ScopeViolationException
+from core.common.exceptions import ScopeViolationException
 
 logger = logging.getLogger(__name__)
 

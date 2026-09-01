@@ -13,8 +13,9 @@ Multiple targets:
 import argparse
 import asyncio
 import logging
-import sys
+import sys, os
 from pathlib import Path
+
 
 # Force UTF-8 encoding for standard streams on Windows to prevent UnicodeEncodeErrors
 if sys.platform.startswith("win"):
@@ -24,9 +25,14 @@ if sys.platform.startswith("win"):
     except Exception:
         pass
 
-from core.config import load_config
-from core.central_brain import CentralBrain
-from core.meta_brain import MetaBrain
+# Ensure standard storage directories exist
+for _dir in ("data/db", "reports", "loot", ".audit_logs"):
+    os.makedirs(_dir, exist_ok=True)
+
+from core.common.config import load_config
+from core.orchestration.central_brain import CentralBrain
+from core.orchestration.meta_brain import MetaBrain
+
 
 _LOG_FMT = '[%(asctime)s] %(name)s - %(levelname)s - %(message)s'
 
@@ -57,7 +63,6 @@ _file.setFormatter(logging.Formatter(_LOG_FMT))
 logging.basicConfig(level=logging.INFO, handlers=[_console, _file])
 logger = logging.getLogger(__name__)
 
-
 async def run_single(target: str, auth_file: str = None, tier: str = "POC"):
     """Single target pentest"""
     auth_document = ""
@@ -71,7 +76,7 @@ async def run_single(target: str, auth_file: str = None, tier: str = "POC"):
 
     scope = {"domains": [target], "max_tier": tier}
     brain = CentralBrain(target=target, scope=scope)
-    await brain.run(auth_document=auth_document)
+    await brain.run_main_loop(auth_document=auth_document)
 
 
 async def run_multi(targets: list, auth_file: str = None):
@@ -106,13 +111,27 @@ Examples:
     parser.add_argument("--tier", default="POC",
                          choices=["POC", "SHALLOW", "DEEP"],
                          help="Max exploitation tier (default: POC)")
+    parser.add_argument("--skip-osint", action="store_true",
+                         help="Skip OSINT reconnaissance phase")
     parser.add_argument("--reset-dedup", action="store_true",
                          help="Reset deduplication database before starting pentest")
+    parser.add_argument("--auto-approve", "-y", action="store_true",
+                         help="Auto-approve active exploit attempts without interactive consent prompts")
     parser.add_argument("--frameworks", default="",
                          help="Comma-separated compliance frameworks to map findings "
                               "to (choices: pci,soc2,hipaa,cis,nist). "
                               "Default: all. Example: --frameworks pci,soc2,hipaa")
     args = parser.parse_args()
+
+    if args.auto_approve:
+        os.environ["AUTO_APPROVE_EXPLOITS"] = "true"
+        from core.security.consent import get_consent
+        get_consent().set_auto_approve(True)
+        logger.info("Auto-approve exploits enabled via CLI.")
+
+    if args.skip_osint:
+        os.environ["ENABLE_OSINT"] = "false"
+        logger.info("OSINT disabled via --skip-osint flag.")
 
     # Load .env config
     config = load_config()
@@ -135,7 +154,7 @@ Examples:
     logger.info(f"Compliance frameworks: {config.config['COMPLIANCE_FRAMEWORKS']}")
 
     if args.reset_dedup:
-        from core.dedup_tracker import DeduplicationTracker
+        from core.memory.dedup_tracker import DeduplicationTracker
         DeduplicationTracker().reset_all()
 
     logger.info("=" * 60)

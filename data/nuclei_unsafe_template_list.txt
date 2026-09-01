@@ -1,0 +1,4 @@
+nuclei_unsafe_template_list.txt
+cve-2021-44228-dos.yaml
+cve-2020-0796-bsod.yaml
+cve-2017-0143-crash.yaml

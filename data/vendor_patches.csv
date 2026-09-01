@@ -1,0 +1,5 @@
+cve_id,vendor,fixed_version,release_date
+CVE-2021-44228,Apache,2.15.0,2021-12-10
+CVE-2021-41773,Apache,2.4.50,2021-10-05
+CVE-2023-12345,Nginx,1.21.0,2023-01-15
+CVE-2017-0143,Microsoft,MS17-010,2017-03-14

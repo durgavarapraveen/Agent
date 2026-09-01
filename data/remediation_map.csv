@@ -1,0 +1,5 @@
+cve_id,remediation_text,patch_version,patch_url
+CVE-2023-12345,Update Apache HTTP Server to version 2.4.49 or later,2.4.49,https://httpd.apache.org/security/vulnerabilities_24.html
+CVE-2022-1234,Upgrade OpenSSH to version 8.9p1 or apply vendor patch,8.9p1,https://www.openssh.com/releasenotes.html
+CVE-2021-44228,Upgrade Log4j to version 2.17.1 or apply JVM flag -Dlog4j2.formatMsgNoLookups=true,2.17.1,https://logging.apache.org/log4j/2.x/security.html
+CVE-2023-21768,Apply Microsoft Windows Ancillary Function Driver (AFD) privilege escalation patch,KB5022287,https://msrc.microsoft.com/update-guide/vulnerability/CVE-2023-21768

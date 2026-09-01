@@ -1,0 +1,6 @@
+# Finance Industry Prompt Variant
+Target Focus: Prioritize PCI-DSS security controls, insecure financial APIs, weak authentication, and parameter tampering.
+Allowed Depth Categories:
+- Shallow: Web discovery & TLS audit.
+- PoC: API endpoint discovery & auth bypass checks.
+- Deep: Full business logic testing, race conditions, and coupon/price tampering.

@@ -6,7 +6,7 @@ Tests 3x subfinder runs (first=all, second=delta/no new, third=all duplicate).
 import os
 import tempfile
 import pytest
-from core.dedup_tracker import DeduplicationTracker
+from core.memory.dedup_tracker import DeduplicationTracker
 
 
 @pytest.fixture

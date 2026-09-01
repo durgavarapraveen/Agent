@@ -4,10 +4,9 @@ Unit tests for core/retest_engine.py automated reproducibility engine.
 
 import asyncio
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-from core.retest_engine import RetestEngine
-from core.shared_context import SharedContext
+from core.reporting.retest_engine import RetestEngine
 
 
 class TestRetestEngine(unittest.TestCase):

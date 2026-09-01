@@ -3,7 +3,6 @@ Unit tests for JSON response validation, failure streak counter tracking,
 retry loops with backoff, diagnostic logging, and safe fallback mechanisms.
 """
 
-import asyncio
 import json
 import logging
 import pytest
@@ -12,8 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from agents.llm_client import (
     LLMProvider, TaskTier, validate_json_payload
 )
-from core.schemas import NormalizedLLMResponse, BrainDecisionAction, TaskSpec, CapabilityType
-from core.central_brain import CentralBrain
+from core.common.schemas import NormalizedLLMResponse
+from core.orchestration.central_brain import CentralBrain
 
 
 class MockLLMProvider(LLMProvider):

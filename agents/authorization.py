@@ -6,7 +6,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Dict, List
 from enum import Enum
 import hashlib
 
@@ -49,7 +49,7 @@ class AuthorizationManager:
 
     def verify_domain(self, domain: str) -> bool:
         """Check if domain is authorized"""
-        from core.authorization import TargetScopeValidator
+        from core.security.authorization import TargetScopeValidator
         return TargetScopeValidator.get().is_authorized(domain)
 
     def verify_tier(self, tier: ExploitTier) -> bool:

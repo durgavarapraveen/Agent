@@ -6,8 +6,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 @pytest.fixture
+def anyio_backend():
+    return 'asyncio'
+
+@pytest.fixture
 def event_loop():
     import asyncio
     loop = asyncio.new_event_loop()
     yield loop
     loop.close()
+

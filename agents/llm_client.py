@@ -13,8 +13,7 @@ from typing import Optional, Dict, Any, List, Tuple
 
 import httpx
 
-from core.config import get_config
-from core.schemas import NormalizedLLMResponse
+from core.common.schemas import NormalizedLLMResponse
 
 
 
@@ -39,15 +38,47 @@ class TaskTier(Enum):
     SMALL = "small"
     LARGE = "large"
 
+from agents.llm_harness_adapter import get_llm, initialize_llm
+from agents.universal_llm_harness import TaskTier as HarnessTaskTier
 
 class LLMProvider(ABC):
-    """Base provider interface"""
+    """Base provider interface (Deprecated - routing to Universal Harness)"""
 
-    @abstractmethod
     async def generate_response(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
                                 system: Optional[str] = None, max_tokens: int = 1024,
                                 temperature: float = 0.3, response_format: Optional[str] = None) -> NormalizedLLMResponse:
-        pass
+        
+        harness = get_llm()
+        if not harness:
+            # Emergency fallback if not initialized
+            await initialize_llm()
+            harness = get_llm()
+
+        harness_tier = HarnessTaskTier.SMALL if tier == TaskTier.SMALL else HarnessTaskTier.LARGE
+        
+        # If the format is JSON, force JSON generation
+        if response_format == "json":
+            json_out = await harness.generate_json(prompt, system, max_tokens, harness_tier)
+            if isinstance(json_out, list):
+                json_out = {"agents": json_out}
+            elif not isinstance(json_out, dict):
+                json_out = {}
+            return NormalizedLLMResponse(
+                content=json.dumps(json_out),
+                structured_output=json_out,
+                provider=harness.active_provider.provider_type.value if harness.active_provider else "unknown",
+                model=harness.active_provider.get_model_for_tier(harness_tier) if harness.active_provider else "unknown"
+            )
+            
+        text_out = await harness.generate_text(prompt, system, max_tokens, harness_tier)
+        return NormalizedLLMResponse(
+            content=text_out,
+            structured_output=None,
+            provider=harness.active_provider.provider_type.value if harness.active_provider else "unknown",
+            model=harness.active_provider.get_model_for_tier(harness_tier) if harness.active_provider else "unknown"
+        )
+
+
 
     async def generate(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
                         system: Optional[str] = None, max_tokens: int = 1024,
@@ -409,14 +440,22 @@ class NullProvider(LLMProvider):
 # ═══════════════════════════════════════════════════════════════
 
 class LLMClient:
-    """Main client - loads provider from .env"""
+    """Main client - now acts as a proxy to universal_llm_harness"""
 
     _instance: Optional[LLMProvider] = None
 
     @classmethod
     def get(cls) -> LLMProvider:
         if cls._instance is None:
-            cls._instance = cls._create_from_config()
+            # We return an anonymous subclass of LLMProvider that just acts as the router
+            class HarnessProxyProvider(LLMProvider):
+                async def is_available(self) -> bool:
+                    harness = get_llm()
+                    if not harness:
+                        await initialize_llm()
+                        harness = get_llm()
+                    return harness is not None and harness.active_provider is not None
+            cls._instance = HarnessProxyProvider()
         return cls._instance
 
     @classmethod
@@ -425,59 +464,8 @@ class LLMClient:
 
     @classmethod
     def _create_from_config(cls) -> LLMProvider:
-        config = get_config()
-        provider_name = config.get("LLM_PROVIDER", "ollama").lower()
-
-        logger.info(f"LLM_PROVIDER from .env: {provider_name}")
-
-
-        if provider_name == "deepseek":
-            try:
-                api_key = config.get("DEEPSEEK_API_KEY")
-                small = config.get("DEEPSEEK_SMALL_MODEL", "deepseek-chat")
-                large = config.get("DEEPSEEK_LARGE_MODEL", "deepseek-chat")
-                base = config.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-                logger.info(f"Using DeepSeek provider ({small}/{large})")
-                return DeepSeekProvider(api_key, small, large, base)
-            except ValueError as e:
-                logger.error(f"DeepSeek init failed: {e}")
-                logger.info("Falling back to NullProvider")
-                return NullProvider()
-
-        elif provider_name == "gemini":
-            try:
-                api_key = config.get("GOOGLE_API_KEY")
-                model = config.get("GEMINI_MODEL", "gemini-2.0-flash-exp")
-                logger.info(f"Using Gemini provider (model: {model})")
-                return GeminiProvider(api_key, model)
-            except ValueError as e:
-                logger.error(f"Gemini init failed: {e}")
-                logger.info("Falling back to NullProvider")
-                return NullProvider()
-
-        elif provider_name == "ollama":
-            base_url = config.get("OLLAMA_BASE_URL", "http://localhost:11434")
-            small_model = config.get("OLLAMA_SMALL_MODEL", "qwen3:8b")
-            large_model = config.get("OLLAMA_LARGE_MODEL", "qwen3:8b")
-            logger.info(f"Using Ollama provider ({small_model})")
-            return OllamaProvider(base_url, small_model, large_model)
-        
-        elif provider_name == "bridge":
-            try:
-                from agents.llm_client_bridge import ClaudeBridgeProvider
-                bridge_url = config.get("BRIDGE_URL", "http://localhost:8000")
-                bridge_model = config.get("BRIDGE_MODEL", "sonnet")
-                logger.info(f"Using Claude Bridge provider: {bridge_url} ({bridge_model})")
-                return ClaudeBridgeProvider(bridge_url, bridge_model)
-            except (ImportError, ValueError) as e:
-                logger.error(f"Bridge init failed: {e}")
-                logger.info("Falling back to NullProvider")
-                return NullProvider()
-
-        else:
-            logger.warning(f"Unknown provider: {provider_name}")
-            logger.info("Falling back to NullProvider")
-            return NullProvider()
+        # No longer used since we proxy to harness
+        pass
 
 
 # Convenience functions
