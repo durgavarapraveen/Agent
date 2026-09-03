@@ -5,6 +5,7 @@ import LiveScan from "./pages/LiveScan";
 import Scans from "./pages/Scans";
 import ScanDetail from "./pages/ScanDetail";
 import AuditTrail from "./pages/AuditTrail";
+import ReviewQueue from "./pages/ReviewQueue";
 import Compare from "./pages/Compare";
 import Settings from "./pages/Settings";
 
@@ -39,6 +40,12 @@ const AuditIcon = () => (
     <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
   </svg>
 );
+const ReviewIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M9 11l3 3L22 4" />
+    <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
+  </svg>
+);
 const SettingsIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <circle cx="12" cy="12" r="3" />
@@ -69,6 +76,7 @@ export default function App() {
 
           <div className="nav-section">
             <span className="nav-label">Analysis</span>
+            <NavLink to="/review"><ReviewIcon /> Review Queue</NavLink>
             <NavLink to="/compare"><CompareIcon /> Compare</NavLink>
             <NavLink to="/audit"><AuditIcon /> Audit Trail</NavLink>
           </div>
@@ -92,6 +100,7 @@ export default function App() {
             <Route path="/live" element={<LiveScan />} />
             <Route path="/scans" element={<Scans />} />
             <Route path="/scans/:scanId" element={<ScanDetail />} />
+            <Route path="/review" element={<ReviewQueue />} />
             <Route path="/compare" element={<Compare />} />
             <Route path="/audit" element={<AuditTrail />} />
             <Route path="/settings" element={<Settings />} />

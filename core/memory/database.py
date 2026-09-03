@@ -41,11 +41,25 @@ class DatabaseManager:
 
     @classmethod
     def _init_extensions(cls):
-        """Ensure pgvector is enabled."""
-        with cls.get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-                conn.commit()
+        """
+        Best-effort: enable pgvector if the role is allowed to. This is OPTIONAL —
+        only the vector-memory feature needs it. It must never abort startup, or the
+        core tables (targets, scans, vulnerabilities, review_queue) would never be
+        created. CREATE EXTENSION requires superuser/rds_superuser; a plain app role
+        will fail here, which is fine.
+        """
+        try:
+            with cls.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+                    conn.commit()
+        except Exception as e:
+            try:
+                # roll back the aborted transaction so the connection is reusable
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning(f"pgvector extension not enabled (vector memory disabled, core DB unaffected): {e}")
 
     @classmethod
     @contextmanager

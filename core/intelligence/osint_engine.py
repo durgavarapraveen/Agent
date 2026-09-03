@@ -512,18 +512,12 @@ class DNSMailIntelligence:
         try:
             import dns.resolver
         except ImportError:
-            logger.warning("[DNSMailIntelligence] dnspython not installed, using simulated results")
-            logger.info(f"[DNSMailIntelligence] ✓ Found 2 MX records for {domain}")
-            logger.info(f"[DNSMailIntelligence] ✓ Found SPF policy: v=spf1 include:_spf.google.com ~all")
-            logger.info(f"[DNSMailIntelligence] ✓ Found DKIM policy: v=DKIM1; k=rsa;")
-            logger.info(f"[DNSMailIntelligence] ✓ Found DMARC policy: v=DMARC1; p=quarantine;")
-            
-            intel.mx_records = ["alt1.aspmx.l.google.com", "alt2.aspmx.l.google.com"]
-            intel.spf_policy = "v=spf1 include:_spf.google.com ~all"
-            intel.dkim_enabled = True
-            intel.dmarc_policy = "v=DMARC1; p=quarantine;"
+            # No fabricated DNS records: without dnspython we simply report the
+            # capability as unavailable and return an empty (honest) result.
+            logger.warning("[DNSMailIntelligence] dnspython not installed — DNS/mail "
+                           "intelligence unavailable; returning no records (install dnspython)")
             return intel
-            
+
         try:
             # Check MX
             mx_records = dns.resolver.resolve(domain, 'MX')

@@ -69,8 +69,8 @@ class KaliTool(Tool):
         "xsser", "dalfox", "arjun", "paramspider", "httpx", "httpx-toolkit",
     }
 
-    def run(self, command: str, timeout: int = 300) -> ToolResult:
-        """Run raw command in Kali container"""
+    def run(self, command: str, timeout: int = 600) -> ToolResult:
+        """Run raw command in Kali container (kali_executor bumps heavy scanners further)"""
         logger.info(f"  [{self.name}] {command}")
         r = KaliDockerExecutor.run(command, timeout=timeout, auto_install=True)
         stdout = strip_ansi(r.get("stdout", ""))

@@ -50,13 +50,10 @@ class ToolManager:
         self._load_default_tools()
     
     def _load_default_tools(self):
-        """Load default tools."""
-        from tools.mock import MockReconTool, MockAPIAnalysisTool, MockSourceAnalysisTool
+        """Load default (real) tools. Mock recon/API/source tools were removed —
+        real reconnaissance runs through core.tools / the Kali executor."""
         from tools.censys_tool import CensysTool
-        
-        self.registry.register(MockReconTool(), "reconnaissance")
-        self.registry.register(MockAPIAnalysisTool(), "api_analysis")
-        self.registry.register(MockSourceAnalysisTool(), "source_analysis")
+
         self.registry.register(CensysTool(), "reconnaissance")
     
     async def execute_tool(self, tool_name: str, params: Dict[str, Any],

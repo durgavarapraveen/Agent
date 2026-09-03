@@ -1,0 +1,39 @@
+{
+  "target": "owasp-juice.shop",
+  "timestamp": "2026-09-03T10:34:39.785741+00:00",
+  "is_first_run": true,
+  "new_subdomains": [],
+  "removed_subdomains": [],
+  "new_ips": [],
+  "removed_ips": [],
+  "new_services": [],
+  "removed_services": [],
+  "new_endpoints": [],
+  "removed_endpoints": [],
+  "new_technologies": [],
+  "removed_technologies": [],
+  "new_findings": [
+    {
+      "type": "VULNERABILITY",
+      "title": "/rest/memories leaks user password hashes & deluxe tokens",
+      "severity": "CRITICAL",
+      "location": "demo.owasp-juice.shop"
+    },
+    {
+      "type": "VULNERABILITY",
+      "title": "Unauthenticated user email/data disclosure via Feedbacks & Reviews",
+      "severity": "HIGH",
+      "location": "demo.owasp-juice.shop"
+    },
+    {
+      "type": "VULNERABILITY",
+      "title": "Directory listing enabled at /ftp despite robots.txt disallow",
+      "severity": "LOW",
+      "location": "demo.owasp-juice.shop"
+    }
+  ],
+  "resolved_findings": [],
+  "header_regressions": [],
+  "severity": "HIGH",
+  "has_changes": true
+}

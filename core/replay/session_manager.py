@@ -18,29 +18,16 @@ class SessionManager:
 
     def create_session(self, identity: Identity) -> Session:
         """
-        In a real world, this would execute a login flow (auth endpoint)
-        using the resolved credentials to get real cookies/JWTs.
-        For this simulation, we mock the session creation.
+        Real sessions are established by AuthSessionManager / MultiIdentityAuthManager
+        and pre-loaded into `self.sessions` by identity_bridge.build_replay_sessions.
+        This manager never fabricates credentials: if no real session exists for the
+        identity, it refuses rather than inventing a mock cookie/token.
         """
-        cred = self.identity_store.resolve_credentials(identity.identity_id)
-        if not cred:
-            logger.error(f"Cannot create session, no credentials for {identity.identity_id}")
-            raise ValueError(f"No credentials for {identity.identity_id}")
-
-        # Mocking an auth flow
-        sess = Session(
-            session_id=str(uuid.uuid4()),
-            identity_id=identity.identity_id,
-            authentication_method="mock",
-            cookies={"session_id": f"mock_cookie_{identity.identity_id}"},
-            tokens={"Authorization": f"Bearer mock_token_{identity.identity_id}"},
-            valid=True
+        raise ValueError(
+            f"No live session for identity '{identity.identity_id}'. "
+            f"Provide credentials for this role so a real session is established "
+            f"(credentials are turned into sessions by the auth layer)."
         )
-        
-        self.sessions[identity.identity_id] = sess
-        identity.authentication_state = AuthenticationState.AUTHENTICATED
-        logger.info(f"Created session {sess.session_id} for identity {identity.identity_id}")
-        return sess
 
     def validate_session(self, session: Session) -> bool:
         """

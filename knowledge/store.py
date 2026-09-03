@@ -22,7 +22,7 @@ class KnowledgeStore:
             with conn.cursor() as cursor:
                 # Targets
                 cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS targets (
+                    CREATE TABLE IF NOT EXISTS kb_targets (
                         target_id TEXT PRIMARY KEY,
                         url_or_path TEXT UNIQUE,
                         target_type TEXT,
@@ -33,20 +33,20 @@ class KnowledgeStore:
                 
                 # Assets (domains, IPs, ports, services)
                 cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS assets (
+                    CREATE TABLE IF NOT EXISTS kb_assets (
                         asset_id TEXT PRIMARY KEY,
                         target_id TEXT,
                         asset_type TEXT,
                         value TEXT,
                         metadata TEXT,
                         created_at TEXT,
-                        FOREIGN KEY(target_id) REFERENCES targets(target_id)
+                        FOREIGN KEY(target_id) REFERENCES kb_targets(target_id)
                     )
                 ''')
                 
                 # Technologies
                 cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS technologies (
+                    CREATE TABLE IF NOT EXISTS kb_technologies (
                         tech_id TEXT PRIMARY KEY,
                         asset_id TEXT,
                         name TEXT,
@@ -54,13 +54,13 @@ class KnowledgeStore:
                         confidence REAL,
                         source TEXT,
                         created_at TEXT,
-                        FOREIGN KEY(asset_id) REFERENCES assets(asset_id)
+                        FOREIGN KEY(asset_id) REFERENCES kb_assets(asset_id)
                     )
                 ''')
                 
                 # Endpoints
                 cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS endpoints (
+                    CREATE TABLE IF NOT EXISTS kb_endpoints (
                         endpoint_id TEXT PRIMARY KEY,
                         asset_id TEXT,
                         path TEXT,
@@ -70,13 +70,13 @@ class KnowledgeStore:
                         requires_auth BOOLEAN,
                         metadata TEXT,
                         discovered_at TEXT,
-                        FOREIGN KEY(asset_id) REFERENCES assets(asset_id)
+                        FOREIGN KEY(asset_id) REFERENCES kb_assets(asset_id)
                     )
                 ''')
                 
                 # APIs
                 cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS apis (
+                    CREATE TABLE IF NOT EXISTS kb_apis (
                         api_id TEXT PRIMARY KEY,
                         asset_id TEXT,
                         api_type TEXT,
@@ -85,13 +85,13 @@ class KnowledgeStore:
                         auth_type TEXT,
                         metadata TEXT,
                         discovered_at TEXT,
-                        FOREIGN KEY(asset_id) REFERENCES assets(asset_id)
+                        FOREIGN KEY(asset_id) REFERENCES kb_assets(asset_id)
                     )
                 ''')
                 
                 # Findings
                 cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS findings (
+                    CREATE TABLE IF NOT EXISTS kb_findings (
                         finding_id TEXT PRIMARY KEY,
                         target_id TEXT,
                         title TEXT,
@@ -109,26 +109,26 @@ class KnowledgeStore:
                         source_agent_id TEXT,
                         created_at TEXT,
                         updated_at TEXT,
-                        FOREIGN KEY(target_id) REFERENCES targets(target_id)
+                        FOREIGN KEY(target_id) REFERENCES kb_targets(target_id)
                     )
                 ''')
                 
                 # Evidence
                 cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS evidence (
+                    CREATE TABLE IF NOT EXISTS kb_evidence (
                         evidence_id TEXT PRIMARY KEY,
                         finding_id TEXT,
                         evidence_type TEXT,
                         content TEXT,
                         tool_name TEXT,
                         created_at TEXT,
-                        FOREIGN KEY(finding_id) REFERENCES findings(finding_id)
+                        FOREIGN KEY(finding_id) REFERENCES kb_findings(finding_id)
                     )
                 ''')
                 
                 # Attack Paths
                 cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS attack_paths (
+                    CREATE TABLE IF NOT EXISTS kb_attack_paths (
                         path_id TEXT PRIMARY KEY,
                         target_id TEXT,
                         name TEXT,
@@ -137,13 +137,13 @@ class KnowledgeStore:
                         status TEXT,
                         confidence REAL,
                         created_at TEXT,
-                        FOREIGN KEY(target_id) REFERENCES targets(target_id)
+                        FOREIGN KEY(target_id) REFERENCES kb_targets(target_id)
                     )
                 ''')
 
                 # Exploit Results
                 cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS exploit_results (
+                    CREATE TABLE IF NOT EXISTS kb_exploit_results (
                         result_id TEXT PRIMARY KEY,
                         target_id TEXT,
                         vuln_id TEXT,
@@ -153,13 +153,13 @@ class KnowledgeStore:
                         proof TEXT,
                         severity TEXT,
                         executed_at TEXT,
-                        FOREIGN KEY(target_id) REFERENCES targets(target_id)
+                        FOREIGN KEY(target_id) REFERENCES kb_targets(target_id)
                     )
                 ''')
 
                 # Post Exploitation Findings
                 cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS post_exploit_findings (
+                    CREATE TABLE IF NOT EXISTS kb_post_exploit_findings (
                         pe_id TEXT PRIMARY KEY,
                         target_id TEXT,
                         type TEXT,
@@ -169,13 +169,13 @@ class KnowledgeStore:
                         severity TEXT,
                         metadata TEXT,
                         created_at TEXT,
-                        FOREIGN KEY(target_id) REFERENCES targets(target_id)
+                        FOREIGN KEY(target_id) REFERENCES kb_targets(target_id)
                     )
                 ''')
                 
                 # Agents execution
                 cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS agents (
+                    CREATE TABLE IF NOT EXISTS kb_agents (
                         agent_id TEXT PRIMARY KEY,
                         task_id TEXT,
                         role TEXT,
@@ -188,7 +188,7 @@ class KnowledgeStore:
                 
                 # Tasks execution
                 cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS tasks (
+                    CREATE TABLE IF NOT EXISTS kb_tasks (
                         task_id TEXT PRIMARY KEY,
                         title TEXT,
                         objective TEXT,
@@ -207,7 +207,7 @@ class KnowledgeStore:
             with conn.cursor() as cursor:
                 try:
                     cursor.execute('''
-                        INSERT INTO targets (target_id, url_or_path, target_type, scope_validated, created_at)
+                        INSERT INTO kb_targets (target_id, url_or_path, target_type, scope_validated, created_at)
                         VALUES (%s, %s, %s, %s, %s)
                         ON CONFLICT (target_id) DO NOTHING
                     ''', (target_id, url_or_path, target_type, False, datetime.now().isoformat()))
@@ -238,7 +238,7 @@ class KnowledgeStore:
             with conn.cursor() as cursor:
                 try:
                     cursor.execute('''
-                        INSERT INTO assets (asset_id, target_id, asset_type, value, metadata, created_at)
+                        INSERT INTO kb_assets (asset_id, target_id, asset_type, value, metadata, created_at)
                         VALUES (%s, %s, %s, %s, %s, %s)
                         ON CONFLICT (asset_id) DO NOTHING
                     ''', (asset_id, target_id, asset_type, value, meta_str, datetime.now().isoformat()))
@@ -270,7 +270,7 @@ class KnowledgeStore:
             with conn.cursor() as cursor:
                 try:
                     cursor.execute('''
-                        INSERT INTO technologies (tech_id, asset_id, name, version, confidence, source, created_at)
+                        INSERT INTO kb_technologies (tech_id, asset_id, name, version, confidence, source, created_at)
                         VALUES (%s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (tech_id) DO NOTHING
                     ''', (tech_id, asset_id, name, version, confidence, source, datetime.now().isoformat()))
@@ -292,7 +292,7 @@ class KnowledgeStore:
             with conn.cursor() as cursor:
                 try:
                     cursor.execute('''
-                        INSERT INTO endpoints (endpoint_id, asset_id, path, http_method, status_code, 
+                        INSERT INTO kb_endpoints (endpoint_id, asset_id, path, http_method, status_code, 
                                               requires_auth, metadata, discovered_at)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (endpoint_id) DO NOTHING
@@ -310,7 +310,7 @@ class KnowledgeStore:
             with conn.cursor() as cursor:
                 try:
                     cursor.execute('''
-                        INSERT INTO apis (api_id, asset_id, api_type, base_url, auth_type, discovered_at)
+                        INSERT INTO kb_apis (api_id, asset_id, api_type, base_url, auth_type, discovered_at)
                         VALUES (%s, %s, %s, %s, %s, %s)
                         ON CONFLICT (api_id) DO NOTHING
                     ''', (api_id, asset_id, api_type, base_url, auth_type, datetime.now().isoformat()))
@@ -330,7 +330,7 @@ class KnowledgeStore:
             with conn.cursor() as cursor:
                 try:
                     cursor.execute('''
-                        INSERT INTO findings (finding_id, target_id, title, description, severity, 
+                        INSERT INTO kb_findings (finding_id, target_id, title, description, severity, 
                                              confidence, status, category, cwe, cve, affected_asset,
                                              affected_endpoint, evidence, remediation, source_agent_id,
                                              created_at, updated_at)
@@ -351,7 +351,7 @@ class KnowledgeStore:
             with conn.cursor() as cursor:
                 try:
                     cursor.execute('''
-                        INSERT INTO evidence (evidence_id, finding_id, evidence_type, content, tool_name, created_at)
+                        INSERT INTO kb_evidence (evidence_id, finding_id, evidence_type, content, tool_name, created_at)
                         VALUES (%s, %s, %s, %s, %s, %s)
                         ON CONFLICT (evidence_id) DO NOTHING
                     ''', (evidence_id, finding_id, evidence_type, content, tool_name, datetime.now().isoformat()))
@@ -369,7 +369,7 @@ class KnowledgeStore:
             with conn.cursor() as cursor:
                 try:
                     cursor.execute('''
-                        INSERT INTO exploit_results (result_id, target_id, vuln_id, exploit_id, payload, success, proof, severity, executed_at)
+                        INSERT INTO kb_exploit_results (result_id, target_id, vuln_id, exploit_id, payload, success, proof, severity, executed_at)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (result_id) DO NOTHING
                     ''', (result_id, target_id, vuln_id, exploit_id, payload, success, proof, severity, executed_at or datetime.now().isoformat()))
@@ -387,7 +387,7 @@ class KnowledgeStore:
             with conn.cursor() as cursor:
                 try:
                     cursor.execute('''
-                        INSERT INTO post_exploit_findings (pe_id, target_id, type, host, technique, detail, severity, metadata, created_at)
+                        INSERT INTO kb_post_exploit_findings (pe_id, target_id, type, host, technique, detail, severity, metadata, created_at)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (pe_id) DO NOTHING
                     ''', (pe_id, target_id, type, host, technique, detail, severity, meta_str, datetime.now().isoformat()))
@@ -399,32 +399,32 @@ class KnowledgeStore:
     def get_target_findings(self, target_id: str) -> List[Dict]:
         with DatabaseManager.get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute('SELECT * FROM findings WHERE target_id = %s', (target_id,))
+                cursor.execute('SELECT * FROM kb_findings WHERE target_id = %s', (target_id,))
                 return cursor.fetchall()
     
     def get_target_assets(self, target_id: str) -> List[Dict]:
         with DatabaseManager.get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute('SELECT * FROM assets WHERE target_id = %s', (target_id,))
+                cursor.execute('SELECT * FROM kb_assets WHERE target_id = %s', (target_id,))
                 return cursor.fetchall()
     
     def get_asset_technologies(self, asset_id: str) -> List[Dict]:
         with DatabaseManager.get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute('SELECT * FROM technologies WHERE asset_id = %s', (asset_id,))
+                cursor.execute('SELECT * FROM kb_technologies WHERE asset_id = %s', (asset_id,))
                 return cursor.fetchall()
     
     def get_asset_endpoints(self, asset_id: str) -> List[Dict]:
         with DatabaseManager.get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute('SELECT * FROM endpoints WHERE asset_id = %s', (asset_id,))
+                cursor.execute('SELECT * FROM kb_endpoints WHERE asset_id = %s', (asset_id,))
                 return cursor.fetchall()
     
     def update_finding_status(self, finding_id: str, status: str):
         with DatabaseManager.get_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute('''
-                    UPDATE findings SET status = %s, updated_at = %s WHERE finding_id = %s
+                    UPDATE kb_findings SET status = %s, updated_at = %s WHERE finding_id = %s
                 ''', (status, datetime.now().isoformat(), finding_id))
                 conn.commit()
     
@@ -434,8 +434,8 @@ class KnowledgeStore:
                 # In PostgreSQL, we can use string_agg instead of GROUP_CONCAT
                 cursor.execute('''
                     SELECT f.*, string_agg(e.content, '|') as evidence_list
-                    FROM findings f
-                    LEFT JOIN evidence e ON f.finding_id = e.finding_id
+                    FROM kb_findings f
+                    LEFT JOIN kb_evidence e ON f.finding_id = e.finding_id
                     WHERE f.target_id = %s
                     GROUP BY f.finding_id
                 ''', (target_id,))
@@ -445,7 +445,7 @@ class KnowledgeStore:
         summary = {}
         with DatabaseManager.get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                for table in ['targets', 'assets', 'endpoints', 'apis', 'findings', 'attack_paths', 'agents', 'tasks']:
+                for table in ['kb_targets', 'kb_assets', 'kb_endpoints', 'kb_apis', 'kb_findings', 'kb_attack_paths', 'kb_agents', 'kb_tasks']:
                     cursor.execute(f'SELECT COUNT(*) as count FROM {table}')
                     summary[table] = cursor.fetchone()['count']
         return summary

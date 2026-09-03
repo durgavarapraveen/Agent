@@ -97,7 +97,9 @@ class ToolGateway:
 
             logger.info(f"Executing: operation={invocation.operation} tool_id={invocation.tool_id} target={invocation.target}")
             
-            timeout_val = invocation.params.get("timeout", 300)
+            # Base default raised to 600s; kali_executor further bumps heavy
+            # scanners (nuclei -> 900s) so they finish instead of being killed.
+            timeout_val = invocation.params.get("timeout", 600)
             
             async with self.rate_limiter:
                 result = await asyncio.wait_for(

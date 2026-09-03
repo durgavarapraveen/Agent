@@ -2,10 +2,13 @@
 Unified PostgreSQL data layer — replaces all JSON files and SQLite databases.
 """
 
+import hashlib
 import json
 import logging
+import re
 import threading
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from contextlib import contextmanager
 
@@ -15,6 +18,44 @@ import psycopg2.extras
 from core.memory.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
+
+
+def _target_slug(target: str) -> str:
+    s = re.sub(r"^https?://", "", str(target or "target")).strip("/")
+    s = re.sub(r"[^A-Za-z0-9._-]", "_", s)
+    return (s or "target")[:60]
+
+
+def make_run_id(target: str) -> str:
+    """
+    Canonical, globally-unique run identifier for one scan of one URL.
+
+    Format: <target-slug>_<UTC-timestamp>_<random>. Because it embeds a UTC
+    timestamp AND a random suffix, two runs of the SAME url — even in the same
+    second — always get distinct ids, so their results never collide or merge.
+    This single id is used across the whole DB (scans, vulnerabilities,
+    review_queue, live data) as the run's identity.
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{_target_slug(target)}_{ts}_{uuid.uuid4().hex[:8]}"
+
+
+def finding_uid(scan_id: str, v: Dict[str, Any]) -> str:
+    """
+    Deterministic finding id, ALWAYS namespaced by the run's scan_id.
+
+    Within one run the same finding maps to the same id (intra-run dedup); across
+    runs the scan_id differs, so the same finding produces a different id and a
+    separate row — runs never overwrite each other.
+    """
+    content = "|".join([
+        str(v.get("type") or v.get("vuln_type") or "").upper(),
+        str(v.get("title") or "").lower().strip(),
+        str(v.get("location") or v.get("target") or v.get("affected_endpoint") or "").lower(),
+        str(v.get("cve_id") or "").upper(),
+    ])
+    h = hashlib.sha1(content.encode("utf-8", "ignore")).hexdigest()[:16]
+    return f"{scan_id}::{h}"
 
 
 def _init_schema():
@@ -304,6 +345,33 @@ def _init_schema():
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
 
+                CREATE TABLE IF NOT EXISTS recon_data (
+                    scan_id TEXT PRIMARY KEY,
+                    target TEXT DEFAULT '',
+                    data JSONB DEFAULT '{}'::jsonb,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+
+                CREATE TABLE IF NOT EXISTS review_queue (
+                    id TEXT PRIMARY KEY,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    target TEXT DEFAULT '',
+                    title TEXT NOT NULL,
+                    status TEXT DEFAULT 'NEEDS_MANUAL',
+                    category TEXT DEFAULT '',
+                    severity TEXT DEFAULT '',
+                    steps INT DEFAULT 0,
+                    evidence TEXT DEFAULT '',
+                    tried_summary TEXT DEFAULT '',
+                    manual_guidance TEXT DEFAULT '',
+                    history JSONB DEFAULT '[]'::jsonb,
+                    scan_id TEXT DEFAULT '',
+                    resolved_at TIMESTAMPTZ,
+                    resolution_note TEXT DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_review_status ON review_queue(status);
+                CREATE INDEX IF NOT EXISTS idx_review_created ON review_queue(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_vulns_scan ON vulnerabilities(scan_id);
                 CREATE INDEX IF NOT EXISTS idx_vulns_severity ON vulnerabilities(severity);
                 CREATE INDEX IF NOT EXISTS idx_scans_target ON scans(target);
@@ -446,7 +514,11 @@ class VulnRepo:
         with DatabaseManager.get_connection() as conn:
             with conn.cursor() as cur:
                 for v in vulns:
-                    fid = v.get("finding_id") or f"{scan_id}_{v.get('title', '')[:50]}"
+                    # ALWAYS scan-scoped so two runs of the same URL never merge;
+                    # any upstream finding_id is preserved in `extra` for traceability.
+                    if v.get("finding_id"):
+                        v.setdefault("orig_finding_id", v["finding_id"])
+                    fid = finding_uid(scan_id, v)
                     cur.execute("""
                         INSERT INTO vulnerabilities
                         (scan_id, finding_id, title, type, severity, status, target, location,
@@ -735,6 +807,98 @@ class ScheduleRepo:
                     WHERE schedule_id = %s
                 """, (last_report, json.dumps(delta or {}, default=str), schedule_id))
                 conn.commit()
+
+
+class ReconRepo:
+    """Full recon intelligence per scan (infrastructure, tech, endpoints, OSINT, …)
+    so the user can see exactly what recon collected — updated live during the scan."""
+
+    @staticmethod
+    def save(scan_id: str, target: str, data: Dict) -> None:
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO recon_data (scan_id, target, data, updated_at)
+                    VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (scan_id) DO UPDATE SET
+                        data = EXCLUDED.data, target = EXCLUDED.target, updated_at = NOW()
+                """, (scan_id, target, json.dumps(data, default=str)))
+                conn.commit()
+
+    @staticmethod
+    def get(scan_id: str) -> Dict:
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SELECT * FROM recon_data WHERE scan_id = %s", (scan_id,))
+                row = cur.fetchone()
+                if row and isinstance(row.get("data"), dict):
+                    return row["data"]
+                return {}
+
+
+class ReviewRepo:
+    """Human review queue — agent successes to showcase + failures to pentest manually."""
+
+    @staticmethod
+    def record(rec: Dict) -> Dict:
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO review_queue
+                    (id, target, title, status, category, severity, steps, evidence,
+                     tried_summary, manual_guidance, history, scan_id)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (id) DO NOTHING
+                """, (rec["id"], rec.get("target", ""), rec.get("title", ""),
+                      rec.get("status", "NEEDS_MANUAL"), rec.get("category", ""),
+                      rec.get("severity", ""), int(rec.get("steps", 0)),
+                      rec.get("evidence", ""), rec.get("tried_summary", ""),
+                      rec.get("manual_guidance", ""),
+                      json.dumps(rec.get("history", []), default=str),
+                      rec.get("scan_id", "")))
+                conn.commit()
+        return rec
+
+    @staticmethod
+    def all(limit: int = 200) -> List[Dict]:
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SELECT * FROM review_queue ORDER BY created_at DESC LIMIT %s", (limit,))
+                return [dict(r) for r in cur.fetchall()]
+
+    @staticmethod
+    def by_status(status: str, limit: int = 200) -> List[Dict]:
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SELECT * FROM review_queue WHERE status = %s ORDER BY created_at DESC LIMIT %s",
+                            (status, limit))
+                return [dict(r) for r in cur.fetchall()]
+
+    @staticmethod
+    def summary() -> Dict:
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT status, COUNT(*) FROM review_queue GROUP BY status")
+                counts = {row[0]: row[1] for row in cur.fetchall()}
+        return {
+            "total": sum(counts.values()),
+            "success": counts.get("SUCCESS", 0),
+            "needs_manual": counts.get("NEEDS_MANUAL", 0),
+            "partial": counts.get("PARTIAL", 0),
+            "resolved": counts.get("RESOLVED", 0),
+        }
+
+    @staticmethod
+    def resolve(record_id: str, note: str = "") -> bool:
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE review_queue SET status = 'RESOLVED', resolved_at = NOW(),
+                        resolution_note = %s WHERE id = %s
+                """, (note[:500], record_id))
+                updated = cur.rowcount
+                conn.commit()
+                return updated > 0
 
 
 class CampaignRepo:

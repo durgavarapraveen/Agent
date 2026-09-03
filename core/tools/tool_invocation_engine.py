@@ -79,7 +79,12 @@ class ToolInvocationEngine:
             else:
                 stdout_len = len(str(result.stdout or ""))
                 stderr_len = len(str(result.stderr or ""))
-                logger.info(f"Tool invocation completed with success: {result.success} | stdout: {stdout_len} bytes | stderr: {stderr_len} bytes")
+                _tool = getattr(invocation, "tool_id", None) or getattr(invocation, "tool", "?")
+                _tgt = getattr(invocation, "target", "") or ""
+                logger.info(
+                    f"TOOL_OK tool={_tool} target={_tgt} | stdout: {stdout_len} bytes | "
+                    f"stderr: {stderr_len} bytes"
+                )
                 
             return result
         except Exception as e:

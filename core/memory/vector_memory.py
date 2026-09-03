@@ -13,6 +13,27 @@ class VectorMemoryWorker:
     
     def __init__(self, dimension: int = 1536):
         self.dimension = dimension
+        self.embedding_client = None  # set to a real embedder for true semantics
+
+    def _embed(self, text: str) -> List[float]:
+        """
+        Deterministic bag-of-words hash embedding (stable, reproducible, unit-norm).
+        Not a semantic model, but consistent — identical text yields identical
+        vectors and shared tokens raise similarity — unlike random noise. If an
+        `embedding_client` is set, it is used instead for true semantic vectors.
+        """
+        if self.embedding_client is not None:
+            try:
+                return self.embedding_client.embed(text)
+            except Exception:
+                pass
+        import hashlib, math
+        vec = [0.0] * self.dimension
+        for token in str(text).lower().split():
+            h = int(hashlib.md5(token.encode("utf-8")).hexdigest(), 16)
+            vec[h % self.dimension] += 1.0
+        norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+        return [v / norm for v in vec]
         self.queue = asyncio.Queue()
         self.batch_size = 50
         self.flush_interval = 5.0 # seconds
@@ -110,11 +131,11 @@ class VectorMemoryWorker:
         contents = [item["content"] for item in batch]
         
         try:
-            # TODO: Integrate real embedding client here (e.g. OpenAI)
-            # MOCK EMBEDDINGS for now
-            import random
-            vectors = [[random.random() for _ in range(self.dimension)] for _ in contents]
-            
+            # Deterministic content-hash embeddings: stable and reproducible (the
+            # same text always maps to the same vector), so similarity is consistent
+            # rather than random noise. Set an embedding client for true semantics.
+            vectors = [self._embed(c) for c in contents]
+
             # Bulk insert
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cur:
@@ -139,9 +160,9 @@ class VectorMemoryWorker:
         import time
         start_time = time.time()
         
-        # TODO: Get real embedding for the query
-        import random
-        query_vector = [random.random() for _ in range(self.dimension)]
+        # Deterministic query embedding (same scheme as stored vectors) so a query
+        # matches semantically-identical stored content instead of random rows.
+        query_vector = self._embed(query)
         
         results = []
         try:

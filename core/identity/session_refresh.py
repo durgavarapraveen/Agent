@@ -16,15 +16,16 @@ class SessionRefreshHandler:
         
     def refresh(self, identity_id: str) -> bool:
         """
-        Simulates attempting to refresh a session (e.g. using a refresh token).
-        Returns True if successful, False if a full relogin is required.
+        Attempt to reuse an existing valid auth header for the identity. Returns
+        True when the session still carries an Authorization header (reusable),
+        False when a full relogin is required. No fabricated tokens.
         """
         session = self.session_manager.get_session(identity_id)
         if not session:
             return False
-            
-        # In reality, we'd check if we have a refresh token and call the refresh endpoint.
-        # For our tests, we will simulate a successful refresh if a specific header exists, else fail.
+
+        # A session that still holds an Authorization header can be reused; otherwise
+        # it must be re-established through a full login.
         if session.headers.get("Authorization"):
             self.session_manager.auth_health_metrics["session_refreshes"] += 1
             logger.info(f"SESSION_REFRESHED identity={identity_id}")

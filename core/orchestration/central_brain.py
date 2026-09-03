@@ -95,7 +95,6 @@ from core.replay.identity_store import IdentityStore
 from core.replay.http_proxy import HttpProxy
 from core.fuzzing.fuzzer_orchestrator import FuzzerOrchestrator
 from core.injection.injection_matrix import InjectionMatrix
-from core.injection.injection_executor import InjectionExecutor
 from core.access_control.matrix_engine import MatrixEngine
 
 # P0 — Foundation
@@ -303,6 +302,276 @@ class CentralBrain:
             pass
         self._write_live_results()
 
+    def _build_recon_context(self) -> dict:
+        """Unified recon view for the UI: ALL subdomains labelled live/dead, the
+        filtered endpoint catalog, technologies, ports, ips, captured requests.
+        Used by both the live-results feed and the final report."""
+        subs = getattr(self.ctx, "subdomains", []) or []
+        sub_status = getattr(self.ctx, "subdomain_status", {}) or {}
+        catalog = getattr(self.ctx, "endpoint_catalog", []) or []
+
+        subs_out = []
+        for s in subs:
+            host = s if isinstance(s, str) else (s.get("name") if isinstance(s, dict) else str(s))
+            host_n = str(host).replace("https://", "").replace("http://", "").rstrip("/").lower()
+            st = sub_status.get(host_n, {})
+            subs_out.append({
+                "name": host_n,
+                "live": bool(st.get("live")),
+                "status": "live" if st.get("live") else ("dead" if st else "unknown"),
+                "status_code": st.get("status_code", 0),
+                "note": st.get("note", ""),
+            })
+
+        if not catalog:
+            eps = getattr(self.ctx, "endpoints", {}) or {}
+            ep_iter = eps.values() if isinstance(eps, dict) else eps
+            for ep in ep_iter:
+                url = getattr(ep, "url", None) or (ep.get("url") or ep.get("name") if isinstance(ep, dict) else None)
+                if url:
+                    catalog.append({"url": str(url), "path": str(url), "method": "GET",
+                                    "host": "", "kind": "page"})
+
+        caps = getattr(self.ctx, "captured_requests", []) or []
+        caps_out = []
+        for r in caps[:200]:
+            caps_out.append({
+                "url": getattr(r, "url", None) or (r.get("url") if isinstance(r, dict) else str(r)),
+                "method": getattr(r, "method", None) or (r.get("method") if isinstance(r, dict) else "GET"),
+            })
+
+        return {
+            "subdomains": subs_out,
+            "endpoints": catalog,
+            "technologies": getattr(self.ctx, "technologies", {}) or {},
+            "captured_requests": caps_out,
+            "ports": getattr(self.ctx, "ports", []) or [],
+            "ips": getattr(self.ctx, "ips", []) or [],
+            "subdomain_summary": {
+                "total": len(subs_out),
+                "live": sum(1 for s in subs_out if s["live"]),
+                "dead": sum(1 for s in subs_out if not s["live"]),
+            },
+            "osint": self._build_osint_context(),
+            # Every other piece of recon intelligence, so nothing is lost.
+            "ssl_info": getattr(self.ctx, "ssl_info", {}) or {},
+            "headers": getattr(self.ctx, "headers", {}) or {},
+            "directories": getattr(self.ctx, "directories", []) or [],
+            "secrets": getattr(self.ctx, "secrets", []) or [],
+            "crawled_pages": (getattr(self.ctx, "crawled_pages", []) or [])[:200],
+        }
+
+    def _persist_recon_data(self):
+        """Persist the full recon context to Postgres so the user can see everything
+        recon collected — written live during recon, not just at report time."""
+        try:
+            from core.database.pg_store import ReconRepo
+            ReconRepo.save(self._scan_id, self.ctx.target, self._build_recon_context())
+            logger.info("[Recon] Full recon intelligence persisted to database")
+        except Exception as e:
+            logger.warning(f"[Recon] recon_data persist failed (non-fatal): {e}")
+
+    @staticmethod
+    def _mask_secret(val: str) -> str:
+        s = str(val or "")
+        if len(s) <= 4:
+            return "•" * len(s)
+        return s[:2] + "•" * max(4, len(s) - 4) + s[-2:]
+
+    def _osint_spray_material(self):
+        """
+        Turn stored OSINT into credential-spray material:
+          - exact leaked (username, password) pairs from GitHub/breach data
+          - usernames derived from discovered employees (emails + name patterns)
+          - passwords seen in leaks (paired with the derived usernames)
+        Returns (creds, usernames, passwords).
+        """
+        g = self.ctx.get
+        leaked = g("leaked_credentials", []) or []
+        employees = g("discovered_employees", []) or []
+        harvested = getattr(self.ctx, "harvested_creds", []) or []
+
+        creds, usernames, passwords = [], [], []
+        seen_u = set()
+
+        def _add_user(u):
+            u = str(u or "").strip()
+            if u and u.lower() not in seen_u:
+                seen_u.add(u.lower())
+                usernames.append(u)
+
+        def _derive_from_email(email):
+            local = str(email).split("@")[0].strip()
+            if local:
+                _add_user(local)
+                _add_user(email)  # some apps log in with full email
+            return local
+
+        def _ascii(s):
+            import unicodedata
+            return unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode()
+
+        def _derive_from_name(name):
+            parts = [p for p in re.split(r"[\s.]+", _ascii(name).strip().lower()) if p.isalpha()]
+            if len(parts) >= 2:
+                f, l = parts[0], parts[-1]
+                for u in (f"{f}.{l}", f"{f[0]}{l}", f"{f}{l}", f"{f}_{l}", f):
+                    _add_user(u)
+            elif parts:
+                _add_user(parts[0])
+
+        # 1) leaked credential pairs
+        for c in (list(leaked) + list(harvested)):
+            if not isinstance(c, dict):
+                continue
+            u = c.get("username") or c.get("user") or c.get("email")
+            p = c.get("password") or c.get("secret") or c.get("value")
+            if u and p:
+                creds.append((str(u), str(p)))
+            if u and "@" in str(u):
+                _derive_from_email(u)
+            elif u:
+                _add_user(str(u))
+            if p:
+                passwords.append(str(p))
+
+        # 2) employees -> usernames
+        for e in employees:
+            if isinstance(e, dict):
+                if e.get("email"):
+                    _derive_from_email(e["email"])
+                if e.get("name"):
+                    _derive_from_name(e["name"])
+                if e.get("username"):
+                    _add_user(e["username"])
+            elif isinstance(e, str):
+                (_derive_from_email(e) if "@" in e else _derive_from_name(e))
+
+        # de-dup passwords, cap sizes
+        passwords = list(dict.fromkeys(passwords))[:20]
+        return creds[:100], usernames[:50], passwords
+
+    def _osint_identities(self) -> dict:
+        """Structured OSINT identities for IDOR/access-control and JWT forgery:
+        emails, usernames, admin/owner candidates, and leaked username:password pairs."""
+        creds, users, _pw = self._osint_spray_material()
+        g = self.ctx.get
+        employees = g("discovered_employees", []) or []
+
+        emails, admin_emails = [], []
+        for e in employees:
+            email = e.get("email") if isinstance(e, dict) else (e if isinstance(e, str) and "@" in e else None)
+            title = (e.get("title", "") if isinstance(e, dict) else "").lower()
+            if email:
+                emails.append(email)
+                if any(k in title for k in ("owner", "admin", "lead", "founder", "cto", "ceo", "director")):
+                    admin_emails.append(email)
+        # leaked-cred usernames that look like emails are admin candidates too
+        for u, _p in creds:
+            if "@" in u:
+                emails.append(u)
+
+        emails = list(dict.fromkeys(emails))
+        idents = {
+            "usernames": users,
+            "emails": emails,
+            "admin_emails": list(dict.fromkeys(admin_emails)) or emails[:2],
+            "leaked_pairs": creds,
+        }
+        try:
+            self.ctx.osint_identities = idents
+            self.ctx._dynamic_keys.add("osint_identities")
+        except Exception:
+            pass
+        return idents
+
+    async def _augment_auth_with_osint(self):
+        """Feed leaked username:password pairs into the auth layer as real identities,
+        then (re)establish sessions so the access-control / IDOR replay engine can test
+        cross-user object access AS those users."""
+        idents = self._osint_identities()
+        pairs = idents.get("leaked_pairs") or []
+        if not pairs:
+            return
+        # Find a login endpoint from what recon already discovered.
+        login_url = ""
+        candidates = []
+        for r in getattr(self.ctx, "captured_requests", []) or []:
+            u = getattr(r, "url", None) or (r.get("url") if isinstance(r, dict) else None)
+            if u:
+                candidates.append(str(u))
+        for ep in getattr(self.ctx, "endpoint_catalog", []) or []:
+            if isinstance(ep, dict) and ep.get("url"):
+                candidates.append(ep["url"])
+        for u in candidates:
+            if any(k in u.lower() for k in ("login", "signin", "session", "/auth", "user/login")):
+                login_url = u.split("?")[0]
+                break
+
+        existing = getattr(self.ctx, "auth_credentials", None) or []
+        new_creds = list(existing)
+        for i, (user, pw) in enumerate(pairs[:5]):
+            new_creds.append({
+                "role": f"osint_{i}_{user.split('@')[0][:12]}",
+                "username": user, "password": pw,
+                "login_url": login_url,   # may be "" -> auth layer will try form detection
+            })
+        self.ctx.auth_credentials = new_creds
+        try:
+            # Re-establish sessions (multi-role) — registers these leaked identities
+            # into the replay/access-control engine via the identity bridge.
+            await self._setup_auth_session()
+            logger.info(f"[OSINT-Auth] Added {min(len(pairs),5)} leaked identities to auth/IDOR testing "
+                        f"(login_url={login_url or 'auto-detect'})")
+        except Exception as e:
+            logger.warning(f"[OSINT-Auth] leaked-identity auth failed (non-fatal): {e}")
+
+    def _build_osint_context(self) -> dict:
+        """Surface OSINT intelligence (employees, GitHub leaks, cloud buckets, threat
+        correlations, DNS/mail intel) for the UI. Secrets are masked; the operator
+        sees WHAT leaked and WHERE, not raw credentials in plaintext."""
+        g = self.ctx.get
+        creds = g("leaked_credentials", []) or []
+        masked_creds = []
+        for c in creds:
+            if isinstance(c, dict):
+                masked_creds.append({
+                    "username": c.get("username") or c.get("user") or c.get("email") or "",
+                    "type": c.get("type") or c.get("credential_type") or "credential",
+                    "source": c.get("source") or c.get("repo") or c.get("url") or "",
+                    "secret": self._mask_secret(c.get("password") or c.get("secret") or c.get("value") or ""),
+                })
+            else:
+                masked_creds.append({"source": str(c)})
+
+        osint = {
+            "employees": g("discovered_employees", []) or [],
+            "leaked_credentials": masked_creds,
+            "cloud_buckets": g("cloud_buckets", []) or [],
+            "domain_intelligence": g("domain_intelligence", {}) or {},
+            "threat_correlations": g("threat_correlations", []) or [],
+            "findings": g("osint_findings", []) or [],
+        }
+        osint["summary"] = {
+            "employees": len(osint["employees"]),
+            "leaked_credentials": len(masked_creds),
+            "cloud_buckets": len(osint["cloud_buckets"]),
+            "threat_correlations": len(osint["threat_correlations"]),
+        }
+        # Include any other dynamically-collected intelligence not covered above.
+        try:
+            known = {"discovered_employees", "leaked_credentials", "cloud_buckets",
+                     "domain_intelligence", "threat_correlations", "osint_findings",
+                     "discovered_subdomains", "target_profile", "discovered_ips",
+                     "discovered_domains", "subdomain_status", "endpoint_catalog"}
+            extra = {k: v for k, v in self.ctx.dynamic_data().items()
+                     if k not in known and not isinstance(v, (bytes,))}
+            if extra:
+                osint["other"] = extra
+        except Exception:
+            pass
+        return osint
+
     def _write_live_results(self):
         """Write structured live results for the UI to poll."""
         try:
@@ -310,6 +579,8 @@ class CentralBrain:
             subs = getattr(self.ctx, "subdomains", []) or []
             eps = getattr(self.ctx, "endpoints", []) or []
             ports = getattr(self.ctx, "ports", []) or []
+            sub_status = getattr(self.ctx, "subdomain_status", {}) or {}
+            endpoint_catalog = getattr(self.ctx, "endpoint_catalog", []) or []
             ips = getattr(self.ctx, "ips", []) or []
             techs = getattr(self.ctx, "technologies", {}) or {}
             vulns = self.ctx.vulnerabilities or []
@@ -331,13 +602,15 @@ class CentralBrain:
             captured = getattr(self.ctx, 'captured_requests', []) or []
             attack_chains = getattr(self.ctx, 'attack_chains', None) or {}
 
+            recon_ctx = self._build_recon_context()
             results = {
                 "recon": {
-                    "subdomains": _serialize(subs),
-                    "endpoints": _serialize(eps),
+                    "subdomains": recon_ctx["subdomains"],
+                    "endpoints": recon_ctx["endpoints"],
                     "technologies": techs if isinstance(techs, dict) else {},
                     "ports": _serialize(ports),
                     "ips": _serialize(ips),
+                    "subdomain_summary": recon_ctx["subdomain_summary"],
                 },
                 "vulnerabilities": _serialize(vulns),
                 "exploits": _serialize(exploits),
@@ -377,7 +650,8 @@ class CentralBrain:
                 return p
         return None
 
-    def __init__(self, target: str, scope: Dict = None, resume_checkpoint: str = None):
+    def __init__(self, target: str, scope: Dict = None, resume_checkpoint: str = None,
+                 scan_id: str = None):
         from core.memory.dedup_tracker import DeduplicationTracker
         from core.orchestration.checkpointer import Checkpointer
 
@@ -392,7 +666,11 @@ class CentralBrain:
         self.auth = AuthorizationManager()
         self.dedup = DeduplicationTracker()
         self.start_time = datetime.now()
-        self._scan_id = self.start_time.strftime("%Y%m%d_%H%M%S")
+        # Canonical run id: use the one the UI passed, else generate a globally-unique
+        # one. Every DB row for this run is keyed by it, so two runs of the same URL
+        # (even seconds apart) never collide or merge.
+        from core.database.pg_store import make_run_id as _make_run_id
+        self._scan_id = scan_id or _make_run_id(target)
         self.max_agents_per_phase = 15
         self.report_dir = Path("reports")
         self.report_dir.mkdir(exist_ok=True)
@@ -522,7 +800,6 @@ class CentralBrain:
 
         # Injection Matrix
         self.injection_matrix = InjectionMatrix()
-        self.injection_executor = InjectionExecutor()
 
         # Access Control Matrix Engine
         self.access_control_engine = MatrixEngine(
@@ -861,7 +1138,11 @@ class CentralBrain:
             return
 
         if max_experiments is None:
-            n_endpoints = len(getattr(self, 'endpoint_inventory_v2', {}) or {})
+            inv = getattr(self, 'endpoint_inventory_v2', None)
+            try:
+                n_endpoints = len(inv.list_endpoints()) if inv is not None else 0
+            except Exception:
+                n_endpoints = 0
             max_experiments = max(500, min(n_endpoints * 4, 5000))
 
         hypotheses = self.hypothesis_engine.generate(gaps)
@@ -1128,10 +1409,16 @@ class CentralBrain:
                 await self._run_phase("OSINT_RECONNAISSANCE")
             await self._run_phase("DEEP_RECONNAISSANCE")
             await self._persist_recon_findings()
+            await self._classify_subdomains()          # label every subdomain live/dead
             await self._scan_subdomain_endpoints()
             await self._capture_requests()
             await self._persist_captured_requests()
             await self._analyze_client_scripts()
+            try:
+                self._preflight_endpoint_analysis()    # consolidate + filter endpoints
+            except Exception as e:
+                logger.warning(f"[Preflight] endpoint analysis failed (non-fatal): {e}")
+            self._persist_recon_data()                 # store full recon intel in DB for the UI
 
             # API Schema Auto-Import (OpenAPI/Swagger/GraphQL)
             try:
@@ -1429,10 +1716,20 @@ class CentralBrain:
             except Exception as e:
                 logger.warning(f"[AccessControlMatrix] Testing failed (non-fatal): {e}")
 
-            # Credential Spray — test default creds against discovered login pages
+            # Credential Spray — OSINT-driven: leaked creds + employee-derived usernames
+            # first, then generic defaults.
             try:
                 from core.exploitation.credential_spray import CredentialSprayEngine
-                spray = CredentialSprayEngine(target=self.ctx.target)
+                osint_creds, osint_users, osint_pw = self._osint_spray_material()
+                spray = CredentialSprayEngine(
+                    target=self.ctx.target,
+                    osint_creds=osint_creds,
+                    osint_usernames=osint_users,
+                    osint_passwords=osint_pw,
+                )
+                if osint_creds or osint_users:
+                    logger.info(f"[CredSpray] Seeded from OSINT: {len(osint_creds)} leaked pairs, "
+                                f"{len(osint_users)} usernames, {len(osint_pw)} leaked passwords")
                 endpoints = getattr(self.ctx, 'endpoints', []) or []
                 captured = getattr(self.ctx, 'captured_requests', []) or []
                 spray_results = await spray.spray(endpoints, captured)
@@ -1468,6 +1765,16 @@ class CentralBrain:
                     self._analyze_cloud_privesc()
                 except Exception as e:
                     logger.warning(f"[CloudPrivesc] analysis failed (non-fatal): {e}")
+
+            # General agentic exploitation (opt-in) — an oracle/evidence-driven
+            # ReAct loop with the full actuator toolkit (HTTP, JWT, encode, upload,
+            # real browser) that actively demonstrates vulns on the authorized
+            # target and reports findings. Works for any in-scope URL.
+            if _get_cfg_synth().get_bool("AGENT_EXPLOIT_ENABLED", False):
+                try:
+                    await self._run_agent_exploitation()
+                except Exception as e:
+                    logger.warning(f"[AgentExploit] agentic exploitation failed (non-fatal): {e}")
 
             # Audit exploitation actions
             try:
@@ -1559,9 +1866,9 @@ class CentralBrain:
                         f"uncertain={critic_summary['uncertain']} "
                         f"quarantined={critic_summary['quarantined']}"
                     )
-                    self.ctx.update("critic_summary", {
+                    self.ctx.critic_summary = {
                         k: v for k, v in critic_summary.items() if k != "findings"
-                    })
+                    }
                     # Feed the closed-loop reward policy (self-improvement).
                     try:
                         self._record_critic_outcomes(annotated)
@@ -1645,7 +1952,7 @@ class CentralBrain:
                 try:
                     from core.monitoring.asm_monitor import ASMMonitor
                     delta = await ASMMonitor().record_and_diff(self.ctx)
-                    self.ctx.update("asm_delta", delta.to_dict())
+                    self.ctx.asm_delta = delta.to_dict()
                 except Exception as e:
                     logger.warning(f"[ASM] snapshot/diff failed (non-fatal): {e}")
 
@@ -2987,11 +3294,19 @@ class CentralBrain:
             
             # ── Subdomains ──
             if hasattr(self.ctx, 'subdomains') and self.ctx.subdomains:
+                from core.security.authorization import TargetScopeValidator
+                _sv = TargetScopeValidator.get()
                 for subdomain in self.ctx.subdomains:
                     self.persistent_knowledge_store.add_asset(
-                        self.target_id, "subdomain", subdomain, 
+                        self.target_id, "subdomain", subdomain,
                         metadata=json.dumps({"discovered_at": datetime.now().isoformat()})
                     )
+                    # Authorize the IPs each in-scope subdomain resolves to, so a
+                    # follow-up scan of that IP is not blocked as out-of-scope.
+                    try:
+                        _sv.note_resolution(subdomain)
+                    except Exception:
+                        pass
                 logger.info(f"  ✓ Persisted {len(self.ctx.subdomains)} subdomains")
             
             # ── IPs ──
@@ -3146,8 +3461,170 @@ class CentralBrain:
             import traceback
             logger.error(traceback.format_exc())
     
+    async def _classify_subdomains(self):
+        """
+        Probe EVERY discovered subdomain and record live/dead status so the UI can
+        show all of them labelled. Stored on ctx.subdomain_status:
+            {host: {"live": bool, "status_code": int, "url": str, "note": str}}
+        """
+        subs = getattr(self.ctx, "subdomains", []) or []
+        if not subs:
+            return
+        import httpx
+        from urllib.parse import urlparse
+
+        hosts = []
+        for s in subs:
+            h = s.strip().lower().rstrip(".")
+            if "://" in h:
+                h = urlparse(h).hostname or h
+            if h:
+                hosts.append(h)
+        hosts = sorted(set(hosts))
+
+        async def _probe(host):
+            for url in (f"https://{host}", f"http://{host}"):
+                try:
+                    async with httpx.AsyncClient(verify=False, timeout=10, follow_redirects=True) as c:
+                        r = await c.get(url, headers={"User-Agent": "Mozilla/5.0"})
+                        final = urlparse(str(r.url)).hostname or host
+                        note = "" if final == host else f"redirects to {final}"
+                        return host, {"live": True, "status_code": r.status_code,
+                                      "url": url, "note": note, "len": len(r.content or b"")}
+                except Exception:
+                    continue
+            return host, {"live": False, "status_code": 0, "url": f"https://{host}",
+                          "note": "no response", "len": 0}
+
+        results = await asyncio.gather(*(_probe(h) for h in hosts), return_exceptions=True)
+        status = {}
+        for res in results:
+            if isinstance(res, tuple):
+                status[res[0]] = res[1]
+        self.ctx.subdomain_status = status
+        live_n = sum(1 for v in status.values() if v.get("live"))
+        logger.info(f"[SubdomainClassify] {live_n}/{len(status)} subdomains live")
+
+    # Static asset extensions that are not useful test targets.
+    _STATIC_EXT = {
+        ".js", ".mjs", ".css", ".map", ".png", ".jpg", ".jpeg", ".gif", ".svg",
+        ".ico", ".webp", ".avif", ".bmp", ".woff", ".woff2", ".ttf", ".otf", ".eot",
+        ".mp4", ".mp3", ".webm", ".ogg", ".wav", ".pdf", ".zip", ".gz", ".tar",
+    }
+
+    def _preflight_endpoint_analysis(self):
+        """
+        Consolidate every URL the recon phase touched (captured requests, discovered
+        endpoints, finding locations) into ONE deduplicated catalog of USEFUL endpoints,
+        dropping static assets (.js/.css/images/fonts/…). Stored on ctx.endpoint_catalog
+        as a list of {url, path, method, kind, host} for the UI and downstream testing.
+        """
+        from urllib.parse import urlparse
+
+        def _classify(path: str) -> str:
+            p = path.lower()
+            if any(seg in p for seg in ("/api/", "/rest/", "/graphql", "/v1/", "/v2/")):
+                return "api"
+            if any(seg in p for seg in ("login", "admin", "upload", "account", "user",
+                                        "token", "password", "auth", "checkout", "cart", "order")):
+                return "sensitive"
+            if "?" in path or "=" in path:
+                return "parameterized"
+            return "page"
+
+        catalog = {}
+        sources = []
+
+        # 1) captured requests (real observed traffic)
+        for r in getattr(self.ctx, "captured_requests", []) or []:
+            url = getattr(r, "url", None) or (r.get("url") if isinstance(r, dict) else None)
+            method = getattr(r, "method", None) or (r.get("method") if isinstance(r, dict) else "GET")
+            if url:
+                sources.append((str(method or "GET").upper(), str(url)))
+        # 2) discovered endpoints (Endpoint objects or dicts)
+        eps = getattr(self.ctx, "endpoints", {}) or {}
+        ep_iter = eps.values() if isinstance(eps, dict) else eps
+        for ep in ep_iter:
+            url = getattr(ep, "url", None) or (ep.get("url") or ep.get("name") if isinstance(ep, dict) else None)
+            if url:
+                sources.append(("GET", str(url)))
+        # 3) finding locations
+        for v in getattr(self.ctx, "vulnerabilities", []) or []:
+            loc = v.get("location") or v.get("url") if isinstance(v, dict) else None
+            if loc and str(loc).startswith("http"):
+                sources.append((str(v.get("method", "GET")).upper(), str(loc)))
+
+        for method, url in sources:
+            try:
+                pu = urlparse(url if "://" in url else f"https://{url}")
+                path = pu.path or "/"
+                # drop static assets
+                ext = "." + path.rsplit(".", 1)[-1].lower() if "." in path.rsplit("/", 1)[-1] else ""
+                if ext in self._STATIC_EXT:
+                    continue
+                key = f"{method} {pu.netloc}{path}"
+                if key in catalog:
+                    continue
+                catalog[key] = {
+                    "url": f"{pu.scheme}://{pu.netloc}{path}" + (f"?{pu.query}" if pu.query else ""),
+                    "path": path + (f"?{pu.query}" if pu.query else ""),
+                    "method": method,
+                    "host": pu.netloc,
+                    "kind": _classify(path + ("?" + pu.query if pu.query else "")),
+                }
+            except Exception:
+                continue
+
+        # Rank: api/sensitive/parameterized first (most testable), pages last.
+        order = {"api": 0, "sensitive": 1, "parameterized": 2, "page": 3}
+        result = sorted(catalog.values(), key=lambda e: order.get(e["kind"], 9))
+        self.ctx.endpoint_catalog = result
+        logger.info(f"[Preflight] Endpoint catalog: {len(result)} useful endpoints "
+                    f"(filtered static assets) from {len(sources)} raw URLs")
+        return result
+
+    async def _probe_live_subdomains(self, urls: list) -> list:
+        """
+        Concurrently probe subdomain URLs and return only the LIVE, in-scope ones,
+        ranked so real application instances (larger HTML/JSON bodies, non-redirect
+        200s) are tested first. Dead hosts and off-scope redirects are dropped so the
+        scan budget is spent on instances that actually respond.
+        """
+        import httpx
+        from urllib.parse import urlparse
+        from core.security.authorization import TargetScopeValidator
+        scope = TargetScopeValidator.get()
+
+        async def _probe(url):
+            host = urlparse(url).hostname or ""
+            for scheme_url in (url, url.replace("https://", "http://")):
+                try:
+                    async with httpx.AsyncClient(verify=False, timeout=10, follow_redirects=True) as c:
+                        r = await c.get(scheme_url, headers={"User-Agent": "Mozilla/5.0"})
+                        final_host = urlparse(str(r.url)).hostname or host
+                        # Only keep instances that still resolve within authorized scope.
+                        if not scope.is_authorized(final_host):
+                            return None
+                        body_len = len(r.content or b"")
+                        # score: prefer 200s with substantial app content
+                        score = body_len + (5000 if r.status_code == 200 else 0)
+                        return {"url": scheme_url, "host": host, "status": r.status_code,
+                                "len": body_len, "score": score}
+                except Exception:
+                    continue
+            return None
+
+        results = await asyncio.gather(*(_probe(u) for u in urls), return_exceptions=True)
+        live = [r for r in results if isinstance(r, dict) and r]
+        live.sort(key=lambda x: x["score"], reverse=True)
+        logger.info(f"[SubdomainScan] Liveness: {len(live)}/{len(urls)} subdomains live "
+                    f"({', '.join(l['host'] for l in live[:10])})")
+        return live
+
     async def _scan_subdomain_endpoints(self):
-        """Run endpoint discovery tools (katana, ffuf, nikto) against each discovered subdomain."""
+        """Comprehensively test each LIVE, in-scope subdomain — not just the primary
+        target — so all live instances get vulnerability coverage, not only recon."""
+        from core.common.config import get_config as _cfg
         subdomains = getattr(self.ctx, 'subdomains', []) or []
         if not subdomains:
             logger.info("[SubdomainScan] No subdomains discovered — skipping endpoint enumeration")
@@ -3157,18 +3634,35 @@ class CentralBrain:
         base = urlparse(self.ctx.target)
         base_host = base.hostname or ""
 
-        targets = []
+        candidates = []
         for sub in subdomains:
             sub_clean = sub.strip().lower().rstrip(".")
             if not sub_clean or sub_clean == base_host:
                 continue
-            targets.append(f"https://{sub_clean}")
+            if "://" in sub_clean:
+                sub_clean = urlparse(sub_clean).hostname or sub_clean
+            candidates.append(f"https://{sub_clean}")
+        candidates = sorted(set(candidates))
 
-        if not targets:
+        if not candidates:
             logger.info("[SubdomainScan] All subdomains match primary target — skipping")
             return
 
-        logger.info(f"\n>>> PHASE 1b: SUBDOMAIN ENDPOINT ENUMERATION ({len(targets)} subdomains)")
+        # Probe liveness and keep only live in-scope instances, best-first.
+        live = await self._probe_live_subdomains(candidates)
+        if not live:
+            logger.info("[SubdomainScan] No live subdomains to test")
+            return
+
+        cap = _cfg().get_int("MAX_SUBDOMAIN_SCANS", 8)
+        deep = _cfg().get_bool("SUBDOMAIN_DEEP_SCAN", True)
+        targets = [l["url"] for l in live[:cap]]
+        if len(live) > cap:
+            logger.info(f"[SubdomainScan] Capping to {cap} of {len(live)} live subdomains "
+                        f"(raise MAX_SUBDOMAIN_SCANS to test more)")
+
+        logger.info(f"\n>>> PHASE 1b: LIVE SUBDOMAIN TESTING ({len(targets)} instances, "
+                    f"{'comprehensive' if deep else 'recon-only'})")
 
         from core.security.authorization import TargetScopeValidator, AuthContext
         scope = TargetScopeValidator.get()
@@ -3199,17 +3693,30 @@ class CentralBrain:
             sub_host = urlparse(sub_url).hostname
             logger.info(f"[SubdomainScan] Scanning endpoints on {sub_host}")
 
-            objective = (
-                f"Perform endpoint discovery and technology fingerprinting on {sub_url}. "
-                f"This is a subdomain of {base_host} discovered during recon. "
-                "1) Run katana to crawl and discover URLs/endpoints. "
-                "2) Run ffuf with /usr/share/wordlists/dirb/common.txt against common paths (/api/FUZZ, /FUZZ). "
-                "3) Run nikto for web server vulnerability scanning. "
-                "4) Run whatweb/httpx for technology fingerprinting. "
-                "5) Check for exposed API endpoints, admin panels, login pages. "
-                "Report all discovered endpoints, technologies, and findings. "
-                f"IMPORTANT: Only scan {sub_url} — stay in scope."
-            )
+            if deep:
+                objective = (
+                    f"Comprehensively security-test the live instance {sub_url} "
+                    f"(a subdomain of {base_host}, in authorized scope). Treat it as a "
+                    "full target, not just recon:\n"
+                    "1) Crawl and map endpoints (katana), fingerprint tech (whatweb/httpx), "
+                    "content-discover paths (ffuf/gobuster on /api/FUZZ, /rest/FUZZ, /FUZZ).\n"
+                    "2) Run nuclei (severity critical,high,medium) and nikto for known vulns/misconfig.\n"
+                    "3) Test injection on discovered parameters: SQLi (sqlmap on ?q=/search/id params), "
+                    "XSS (dalfox), command injection.\n"
+                    "4) Check auth/access-control: default creds, IDOR on object ids, missing auth on "
+                    "/api and /rest endpoints, security headers, CORS.\n"
+                    "5) Attempt to demonstrate and report each real vulnerability with evidence.\n"
+                    f"IMPORTANT: Only interact with {sub_url} — stay in scope."
+                )
+                rounds = 18
+            else:
+                objective = (
+                    f"Perform endpoint discovery and technology fingerprinting on {sub_url}. "
+                    "1) katana crawl. 2) ffuf/gobuster on common paths. 3) nikto. "
+                    "4) whatweb/httpx fingerprint. 5) Find exposed API/admin/login. "
+                    f"IMPORTANT: Only scan {sub_url} — stay in scope."
+                )
+                rounds = 10
 
             try:
                 executor = AgenticExecutor(
@@ -3220,21 +3727,25 @@ class CentralBrain:
                 )
                 result = await executor.execute(
                     objective=objective,
-                    phase=f"subdomain_recon_{sub_host}",
-                    max_rounds=10,
+                    phase=f"subdomain_scan_{sub_host}",
+                    max_rounds=rounds,
                 )
                 findings = result.get("findings", []) if isinstance(result, dict) else []
                 steps = result.get("steps", 0) if isinstance(result, dict) else 0
                 logger.info(f"[SubdomainScan] {sub_host}: {len(findings)} findings, {steps} steps")
 
                 for f in findings:
+                    if isinstance(f, dict):
+                        f.setdefault("location", sub_url)
+                        f.setdefault("target", sub_host)
+                        f.setdefault("instance", sub_host)
                     if hasattr(self.ctx, 'add_vulnerability'):
                         self.ctx.add_vulnerability(f)
 
             except Exception as e:
                 logger.warning(f"[SubdomainScan] {sub_host} scan failed (non-fatal): {e}")
 
-        logger.info(f"[SubdomainScan] Completed endpoint enumeration for {len(targets)} subdomains")
+        logger.info(f"[SubdomainScan] Completed testing {len(targets)} live subdomains")
 
     async def _persist_captured_requests(self):
         """Save captured HTTP requests to disk for replay."""
@@ -3569,6 +4080,83 @@ class CentralBrain:
         if detonated:
             logger.info(f"[Sandbox] detonated {detonated} synthesized exploits")
 
+    async def _run_agent_exploitation(self) -> None:
+        """General agentic exploitation loop against the authorized target."""
+        from core.actuation import ObjectiveAgentLoop
+        from core.common.config import get_config as _cfg
+        from agents.llm_harness_adapter import get_llm, initialize_llm
+
+        harness = get_llm()
+        if harness is None:
+            await initialize_llm()
+            harness = get_llm()
+        if harness is None:
+            logger.warning("[AgentExploit] no LLM harness available — skipping")
+            return
+
+        # Brief context from what recon/scanning already found.
+        known = "; ".join(
+            f"[{v.get('severity','?')}] {v.get('title', v.get('type','?'))}"
+            for v in (self.ctx.vulnerabilities or [])[:12]
+        )
+        endpoints = list((getattr(self.ctx, "endpoints", {}) or {}).keys())[:20]
+        context = (f"Known findings: {known or 'none yet'}. "
+                   f"Discovered endpoints: {', '.join(map(str, endpoints)) or 'none'}.")
+
+        # Register leaked identities for authenticated IDOR/access-control testing.
+        try:
+            await self._augment_auth_with_osint()
+        except Exception:
+            pass
+
+        # Feed OSINT into auth attacks, JWT forgery, and IDOR.
+        try:
+            idents = self._osint_identities()
+            o_users = idents.get("usernames", [])
+            o_creds = idents.get("leaked_pairs", [])
+            emails = idents.get("emails", [])
+            admin_emails = idents.get("admin_emails", [])
+            o_pw = self._osint_spray_material()[2]
+            if o_users or o_creds or emails:
+                cred_hint = "; ".join(f"{u}:{p}" for u, p in o_creds[:15])
+                context += (
+                    f"\nOSINT for authentication & authorization testing:\n"
+                    f"Usernames: {', '.join(o_users[:30])}\n"
+                    + (f"Emails: {', '.join(emails[:20])}\n" if emails else "")
+                    + (f"Leaked username:password pairs: {cred_hint}\n" if cred_hint else "")
+                    + (f"Passwords seen in leaks: {', '.join(o_pw[:15])}\n" if o_pw else "")
+                    + "APPLY THESE:\n"
+                    "1) Credential stuffing / password-reset abuse on login endpoints.\n"
+                    "2) JWT forgery (jwt_forge): forge tokens impersonating these users — set "
+                    f"the token email/sub to {', '.join((admin_emails or emails)[:3]) or 'a discovered admin email'} "
+                    "and role=admin; try alg=none and HS256 with any leaked key/secret.\n"
+                    "3) IDOR / broken access control: as one identity, request resources belonging "
+                    "to these other users (their email/username/id in /api and /rest object references); "
+                    "authenticated sessions for the leaked identities are available to replay as.\n"
+                )
+        except Exception:
+            pass
+
+        objective = (
+            f"Actively exploit the authorized target {self.ctx.target}. Confirm and "
+            "demonstrate real vulnerabilities — authentication bypass, JWT flaws, IDOR / "
+            "broken access control, injection, business-logic abuse, and client-side "
+            "(DOM/CSP) issues via the browser. Chain requests and identities as needed. "
+            "Call report_finding for each vulnerability you concretely demonstrate."
+        )
+        loop = ObjectiveAgentLoop(
+            target=self.ctx.target, harness=harness,
+            auth_headers=getattr(self.ctx, "auth_headers", None),
+            max_steps=_cfg().get_int("AGENT_EXPLOIT_STEPS", 16),
+            verifier=None,  # general targets have no benchmark oracle — evidence-driven
+        )
+        result = await loop.run(objective, context=context, category="exploitation",
+                                scan_id=self._scan_id)
+        for f in result.get("findings", []):
+            self.ctx.add_vulnerability(f)
+        logger.info(f"[AgentExploit] loop finished: {result.get('steps')} steps, "
+                    f"{len(result.get('findings', []))} findings reported")
+
     def _analyze_cloud_privesc(self) -> None:
         """Analyze cloud IAM/RBAC/container config for privilege-escalation paths."""
         from core.cloud.iam_privesc import CloudPrivescScanner
@@ -3652,7 +4240,7 @@ class CentralBrain:
                     self.auth_session = default
                     self.ctx.auth_headers = default.auth_headers()
                     self.ctx.auth_cookies = dict(default.cookies)
-                self.ctx.update("auth_summary", multi.summary())
+                self.ctx.auth_summary = multi.summary()
                 self.ctx.log_brain(
                     f"Authenticated {len(multi.summary()['authenticated_roles'])} role session(s)", "auth")
                 logger.info(f"[Auth] multi-role sessions ready: {multi.summary()['authenticated_roles']}")
@@ -3667,7 +4255,7 @@ class CentralBrain:
                         identity_manager=self.identity_manager,
                         shared_context=self.ctx,
                     )
-                    self.ctx.update("replay_identity_bridge", bridge)
+                    self.ctx.replay_identity_bridge = bridge
                 except Exception as e:
                     logger.warning(f"[Auth] replay-engine bridge failed (non-fatal): {e}")
                 return
@@ -3681,7 +4269,7 @@ class CentralBrain:
             self.auth_session = mgr
             self.ctx.auth_headers = mgr.auth_headers()
             self.ctx.auth_cookies = dict(mgr.cookies)
-            self.ctx.update("auth_summary", mgr.summary())
+            self.ctx.auth_summary = mgr.summary()
             if ok and mgr.config.probe_url:
                 live = await mgr.is_authenticated()
                 logger.info(f"[Auth] session live-check on probe url: {'OK' if live else 'FAILED'}")
@@ -4036,6 +4624,7 @@ CRITICAL RULES:
             },
             "executive_summary": exec_summary,
             "scope": self.ctx.scope,
+            "context": self._build_recon_context(),
             "vulnerabilities": validated["reported"],
             "vulnerabilities_all": self.ctx.vulnerabilities,
             "needs_review": validated["needs_review"],
@@ -4089,12 +4678,14 @@ CRITICAL RULES:
             json.dump(report, f, indent=2, default=str, ensure_ascii=False)
         logger.info(f"Report saved: {report_path}")
 
-        # Persist to PostgreSQL
+        # Persist to PostgreSQL under the canonical run id (never the wall-clock
+        # timestamp) so this run's rows are isolated from every other run.
         try:
             from core.database.pg_store import ScanRepo, VulnRepo
-            ScanRepo.create(ts, self.ctx.target, self.tier)
-            ScanRepo.save_report(ts, report)
-            VulnRepo.bulk_insert(ts, validated["reported"])
+            run_id = self._scan_id
+            ScanRepo.create(run_id, self.ctx.target, self.tier)
+            ScanRepo.save_report(run_id, report)
+            VulnRepo.bulk_insert(run_id, validated["reported"])
         except Exception as pg_err:
             logger.warning(f"[report] PG persist failed (non-fatal): {pg_err}")
 

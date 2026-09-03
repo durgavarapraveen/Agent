@@ -62,6 +62,10 @@ services:
     container_name: kali-pentesting
     hostname: kali-pentesting
 
+    # Run tini as PID 1 so killed tools (nuclei/ffuf on timeout) are reaped
+    # instead of piling up as zombie processes inside the container.
+    init: true
+
     working_dir: /pentesting
 
     environment:

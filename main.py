@@ -56,7 +56,8 @@ logging.basicConfig(level=logging.INFO, handlers=[_console, _file])
 logger = logging.getLogger(__name__)
 
 async def run_single(target: str, auth_file: str = None, tier: str = "POC",
-                     resume: bool = False, phases: list = None, credentials: dict = None):
+                     resume: bool = False, phases: list = None, credentials: dict = None,
+                     scan_id: str = None):
     """Single target pentest"""
     auth_document = ""
     if auth_file:
@@ -68,7 +69,7 @@ async def run_single(target: str, auth_file: str = None, tier: str = "POC",
             sys.exit(1)
 
     scope = {"domains": [target], "max_tier": tier}
-    brain = CentralBrain(target=target, scope=scope)
+    brain = CentralBrain(target=target, scope=scope, scan_id=scan_id)
 
     if credentials:
         cred_list = credentials if isinstance(credentials, list) else [credentials]
@@ -142,6 +143,8 @@ Examples:
                          help="Comma-separated phases to run (RECON,ACTIVE_SCANNING,EXPLOITATION,REPORTING). Default: all")
     parser.add_argument("--credentials", default="",
                          help='JSON string with login creds: {"username":"x","password":"y","login_url":"https://..."}')
+    parser.add_argument("--scan-id", default=None,
+                         help="Canonical run id (from the UI); every DB row for this run uses it so runs never merge")
     parser.add_argument("--frameworks", default="",
                          help="Comma-separated compliance frameworks to map findings "
                               "to (choices: pci,soc2,hipaa,cis,nist). "
@@ -209,7 +212,7 @@ Examples:
             except _json.JSONDecodeError:
                 logger.error(f"Invalid --credentials JSON: {args.credentials[:100]}")
                 sys.exit(1)
-        asyncio.run(run_single(args.target, args.auth, args.tier, resume=args.resume, phases=phases_list, credentials=creds))
+        asyncio.run(run_single(args.target, args.auth, args.tier, resume=args.resume, phases=phases_list, credentials=creds, scan_id=args.scan_id))
 
         if args.schedule and args.schedule > 0:
             from core.orchestration.scheduler import get_scheduler

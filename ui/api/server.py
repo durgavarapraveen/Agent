@@ -37,6 +37,7 @@ sys.path.insert(0, str(BASE))
 from core.database.pg_store import (
     _init_schema, TargetRepo, ScanRepo, VulnRepo, LiveDataRepo,
     FindingV2Repo, DedupRepo, AuditRepo, ScheduleRepo, CampaignRepo,
+    make_run_id,
 )
 try:
     _init_schema()
@@ -144,6 +145,9 @@ def _run_scan_process(job_id: str, target: str, tier: str,
     if credentials:
         import json as _json
         cmd.extend(["--credentials", _json.dumps(credentials)])
+    # The run's identity is the job_id — pass it so the brain persists every row
+    # (scan, vulns, review queue) under this exact id and never merges with another run.
+    cmd.extend(["--scan-id", job_id])
 
     _active_scans[job_id]["status"] = "running"
     _active_scans[job_id]["command"] = " ".join(cmd)
@@ -291,7 +295,16 @@ def get_scan(scan_id: str):
     report = scan.get("report_data") or {}
     meta = report.get("metadata", {"target": scan.get("target", ""), "timestamp": str(scan.get("started_at", ""))})
     scope = report.get("scope", {})
+    # Recon intelligence: prefer the dedicated recon_data table (written live during
+    # recon), fall back to the report's embedded context.
     context = report.get("context", {})
+    try:
+        from core.database.pg_store import ReconRepo
+        recon = ReconRepo.get(scan_id)
+        if recon:
+            context = recon
+    except Exception:
+        pass
     severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
     for v in vulns:
         sev = (v.get("severity") or "INFO").upper()
@@ -308,14 +321,72 @@ def get_scan(scan_id: str):
             "technologies": context.get("technologies", {}),
             "endpoints": context.get("endpoints", []),
             "captured_requests": context.get("captured_requests", []),
+            "subdomain_summary": context.get("subdomain_summary", {}),
+            "osint": context.get("osint", {}),
+            "ports": context.get("ports", []),
+            "ips": context.get("ips", []),
+            "ssl_info": context.get("ssl_info", {}),
+            "headers": context.get("headers", {}),
+            "directories": context.get("directories", []),
+            "secrets": context.get("secrets", []),
         },
         "exploits": [], "checkpoints": [],
     }
 
 
+@app.get("/api/scans/{scan_id}/recon")
+def get_recon(scan_id: str):
+    """Full recon intelligence collected for a scan (live during recon, and after)."""
+    try:
+        from core.database.pg_store import ReconRepo
+        return ReconRepo.get(scan_id)
+    except Exception as e:
+        raise HTTPException(500, f"recon data unavailable: {e}")
+
+
 @app.get("/api/scans/{scan_id}/vulnerabilities")
 def get_vulnerabilities(scan_id: str):
     return VulnRepo.get_by_scan(scan_id)
+
+
+# ── Human review queue: agent successes to showcase + failures to pentest manually ──
+
+def _review_queue():
+    from core.reporting.review_queue import get_review_queue
+    return get_review_queue()
+
+
+@app.get("/api/review-queue")
+def review_queue_all(limit: int = 200):
+    """Everything the agent attempted, newest first (successes + manual follow-ups)."""
+    q = _review_queue()
+    return {"summary": q.summary(), "items": q.all(limit)}
+
+
+@app.get("/api/review-queue/successes")
+def review_queue_successes(limit: int = 200):
+    """Objectives the agent actually exploited — ready for a human to verify/showcase."""
+    return {"items": _review_queue().successes(limit)}
+
+
+@app.get("/api/review-queue/manual")
+def review_queue_manual(limit: int = 200):
+    """Objectives the agent could NOT exploit — for a human to pentest manually,
+    with what was tried and suggested next steps."""
+    return {"items": _review_queue().manual_followups(limit)}
+
+
+class ReviewResolve(BaseModel):
+    note: str = ""
+
+
+@app.post("/api/review-queue/{record_id}/resolve")
+def review_queue_resolve(record_id: str, body: ReviewResolve):
+    """Mark a manual follow-up as handled by the human."""
+    ok = _review_queue().resolve(record_id, note=body.note)
+    if not ok:
+        raise HTTPException(status_code=404, detail="review record not found")
+    return {"status": "resolved", "id": record_id}
 
 
 @app.get("/api/audit-trail")
@@ -393,7 +464,7 @@ def run_scan(body: ScanRequest):
         if job["target"] == body.target and job["status"] == "running":
             raise HTTPException(409, f"Scan already running for {body.target}")
 
-    job_id = uuid.uuid4().hex[:12]
+    job_id = make_run_id(body.target)
     _active_scans[job_id] = {
         "job_id": job_id,
         "target": body.target,
@@ -511,7 +582,7 @@ def resume_scan(body: ResumeRequest):
         if job["target"] == body.target and job["status"] == "running":
             raise HTTPException(409, f"Scan already running for {body.target}")
 
-    job_id = uuid.uuid4().hex[:12]
+    job_id = make_run_id(body.target)
     _active_scans[job_id] = {
         "job_id": job_id,
         "target": body.target,

@@ -6,6 +6,7 @@ export default function Dashboard() {
   const [stats, setStats] = useState(null);
   const [scans, setScans] = useState([]);
   const [active, setActive] = useState(null);
+  const [review, setReview] = useState({ summary: {}, manual: [] });
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
@@ -14,6 +15,11 @@ export default function Dashboard() {
       .then(([s, sc, a]) => { setStats(s); setScans(sc); setActive(a); })
       .catch(() => {})
       .finally(() => setLoading(false));
+    Promise.all([
+      api.getReviewQueue().catch(() => ({ summary: {} })),
+      api.getReviewManual().catch(() => ({ items: [] })),
+    ]).then(([q, m]) => setReview({ summary: q.summary || {}, manual: m.items || [] }))
+      .catch(() => {});
   };
 
   useEffect(() => {
@@ -72,6 +78,8 @@ export default function Dashboard() {
         </div>
       </div>
 
+      <ReviewWidget review={review} navigate={navigate} />
+
       <div className="card" style={{ marginTop: 8 }}>
         <h3>Recent Scans</h3>
         {scans.length === 0 ? (
@@ -110,6 +118,68 @@ export default function Dashboard() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function ReviewWidget({ review, navigate }) {
+  const s = review.summary || {};
+  const manual = (review.manual || []).slice(0, 4);
+  const nothing = !(s.success || s.needs_manual);
+
+  return (
+    <div className="card" style={{ marginTop: 8 }}>
+      <div className="flex-between" style={{ alignItems: "center", marginBottom: 4 }}>
+        <h3 style={{ margin: 0 }}>Agent Review</h3>
+        <button className="btn" style={{ fontSize: 12, padding: "4px 10px" }} onClick={() => navigate("/review")}>
+          Open queue &rarr;
+        </button>
+      </div>
+      <p style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 0 }}>
+        Confirmed exploits to showcase, and objectives the agent couldn't crack — handed to you.
+      </p>
+
+      <div style={{ display: "flex", gap: 12, marginBottom: manual.length ? 16 : 0 }}>
+        <div className="stat-card accent-green" style={{ flex: 1, cursor: "pointer" }} onClick={() => navigate("/review")}>
+          <span className="label">Confirmed Exploits</span>
+          <span className="value" style={{ color: "var(--green)" }}>{s.success || 0}</span>
+        </div>
+        <div className="stat-card accent-orange" style={{ flex: 1, cursor: "pointer" }} onClick={() => navigate("/review")}>
+          <span className="label">Needs Manual Pentest</span>
+          <span className="value" style={{ color: "var(--orange, #ea580c)" }}>{s.needs_manual || 0}</span>
+        </div>
+      </div>
+
+      {nothing ? (
+        <div className="empty" style={{ padding: 16 }}>No agent attempts recorded yet.</div>
+      ) : manual.length > 0 ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <span style={{ fontSize: 11, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.6px", fontWeight: 600 }}>
+            Waiting for you
+          </span>
+          {manual.map((r) => (
+            <div key={r.id} className="click-row" onClick={() => navigate("/review")}
+              style={{ padding: "10px 12px", borderRadius: 8, background: "var(--surface-2, rgba(255,255,255,0.02))",
+                       borderLeft: "3px solid var(--orange, #ea580c)", cursor: "pointer" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
+                <strong style={{ fontSize: 13 }}>{r.title}</strong>
+                <span style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--mono)", whiteSpace: "nowrap" }}>{r.target}</span>
+              </div>
+              {r.manual_guidance && (
+                <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 4,
+                              overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box",
+                              WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>
+                  {r.manual_guidance}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="empty" style={{ padding: 16, color: "var(--green)" }}>
+          All clear — nothing waiting for manual review.
+        </div>
+      )}
     </div>
   );
 }

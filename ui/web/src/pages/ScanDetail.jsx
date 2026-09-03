@@ -34,15 +34,20 @@ export default function ScanDetail() {
     <div>
       <div className="flex-between" style={{ marginBottom: 8 }}>
         <Link to="/scans" style={{ color: "var(--accent)", textDecoration: "none", fontSize: 13 }}>&larr; Back to Scans</Link>
-        <a
-          href={api.getReportUrl(scanId)}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="btn btn-sm"
-          style={{ textDecoration: "none" }}
-        >
-          Export JSON
-        </a>
+        <div style={{ display: "flex", gap: 8 }}>
+          <a href={api.getReportUrl(scanId)} target="_blank" rel="noopener noreferrer"
+             className="btn btn-sm" style={{ textDecoration: "none" }}>
+            Report (JSON)
+          </a>
+          <a href={api.getSarifUrl(scanId)} target="_blank" rel="noopener noreferrer"
+             className="btn btn-sm" style={{ textDecoration: "none" }}>
+            SARIF
+          </a>
+          <a href={api.getScanLogsDownloadUrl(scanId)} target="_blank" rel="noopener noreferrer"
+             className="btn btn-sm" style={{ textDecoration: "none" }}>
+            Logs
+          </a>
+        </div>
       </div>
       <h1>{metadata.target || "Scan"}</h1>
 
@@ -417,9 +422,40 @@ function ReconTab({ context }) {
     <>
       {context.subdomains?.length > 0 && (
         <div className="card">
-          <h3>Subdomains ({context.subdomains.length})</h3>
-          <div className="pill-row">
-            {context.subdomains.map((s, i) => <span key={i} className="pill">{s}</span>)}
+          <h3>
+            Subdomains ({context.subdomains.length})
+            {context.subdomain_summary && (
+              <span style={{ fontSize: 12, color: "var(--text-dim)", fontWeight: 400, marginLeft: 10 }}>
+                <span style={{ color: "var(--green)" }}>{context.subdomain_summary.live} live</span>
+                {" · "}
+                <span style={{ color: "var(--text-dim)" }}>{context.subdomain_summary.dead} dead</span>
+              </span>
+            )}
+          </h3>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {context.subdomains.map((s, i) => {
+              const host = typeof s === "string" ? s : s.name;
+              const live = typeof s === "object" && s.live;
+              const known = typeof s === "object" && s.status && s.status !== "unknown";
+              return (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13 }}>
+                  <span style={{
+                    fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 4, minWidth: 42, textAlign: "center",
+                    color: live ? "var(--green)" : (known ? "var(--red)" : "var(--text-dim)"),
+                    background: live ? "rgba(0,200,100,0.12)" : (known ? "rgba(220,50,50,0.12)" : "rgba(255,255,255,0.05)"),
+                  }}>
+                    {live ? "LIVE" : (known ? "DEAD" : "?")}
+                  </span>
+                  <span style={{ fontFamily: "var(--mono)" }}>{host}</span>
+                  {typeof s === "object" && s.status_code ? (
+                    <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{s.status_code}</span>
+                  ) : null}
+                  {typeof s === "object" && s.note ? (
+                    <span style={{ fontSize: 11, color: "var(--text-dim)", fontStyle: "italic" }}>{s.note}</span>
+                  ) : null}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -427,13 +463,26 @@ function ReconTab({ context }) {
       {context.endpoints?.length > 0 && (
         <div className="card">
           <h3>Discovered Endpoints ({context.endpoints.length})</h3>
-          <div style={{ maxHeight: 300, overflowY: "auto" }}>
-            {context.endpoints.map((ep, i) => (
-              <div key={i} style={{ padding: "4px 0", fontSize: 12, fontFamily: "var(--mono)", borderBottom: "1px solid var(--border)" }}>{ep}</div>
-            ))}
+          <div style={{ maxHeight: 360, overflowY: "auto" }}>
+            {context.endpoints.map((ep, i) => {
+              const isObj = typeof ep === "object" && ep;
+              const method = isObj ? ep.method : "GET";
+              const path = isObj ? (ep.path || ep.url) : ep;
+              const kind = isObj ? ep.kind : "";
+              const kindColor = { api: "var(--accent, #8b5cf6)", sensitive: "var(--red)", parameterized: "var(--orange, #ea580c)", page: "var(--text-dim)" }[kind] || "var(--text-dim)";
+              return (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", fontSize: 12, borderBottom: "1px solid var(--border)" }}>
+                  <span style={{ fontFamily: "var(--mono)", fontWeight: 700, minWidth: 46, color: "var(--text-h)" }}>{method}</span>
+                  <span style={{ fontFamily: "var(--mono)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{path}</span>
+                  {kind && <span style={{ fontSize: 10, fontWeight: 600, color: kindColor, textTransform: "uppercase" }}>{kind}</span>}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
+
+      <OsintPanel osint={context.osint} />
 
       {context.technologies && Object.keys(context.technologies).length > 0 && (
         <div className="card">
@@ -448,9 +497,154 @@ function ReconTab({ context }) {
           ))}
         </div>
       )}
+
+      {context.ports?.length > 0 && (
+        <div className="card">
+          <h3>Open Ports ({context.ports.length})</h3>
+          <div className="pill-row">
+            {context.ports.map((p, i) => (
+              <span key={i} className="pill" style={{ fontFamily: "var(--mono)" }}>
+                {typeof p === "object" ? `${p.port || p.port_number || ""}/${p.protocol || "tcp"} ${p.service || ""}`.trim() : String(p)}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <ReconListCard title="Directories" items={context.directories} mono />
+      <ReconListCard title="Exposed Secrets" items={context.secrets} danger />
+
+      {context.ssl_info && Object.keys(context.ssl_info).length > 0 && (
+        <div className="card">
+          <h3>SSL / TLS</h3>
+          <pre style={preBoxSD}>{JSON.stringify(context.ssl_info, null, 2)}</pre>
+        </div>
+      )}
+
+      {context.headers && Object.keys(context.headers).length > 0 && (
+        <div className="card">
+          <h3>Security Headers</h3>
+          <pre style={preBoxSD}>{JSON.stringify(context.headers, null, 2)}</pre>
+        </div>
+      )}
     </>
   );
 }
+
+function ReconListCard({ title, items, mono, danger }) {
+  if (!items || !items.length) return null;
+  const asText = (v) => typeof v === "string" ? v : (v?.path || v?.url || v?.name || v?.value || JSON.stringify(v));
+  return (
+    <div className="card">
+      <h3 style={danger ? { color: "var(--red)" } : undefined}>{title} ({items.length})</h3>
+      <div style={{ maxHeight: 280, overflowY: "auto" }}>
+        {items.slice(0, 300).map((it, i) => (
+          <div key={i} style={{ padding: "4px 0", fontSize: 12, fontFamily: mono ? "var(--mono)" : "inherit", borderBottom: "1px solid var(--border)" }}>
+            {asText(it)}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ── OSINT ───────────────────────────────────────────────────────────────── */
+function OsintPanel({ osint }) {
+  if (!osint || typeof osint !== "object") return null;
+  const s = osint.summary || {};
+  const has = (s.employees || 0) + (s.leaked_credentials || 0) + (s.cloud_buckets || 0) +
+    (s.threat_correlations || 0) + (osint.findings?.length || 0);
+  if (!has) return null;
+
+  const asText = (v) => typeof v === "string" ? v : (v?.name || v?.email || v?.title || JSON.stringify(v));
+
+  return (
+    <div className="card">
+      <h3>OSINT Intelligence</h3>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+        {[["Employees", s.employees], ["Leaked creds", s.leaked_credentials],
+          ["Cloud buckets", s.cloud_buckets], ["Threat hits", s.threat_correlations]].map(([l, n]) => (
+          <div key={l} className="stat-card" style={{ padding: "8px 14px", minWidth: 110 }}>
+            <span className="label">{l}</span>
+            <span className="value" style={{ fontSize: 20 }}>{n || 0}</span>
+          </div>
+        ))}
+      </div>
+
+      {osint.employees?.length > 0 && (
+        <OsintSection title={`Employees / People (${osint.employees.length})`}>
+          {osint.employees.map((e, i) => (
+            <div key={i} style={rowStyle}>
+              <span style={{ fontWeight: 600 }}>{asText(e)}</span>
+              {e?.email && <span style={dimMono}>{e.email}</span>}
+              {e?.title && <span style={dim}>{e.title}</span>}
+              {e?.source && <span style={dim}>· {e.source}</span>}
+            </div>
+          ))}
+        </OsintSection>
+      )}
+
+      {osint.leaked_credentials?.length > 0 && (
+        <OsintSection title={`Leaked Credentials (${osint.leaked_credentials.length})`} danger>
+          {osint.leaked_credentials.map((c, i) => (
+            <div key={i} style={rowStyle}>
+              <span className="badge critical" style={{ fontSize: 10 }}>{c.type || "credential"}</span>
+              <span style={{ fontFamily: "var(--mono)", fontWeight: 600 }}>{c.username || "?"}</span>
+              {c.secret && <span style={dimMono}>{c.secret}</span>}
+              {c.source && <span style={dim}>· {c.source}</span>}
+            </div>
+          ))}
+        </OsintSection>
+      )}
+
+      {osint.cloud_buckets?.length > 0 && (
+        <OsintSection title={`Cloud Buckets (${osint.cloud_buckets.length})`}>
+          {osint.cloud_buckets.map((b, i) => (
+            <div key={i} style={{ ...rowStyle, fontFamily: "var(--mono)" }}>{asText(b)}</div>
+          ))}
+        </OsintSection>
+      )}
+
+      {osint.threat_correlations?.length > 0 && (
+        <OsintSection title={`Threat Intelligence (${osint.threat_correlations.length})`}>
+          {osint.threat_correlations.map((t, i) => (
+            <div key={i} style={rowStyle}>{asText(t)}</div>
+          ))}
+        </OsintSection>
+      )}
+
+      {osint.findings?.length > 0 && (
+        <OsintSection title={`OSINT Findings (${osint.findings.length})`}>
+          {osint.findings.slice(0, 50).map((f, i) => (
+            <div key={i} style={rowStyle}>{asText(f)}</div>
+          ))}
+        </OsintSection>
+      )}
+
+      {osint.domain_intelligence && Object.keys(osint.domain_intelligence).length > 0 && (
+        <OsintSection title="DNS / Mail Intelligence">
+          <pre style={{ ...preBoxSD, margin: 0 }}>{JSON.stringify(osint.domain_intelligence, null, 2)}</pre>
+        </OsintSection>
+      )}
+    </div>
+  );
+}
+
+function OsintSection({ title, children, danger }) {
+  return (
+    <details open style={{ marginBottom: 8 }}>
+      <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 600, color: danger ? "var(--red)" : "var(--text-h)", padding: "4px 0" }}>
+        {title}
+      </summary>
+      <div style={{ maxHeight: 260, overflowY: "auto", paddingLeft: 6 }}>{children}</div>
+    </details>
+  );
+}
+
+const rowStyle = { display: "flex", alignItems: "center", gap: 8, padding: "4px 0", fontSize: 12, borderBottom: "1px solid var(--border)" };
+const dim = { color: "var(--text-dim)", fontSize: 11 };
+const dimMono = { color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--mono)" };
+const preBoxSD = { background: "var(--surface-2, #0e0e12)", padding: 10, borderRadius: 6, fontSize: 11, maxHeight: 220, overflow: "auto" };
 
 /* ── Requests ────────────────────────────────────────────────────────────── */
 function RequestsTab({ requests }) {

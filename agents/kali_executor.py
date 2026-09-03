@@ -132,7 +132,7 @@ class KaliDockerExecutor:
             # Auto-create if requested and docker is available
             if auto_create and cls.check_docker():
                 logger.info("[KaliDockerExecutor] Auto-creating new Kali container 'kali-pentesting-mcp'...")
-                run_cmd = "docker run -dit --name kali-pentesting-mcp kalilinux/kali-rolling bash"
+                run_cmd = "docker run -dit --init --name kali-pentesting-mcp kalilinux/kali-rolling bash"
                 r_create = subprocess.run(run_cmd, shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=60)
                 if r_create.returncode == 0:
                     cls._container_name = "kali-pentesting-mcp"
@@ -252,13 +252,75 @@ class KaliDockerExecutor:
 
     @classmethod
     def _effective_timeout(cls, command: str, requested: int) -> int:
-        try:
-            tool = command.split()[0].lower()
-        except (IndexError, AttributeError):
-            return requested
-        if tool in cls.SLOW_TOOLS or any(t in tool for t in ("harvest", "nuclei", "nmap")):
-            return max(requested, 300)
+        # Match the tool ANYWHERE in the command (it may be wrapped in a path,
+        # env prefix, or shell pipeline), not just the first token — otherwise
+        # nuclei falls back to the caller's short default and gets SIGKILLed (rc=137).
+        cmd = (command or "").lower()
+        if "nuclei" in cmd:
+            return max(requested, 900)
+        if any(t in cmd for t in ("theharvester", "harvester", "nmap", "amass",
+                                  "feroxbuster", "ffuf", "gobuster", "dirsearch",
+                                  "katana", "sqlmap", "wpscan", "dalfox")):
+            return max(requested, 600)
         return requested
+
+    @classmethod
+    def _normalize_command(cls, command: str) -> str:
+        """
+        Repair common malformed tool invocations the LLM sometimes emits, so a bad
+        argument order doesn't fail the whole task. Currently: amass — the correct
+        form is `amass enum -passive -d <domain>`; the model often writes
+        `amass <domain> passive` which exits non-zero.
+        """
+        try:
+            parts = command.split()
+        except Exception:
+            return command
+        if parts and parts[0] == "amass" and "enum" not in parts:
+            domain = ""
+            for p in parts[1:]:
+                if "." in p and not p.startswith("-"):
+                    domain = p
+                    break
+            if domain:
+                fixed = f"amass enum -passive -d {domain} -silent"
+                logger.info(f"[Kali] normalized amass command -> {fixed}")
+                return fixed
+
+        # nuclei: a bare `nuclei -u <url>` runs ALL ~9000 templates and, behind a WAF,
+        # can run for tens of minutes. Scope it and bound concurrency/rate/timeout so
+        # it finishes fast with high-signal results instead of being SIGKILLed.
+        if parts and parts[0] == "nuclei":
+            add = []
+            if not any(f in command for f in ("-severity", "-s ", "-tags", "-t ", "-templates")):
+                add += ["-severity", "critical,high,medium,low"]
+            if "-rl" not in parts and "-rate-limit" not in command:
+                add += ["-rl", "150"]
+            if "-c" not in parts and "-concurrency" not in command:
+                add += ["-c", "50"]
+            if "-timeout" not in command:
+                add += ["-timeout", "8"]
+            if "-retries" not in command:
+                add += ["-retries", "1"]
+            if "-stats" not in command:
+                add += ["-stats"]
+            if add:
+                fixed = command + " " + " ".join(add)
+                logger.info(f"[Kali] scoped nuclei command -> {fixed}")
+                return fixed
+        return command
+
+    @classmethod
+    def _kill_in_container(cls, container: str, command: str) -> None:
+        """Reap any orphaned tool process left running inside the container after a
+        host-side timeout, so it does not become a long-lived zombie consuming CPU."""
+        try:
+            tool = command.split()[0]
+            # kill by process name and by the full command signature
+            subprocess.run(f'docker exec {container} pkill -9 -f "{tool}"',
+                           shell=True, capture_output=True, timeout=15)
+        except Exception:
+            pass
 
     @classmethod
     def _apply_mem_limit(cls, command: str) -> str:
@@ -318,17 +380,25 @@ class KaliDockerExecutor:
                     "stdout": "", "stderr": ""
                 }
 
+        command = cls._normalize_command(command)
         mem_cmd = cls._apply_mem_limit(command)
-        timed_cmd = f"timeout --signal=KILL {int(timeout)}s {mem_cmd}"
+        # `timeout -k 10s -s TERM Ns`: the container-side timeout fires FIRST (before
+        # the host grace) and sends SIGTERM, then SIGKILL 10s later. We deliberately
+        # do NOT use setsid here — it moved the tool into a new process group that the
+        # old `pkill -g $$` could never reach, which is exactly how nuclei/ffuf children
+        # were orphaned into zombies. Instead, any stragglers are reaped explicitly
+        # via _kill_in_container on every timeout path below.
+        timed_cmd = f"timeout -k 10s -s TERM {int(timeout)}s {mem_cmd}"
         escaped_cmd = timed_cmd.replace('"', '\\"')
         full = f'docker exec {container} bash -c "{escaped_cmd}"'
-        grace = int(timeout) + 15
+        grace = int(timeout) + 20
 
         try:
             r = subprocess.run(
                 full, shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=grace
             )
             if r.returncode in (124, 137):
+                cls._kill_in_container(container, command)  # reap orphaned children
                 return {"status": "timeout", "returncode": r.returncode,
                         "error": f"Command exceeded {timeout}s (killed in-container)",
                         "stdout": r.stdout, "stderr": r.stderr}
@@ -342,6 +412,7 @@ class KaliDockerExecutor:
             }
         except subprocess.TimeoutExpired as e:
             logger.warning(f"[Kali] subprocess backstop timeout after {grace}s: {command[:60]}")
+            cls._kill_in_container(container, command)  # host gave up — kill it in the container too
             partial = ""
             try:
                 partial = (e.stdout or b"").decode("utf-8", "ignore") if isinstance(e.stdout, bytes) else (e.stdout or "")

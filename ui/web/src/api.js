@@ -135,4 +135,8 @@ export const api = {
     recon: { subdomains: [], endpoints: [], technologies: {}, ports: [], ips: [] },
     vulnerabilities: [], exploits: [], captured_requests: [],
   })),
+  getReviewQueue: () => request("/api/review-queue"),
+  getReviewSuccesses: () => request("/api/review-queue/successes"),
+  getReviewManual: () => request("/api/review-queue/manual"),
+  resolveReview: (id, note = "") => post(`/api/review-queue/${id}/resolve`, { note }),
 };

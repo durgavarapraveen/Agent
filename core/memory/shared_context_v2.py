@@ -13,6 +13,9 @@ class SharedContextV2:
     Central memory and state orchestrator for Pentest V2.
     """
     def __init__(self, target: str = None, scope: Dict = None):
+        # Tracks keys added dynamically via update() (OSINT/recon intelligence) so
+        # they can be serialized and shared. Set first so update() can use it.
+        self._dynamic_keys: set = set()
         self.target = target
         self.scope = scope or {}
         self.endpoints: Dict[str, Endpoint] = {}
@@ -177,10 +180,30 @@ class SharedContextV2:
             json.dump(data, f, indent=2, default=str)
 
     def update(self, key: str, value: Any):
-        if hasattr(self, key):
-            setattr(self, key, value)
-        elif key == "target_profile" and isinstance(value, dict):
+        # Store EVERY key so recon/OSINT data (employees, GitHub info, leaked creds,
+        # cloud buckets, threat correlations, …) is never silently dropped — any agent
+        # can then read it via ctx.get(key). Previously novel keys were discarded.
+        if key == "target_profile" and isinstance(value, dict) and hasattr(self, "target_summary"):
             self.target_summary.update(value)
+        existed = hasattr(self, key)
+        setattr(self, key, value)
+        if not existed and not key.startswith("_"):
+            try:
+                self._dynamic_keys.add(key)
+            except AttributeError:
+                self._dynamic_keys = {key}
+
+    def dynamic_data(self) -> Dict[str, Any]:
+        """Return everything added dynamically via update() (OSINT and other recon
+        intelligence), so it can be serialized to the report/UI and shared."""
+        keys = getattr(self, "_dynamic_keys", set())
+        out = {}
+        for k in keys:
+            try:
+                out[k] = getattr(self, k)
+            except Exception:
+                pass
+        return out
         
     def get_endpoint(self, endpoint_id: str) -> Optional[Endpoint]:
         return self.endpoints.get(endpoint_id)

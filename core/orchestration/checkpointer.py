@@ -16,6 +16,10 @@ class Checkpointer:
 
     def save_checkpoint(self, brain) -> str:
         """Saves current phase and SharedContext state to JSON. current_phase = the NEXT phase to run on resume."""
+        # Opt-out: set CHECKPOINT_TO_FILE=false to skip file checkpoints (resume via
+        # --resume depends on them, so leaving them on is recommended).
+        if os.getenv("CHECKPOINT_TO_FILE", "true").lower() in ("false", "0", "no", "off"):
+            return ""
         target_slug = brain.target.replace('://', '_').replace('/', '_').replace(':', '_')
         checkpoint_id = f"checkpoint_{target_slug}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         filepath = self.checkpoints_dir / f"{checkpoint_id}.json"

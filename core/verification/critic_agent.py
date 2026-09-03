@@ -87,7 +87,7 @@ class CriticAgent:
         llm_client: Optional[Any] = None,
         max_concurrency: int = 4,
         confirm_threshold: float = 0.6,
-        reject_threshold: float = 0.6,
+        reject_threshold: float = 0.85,
         max_tokens: int = 900,
     ):
         """
@@ -278,13 +278,23 @@ class CriticAgent:
             elif verdict.verdict == Verdict.FALSE_POSITIVE and verdict.confidence >= self.reject_threshold:
                 false_pos += 1
                 finding["confidence_score"] = max(0.05, round(base - 0.30 * verdict.confidence, 3))
-                # Never quarantine something the exploit layer actually proved.
-                tool_proven = bool(finding.get("exploited") or finding.get("confirmed"))
-                if quarantine and not tool_proven:
+                # Only quarantine LOW-EVIDENCE findings the critic is very sure about.
+                # Anything the tools/agent actually demonstrated (evidence/proof/exploited/
+                # confirmed, or produced by a scanner/agent source) is downgraded, never
+                # dropped — a skeptical LLM must not delete real findings on a live target.
+                has_evidence = bool(
+                    finding.get("exploited") or finding.get("confirmed")
+                    or finding.get("evidence") or finding.get("proof")
+                    or str(finding.get("source") or "").lower() in
+                    ("exploit_agent", "agentic_executor", "objective_agent",
+                     "sqlmap", "nuclei", "nikto", "dalfox")
+                )
+                if quarantine and not has_evidence:
                     finding["status"] = "QUARANTINED"
                     finding["quarantine_reason"] = verdict.reasoning or "Critic rejected finding"
                     quarantined += 1
                 else:
+                    finding["critic_flag"] = "downgraded_by_critic"
                     survivors.append(finding)
             else:
                 uncertain += 1

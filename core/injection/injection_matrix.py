@@ -11,11 +11,17 @@ class InjectionMatrix:
         matrix = InjectionTestMatrix(endpoints=len(endpoints))
         
         for ep in endpoints:
-            # We mock the parameters and content_type extraction for matrix building.
-            # In a full run, this would be tied to ParameterInventory and ContentType extraction.
-            # We'll assume each endpoint has 1 parameter to test for this exercise, unless it has a specific path.
-            params_to_test = [("q", "text/html"), ("file", "application/json")]
-            
+            # Use the endpoint's REAL discovered parameters. Body params are tested
+            # as JSON, everything else as form/query — no fabricated parameters.
+            params_to_test = []
+            for p in getattr(ep, "parameters", []) or []:
+                ptype = str(getattr(p, "parameter_type", "")).lower()
+                ctype = "application/json" if "body" in ptype else "text/html"
+                params_to_test.append((p.name, ctype))
+            if not params_to_test:
+                # No known parameters for this endpoint — nothing to test, don't invent any.
+                continue
+
             for param_name, ctype in params_to_test:
                 tests = self.checker.is_eligible(ep, param_name, ctype, None)
                 if tests:

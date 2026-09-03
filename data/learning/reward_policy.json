@@ -1,0 +1,30 @@
+{
+  "policy": {
+    "agentic_executor|vulnerability": {
+      "strategy": "agentic_executor",
+      "test_type": "VULNERABILITY",
+      "attempts": 5,
+      "confirmed": 3,
+      "false_positive": 2,
+      "failure": 0,
+      "uncertain": 0,
+      "reward_sum": 2.0999999999999996,
+      "cost_seconds": 0.0,
+      "cost_tokens": 0
+    },
+    "profiler|missing_header": {
+      "strategy": "profiler",
+      "test_type": "MISSING_HEADER",
+      "attempts": 4,
+      "confirmed": 0,
+      "false_positive": 4,
+      "failure": 0,
+      "uncertain": 0,
+      "reward_sum": -2.4,
+      "cost_seconds": 0.0,
+      "cost_tokens": 0
+    }
+  },
+  "total_pulls": 9,
+  "updated_at": 1788431666.8971627
+}

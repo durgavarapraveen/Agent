@@ -15,17 +15,30 @@ class WorkflowInventory:
         
     def discover_workflows_from_requests(self, requests: List[CapturedRequest]) -> List[Workflow]:
         """
-        Simplified heuristic: Groups sequential requests by the same session_id 
-        if they occur within a short timeframe (mocking this logic for now).
-        Returns a list of extracted Workflows.
+        Group real captured requests into workflows by session, ordered by time.
+        A workflow is the ordered sequence of requests sharing a session_id. No
+        fabricated data — only actual captured requests are grouped.
         """
-        # For this prototype implementation, we'll just mock discovery
-        # A real implementation would chronologically sort requests per session
-        # and slice them based on time gaps or clear logic sequences.
-        mock_workflow = Workflow(
-            name=f"discovered_workflow_{uuid.uuid4().hex[:8]}",
-            description="Auto-discovered workflow from sequential session requests",
-            request_ids=[req.request_id for req in requests[:5]] # Grabbing first 5 as a mock sequence
-        )
-        self.add_workflow(mock_workflow)
-        return [mock_workflow]
+        if not requests:
+            return []
+
+        # Bucket requests by their real session identifier.
+        by_session: Dict[str, List[CapturedRequest]] = {}
+        for req in requests:
+            sid = getattr(req, "session_id", None) or getattr(req, "identity_id", None) or "unscoped"
+            by_session.setdefault(str(sid), []).append(req)
+
+        discovered: List[Workflow] = []
+        for sid, reqs in by_session.items():
+            # Order chronologically when a timestamp is available.
+            reqs_sorted = sorted(reqs, key=lambda r: getattr(r, "timestamp", 0) or 0)
+            if len(reqs_sorted) < 2:
+                continue  # a single request is not a workflow
+            wf = Workflow(
+                name=f"workflow_{sid}",
+                description=f"Observed request sequence for session {sid}",
+                request_ids=[r.request_id for r in reqs_sorted],
+            )
+            self.add_workflow(wf)
+            discovered.append(wf)
+        return discovered

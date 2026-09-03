@@ -89,7 +89,7 @@ class EncryptedTrendStore:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        CREATE TABLE IF NOT EXISTS scan_history (
+                        CREATE TABLE IF NOT EXISTS scan_history_encrypted (
                             id SERIAL PRIMARY KEY,
                             timestamp TEXT NOT NULL,
                             target TEXT NOT NULL,
@@ -116,7 +116,7 @@ class EncryptedTrendStore:
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("INSERT INTO scan_history (timestamp, target, encrypted_data) VALUES (%s, %s, %s)",
+                    cursor.execute("INSERT INTO scan_history_encrypted (timestamp, target, encrypted_data) VALUES (%s, %s, %s)",
                                  (ts, target, enc_blob))
                     conn.commit()
         except Exception as e:
@@ -129,7 +129,7 @@ class EncryptedTrendStore:
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT encrypted_data FROM scan_history WHERE target = %s ORDER BY id ASC", (target,))
+                    cursor.execute("SELECT encrypted_data FROM scan_history_encrypted WHERE target = %s ORDER BY id ASC", (target,))
                     for row in cursor.fetchall():
                         try:
                             dec_bytes = self._xor_cipher(row[0])

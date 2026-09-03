@@ -592,7 +592,11 @@ class DeepSeekProvider(LLMProvider):
             return LLMResponse(content="", provider="deepseek", model=model, error="Budget exceeded")
 
         start_time = datetime.now()
-        use_thinking = (tier == TaskTier.LARGE)
+        # Thinking mode + JSON object mode don't mix well on DeepSeek: the model
+        # emits its answer as reasoning_content and returns an empty "{}" as content,
+        # which is exactly the empty-response failure seen during exploitation. Disable
+        # thinking whenever structured JSON is requested so JSON tasks return real data.
+        use_thinking = (tier == TaskTier.LARGE) and response_format != "json"
 
         messages = []
         if system:
@@ -1109,6 +1113,12 @@ class UniversalLLMHarness:
         """Tool-calling loop via active provider with mid-session fallback."""
         if not self.active_provider:
             await self.initialize()
+        # Economic policy also governs the agentic tool loop (the biggest spender).
+        if self.governor is not None:
+            if not self.governor.allow_request(max_tokens, self.primary_provider.value):
+                return LLMResponse(content="", provider=self.primary_provider.value,
+                                   error="Budget governor: hard stop reached")
+            tier = self.governor.adjust_tier(tier)
         if isinstance(self.active_provider, DeepSeekProvider):
             resp = await self.active_provider.generate_with_tools(
                 messages, tools, max_tokens=max_tokens, tier=tier,
