@@ -1,6 +1,9 @@
-import { useEffect, useState, useRef, useCallback } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, createScanSocket } from "../api";
+import ActivityLog from "../components/ActivityLog";
+import ReconPanel from "../components/ReconPanel";
+import { methodColor, fmtDate } from "../components/utils";
 
 const PHASES = ["RECON", "ACTIVE_SCANNING", "EXPLOITATION", "REPORTING"];
 const PHASE_LABELS = { RECON: "Recon", ACTIVE_SCANNING: "Vulnerability Assessment", EXPLOITATION: "Exploitation", REPORTING: "Reporting" };
@@ -11,15 +14,23 @@ export default function LiveScan() {
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
+  const autoSelected = useRef(false);
+
   useEffect(() => {
-    const fetch = () => {
+    const fetchJobs = () => {
       api.getActiveScans().then(j => {
-        setJobs(j);
-        if (!selected && j.length > 0) setSelected(j[0].job_id);
+        // Only keep truly active scans (not completed/failed/cancelled)
+        const active = Array.isArray(j) ? j.filter(s => !["completed", "failed", "cancelled"].includes(s.status)) : [];
+        setJobs(active);
+        if (!autoSelected.current && active.length > 0) {
+          const live = active.find(s => s.status === "running" || s.status === "starting");
+          setSelected((live || active[0]).job_id);
+          autoSelected.current = true;
+        }
       }).catch(() => {}).finally(() => setLoading(false));
     };
-    fetch();
-    const iv = setInterval(fetch, 4000);
+    fetchJobs();
+    const iv = setInterval(fetchJobs, 4000);
     return () => clearInterval(iv);
   }, []);
 
@@ -197,6 +208,7 @@ function LiveScanDetail({ jobId }) {
     { id: "recon", label: `Recon (${recon.subdomains.length + recon.endpoints.length})` },
     { id: "vulns", label: `Vulnerabilities (${vulns.length})` },
     { id: "exploits", label: `Exploits (${exploits.length})` },
+    { id: "activity", label: "Agent Activity" },
     { id: "requests", label: `Requests (${requests.length})` },
     { id: "logs", label: `Logs (${logs.total})` },
   ];
@@ -254,9 +266,10 @@ function LiveScanDetail({ jobId }) {
       </div>
 
       {tab === "overview" && <OverviewSection recon={recon} vulns={vulns} exploits={exploits} progress={progress} />}
-      {tab === "recon" && <ReconSection recon={recon} />}
+      {tab === "recon" && <ReconPanel context={recon} />}
       {tab === "vulns" && <VulnsSection vulns={vulns} />}
       {tab === "exploits" && <ExploitsSection exploits={exploits} />}
+      {tab === "activity" && <ActivityLog scanId={jobId} poll />}
       {tab === "requests" && <RequestsSection requests={requests} />}
       {tab === "logs" && <LogsSection logs={logs} logRef={logRef} jobId={jobId} />}
     </div>
@@ -344,6 +357,20 @@ function OverviewSection({ recon, vulns, exploits, progress }) {
               <span style={{ color: "var(--text-dim)" }}>Open Ports</span>
               <span style={{ fontFamily: "var(--mono)", fontWeight: 700, color: "var(--text-h)" }}>{recon.ports.length}</span>
             </div>
+            {(recon.directories?.length > 0 || recon.secrets?.length > 0 || recon.osint) && <>
+              {recon.directories?.length > 0 && <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ color: "var(--text-dim)" }}>Directories</span>
+                <span style={{ fontFamily: "var(--mono)", fontWeight: 700, color: "var(--text-h)" }}>{recon.directories.length}</span>
+              </div>}
+              {recon.secrets?.length > 0 && <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ color: "var(--text-dim)" }}>Secrets</span>
+                <span style={{ fontFamily: "var(--mono)", fontWeight: 700, color: "var(--red)" }}>{recon.secrets.length}</span>
+              </div>}
+              {recon.osint?.summary?.employees > 0 && <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ color: "var(--text-dim)" }}>OSINT People</span>
+                <span style={{ fontFamily: "var(--mono)", fontWeight: 700, color: "var(--text-h)" }}>{recon.osint.summary.employees}</span>
+              </div>}
+            </>}
           </div>
         </div>
       </div>
@@ -387,82 +414,6 @@ function SevBar({ label, count, total, color }) {
 }
 
 
-function ReconSection({ recon }) {
-  return (
-    <div>
-      {recon.subdomains.length > 0 && (
-        <div style={{ marginBottom: 20 }}>
-          <h3>Subdomains ({recon.subdomains.length})</h3>
-          <div className="pill-row">
-            {recon.subdomains.map((s, i) => (
-              <span key={i} className="pill">{typeof s === "string" ? s : s.subdomain || s.name || JSON.stringify(s)}</span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {recon.ports.length > 0 && (
-        <div style={{ marginBottom: 20 }}>
-          <h3>Open Ports ({recon.ports.length})</h3>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>Port</th><th>Protocol</th><th>Service</th><th>State</th></tr></thead>
-              <tbody>
-                {recon.ports.map((p, i) => (
-                  <tr key={i}>
-                    <td style={{ fontFamily: "var(--mono)", fontWeight: 700 }}>{p.port || p.port_number || "-"}</td>
-                    <td>{p.protocol || "tcp"}</td>
-                    <td>{p.service || p.service_name || "-"}</td>
-                    <td><span className="badge confirmed">{p.state || "open"}</span></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {recon.endpoints.length > 0 && (
-        <div style={{ marginBottom: 20 }}>
-          <h3>Endpoints ({recon.endpoints.length})</h3>
-          <div style={{ maxHeight: 400, overflowY: "auto", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)" }}>
-            {recon.endpoints.map((ep, i) => {
-              const url = typeof ep === "string" ? ep : ep.url || ep.path || JSON.stringify(ep);
-              const method = typeof ep === "object" ? ep.method : "";
-              return (
-                <div key={i} style={{
-                  padding: "6px 14px", fontSize: 12, fontFamily: "var(--mono)",
-                  borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 8,
-                }}>
-                  {method && <span className="badge" style={{ background: "var(--bg-surface)", fontSize: 10 }}>{method}</span>}
-                  <span style={{ color: "var(--text)" }}>{url}</span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {Object.keys(recon.technologies).length > 0 && (
-        <div>
-          <h3>Technologies Detected</h3>
-          {Object.entries(recon.technologies).map(([host, techs]) => (
-            <div key={host} style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4, fontFamily: "var(--mono)" }}>{host}</div>
-              <div className="pill-row">
-                {(Array.isArray(techs) ? techs : []).map((t, i) => <span key={i} className="pill">{t}</span>)}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {recon.subdomains.length === 0 && recon.endpoints.length === 0 && recon.ports.length === 0 && (
-        <div className="empty">No recon data collected yet</div>
-      )}
-    </div>
-  );
-}
 
 
 function VulnsSection({ vulns }) {
@@ -546,32 +497,79 @@ function VulnsSection({ vulns }) {
   );
 }
 
-import React from "react";
-
 function ExploitsSection({ exploits }) {
   if (exploits.length === 0) return <div className="empty">No exploit results yet</div>;
 
   return (
     <div>
-      {exploits.map((ex, i) => (
-        <div key={i} className="card" style={{ margin: "0 0 12px" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-            <span className={`badge ${ex.success || ex.exploited ? "critical" : "medium"}`}>
-              {ex.success || ex.exploited ? "EXPLOITED" : "ATTEMPTED"}
-            </span>
-            <span style={{ fontWeight: 600, color: "var(--text-h)", fontSize: 14 }}>{ex.name || ex.title || ex.vulnerability || `Exploit #${i + 1}`}</span>
+      {exploits.map((ex, i) => {
+        const succeeded = ex.success || ex.exploited || ex.proof_found;
+        const title = ex.name || ex.title || ex.vulnerability || ex.vuln_id
+          || (ex.type ? `${ex.type} Exploit` : `Exploit #${i + 1}`);
+        const target = ex.target || ex.url || ex.location || "-";
+        const method = ex.method || ex.technique || ex.type || "-";
+        const tool = ex.tool || ex.source || ex.source_agent || ex.agent || ex.sandbox
+          || (ex.chain_id ? `Chain ${ex.chain_id}` : "-");
+        const proof = ex.proof || ex.output || ex.result || ex.content || "";
+        const error = ex.error || "";
+        const payload = ex.payload || "";
+        const details = ex.details || [];
+        const step = ex.step ? `Step ${ex.step}` : "";
+
+        return (
+          <div key={i} className="card" style={{ margin: "0 0 12px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+              <span className={`badge ${succeeded ? "critical" : error ? "medium" : "info"}`}>
+                {succeeded ? "EXPLOITED" : error ? "FAILED" : "ATTEMPTED"}
+              </span>
+              <span style={{ fontWeight: 600, color: "var(--text-h)", fontSize: 14 }}>{title}</span>
+              {step && <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{step}</span>}
+            </div>
+            <div className="vuln-detail-grid">
+              <span className="lbl">Target</span>
+              <span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{target}</span>
+              <span className="lbl">Method</span>
+              <span>{method}</span>
+              <span className="lbl">Tool / Agent</span>
+              <span>{tool}</span>
+              {ex.chain_id && <>
+                <span className="lbl">Chain</span>
+                <span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{ex.chain_id}</span>
+              </>}
+              {ex.severity && <>
+                <span className="lbl">Severity</span>
+                <span className={`badge ${ex.severity.toLowerCase()}`}>{ex.severity}</span>
+              </>}
+              {payload && <>
+                <span className="lbl">Payload</span>
+                <pre className="code-block" style={{ maxHeight: 120, margin: 0, whiteSpace: "pre-wrap" }}>{payload}</pre>
+              </>}
+              {proof && <>
+                <span className="lbl">Proof</span>
+                <pre className="code-block" style={{ maxHeight: 200, margin: 0, whiteSpace: "pre-wrap" }}>{typeof proof === "string" ? proof : JSON.stringify(proof, null, 2)}</pre>
+              </>}
+              {error && <>
+                <span className="lbl">Error</span>
+                <span style={{ color: "var(--red)", fontSize: 12 }}>{error}</span>
+              </>}
+              {details.length > 0 && <>
+                <span className="lbl">Findings ({details.length})</span>
+                <div style={{ fontSize: 12 }}>
+                  {details.map((d, j) => (
+                    <div key={j} style={{ padding: "4px 0", borderBottom: "1px solid var(--border)" }}>
+                      <span className={`badge ${(d.severity || "low").toLowerCase()}`} style={{ fontSize: 10, marginRight: 8 }}>
+                        {d.severity || "INFO"}
+                      </span>
+                      <span style={{ fontWeight: 600 }}>{d.title || d.description || JSON.stringify(d)}</span>
+                      {d.location && <span style={{ color: "var(--text-dim)", marginLeft: 8, fontFamily: "var(--mono)", fontSize: 11 }}>{d.location}</span>}
+                    </div>
+                  ))}
+                </div>
+              </>}
+            </div>
           </div>
-          <div className="vuln-detail-grid">
-            <span className="lbl">Target</span><span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{ex.target || ex.url || "-"}</span>
-            <span className="lbl">Method</span><span>{ex.method || ex.technique || "-"}</span>
-            <span className="lbl">Tool</span><span>{ex.tool || ex.source || "-"}</span>
-            {ex.payload && <><span className="lbl">Payload</span><span className="code-block" style={{ maxHeight: 120, margin: 0 }}>{ex.payload}</span></>}
-            {(ex.output || ex.result || ex.content) && (
-              <><span className="lbl">Output</span><span className="code-block" style={{ maxHeight: 200, margin: 0 }}>{ex.output || ex.result || ex.content}</span></>
-            )}
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -621,6 +619,8 @@ function RequestsSection({ requests }) {
     </div>
   );
 }
+
+
 
 
 function LogsSection({ logs, logRef, jobId }) {
@@ -700,17 +700,4 @@ function classifyLog(l) {
   if (low.includes("warn")) return "warning";
   if (low.includes("found") || low.includes("confirmed") || low.includes("success") || low.includes("vulnerability")) return "success";
   return "info";
-}
-
-function methodColor(m) {
-  const map = { GET: "#16a34a", POST: "#ca8a04", PUT: "#2563eb", DELETE: "#e7000b", PATCH: "#af50ff" };
-  return map[(m || "").toUpperCase()] || "#828384";
-}
-
-function fmtDate(ts) {
-  if (!ts) return "-";
-  try {
-    const d = new Date(ts);
-    return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  } catch { return ts; }
 }

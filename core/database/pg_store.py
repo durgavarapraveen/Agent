@@ -370,6 +370,41 @@ def _init_schema():
                     resolution_note TEXT DEFAULT ''
                 );
 
+                CREATE TABLE IF NOT EXISTS tool_outputs (
+                    id SERIAL PRIMARY KEY,
+                    scan_id TEXT NOT NULL,
+                    tool_name TEXT NOT NULL,
+                    operation TEXT DEFAULT '',
+                    target TEXT DEFAULT '',
+                    command TEXT DEFAULT '',
+                    stdout TEXT DEFAULT '',
+                    stderr TEXT DEFAULT '',
+                    exit_code INT DEFAULT -1,
+                    duration_s REAL DEFAULT 0,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+
+                CREATE TABLE IF NOT EXISTS agent_activity (
+                    id TEXT PRIMARY KEY,
+                    scan_id TEXT NOT NULL,
+                    timestamp DOUBLE PRECISION NOT NULL,
+                    action TEXT NOT NULL DEFAULT '',
+                    title TEXT NOT NULL DEFAULT '',
+                    detail TEXT DEFAULT '',
+                    tool TEXT DEFAULT '',
+                    target TEXT DEFAULT '',
+                    phase TEXT DEFAULT '',
+                    input_data TEXT DEFAULT '',
+                    output_data TEXT DEFAULT '',
+                    status TEXT DEFAULT 'ok',
+                    duration_s REAL DEFAULT 0,
+                    metadata JSONB DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_tool_outputs_scan ON tool_outputs(scan_id);
+                CREATE INDEX IF NOT EXISTS idx_activity_scan ON agent_activity(scan_id);
+                CREATE INDEX IF NOT EXISTS idx_activity_ts ON agent_activity(timestamp);
                 CREATE INDEX IF NOT EXISTS idx_review_status ON review_queue(status);
                 CREATE INDEX IF NOT EXISTS idx_review_created ON review_queue(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_vulns_scan ON vulnerabilities(scan_id);
@@ -446,7 +481,7 @@ class ScanRepo:
     def update_status(scan_id: str, status: str, **kwargs):
         fields = ["status = %s"]
         values = [status]
-        for k in ("pid", "exit_code", "error", "command"):
+        for k in ("pid", "exit_code", "error", "command", "log_file"):
             if k in kwargs:
                 fields.append(f"{k} = %s")
                 values.append(kwargs[k])
@@ -493,7 +528,13 @@ class ScanRepo:
     def get_active() -> List[Dict]:
         with DatabaseManager.get_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("SELECT * FROM scans WHERE status IN ('running', 'starting') ORDER BY started_at DESC")
+                cur.execute(
+                    "SELECT * FROM scans WHERE status IN ('running', 'starting', 'stopping') "
+                    "OR (status IN ('stopped', 'completed', 'failed') "
+                    "    AND started_at > NOW() - INTERVAL '1 hour') "
+                    "ORDER BY CASE WHEN status IN ('running', 'starting') THEN 0 "
+                    "WHEN status = 'stopping' THEN 1 ELSE 2 END, started_at DESC"
+                )
                 return [dict(r) for r in cur.fetchall()]
 
     @staticmethod
@@ -834,6 +875,90 @@ class ReconRepo:
                 if row and isinstance(row.get("data"), dict):
                     return row["data"]
                 return {}
+
+
+class ToolOutputRepo:
+    """Per-tool raw stdout/stderr persisted for UI display and debugging."""
+
+    @staticmethod
+    def save(scan_id: str, tool_name: str, operation: str, target: str,
+             command: str, stdout: str, stderr: str, exit_code: int,
+             duration_s: float = 0) -> None:
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO tool_outputs
+                        (scan_id, tool_name, operation, target, command,
+                         stdout, stderr, exit_code, duration_s)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """, (scan_id, tool_name, operation, target,
+                          command[:2000], stdout[:50000], stderr[:10000],
+                          exit_code, duration_s))
+                    conn.commit()
+        except Exception:
+            pass
+
+    @staticmethod
+    def list_by_scan(scan_id: str) -> List[Dict]:
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("""
+                        SELECT id, tool_name, operation, target, command,
+                               stdout, stderr, exit_code, duration_s, created_at
+                        FROM tool_outputs WHERE scan_id = %s
+                        ORDER BY created_at ASC
+                    """, (scan_id,))
+                    return [dict(r) for r in cur.fetchall()]
+        except Exception:
+            return []
+
+
+class ActivityLogRepo:
+    """Read-only timeline of what the agent did during a scan."""
+
+    @staticmethod
+    def insert(rec: Dict) -> None:
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO agent_activity
+                        (id, scan_id, timestamp, action, title, detail, tool, target,
+                         phase, input_data, output_data, status, duration_s, metadata)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (id) DO NOTHING
+                    """, (rec["id"], rec["scan_id"], rec["timestamp"],
+                          rec.get("action", ""), rec.get("title", ""),
+                          rec.get("detail", ""), rec.get("tool", ""),
+                          rec.get("target", ""), rec.get("phase", ""),
+                          rec.get("input_data", ""), rec.get("output_data", ""),
+                          rec.get("status", "ok"), rec.get("duration_s", 0),
+                          json.dumps(rec.get("metadata", {}), default=str)))
+                    conn.commit()
+        except Exception:
+            pass
+
+    @staticmethod
+    def list_by_scan(scan_id: str, limit: int = 500) -> List[Dict]:
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("""
+                        SELECT id, scan_id, timestamp, action, title, detail, tool, target,
+                               phase, input_data, output_data, status, duration_s, metadata,
+                               created_at
+                        FROM agent_activity WHERE scan_id = %s
+                        ORDER BY timestamp ASC LIMIT %s
+                    """, (scan_id, limit))
+                    rows = [dict(r) for r in cur.fetchall()]
+                    for r in rows:
+                        if "created_at" in r:
+                            r["created_at"] = str(r["created_at"])
+                    return rows
+        except Exception:
+            return []
 
 
 class ReviewRepo:

@@ -47,10 +47,10 @@ export default function Scans() {
                   <td>{fmtDur(s.duration_seconds)}</td>
                   <td>{s.agents_used}</td>
                   <td style={{ fontFamily: "var(--mono)", fontWeight: 600 }}>{s.total_vulns}</td>
-                  <td>{s.severity_counts.CRITICAL > 0 ? <span className="badge critical">{s.severity_counts.CRITICAL}</span> : "-"}</td>
-                  <td>{s.severity_counts.HIGH > 0 ? <span className="badge high">{s.severity_counts.HIGH}</span> : "-"}</td>
-                  <td>{s.status_counts.CONFIRMED > 0 ? <span className="badge confirmed">{s.status_counts.CONFIRMED}</span> : "-"}</td>
-                  <td>{s.status_counts.REJECTED > 0 ? <span className="badge rejected">{s.status_counts.REJECTED}</span> : "-"}</td>
+                  <td>{s.severity_counts?.CRITICAL > 0 ? <span className="badge critical">{s.severity_counts.CRITICAL}</span> : "-"}</td>
+                  <td>{s.severity_counts?.HIGH > 0 ? <span className="badge high">{s.severity_counts.HIGH}</span> : "-"}</td>
+                  <td>{s.status_counts?.CONFIRMED > 0 ? <span className="badge confirmed">{s.status_counts.CONFIRMED}</span> : "-"}</td>
+                  <td>{s.status_counts?.REJECTED > 0 ? <span className="badge rejected">{s.status_counts.REJECTED}</span> : "-"}</td>
                 </tr>
               ))}
             </tbody>

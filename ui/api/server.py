@@ -1,6 +1,7 @@
 """AntiGravity Dashboard API — PostgreSQL-backed, no flat files or SQLite."""
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -9,6 +10,8 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger("antigravity.api")
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -75,7 +78,8 @@ def _persist_scan_state():
         try:
             ScanRepo.update_status(job_id, job.get("status", "unknown"),
                                    pid=job.get("pid"), exit_code=job.get("exit_code"),
-                                   error=job.get("error", ""), command=job.get("command", ""))
+                                   error=job.get("error", ""), command=job.get("command", ""),
+                                   log_file=job.get("log_file", ""))
         except Exception:
             pass
 
@@ -107,15 +111,18 @@ def _load_scan_state():
         for scan in ScanRepo.get_active():
             sid = scan["scan_id"]
             pid = scan.get("pid")
-            if pid and not _is_pid_alive(pid):
-                ScanRepo.update_status(sid, "completed")
+            status = scan["status"]
+            if pid and not _is_pid_alive(pid) and status in ("running", "starting", "stopping"):
+                status = "stopped" if status == "stopping" else "completed"
+                ScanRepo.update_status(sid, status)
+            if status in ("cancelled", "completed", "failed"):
                 continue
             _active_scans[sid] = {
                 "job_id": sid, "target": scan["target"], "tier": scan.get("tier", "POC"),
-                "status": scan["status"], "started_at": str(scan.get("started_at", "")),
+                "status": status, "started_at": str(scan.get("started_at", "")),
                 "finished_at": str(scan.get("finished_at", "")), "pid": pid,
                 "exit_code": scan.get("exit_code"), "error": scan.get("error", ""),
-                "log_file": scan.get("log_file", str(REPORTS_DIR / f"scan_log_{sid}.txt")),
+                "log_file": scan.get("log_file") or str(REPORTS_DIR / f"scan_log_{sid}.txt"),
                 "command": scan.get("command", ""),
             }
     except Exception:
@@ -152,6 +159,15 @@ def _run_scan_process(job_id: str, target: str, tier: str,
     _active_scans[job_id]["status"] = "running"
     _active_scans[job_id]["command"] = " ".join(cmd)
     _persist_scan_state()
+
+    # Clean any leftover stop signal from a previous kill-all
+    slug = target.replace("://", "_").replace("/", "_").replace(":", "_")
+    old_signal = BASE / ".antigravity" / f"stop_{slug}.signal"
+    if old_signal.exists():
+        try:
+            old_signal.unlink()
+        except Exception:
+            pass
 
     try:
         with open(log_file, "w", encoding="utf-8") as lf:
@@ -219,7 +235,20 @@ def _get_scans() -> list:
 
 @app.get("/api/targets")
 def list_targets():
-    return TargetRepo.list_all()
+    targets = TargetRepo.list_all()
+    scans = ScanRepo.list_all()
+    for t in targets:
+        url = t.get("url", "")
+        matching = [s for s in scans if s.get("target", "") == url
+                    or url.endswith(s.get("target", "\x00"))]
+        t["scan_count"] = len(matching)
+        t["added"] = str(t.get("added_at", "")) if t.get("added_at") else None
+        if matching:
+            latest = max(matching, key=lambda s: s.get("started_at") or "")
+            t["last_scan"] = str(latest.get("started_at", ""))
+        else:
+            t["last_scan"] = None
+    return targets
 
 
 @app.post("/api/targets")
@@ -283,6 +312,20 @@ def get_live_results():
 
 @app.get("/api/scans/active")
 def list_active_scans():
+    dirty = False
+    for job in _active_scans.values():
+        pid = job.get("pid")
+        if pid and not _is_pid_alive(pid) and job["status"] in ("running", "starting", "stopping"):
+            job["status"] = "stopped" if job["status"] == "stopping" else "completed"
+            dirty = True
+    # Auto-clean finished scans (completed/failed/cancelled) from active list
+    finished = [jid for jid, j in _active_scans.items()
+                if j["status"] in ("completed", "failed", "cancelled")]
+    for jid in finished:
+        del _active_scans[jid]
+        dirty = True
+    if dirty:
+        _persist_scan_state()
     return list(_active_scans.values())
 
 
@@ -330,7 +373,8 @@ def get_scan(scan_id: str):
             "directories": context.get("directories", []),
             "secrets": context.get("secrets", []),
         },
-        "exploits": [], "checkpoints": [],
+        "exploits": report.get("exploit_results", []),
+        "checkpoints": [],
     }
 
 
@@ -344,9 +388,33 @@ def get_recon(scan_id: str):
         raise HTTPException(500, f"recon data unavailable: {e}")
 
 
+@app.get("/api/scans/{scan_id}/tool-outputs")
+def get_tool_outputs(scan_id: str):
+    """Per-tool raw stdout/stderr for a scan — shows what each tool produced."""
+    try:
+        from core.database.pg_store import ToolOutputRepo
+        rows = ToolOutputRepo.list_by_scan(scan_id)
+        for r in rows:
+            if "created_at" in r:
+                r["created_at"] = str(r["created_at"])
+        return rows
+    except Exception as e:
+        raise HTTPException(500, f"tool outputs unavailable: {e}")
+
+
 @app.get("/api/scans/{scan_id}/vulnerabilities")
 def get_vulnerabilities(scan_id: str):
     return VulnRepo.get_by_scan(scan_id)
+
+
+@app.get("/api/scans/{scan_id}/activity")
+def get_activity_log(scan_id: str, limit: int = 500):
+    """Agent activity timeline — read-only log of what the agent did, how, and the output."""
+    try:
+        from core.reporting.agent_activity import get_activity_log
+        return get_activity_log().get(scan_id, limit)
+    except Exception as e:
+        raise HTTPException(500, f"activity log unavailable: {e}")
 
 
 # ── Human review queue: agent successes to showcase + failures to pentest manually ──
@@ -480,7 +548,8 @@ def run_scan(body: ScanRequest):
 
     _active_scans[job_id]["phases"] = body.phases or ["RECON", "ACTIVE_SCANNING", "EXPLOITATION", "REPORTING"]
     try:
-        ScanRepo.create(job_id, body.target, body.tier)
+        ScanRepo.create(job_id, body.target, body.tier,
+                        log_file=str(REPORTS_DIR / f"scan_log_{job_id}.txt"))
     except Exception:
         pass
     _persist_scan_state()
@@ -504,19 +573,40 @@ def get_scan_job(job_id: str):
     raise HTTPException(404, "Job not found")
 
 
+def _resolve_log_file(job_id: str) -> Path:
+    if job_id in _active_scans:
+        raw = _active_scans[job_id].get("log_file", "")
+        if raw:
+            return Path(raw)
+    default = REPORTS_DIR / f"scan_log_{job_id}.txt"
+    if default.is_file():
+        return default
+    try:
+        row = ScanRepo.get(job_id)
+        if row and row.get("log_file"):
+            p = Path(row["log_file"])
+            if p.is_file():
+                return p
+    except Exception:
+        pass
+    return default
+
+
 @app.get("/api/scans/job/{job_id}/logs")
 def get_scan_logs(job_id: str, tail: int = 100):
-    log_file = None
-    if job_id in _active_scans:
-        log_file = Path(_active_scans[job_id]["log_file"])
-    else:
-        raise HTTPException(404, "Job not found")
+    try:
+        log_file = _resolve_log_file(job_id)
 
-    if not log_file or not log_file.exists():
-        return {"lines": [], "total": 0}
-    with open(log_file, "r", encoding="utf-8", errors="replace") as f:
-        all_lines = f.readlines()
-    return {"lines": all_lines[-tail:], "total": len(all_lines)}
+        if not log_file.is_file():
+            return {"lines": [], "total": 0}
+        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+        stripped = [line.rstrip("\r\n") for line in all_lines[-tail:]]
+        return {"lines": stripped, "total": len(all_lines)}
+    except Exception as e:
+        import traceback
+        logger.error(f"get_scan_logs error: {traceback.format_exc()}")
+        return {"lines": [f"Error reading logs: {e}"], "total": 0}
 
 
 @app.post("/api/scans/job/{job_id}/stop")
@@ -560,6 +650,32 @@ def cancel_scan(job_id: str):
             stop_file.unlink()
 
     return {"status": "cancelled", "job_id": job_id}
+
+
+@app.post("/api/scans/kill-all")
+def kill_all_scans():
+    """Emergency kill switch — terminate all running scan processes and mark them cancelled."""
+    killed = []
+    for job_id, job in list(_active_scans.items()):
+        pid = job.get("pid")
+        target = job.get("target", "")
+        if pid and _is_pid_alive(pid):
+            try:
+                import signal
+                os.kill(pid, signal.SIGTERM)
+            except Exception:
+                pass
+        if target:
+            slug = target.replace("://", "_").replace("/", "_").replace(":", "_")
+            stop_file = BASE / ".antigravity" / f"stop_{slug}.signal"
+            stop_file.parent.mkdir(parents=True, exist_ok=True)
+            stop_file.touch()
+        job["status"] = "cancelled"
+        ScanRepo.update_status(job_id, "cancelled")
+        killed.append(job_id)
+    _active_scans.clear()
+    _persist_scan_state()
+    return {"status": "all_killed", "killed": killed, "count": len(killed)}
 
 
 class ResumeRequest(BaseModel):
@@ -611,10 +727,8 @@ def resume_scan(body: ResumeRequest):
 @app.get("/api/scans/job/{job_id}/logs-full")
 def get_scan_logs_full(job_id: str):
     """Return the complete scan log file."""
-    if job_id not in _active_scans:
-        raise HTTPException(404, "Job not found")
-    log_file = Path(_active_scans[job_id]["log_file"])
-    if not log_file.exists():
+    log_file = _resolve_log_file(job_id)
+    if not log_file.is_file():
         return {"lines": [], "total": 0}
     with open(log_file, "r", encoding="utf-8", errors="replace") as f:
         all_lines = f.readlines()
@@ -625,10 +739,8 @@ def get_scan_logs_full(job_id: str):
 def download_scan_logs(job_id: str):
     """Download the complete scan log as a file."""
     from fastapi.responses import FileResponse
-    log_file = None
-    if job_id in _active_scans:
-        log_file = Path(_active_scans[job_id]["log_file"])
-    if not log_file or not log_file.exists():
+    log_file = _resolve_log_file(job_id)
+    if not log_file.is_file():
         raise HTTPException(404, "Log file not found")
     return FileResponse(str(log_file), filename=f"scan_{job_id}_logs.txt", media_type="text/plain")
 

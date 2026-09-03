@@ -37,7 +37,7 @@ export default function ReviewQueue() {
   return (
     <div>
       <h1>Agent Review Queue</h1>
-      <p style={{ color: "var(--muted)", marginTop: -8 }}>
+      <p style={{ color: "var(--text-dim)", marginTop: -8 }}>
         Confirmed exploits to verify &amp; showcase, and objectives the agent couldn't crack —
         handed to you with what it tried and suggested next steps.
       </p>
@@ -57,16 +57,14 @@ export default function ReviewQueue() {
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-        <button className={`badge ${tab === "manual" ? "scope-violation" : ""}`}
-          style={tabBtn(tab === "manual")} onClick={() => setTab("manual")}>
+      <div className="tabs" style={{ marginBottom: 16 }}>
+        <button className={`tab ${tab === "manual" ? "active" : ""}`} onClick={() => setTab("manual")}>
           Needs Attention ({summary.needs_manual || 0})
         </button>
-        <button className={`badge ${tab === "success" ? "scope-ok" : ""}`}
-          style={tabBtn(tab === "success")} onClick={() => setTab("success")}>
+        <button className={`tab ${tab === "success" ? "active" : ""}`} onClick={() => setTab("success")}>
           Confirmed Exploits ({summary.success || 0})
         </button>
-        <button style={tabBtn(false)} onClick={load}>Refresh</button>
+        <button className="btn btn-sm" style={{ marginLeft: "auto", alignSelf: "center" }} onClick={load}>Refresh</button>
       </div>
 
       {loading ? (
@@ -98,7 +96,7 @@ export default function ReviewQueue() {
                   )}
                 </div>
               </div>
-              <div style={{ color: "var(--muted)", fontSize: 12, marginTop: 6 }}>
+              <div style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 6 }}>
                 <span style={{ fontFamily: "var(--mono)" }}>{r.target}</span>
                 {r.category ? <> &middot; {r.category}</> : null}
                 {r.steps ? <> &middot; {r.steps} steps</> : null}
@@ -123,7 +121,7 @@ export default function ReviewQueue() {
                   {r.tried_summary && (
                     <div style={{ fontSize: 12, marginBottom: 8 }}>
                       <strong>What the agent tried:</strong>
-                      <div style={{ fontFamily: "var(--mono)", color: "var(--muted)", marginTop: 4 }}>{r.tried_summary}</div>
+                      <div style={{ fontFamily: "var(--mono)", color: "var(--text-dim)", marginTop: 4 }}>{r.tried_summary}</div>
                     </div>
                   )}
                   {Array.isArray(r.history) && r.history.length > 0 && (

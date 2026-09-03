@@ -1,7 +1,11 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { api } from "../api";
 
 export default function Settings() {
   const [saved, setSaved] = useState(false);
+  const [killing, setKilling] = useState(false);
+  const [killResult, setKillResult] = useState(null);
+  const [apiStatus, setApiStatus] = useState("checking");
   const [defaults, setDefaults] = useState(() => {
     try { return JSON.parse(localStorage.getItem("ag_defaults") || "{}"); }
     catch { return {}; }
@@ -15,6 +19,12 @@ export default function Settings() {
     });
     setSaved(false);
   };
+
+  useEffect(() => {
+    api.getScans()
+      .then(() => setApiStatus("connected"))
+      .catch(() => setApiStatus("error"));
+  }, []);
 
   const save = () => {
     localStorage.setItem("ag_defaults", JSON.stringify(defaults));
@@ -67,12 +77,45 @@ export default function Settings() {
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{ color: "var(--text-dim)", fontWeight: 600, minWidth: 100 }}>Status</span>
-            <span style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--green)" }}>
-              <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--green)", display: "inline-block" }} />
-              Connected
+            <span style={{ display: "flex", alignItems: "center", gap: 6, color: apiStatus === "connected" ? "var(--green)" : apiStatus === "error" ? "var(--red)" : "var(--text-dim)" }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", background: apiStatus === "connected" ? "var(--green)" : apiStatus === "error" ? "var(--red)" : "var(--text-dim)", display: "inline-block" }} />
+              {apiStatus === "connected" ? "Connected" : apiStatus === "error" ? "Disconnected" : "Checking..."}
             </span>
           </div>
         </div>
+      </div>
+
+      <div className="card" style={{ borderColor: "var(--red, #e74c3c)" }}>
+        <h3 style={{ color: "var(--red, #e74c3c)" }}>Emergency Kill Switch</h3>
+        <p style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 16 }}>
+          Immediately terminate all running scan processes and mark them as cancelled.
+          This cannot be undone.
+        </p>
+        <button
+          className="btn"
+          disabled={killing}
+          onClick={() => {
+            if (!window.confirm("Kill ALL running scans? This will terminate every active scan process immediately.")) return;
+            setKilling(true);
+            setKillResult(null);
+            api.killAllScans()
+              .then(r => setKillResult({ ok: true, count: r.count }))
+              .catch(e => setKillResult({ ok: false, error: e.message }))
+              .finally(() => setKilling(false));
+          }}
+          style={{
+            background: "var(--red, #e74c3c)", color: "#fff", fontWeight: 700,
+            padding: "10px 24px", border: "none", borderRadius: "var(--radius-sm)",
+            cursor: killing ? "not-allowed" : "pointer", opacity: killing ? 0.6 : 1,
+          }}
+        >
+          {killing ? "Killing..." : "Kill All Scans"}
+        </button>
+        {killResult && (
+          <div style={{ marginTop: 12, fontSize: 13, color: killResult.ok ? "var(--green)" : "var(--red)" }}>
+            {killResult.ok ? `Killed ${killResult.count} scan(s).` : `Error: ${killResult.error}`}
+          </div>
+        )}
       </div>
 
       <div className="card">

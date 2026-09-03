@@ -260,7 +260,7 @@ class KaliDockerExecutor:
             return max(requested, 900)
         if any(t in cmd for t in ("theharvester", "harvester", "nmap", "amass",
                                   "feroxbuster", "ffuf", "gobuster", "dirsearch",
-                                  "katana", "sqlmap", "wpscan", "dalfox")):
+                                  "katana", "sqlmap", "wpscan", "dalfox", "nikto")):
             return max(requested, 600)
         return requested
 

@@ -332,6 +332,19 @@ class CapabilityWorker:
         logger.info(f"TOOL_EXECUTED: tool={tool_name}")
         raw_output_repr = f"exit_code={exit_code}, stdout={stdout[:500]!r}, stderr={stderr[:300]!r}, raw_data={extracted_data!r}"
         logger.info(f"TOOL_RESULT_RAW: tool={tool_name}, output={raw_output_repr}")
+
+        # Persist raw tool output to DB for the Recon UI.
+        _sid = getattr(self.ctx, "scan_id", "") if self.ctx else ""
+        if _sid:
+            try:
+                from core.database.pg_store import ToolOutputRepo
+                ToolOutputRepo.save(
+                    scan_id=_sid, tool_name=tool_name, operation=capability,
+                    target=target, command=command, stdout=stdout,
+                    stderr=str(stderr), exit_code=exit_code,
+                )
+            except Exception:
+                pass
         logger.info(f"RESULT_COMPRESSION: {orig_tokens} tokens → {comp_tokens} tokens ({pct_saved}% saved)")
         sample_output = formatted_summary.splitlines()[0] if formatted_summary else ""
         logger.info(f"FORMATTED_OUTPUT: \"{sample_output}\"")

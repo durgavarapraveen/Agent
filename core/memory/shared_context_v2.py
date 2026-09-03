@@ -150,6 +150,28 @@ class SharedContextV2:
     def get_technologies(self) -> Dict[str, Any]:
         return self.technologies
 
+    def add_exploit_result(self, result: Dict):
+        self.exploit_results.append(result)
+
+    def add_directory(self, directory: str, source: str = None):
+        if directory not in self.directories:
+            self.directories.append(directory)
+
+    def add_secret(self, secret: Dict):
+        for existing in self.secrets:
+            if existing.get("value") == secret.get("value") and existing.get("location") == secret.get("location"):
+                return
+        self.secrets.append(secret)
+
+    def add_captured_request(self, req: Dict):
+        self.captured_requests.append(req)
+
+    def add_ssl_info(self, host: str, info: Dict):
+        self.ssl_info[host] = info
+
+    def add_headers(self, host: str, hdrs: Dict):
+        self.headers[host] = hdrs
+
     def add_event(self, event: str, data: Any = None):
         self.brain_log.append(f"[event] {event}: {data}")
 

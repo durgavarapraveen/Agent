@@ -3,18 +3,30 @@
     "agentic_executor|vulnerability": {
       "strategy": "agentic_executor",
       "test_type": "VULNERABILITY",
-      "attempts": 5,
-      "confirmed": 3,
-      "false_positive": 2,
+      "attempts": 12,
+      "confirmed": 6,
+      "false_positive": 6,
       "failure": 0,
       "uncertain": 0,
-      "reward_sum": 2.0999999999999996,
+      "reward_sum": 3.599999999999999,
       "cost_seconds": 0.0,
       "cost_tokens": 0
     },
     "profiler|missing_header": {
       "strategy": "profiler",
       "test_type": "MISSING_HEADER",
+      "attempts": 8,
+      "confirmed": 0,
+      "false_positive": 8,
+      "failure": 0,
+      "uncertain": 0,
+      "reward_sum": -4.8,
+      "cost_seconds": 0.0,
+      "cost_tokens": 0
+    },
+    "agentic_executor|misconfiguration": {
+      "strategy": "agentic_executor",
+      "test_type": "MISCONFIGURATION",
       "attempts": 4,
       "confirmed": 0,
       "false_positive": 4,
@@ -23,8 +35,32 @@
       "reward_sum": -2.4,
       "cost_seconds": 0.0,
       "cost_tokens": 0
+    },
+    "nuclei|nuclei_match": {
+      "strategy": "nuclei",
+      "test_type": "NUCLEI_MATCH",
+      "attempts": 1,
+      "confirmed": 0,
+      "false_positive": 1,
+      "failure": 0,
+      "uncertain": 0,
+      "reward_sum": -0.6,
+      "cost_seconds": 0.0,
+      "cost_tokens": 0
+    },
+    "unknown|missing_cors": {
+      "strategy": "unknown",
+      "test_type": "missing_cors",
+      "attempts": 1,
+      "confirmed": 0,
+      "false_positive": 1,
+      "failure": 0,
+      "uncertain": 0,
+      "reward_sum": -0.6,
+      "cost_seconds": 0.0,
+      "cost_tokens": 0
     }
   },
-  "total_pulls": 9,
-  "updated_at": 1788431666.8971627
+  "total_pulls": 26,
+  "updated_at": 1788456138.3396611
 }

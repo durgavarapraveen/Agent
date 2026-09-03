@@ -85,9 +85,11 @@ class ReviewQueue:
         scan_id: str = "",
     ) -> Dict[str, Any]:
         """Append a review record. Returns it."""
+        now = time.time()
         rec = {
             "id": uuid.uuid4().hex[:12],
-            "timestamp": time.time(),
+            "timestamp": now,
+            "created_at": now,
             "target": target,
             "title": title,
             "status": status,

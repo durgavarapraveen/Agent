@@ -167,11 +167,50 @@ class CriticAgent:
         """Return the critic's verdict for a single finding. Never raises."""
         ftype = str(finding.get("type") or finding.get("vuln_type") or "").upper()
 
-        # Cost short-circuit: exploit agent already proved it with live evidence.
+        # Cost short-circuit: exploit agent or scanner already proved it.
         if finding.get("exploited") and finding.get("evidence") and ftype in _STRONG_TOOL_TYPES:
             return CriticVerdict(
                 verdict=Verdict.CONFIRMED, confidence=0.9,
                 reasoning="Exploit agent produced live proof for a strong-signal finding.",
+                model="heuristic",
+            )
+        # Auto-confirm scanner-produced findings with proof text.
+        _scanner_tools = {"sqlmap", "nuclei", "nikto", "sslscan", "dalfox", "nmap"}
+        if (finding.get("proof") and
+            (str(finding.get("tool") or "").lower() in _scanner_tools or ftype in _STRONG_TOOL_TYPES)):
+            return CriticVerdict(
+                verdict=Verdict.CONFIRMED, confidence=0.85,
+                reasoning=f"Tool '{finding.get('tool', 'scanner')}' produced concrete proof.",
+                model="heuristic",
+            )
+        # Auto-confirm LLM/agentic findings that have concrete HTTP evidence.
+        _agentic_sources = {
+            "exploit_agent", "agentic_executor", "objective_agent",
+            "llm_agent", "central_brain",
+        }
+        source = str(finding.get("source") or finding.get("source_agent") or finding.get("tool") or "").lower()
+        has_concrete_proof = bool(
+            finding.get("proof") or finding.get("evidence")
+            or finding.get("exploited") or finding.get("confirmed")
+        )
+        if source in _agentic_sources and has_concrete_proof and ftype in _STRONG_TOOL_TYPES:
+            return CriticVerdict(
+                verdict=Verdict.CONFIRMED, confidence=0.85,
+                reasoning=f"Agentic executor '{source}' produced concrete evidence for {ftype}.",
+                model="heuristic",
+            )
+        # Auto-confirm any finding with HTTP response proof showing exploitation succeeded.
+        proof_text = str(finding.get("proof") or finding.get("evidence") or "").lower()
+        _exploitation_markers = [
+            "union select", "union+select", "' or 1=1", "admin' --",
+            "extractvalue(", "updatexml(", "load_file(", "into outfile",
+            "xp_cmdshell", "<script>", "alert(", "onerror=",
+            "root:x:0", "/etc/passwd", "uid=0",
+        ]
+        if has_concrete_proof and any(m in proof_text for m in _exploitation_markers):
+            return CriticVerdict(
+                verdict=Verdict.CONFIRMED, confidence=0.90,
+                reasoning="Finding proof contains concrete exploitation markers.",
                 model="heuristic",
             )
 
@@ -282,12 +321,18 @@ class CriticAgent:
                 # Anything the tools/agent actually demonstrated (evidence/proof/exploited/
                 # confirmed, or produced by a scanner/agent source) is downgraded, never
                 # dropped — a skeptical LLM must not delete real findings on a live target.
+                _tool_sources = {
+                    "exploit_agent", "agentic_executor", "objective_agent",
+                    "sqlmap", "nuclei", "nikto", "dalfox", "sslscan",
+                    "nmap", "ffuf", "gobuster", "feroxbuster", "katana",
+                    "arjun", "profiler",
+                }
                 has_evidence = bool(
                     finding.get("exploited") or finding.get("confirmed")
                     or finding.get("evidence") or finding.get("proof")
-                    or str(finding.get("source") or "").lower() in
-                    ("exploit_agent", "agentic_executor", "objective_agent",
-                     "sqlmap", "nuclei", "nikto", "dalfox")
+                    or str(finding.get("source") or "").lower() in _tool_sources
+                    or str(finding.get("tool") or "").lower() in _tool_sources
+                    or str(finding.get("type") or "").upper() in _STRONG_TOOL_TYPES
                 )
                 if quarantine and not has_evidence:
                     finding["status"] = "QUARANTINED"

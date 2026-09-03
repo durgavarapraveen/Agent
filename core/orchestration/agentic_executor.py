@@ -242,12 +242,10 @@ class AgenticExecutor:
         self._available_tools = self._probe_tool_availability()
         available_tools_str = ", ".join(sorted(self._available_tools)) if self._available_tools else "none (use http_request for all testing)"
 
-        context_summary = json.dumps(self.ctx.get_full_summary(max_chars=4000), default=str)
-
-        known_subdomains = ", ".join(self.ctx.subdomains[:20]) if self.ctx.subdomains else "none discovered yet"
+        known_subdomains = ", ".join(self.ctx.subdomains[:10]) if self.ctx.subdomains else "none"
         known_endpoints = str(len(self.ctx.endpoints)) + " endpoints"
-        known_vulns = str(len(self.ctx.vulnerabilities)) + " vulnerabilities"
-        known_techs = json.dumps(self.ctx.technologies, default=str) if self.ctx.technologies else "unknown"
+        known_vulns = str(len(self.ctx.vulnerabilities)) + " vulns"
+        known_techs = json.dumps(self.ctx.technologies, default=str)[:500] if self.ctx.technologies else "unknown"
 
         user_message = (
             f"## Objective\n{objective}\n\n"
@@ -408,16 +406,32 @@ class AgenticExecutor:
                     self.result.errors_encountered.append(f"{tool_id}: {err_msg}")
 
             if result.stdout:
-                stdout_trimmed = str(result.stdout)[:8000]
+                stdout_trimmed = str(result.stdout)[:4000]
                 output_parts.append(f"\n--- STDOUT ({len(str(result.stdout))} bytes) ---\n{stdout_trimmed}")
 
             if result.stderr:
-                stderr_trimmed = str(result.stderr)[:2000]
+                stderr_trimmed = str(result.stderr)[:1000]
                 output_parts.append(f"\n--- STDERR ---\n{stderr_trimmed}")
 
             if result.data:
-                data_str = json.dumps(result.data, default=str)[:3000]
+                data_str = json.dumps(result.data, default=str)[:2000]
                 output_parts.append(f"\n--- Parsed Data ---\n{data_str}")
+
+            # Persist raw output for the Recon UI.
+            _sid = getattr(self.ctx, "scan_id", "")
+            if _sid:
+                try:
+                    from core.database.pg_store import ToolOutputRepo
+                    ToolOutputRepo.save(
+                        scan_id=_sid, tool_name=tool_id,
+                        operation=operation, target=target,
+                        command=f"{tool_id} {target} {extra_args}".strip(),
+                        stdout=str(result.stdout or ""),
+                        stderr=str(result.stderr or ""),
+                        exit_code=getattr(result, "exit_code", -1) or -1,
+                    )
+                except Exception:
+                    pass
 
             return "\n".join(output_parts)
 
@@ -442,16 +456,20 @@ class AgenticExecutor:
             async with httpx_lib.AsyncClient(follow_redirects=follow, timeout=30, verify=False) as client:
                 resp = await client.request(method, url, headers=headers, content=body if body else None)
 
+                # Only include security-relevant headers to save tokens.
+                sec_headers = {k: v for k, v in resp.headers.items()
+                               if k.lower() in ("content-type", "server", "x-powered-by",
+                                   "set-cookie", "www-authenticate", "location",
+                                   "x-frame-options", "content-security-policy",
+                                   "strict-transport-security", "access-control-allow-origin",
+                                   "x-content-type-options", "authorization")}
+                hdr_str = "\n".join(f"{k}: {v}" for k, v in sec_headers.items())
+                body_text = resp.text[:3000] if resp.text else "(empty)"
                 output_parts = [
-                    f"HTTP {resp.status_code} {resp.reason_phrase}",
-                    f"URL: {resp.url}",
-                    "\n--- Response Headers ---",
+                    f"HTTP {resp.status_code} {resp.reason_phrase} | {resp.url}",
+                    hdr_str,
+                    f"\n--- Body ({len(resp.text)}b) ---\n{body_text}",
                 ]
-                for k, v in resp.headers.items():
-                    output_parts.append(f"{k}: {v}")
-
-                body_text = resp.text[:5000] if resp.text else "(empty body)"
-                output_parts.append(f"\n--- Response Body ({len(resp.text)} bytes) ---\n{body_text}")
 
                 return "\n".join(output_parts)
 
@@ -521,20 +539,35 @@ class AgenticExecutor:
             (f"\n  ... and {len(filtered) - 50} more" if len(filtered) > 50 else "")
         )
 
+    _VULN_TYPES = frozenset({
+        "vulnerability", "misconfiguration", "sqli", "sql_injection",
+        "xss", "cross_site_scripting", "rce", "command_injection",
+        "ssrf", "lfi", "rfi", "xxe", "ssti", "idor", "csrf",
+        "open_redirect", "path_traversal", "file_upload",
+        "auth_bypass", "broken_access", "privilege_escalation",
+        "information_disclosure", "sensitive_data", "default_credentials",
+        "cors_misconfiguration", "clickjacking", "header_injection",
+        "deserialization", "weak_crypto", "session_fixation",
+    })
+
     def _ingest_to_shared_context(self):
         """Push all findings back into shared context."""
         for finding in self.result.findings:
-            ftype = finding.get("type", "")
+            ftype = finding.get("type", "").lower().strip()
 
-            if ftype == "vulnerability" or ftype == "misconfiguration":
+            if ftype in self._VULN_TYPES or "vuln" in ftype or "inject" in ftype:
                 self.ctx.add_vulnerability({
                     "title": finding["title"],
                     "type": ftype.upper(),
                     "severity": finding.get("severity", "info"),
                     "details": finding.get("details", ""),
                     "evidence": finding.get("evidence", ""),
+                    "proof": finding.get("evidence", ""),
                     "target": finding.get("target", self.ctx.target),
+                    "location": finding.get("target", self.ctx.target),
                     "source": "agentic_executor",
+                    "source_agent": "agentic_executor",
+                    "confirmed": True,
                 })
 
             elif ftype == "subdomain":

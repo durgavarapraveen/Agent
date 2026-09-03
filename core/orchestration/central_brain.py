@@ -306,14 +306,30 @@ class CentralBrain:
         """Unified recon view for the UI: ALL subdomains labelled live/dead, the
         filtered endpoint catalog, technologies, ports, ips, captured requests.
         Used by both the live-results feed and the final report."""
-        subs = getattr(self.ctx, "subdomains", []) or []
+        subs = list(getattr(self.ctx, "subdomains", []) or [])
+        # Merge OSINT-discovered subdomains into the main list
+        osint_subs = getattr(self.ctx, "discovered_subdomains", []) or []
+        for s in osint_subs:
+            name = s.name if hasattr(s, 'name') else str(s)
+            if name and name not in subs:
+                subs.append(name)
+        # Merge discovered_domains too
+        for s in (getattr(self.ctx, "discovered_domains", []) or []):
+            name = str(s)
+            if name and name not in subs:
+                subs.append(name)
+
         sub_status = getattr(self.ctx, "subdomain_status", {}) or {}
         catalog = getattr(self.ctx, "endpoint_catalog", []) or []
 
+        seen_hosts = set()
         subs_out = []
         for s in subs:
             host = s if isinstance(s, str) else (s.get("name") if isinstance(s, dict) else str(s))
             host_n = str(host).replace("https://", "").replace("http://", "").rstrip("/").lower()
+            if host_n in seen_hosts:
+                continue
+            seen_hosts.add(host_n)
             st = sub_status.get(host_n, {})
             subs_out.append({
                 "name": host_n,
@@ -603,15 +619,12 @@ class CentralBrain:
             attack_chains = getattr(self.ctx, 'attack_chains', None) or {}
 
             recon_ctx = self._build_recon_context()
+            recon_ctx["ports"] = _serialize(ports) if ports else recon_ctx.get("ports", [])
+            recon_ctx["ips"] = _serialize(ips) if ips else recon_ctx.get("ips", [])
+            if techs and isinstance(techs, dict):
+                recon_ctx["technologies"] = techs
             results = {
-                "recon": {
-                    "subdomains": recon_ctx["subdomains"],
-                    "endpoints": recon_ctx["endpoints"],
-                    "technologies": techs if isinstance(techs, dict) else {},
-                    "ports": _serialize(ports),
-                    "ips": _serialize(ips),
-                    "subdomain_summary": recon_ctx["subdomain_summary"],
-                },
+                "recon": recon_ctx,
                 "vulnerabilities": _serialize(vulns),
                 "exploits": _serialize(exploits),
                 "captured_requests": _serialize(captured[:100]),
@@ -671,6 +684,11 @@ class CentralBrain:
         # (even seconds apart) never collide or merge.
         from core.database.pg_store import make_run_id as _make_run_id
         self._scan_id = scan_id or _make_run_id(target)
+        self.ctx.scan_id = self._scan_id
+
+        from core.reporting.agent_activity import get_activity_log
+        self._activity = get_activity_log()
+
         self.max_agents_per_phase = 15
         self.report_dir = Path("reports")
         self.report_dir.mkdir(exist_ok=True)
@@ -919,6 +937,17 @@ class CentralBrain:
             state = self.checkpointer.load_checkpoint(resume_checkpoint)
             if state:
                 self.checkpointer.apply_checkpoint(self, state)
+
+    def _log_activity(self, action, title, **kwargs):
+        try:
+            self._activity.record(
+                scan_id=self._scan_id, action=action, title=title,
+                target=kwargs.get("target", self.ctx.target),
+                phase=kwargs.get("phase", getattr(self.current_phase, "value", "")),
+                **{k: v for k, v in kwargs.items() if k not in ("target", "phase")},
+            )
+        except Exception:
+            pass
 
     def _register_capabilities(self):
         """Register all deterministic executors in the capability registry."""
@@ -1368,6 +1397,8 @@ class CentralBrain:
 
                 self._write_progress({"phase": self.current_phase.value, "status": "running"})
                 logger.info(f"\n>>> ENTERING MAIN PHASE: {self.current_phase.value}")
+                self._log_activity("phase", f"Starting phase: {self.current_phase.value}",
+                                   detail=f"Beginning {self.current_phase.value} phase on {self.ctx.target}")
                 await self.run_phase(self.current_phase.value)
 
                 # Record state
@@ -1396,6 +1427,11 @@ class CentralBrain:
         logger.info(f"Agents spawned: {len(self.ctx.agents_spawned)}")
         logger.info(f"Vulnerabilities: {len(self.ctx.vulnerabilities)}")
         logger.info(f"Exploits executed: {len(self.ctx.exploit_results)}")
+        self._log_activity("phase",
+            f"Scan {'stopped' if stopped else 'completed'} in {duration:.0f}s",
+            detail=f"Agents: {len(self.ctx.agents_spawned)}, Vulns: {len(self.ctx.vulnerabilities)}, "
+                   f"Exploits: {len(self.ctx.exploit_results)}",
+            duration_s=duration)
         return {"stopped": stopped, "phase": self.current_phase.value if self.current_phase else None}
 
     async def run_phase(self, phase: str):
@@ -1416,9 +1452,13 @@ class CentralBrain:
             await self._analyze_client_scripts()
             try:
                 self._preflight_endpoint_analysis()    # consolidate + filter endpoints
+                self._feed_catalog_to_attack_surface() # convert catalog → Endpoint objects → injection matrix
             except Exception as e:
                 logger.warning(f"[Preflight] endpoint analysis failed (non-fatal): {e}")
             self._persist_recon_data()                 # store full recon intel in DB for the UI
+            self._log_activity("phase", "Recon complete",
+                detail=f"Subdomains: {len(self.ctx.subdomains)}, Endpoints: {len(self.ctx.endpoints)}, "
+                       f"Ports: {len(getattr(self.ctx, 'ports', []))}")
 
             # API Schema Auto-Import (OpenAPI/Swagger/GraphQL)
             try:
@@ -1449,6 +1489,11 @@ class CentralBrain:
                     js_endpoints = js_analyzer.get_endpoints()
                     if js_endpoints:
                         self.ctx.add_endpoints(js_endpoints, source="js_analysis")
+                        for jep in js_endpoints:
+                            try:
+                                self.attack_surface.add_endpoint(jep)
+                            except Exception:
+                                pass
                         logger.info(f"[JSAnalyzer] Found {len(js_endpoints)} endpoints in JavaScript")
                     js_secrets = js_analyzer.get_secrets()
                     for sf in js_secrets:
@@ -1548,6 +1593,14 @@ class CentralBrain:
             await self._run_phase("analyze")
             await self._persist_vulnerabilities()
 
+            # Hydrate attack surface from ctx.endpoints before building injection matrix.
+            # ctx.endpoints are URLs discovered by tools (katana/ffuf/gobuster) — they need
+            # to be converted to proper Endpoint domain objects with extracted parameters.
+            try:
+                self._hydrate_attack_surface_from_ctx_endpoints()
+            except Exception as e:
+                logger.warning(f"[AttackSurface] ctx.endpoints hydration failed (non-fatal): {e}")
+
             # Build injection test matrix from attack surface endpoints
             try:
                 as_endpoints = self.attack_surface.api_endpoints()
@@ -1556,6 +1609,9 @@ class CentralBrain:
                     matrix_tests = getattr(test_matrix, 'tests', [])
                     logger.info(f"[InjectionMatrix] Built matrix: {len(matrix_tests)} injection tests "
                                 f"across {len(as_endpoints)} API endpoints")
+                    self._log_activity("injection",
+                        f"Injection matrix: {len(matrix_tests)} tests across {len(as_endpoints)} endpoints",
+                        tool="injection_matrix")
                     self.ctx.update('injection_matrix', {
                         'test_count': len(matrix_tests),
                         'endpoint_count': len(as_endpoints),
@@ -1749,6 +1805,19 @@ class CentralBrain:
             except Exception as e:
                 logger.warning(f"[CredSpray] Credential spray failed (non-fatal): {e}")
 
+            # Web-level privilege escalation: forced browsing to admin paths + role
+            # escalation with any harvested credentials.
+            try:
+                await self._probe_web_privilege_escalation()
+            except Exception as e:
+                logger.warning(f"[WebPrivesc] Privilege escalation probing failed (non-fatal): {e}")
+
+            # Browser-based DOM XSS validation using Playwright/Chromium
+            try:
+                await self._browser_xss_validation()
+            except Exception as e:
+                logger.warning(f"[BrowserXSS] Browser-based XSS validation failed (non-fatal): {e}")
+
             # Exploit synthesis + sandbox detonation (opt-in) — the agent writes a
             # custom non-destructive PoC and fires it in an ephemeral sandbox.
             from core.common.config import get_config as _get_cfg_synth
@@ -1770,7 +1839,7 @@ class CentralBrain:
             # ReAct loop with the full actuator toolkit (HTTP, JWT, encode, upload,
             # real browser) that actively demonstrates vulns on the authorized
             # target and reports findings. Works for any in-scope URL.
-            if _get_cfg_synth().get_bool("AGENT_EXPLOIT_ENABLED", False):
+            if _get_cfg_synth().get_bool("AGENT_EXPLOIT_ENABLED", True):
                 try:
                     await self._run_agent_exploitation()
                 except Exception as e:
@@ -1786,6 +1855,9 @@ class CentralBrain:
                 )
             except Exception:
                 pass
+            self._log_activity("exploit",
+                f"Exploitation complete: {len(self.ctx.vulnerabilities)} vulns, {len(self.ctx.exploit_results)} exploits",
+                output_data=f"Vulnerabilities: {len(self.ctx.vulnerabilities)}, Exploits: {len(self.ctx.exploit_results)}")
 
             await self._run_post_exploitation()
 
@@ -1841,6 +1913,11 @@ class CentralBrain:
                 from core.reporting.retest_engine import RetestEngine
                 retest_engine = RetestEngine(auth_headers=getattr(self.ctx, "auth_headers", None))
                 await retest_engine.retest_findings(self.ctx.vulnerabilities)
+                confirmed = sum(1 for v in self.ctx.vulnerabilities if v.get("reproducibility_status") == "CONFIRMED")
+                self._log_activity("retest", f"Retested {len(self.ctx.vulnerabilities)} findings — {confirmed} confirmed",
+                                   detail=f"RetestEngine: {confirmed}/{len(self.ctx.vulnerabilities)} reproduced",
+                                   tool="retest_engine",
+                                   output_data=f"Confirmed: {confirmed}, Total: {len(self.ctx.vulnerabilities)}")
 
             # Adversarial Critic (Planner–Worker–Critic loop) — semantic second
             # opinion that challenges each surviving finding and quarantines the
@@ -1866,6 +1943,11 @@ class CentralBrain:
                         f"uncertain={critic_summary['uncertain']} "
                         f"quarantined={critic_summary['quarantined']}"
                     )
+                    self._log_activity("critic",
+                        f"Critic verified findings: {critic_summary['confirmed']} confirmed, "
+                        f"{critic_summary['quarantined']} quarantined",
+                        tool="critic_agent",
+                        output_data=json.dumps({k: v for k, v in critic_summary.items() if k != "findings"}, default=str))
                     self.ctx.critic_summary = {
                         k: v for k, v in critic_summary.items() if k != "findings"
                     }
@@ -1889,6 +1971,10 @@ class CentralBrain:
                     logger.info(f"[LLMValidator] {summary['validated']} validated, "
                                 f"{summary['false_positives']} FPs removed, "
                                 f"{summary['severity_adjustments']} severity adjustments")
+                    self._log_activity("critic",
+                        f"LLM Validator: {summary['validated']} validated, {summary['false_positives']} FPs removed",
+                        tool="llm_validator",
+                        output_data=json.dumps(summary, default=str))
                     # Filter out false positives
                     self.ctx.vulnerabilities = [
                         v for v in self.ctx.vulnerabilities
@@ -1896,6 +1982,100 @@ class CentralBrain:
                     ]
                 except Exception as e:
                     logger.warning(f"[LLMValidator] Validation failed (non-fatal): {e}")
+
+            # Persist final validated vulnerabilities back to DB so the stored data
+            # reflects post-retest/critic/validator filtering (not stale pre-validation state).
+            try:
+                await self._persist_vulnerabilities()
+                logger.info(f"[Persist] Final validated findings persisted: {len(self.ctx.vulnerabilities)}")
+            except Exception as e:
+                logger.warning(f"[Persist] Final vulnerability persist failed (non-fatal): {e}")
+
+            # Populate Review Queue — feed confirmed findings + exploit results so
+            # the human operator sees what the agent did, what it found, and what needs
+            # manual follow-up.
+            try:
+                from core.reporting.review_queue import get_review_queue, STATUS_SUCCESS, STATUS_NEEDS_MANUAL, STATUS_PARTIAL
+                rq = get_review_queue()
+                scan_id = self._scan_id
+                for v in self.ctx.vulnerabilities:
+                    sev = str(v.get("severity", "info")).upper()
+                    status = v.get("status", "")
+                    critic_verdict = (v.get("critic", {}) or {}).get("verdict", "")
+                    retest_status = v.get("reproducibility_status", "")
+                    title = v.get("title") or v.get("type", "Unknown Finding")
+                    target = v.get("target") or v.get("location") or self.ctx.target
+
+                    if v.get("exploited") or v.get("confirmed") or sev in ("CRITICAL", "HIGH"):
+                        q_status = STATUS_SUCCESS
+                    elif status == "QUARANTINED" or critic_verdict == "FALSE_POSITIVE":
+                        continue
+                    elif retest_status == "NOT REPRODUCIBLE":
+                        q_status = STATUS_NEEDS_MANUAL
+                    else:
+                        q_status = STATUS_PARTIAL
+
+                    evidence = str(v.get("proof") or v.get("evidence") or v.get("details") or "")[:1500]
+                    tried = f"Retest: {v.get('retest_successes', '?')}/{v.get('retest_attempts', '?')} succeeded"
+                    if critic_verdict:
+                        tried += f" | Critic: {critic_verdict}"
+                    if v.get("source") or v.get("source_agent") or v.get("tool"):
+                        tried += f" | Source: {v.get('source') or v.get('source_agent') or v.get('tool')}"
+
+                    history = []
+                    if v.get("source") or v.get("tool"):
+                        history.append({"step": "Discovery", "tool": v.get("source") or v.get("tool", ""),
+                                        "result": v.get("type", "")})
+                    history.append({"step": "Retest", "attempts": v.get("retest_attempts", 0),
+                                    "successes": v.get("retest_successes", 0),
+                                    "status": retest_status or "N/A"})
+                    if critic_verdict:
+                        critic_data = v.get("critic", {}) or {}
+                        history.append({"step": "Critic Review", "verdict": critic_verdict,
+                                        "confidence": critic_data.get("confidence", 0),
+                                        "reasoning": critic_data.get("reasoning", "")[:300]})
+                    if v.get("payload"):
+                        history.append({"step": "Payload", "data": str(v.get("payload"))[:500]})
+
+                    manual_guidance = ""
+                    if q_status == STATUS_NEEDS_MANUAL:
+                        manual_guidance = (
+                            f"The agent found this {v.get('type', 'issue')} but could not fully "
+                            f"reproduce it ({v.get('retest_successes', 0)}/{v.get('retest_attempts', 0)} "
+                            f"attempts). Try manually testing {target} with the payload/evidence shown."
+                        )
+
+                    rq.record(
+                        target=target,
+                        title=title,
+                        status=q_status,
+                        category=v.get("type", ""),
+                        severity=sev,
+                        evidence=evidence,
+                        tried_summary=tried,
+                        manual_guidance=manual_guidance,
+                        history=history,
+                        scan_id=scan_id,
+                    )
+
+                for ex in self.ctx.exploit_results:
+                    ex_title = ex.get("title") or ex.get("vuln_id") or ex.get("type", "Exploit")
+                    ex_target = ex.get("target") or self.ctx.target
+                    ex_status = STATUS_SUCCESS if ex.get("success") else STATUS_NEEDS_MANUAL
+                    rq.record(
+                        target=ex_target,
+                        title=f"Exploit: {ex_title}",
+                        status=ex_status,
+                        category=ex.get("type", "exploit"),
+                        severity="HIGH",
+                        evidence=str(ex.get("proof") or ex.get("error") or "")[:1500],
+                        tried_summary=f"Tool: {ex.get('tool', '?')} | Chain: {ex.get('chain_id', 'N/A')}",
+                        scan_id=scan_id,
+                    )
+                logger.info(f"[ReviewQueue] Populated with {len(self.ctx.vulnerabilities)} findings + "
+                            f"{len(self.ctx.exploit_results)} exploit results")
+            except Exception as e:
+                logger.warning(f"[ReviewQueue] Population failed (non-fatal): {e}")
 
             # Evidence Screenshot Capture — screenshot vulnerable pages as proof
             if self.ctx.vulnerabilities:
@@ -1944,6 +2124,9 @@ class CentralBrain:
                 pass
 
             await self._generate_report()
+            self._log_activity("phase", "Report generated",
+                               detail=f"Final report with {len(self.ctx.vulnerabilities)} findings, "
+                                      f"{len(self.ctx.exploit_results)} exploit results")
 
             # Continuous ASM — snapshot the attack surface and diff against the
             # previous run so scheduled re-scans surface only what changed.
@@ -2471,8 +2654,20 @@ class CentralBrain:
                 else:
                     self.task_manager.fail_task(actual_task_id, f"Tool invocation failed for capability {capability}")
                     
+                self._log_activity("tool_run",
+                    f"{tool_name}: {capability} on {target}",
+                    tool=tool_name, target=target, phase=phase,
+                    status="ok" if result.success else "error",
+                    detail=getattr(task, 'objective', capability),
+                    output_data=str(result.data or result.stdout or "")[:3000],
+                    duration_s=getattr(result, 'duration', 0) or 0)
+
                 # Ingest findings into shared context & knowledge store
                 self._ingest_approach_a_result(capability, target, result)
+                try:
+                    self._write_live_results()
+                except Exception:
+                    pass
                 self.ctx.log_agent(
                     agent_id=actual_task_id,
                     objective=getattr(task, 'objective', capability),
@@ -2564,8 +2759,10 @@ class CentralBrain:
         if ports:
             self.ctx.add_ports(target_host, ports)
 
-        # 4. Ingest Endpoints from ffuf/feroxbuster/gobuster/dirb output
-        if capability in ("endpoint_discovery", "web_crawling") and stdout:
+        # 4. Ingest Endpoints from ANY tool that discovers URLs
+        _ep_caps = ("endpoint_discovery", "web_crawling", "directory_bruteforce",
+                     "api_enumeration", "vulnerability_scanning", "technology_fingerprinting")
+        if stdout and capability in _ep_caps:
             endpoints = []
             for line in stdout.splitlines():
                 line = line.strip()
@@ -2584,19 +2781,27 @@ class CentralBrain:
                 # bare URL lines (katana output)
                 m = re.match(r'^(https?://\S+)$', line)
                 if m:
-                    endpoints.append({"url": m.group(1), "status": 0})
+                    url = m.group(1)
+                    # skip static assets
+                    if not re.search(r'\.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|map)(\?|$)', url, re.I):
+                        endpoints.append({"url": url, "status": 0})
             if endpoints:
-                if hasattr(self.ctx, 'add_endpoints'):
-                    self.ctx.add_endpoints(endpoints, source=getattr(result, "tool", capability))
-                elif hasattr(self.ctx, 'endpoints'):
-                    existing = getattr(self.ctx, 'endpoints', []) or []
-                    seen_urls = {e.get('url') for e in existing if isinstance(e, dict)}
-                    for ep in endpoints:
-                        if ep['url'] not in seen_urls:
-                            existing.append(ep)
-                            seen_urls.add(ep['url'])
-                    self.ctx.endpoints = existing
+                self.ctx.add_endpoints(endpoints, source=getattr(result, "tool", capability))
                 logger.info(f"Ingested {len(endpoints)} endpoints from {getattr(result, 'tool', capability)}")
+
+        # 4b. Ingest directories from ffuf/gobuster/dirb/feroxbuster
+        if stdout and capability in ("directory_bruteforce", "endpoint_discovery", "web_crawling"):
+            tool_name = getattr(result, "tool", "")
+            for line in stdout.splitlines():
+                line = line.strip()
+                # directory paths (ending with /)
+                m = re.search(r'(https?://\S+/)\s', line)
+                if m:
+                    self.ctx.add_directory(m.group(1))
+                # /ftp/ style directory listings
+                m = re.search(r'(/[a-zA-Z0-9._-]+/)\s', line)
+                if m and len(m.group(1)) > 2:
+                    self.ctx.add_directory(f"{target.rstrip('/')}{m.group(1)}")
 
         # 5. Ingest Vulnerability findings from nikto/nuclei output
         if capability == "vulnerability_scanning" and stdout:
@@ -2684,57 +2889,168 @@ class CentralBrain:
                         self.ctx.add_vulnerability(v)
                 for v in vulns:
                     logger.info(f"  [VULN] [{v.get('severity','?')}] {v.get('title','')} | type={v.get('type','')} | location={v.get('location','')}")
+                    self._log_activity("finding",
+                        f"[{v.get('severity','?')}] {v.get('title','')}",
+                        tool=tool_name, target=v.get('location', target),
+                        detail=f"Type: {v.get('type','')} | {v.get('details','')[:200]}",
+                        output_data=str(v.get('proof', ''))[:1000])
                 logger.info(f"Ingested {len(vulns)} vulnerability findings from {tool_name}")
 
-        # 6. Ingest TLS findings from sslscan output
+        # 6. Ingest TLS/SSL findings from sslscan output
         if capability == "tls_analysis" and stdout:
             tls_findings = []
-            if "SSLv2" in stdout or "SSLv3" in stdout:
-                for line in stdout.splitlines():
-                    if re.search(r'SSL(?:v[23])\s+\d+\s+bits\s+\S+\s+Accepted', line):
-                        tls_findings.append({
-                            "type": "TLS_WEAKNESS",
-                            "title": f"Deprecated SSL protocol accepted: {line.strip()[:80]}",
-                            "severity": "HIGH",
-                            "target": target,
-                            "location": target,
-                            "proof": line.strip(),
-                            "details": "Server accepts deprecated SSL protocol version",
-                            "tool": "sslscan",
-                        })
+            ssl_data = {"protocols": [], "ciphers": [], "certificate": {}}
+            for line in stdout.splitlines():
+                # Parse SSL protocol acceptance
+                m_proto = re.search(r'((?:SSL|TLS)v[\d.]+)\s+(\d+)\s+bits\s+(\S+)\s+(Accepted|Rejected)', line)
+                if m_proto:
+                    entry = {"protocol": m_proto.group(1), "bits": int(m_proto.group(2)),
+                             "cipher": m_proto.group(3), "status": m_proto.group(4)}
+                    ssl_data["ciphers"].append(entry)
+                    if m_proto.group(4) == "Accepted":
+                        proto = m_proto.group(1)
+                        if proto not in ssl_data["protocols"]:
+                            ssl_data["protocols"].append(proto)
+                        if proto in ("SSLv2", "SSLv3"):
+                            tls_findings.append({
+                                "type": "TLS_WEAKNESS",
+                                "title": f"Deprecated SSL protocol accepted: {line.strip()[:80]}",
+                                "severity": "HIGH", "target": target, "location": target,
+                                "proof": line.strip(),
+                                "details": "Server accepts deprecated SSL protocol version",
+                                "tool": "sslscan",
+                            })
+                # Parse certificate info
+                m_subj = re.search(r'Subject:\s+(.+)', line)
+                if m_subj:
+                    ssl_data["certificate"]["subject"] = m_subj.group(1).strip()
+                m_issuer = re.search(r'Issuer:\s+(.+)', line)
+                if m_issuer:
+                    ssl_data["certificate"]["issuer"] = m_issuer.group(1).strip()
+                m_exp = re.search(r'Not valid after:\s+(.+)', line)
+                if m_exp:
+                    ssl_data["certificate"]["expires"] = m_exp.group(1).strip()
+
             if "Heartbleed" in stdout and "vulnerable" in stdout.lower() and "not vulnerable" not in stdout.lower():
                 tls_findings.append({
                     "type": "TLS_WEAKNESS",
                     "title": "Heartbleed vulnerability detected",
-                    "severity": "CRITICAL",
-                    "target": target, "location": target,
+                    "severity": "CRITICAL", "target": target, "location": target,
                     "proof": "sslscan Heartbleed test positive",
                     "details": "Server is vulnerable to Heartbleed (CVE-2014-0160)",
                     "tool": "sslscan",
                 })
             if tls_findings:
                 for v in tls_findings:
-                    if hasattr(self.ctx, 'add_vulnerability'):
-                        self.ctx.add_vulnerability(v)
+                    self.ctx.add_vulnerability(v)
                 logger.info(f"Ingested {len(tls_findings)} TLS findings from sslscan")
+            if ssl_data["protocols"] or ssl_data["certificate"]:
+                self.ctx.add_ssl_info(target_host, ssl_data)
+                logger.info(f"Stored SSL info for {target_host}: {len(ssl_data['protocols'])} protocols, {len(ssl_data['ciphers'])} ciphers")
 
-        # 7. Convert missing security headers from profiling into findings
+        # 7. Ingest HTTP headers from curl/httpx/whatweb output and flag missing ones
         if capability in ("http_analysis", "technology_fingerprinting") and stdout:
-            header_vulns = []
             important_headers = {
                 "X-Frame-Options": ("Missing X-Frame-Options header", "Clickjacking protection not enabled"),
                 "Content-Security-Policy": ("Missing Content-Security-Policy header", "No CSP policy configured"),
                 "Strict-Transport-Security": ("Missing HSTS header", "HSTS not enforced"),
                 "X-Content-Type-Options": ("Missing X-Content-Type-Options header", "MIME sniffing protection not enabled"),
             }
+            parsed_headers = {}
+            for line in stdout.splitlines():
+                m_hdr = re.match(r'^([A-Za-z][A-Za-z0-9-]+):\s+(.+)', line)
+                if m_hdr:
+                    parsed_headers[m_hdr.group(1)] = m_hdr.group(2).strip()
+            if parsed_headers:
+                self.ctx.add_headers(target_host, parsed_headers)
+                logger.info(f"Stored {len(parsed_headers)} HTTP headers for {target_host}")
             response_headers = set()
             for line in stdout.splitlines():
                 for hdr in important_headers:
                     if hdr.lower() in line.lower():
                         response_headers.add(hdr)
-            for hdr, (title, detail) in important_headers.items():
-                if hdr not in response_headers and "missing" not in capability:
-                    pass  # Only flag from explicit header checks
+
+        # 8. Ingest secrets/sensitive files from tool output
+        if stdout:
+            _secret_patterns = [
+                (r'(\.git/config|\.git/HEAD)\b', "Git repository exposed", "HIGH"),
+                (r'(/\.env|\.env\.bak|\.env\.local)\b', "Environment file exposed", "HIGH"),
+                (r'(\.kdbx|\.key|\.pem|\.p12|\.pfx)\b', "Sensitive key/credential file", "MEDIUM"),
+                (r'(password|secret|api[_-]?key|token|credential)\s*[:=]\s*\S+', "Hardcoded secret", "HIGH"),
+                (r'(/ftp/[^\s]+\.(?:md|txt|pdf|bak|sql))', "Sensitive file in FTP directory", "MEDIUM"),
+            ]
+            for pattern, desc, severity in _secret_patterns:
+                for m in re.finditer(pattern, stdout, re.IGNORECASE):
+                    self.ctx.add_secret({
+                        "type": desc, "value": m.group(0)[:200], "location": target,
+                        "severity": severity, "tool": getattr(result, "tool", capability),
+                    })
+
+        # 9. Ingest directory listings from tool output
+        if stdout and capability in ("directory_bruteforce", "endpoint_discovery", "web_crawling",
+                                     "vulnerability_scanning", "technology_fingerprinting"):
+            _dir_re = re.compile(r'(?:Directory|Index of|listing)\s+(?:of\s+)?(https?://\S+|/\S+)', re.IGNORECASE)
+            for m in _dir_re.finditer(stdout):
+                self.ctx.add_directory(m.group(1))
+
+        # 10. Ingest OSINT data (emails, employees, GitHub info) from theHarvester/whois
+        if capability in ("employee_enumeration", "osint", "whois_lookup") and stdout:
+            tool_name = getattr(result, "tool", capability)
+            # Extract emails
+            emails = set()
+            email_re = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+            for m in email_re.finditer(stdout):
+                email = m.group(0).lower()
+                if apex in email or not email.endswith(('.png', '.jpg', '.gif')):
+                    emails.add(email)
+            if emails:
+                existing = self.ctx.get("discovered_employees", []) or []
+                existing_emails = {e.get("email", "").lower() for e in existing if isinstance(e, dict)}
+                for email in emails:
+                    if email.lower() not in existing_emails:
+                        name_part = email.split("@")[0].replace(".", " ").replace("_", " ").replace("-", " ")
+                        existing.append({"email": email, "name": name_part.title(), "source": tool_name})
+                self.ctx.update("discovered_employees", existing)
+                logger.info(f"Ingested {len(emails)} emails from {tool_name}")
+
+            # Extract GitHub users/orgs
+            gh_re = re.compile(r'github\.com/([a-zA-Z0-9_-]+)')
+            gh_users = set()
+            for m in gh_re.finditer(stdout):
+                gh_users.add(m.group(1))
+            if gh_users:
+                existing_gh = self.ctx.get("github_profiles", []) or []
+                existing_names = {g.get("username", "") for g in existing_gh if isinstance(g, dict)}
+                for user in gh_users:
+                    if user not in existing_names:
+                        existing_gh.append({"username": user, "source": tool_name})
+                self.ctx.update("github_profiles", existing_gh)
+
+            # Extract leaked credential indicators
+            cred_patterns = [
+                r'(\d+)\s+(?:compromised|leaked|breached)\s+(?:user|credential|account)',
+                r'(?:compromised|leaked|breached)\s+(?:user|credential|account)s?[:]\s*(\d+)',
+            ]
+            for pat in cred_patterns:
+                m = re.search(pat, stdout, re.IGNORECASE)
+                if m:
+                    count = int(m.group(1))
+                    existing_creds = self.ctx.get("leaked_credentials", []) or []
+                    existing_creds.append({
+                        "type": "breach_indicator", "source": tool_name,
+                        "count": count, "note": f"{count} compromised credentials reported",
+                    })
+                    self.ctx.update("leaked_credentials", existing_creds)
+
+        # 11. Record tool invocation as captured request for audit trail
+        tool_name = getattr(result, "tool", capability)
+        command = getattr(result, "command", "") or ""
+        if command:
+            self.ctx.add_captured_request({
+                "tool": tool_name, "command": command[:500], "target": target,
+                "capability": capability, "success": bool(result.success),
+                "stdout_bytes": len(stdout),
+            })
 
         self._write_progress({"status": "running"})
 
@@ -3583,6 +3899,319 @@ class CentralBrain:
                     f"(filtered static assets) from {len(sources)} raw URLs")
         return result
 
+    def _feed_catalog_to_attack_surface(self):
+        """Convert preflight endpoint_catalog entries into proper Endpoint domain
+        objects (with query-string parameters extracted) and feed them into the
+        AttackSurfaceGraph so the injection matrix can test them."""
+        from urllib.parse import urlparse, parse_qs
+        from core.domain.endpoint import Endpoint
+        from core.domain.parameter import Parameter, ParameterType
+
+        catalog = getattr(self.ctx, "endpoint_catalog", []) or []
+        added = 0
+        for entry in catalog:
+            url = entry.get("url", "")
+            method = entry.get("method", "GET")
+            path = entry.get("path", "/")
+            if not url:
+                continue
+            pu = urlparse(url)
+            eid = f"{method}:{pu.netloc}{pu.path}"
+            # skip if already in the graph
+            if eid in self.attack_surface.endpoints:
+                continue
+            # extract parameters from query string
+            params = []
+            qs = parse_qs(pu.query, keep_blank_values=True)
+            for pname in qs:
+                params.append(Parameter(
+                    name=pname,
+                    parameter_type=ParameterType.QUERY,
+                    inferred_data_type="string",
+                    is_required=False,
+                ))
+            # for POST/PUT/PATCH, add a generic body param so injection matrix tests it
+            if method in ("POST", "PUT", "PATCH") and not any(
+                    p.parameter_type == ParameterType.BODY for p in params):
+                params.append(Parameter(
+                    name="body",
+                    parameter_type=ParameterType.BODY,
+                    inferred_data_type="string",
+                    is_required=False,
+                ))
+            try:
+                ep = Endpoint(
+                    endpoint_id=eid,
+                    url=url,
+                    path=pu.path or "/",
+                    method_set=[method],
+                    parameters=params,
+                    auth_required=entry.get("kind") == "sensitive",
+                )
+                self.attack_surface.add_endpoint(ep)
+                added += 1
+            except Exception:
+                continue
+        if added:
+            try:
+                self.attack_surface.build_graph()
+            except Exception:
+                pass
+            logger.info(f"[Preflight→AttackSurface] Fed {added} catalog endpoints "
+                        f"(with params) into attack surface graph")
+
+    def _hydrate_attack_surface_from_ctx_endpoints(self):
+        """Convert ctx.endpoints (URL strings/dicts from tool discovery) into proper
+        Endpoint domain objects with query-string parameters extracted, and feed them
+        into the AttackSurfaceGraph so the InjectionMatrix can test them."""
+        from urllib.parse import urlparse, parse_qs
+        from core.domain.endpoint import Endpoint
+        from core.domain.parameter import Parameter, ParameterType
+
+        raw_endpoints = getattr(self.ctx, "endpoints", []) or []
+        added = 0
+        for entry in raw_endpoints:
+            if isinstance(entry, str):
+                url = entry
+                method = "GET"
+            elif isinstance(entry, dict):
+                url = entry.get("url") or entry.get("path") or ""
+                method = entry.get("method", "GET")
+            else:
+                continue
+            if not url:
+                continue
+            if not url.startswith("http"):
+                url = f"https://{url}"
+            pu = urlparse(url)
+            eid = f"{method}:{pu.netloc}{pu.path}"
+            if eid in self.attack_surface.endpoints:
+                continue
+            params = []
+            qs = parse_qs(pu.query, keep_blank_values=True)
+            for pname in qs:
+                params.append(Parameter(
+                    name=pname,
+                    parameter_type=ParameterType.QUERY,
+                    inferred_data_type="string",
+                    is_required=False,
+                ))
+            if method in ("POST", "PUT", "PATCH") and not any(
+                    p.parameter_type == ParameterType.BODY for p in params):
+                params.append(Parameter(
+                    name="body",
+                    parameter_type=ParameterType.BODY,
+                    inferred_data_type="string",
+                    is_required=False,
+                ))
+            try:
+                ep = Endpoint(
+                    endpoint_id=eid,
+                    url=url,
+                    path=pu.path or "/",
+                    method_set=[method],
+                    parameters=params,
+                )
+                self.attack_surface.add_endpoint(ep)
+                added += 1
+            except Exception:
+                continue
+        if added:
+            try:
+                self.attack_surface.build_graph()
+            except Exception:
+                pass
+            logger.info(f"[ctx→AttackSurface] Fed {added} discovered endpoints into attack surface graph")
+
+    async def _browser_xss_validation(self):
+        """Use Playwright/Chromium to validate XSS findings and probe for DOM-based XSS."""
+        from core.actuation.browser_actuator import BrowserActuator
+        browser = BrowserActuator()
+        target = self.ctx.target.rstrip("/")
+
+        # Collect endpoints with query parameters for DOM XSS probing
+        test_urls = []
+        for ep in (getattr(self.ctx, "endpoints", []) or []):
+            url = ep if isinstance(ep, str) else (ep.get("url", "") if isinstance(ep, dict) else "")
+            if url and "?" in url:
+                test_urls.append(url)
+        # Also add common search/query endpoints
+        for path in ["/search", "/#/search", "/rest/products/search"]:
+            test_urls.append(f"{target}{path}?q=<script>alert('xss')</script>")
+
+        xss_probe = "<img src=x onerror=window.__xss_proof__=1>"
+        findings = []
+
+        for url in test_urls[:15]:
+            if "?" in url:
+                param_url = url.split("?")[0] + "?" + "&".join(
+                    f"{p.split('=')[0]}={xss_probe}" for p in url.split("?")[1].split("&")
+                )
+            else:
+                param_url = f"{url}?q={xss_probe}"
+
+            try:
+                result = await browser.run_actions([
+                    {"action": "navigate", "url": param_url, "timeout": 15000},
+                    {"action": "eval", "script": "!!window.__xss_proof__"},
+                    {"action": "dom"},
+                ])
+                if result.get("error"):
+                    continue
+                results = result.get("results", [])
+                console_logs = result.get("console", [])
+
+                xss_fired = results[0] if results else False
+                dom_content = results[1] if len(results) > 1 else ""
+                js_errors = [l for l in console_logs if "xss" in l.lower() or "error" in l.lower()]
+
+                if xss_fired:
+                    findings.append({
+                        "title": f"DOM XSS Confirmed: {param_url.split('?')[0]}",
+                        "type": "XSS",
+                        "severity": "HIGH",
+                        "location": param_url,
+                        "target": param_url,
+                        "details": "DOM-based XSS confirmed via Playwright browser execution. "
+                                   "Injected payload executed JavaScript in the page context.",
+                        "proof": f"window.__xss_proof__ = true after injection. Console: {js_errors[:3]}",
+                        "tool": "playwright_browser",
+                        "confirmed": True,
+                        "exploited": True,
+                        "cwe_id": "CWE-79",
+                    })
+                elif xss_probe in str(dom_content):
+                    findings.append({
+                        "title": f"Reflected XSS (unescaped): {param_url.split('?')[0]}",
+                        "type": "XSS",
+                        "severity": "MEDIUM",
+                        "location": param_url,
+                        "target": param_url,
+                        "details": "Input reflected unescaped in DOM but JS execution not confirmed.",
+                        "proof": f"Payload found in DOM content",
+                        "tool": "playwright_browser",
+                        "cwe_id": "CWE-79",
+                    })
+            except Exception as e:
+                logger.debug(f"[BrowserXSS] Error testing {url}: {e}")
+                continue
+
+        # Also check for clickjacking (missing X-Frame-Options)
+        try:
+            result = await browser.run_actions([
+                {"action": "navigate", "url": target, "timeout": 15000},
+                {"action": "eval", "script": (
+                    "(() => {"
+                    "  const iframe = document.createElement('iframe');"
+                    "  iframe.src = window.location.href;"
+                    "  iframe.style.display = 'none';"
+                    "  document.body.appendChild(iframe);"
+                    "  return !!(iframe.contentDocument || iframe.contentWindow);"
+                    "})()"
+                )},
+            ])
+            if result.get("results", [None])[0]:
+                findings.append({
+                    "title": "Clickjacking: Page frameable",
+                    "type": "CLICKJACKING",
+                    "severity": "MEDIUM",
+                    "location": target,
+                    "target": target,
+                    "details": "Page can be embedded in an iframe (no X-Frame-Options / CSP frame-ancestors).",
+                    "proof": "Successfully loaded page in iframe via Playwright",
+                    "tool": "playwright_browser",
+                    "cwe_id": "CWE-1021",
+                })
+        except Exception:
+            pass
+
+        for f in findings:
+            self.ctx.add_vulnerability(f)
+        if findings:
+            logger.info(f"[BrowserXSS] Playwright found {len(findings)} client-side issues")
+        else:
+            logger.info("[BrowserXSS] No DOM XSS or clickjacking found via browser")
+
+    async def _probe_web_privilege_escalation(self):
+        """Probe for web-level privilege escalation: forced browsing to admin paths,
+        role parameter tampering, and accessing admin APIs with regular user tokens."""
+        from agents.kali_executor import KaliDockerExecutor
+        target = self.ctx.target.rstrip("/")
+        admin_paths = [
+            "/admin", "/administration", "/api/admin", "/rest/admin",
+            "/#/administration", "/admin/dashboard", "/api/Users",
+            "/panel", "/manage", "/console", "/api/v1/admin",
+            "/admin/users", "/api/admin/users", "/rest/admin/orders",
+            "/accounting", "/support/logs", "/api/Feedbacks",
+            "/api/Complaints", "/api/Recycles", "/api/SecurityQuestions",
+        ]
+        findings = []
+        for path in admin_paths:
+            url = f"{target}{path}"
+            cmd = f'curl -s -o /dev/null -w "%{{http_code}}" -k --max-time 10 "{url}"'
+            result = KaliDockerExecutor.run(cmd, timeout=15)
+            if result.get("status") != "success":
+                continue
+            try:
+                status = int(result.get("stdout", "").strip())
+            except (ValueError, IndexError):
+                continue
+            if status in (200, 301, 302):
+                findings.append({
+                    "title": f"Admin Endpoint Accessible: {path}",
+                    "type": "FORCED_BROWSING",
+                    "severity": "HIGH" if status == 200 else "MEDIUM",
+                    "location": url,
+                    "target": url,
+                    "details": f"Admin path {path} returned HTTP {status} without authentication.",
+                    "proof": f"HTTP {status} at {url}",
+                    "tool": "privesc_probe",
+                    "cwe_id": "CWE-425",
+                })
+
+        # If we have harvested creds (regular user), try accessing admin paths WITH auth
+        creds = getattr(self.ctx, "harvested_creds", []) or []
+        if creds:
+            cred = creds[0]
+            token = cred.get("session_token", "")
+            if token:
+                for path in ["/api/admin", "/rest/admin", "/administration", "/api/Users"]:
+                    url = f"{target}{path}"
+                    cmd = (
+                        f'curl -s -o /dev/null -w "%{{http_code}}" -k --max-time 10 '
+                        f'-H "Authorization: Bearer {token}" "{url}"'
+                    )
+                    result = KaliDockerExecutor.run(cmd, timeout=15)
+                    if result.get("status") != "success":
+                        continue
+                    try:
+                        status = int(result.get("stdout", "").strip())
+                    except (ValueError, IndexError):
+                        continue
+                    if status == 200:
+                        findings.append({
+                            "title": f"Privilege Escalation: Regular user accesses {path}",
+                            "type": "PRIVILEGE_ESCALATION",
+                            "severity": "CRITICAL",
+                            "location": url,
+                            "target": url,
+                            "details": (
+                                f"Regular user '{cred.get('username', '')}' can access admin "
+                                f"endpoint {path}. This indicates broken access control."
+                            ),
+                            "proof": f"HTTP 200 at {url} with regular user token",
+                            "tool": "privesc_probe",
+                            "cwe_id": "CWE-269",
+                            "confirmed": True,
+                        })
+
+        for f in findings:
+            self.ctx.add_vulnerability(f)
+        if findings:
+            logger.info(f"[WebPrivesc] Found {len(findings)} privilege escalation / forced browsing issues")
+        else:
+            logger.info("[WebPrivesc] No forced browsing or privilege escalation found")
+
     async def _probe_live_subdomains(self, urls: list) -> list:
         """
         Concurrently probe subdomain URLs and return only the LIVE, in-scope ones,
@@ -4072,6 +4701,7 @@ class CentralBrain:
                         "title": finding.get("title"), "type": finding.get("type"),
                         "target": self.ctx.target, "sandbox": result.sandbox,
                         "proof_found": result.proof_found, "source": "sandbox_detonator",
+                        "tool": "sandbox_detonator", "success": True,
                     })
                     logger.info(f"[Sandbox] PoC SUCCEEDED for '{finding.get('title')}' "
                                 f"(proof={result.proof_found})")
@@ -4097,11 +4727,12 @@ class CentralBrain:
         # Brief context from what recon/scanning already found.
         known = "; ".join(
             f"[{v.get('severity','?')}] {v.get('title', v.get('type','?'))}"
-            for v in (self.ctx.vulnerabilities or [])[:12]
+            for v in (self.ctx.vulnerabilities or [])[:8]
         )
-        endpoints = list((getattr(self.ctx, "endpoints", {}) or {}).keys())[:20]
-        context = (f"Known findings: {known or 'none yet'}. "
-                   f"Discovered endpoints: {', '.join(map(str, endpoints)) or 'none'}.")
+        catalog = getattr(self.ctx, "endpoint_catalog", []) or []
+        api_eps = [e["path"] for e in catalog if e.get("kind") in ("api", "sensitive")][:12]
+        context = (f"Findings: {known or 'none yet'}. "
+                   f"API/sensitive endpoints: {', '.join(api_eps) or 'none'}.")
 
         # Register leaked identities for authenticated IDOR/access-control testing.
         try:
@@ -4118,21 +4749,17 @@ class CentralBrain:
             admin_emails = idents.get("admin_emails", [])
             o_pw = self._osint_spray_material()[2]
             if o_users or o_creds or emails:
-                cred_hint = "; ".join(f"{u}:{p}" for u, p in o_creds[:15])
+                cred_hint = "; ".join(f"{u}:{p}" for u, p in o_creds[:8])
+                admin_hint = ', '.join((admin_emails or emails)[:3]) or 'admin email'
                 context += (
-                    f"\nOSINT for authentication & authorization testing:\n"
-                    f"Usernames: {', '.join(o_users[:30])}\n"
-                    + (f"Emails: {', '.join(emails[:20])}\n" if emails else "")
-                    + (f"Leaked username:password pairs: {cred_hint}\n" if cred_hint else "")
-                    + (f"Passwords seen in leaks: {', '.join(o_pw[:15])}\n" if o_pw else "")
-                    + "APPLY THESE:\n"
-                    "1) Credential stuffing / password-reset abuse on login endpoints.\n"
-                    "2) JWT forgery (jwt_forge): forge tokens impersonating these users — set "
-                    f"the token email/sub to {', '.join((admin_emails or emails)[:3]) or 'a discovered admin email'} "
-                    "and role=admin; try alg=none and HS256 with any leaked key/secret.\n"
-                    "3) IDOR / broken access control: as one identity, request resources belonging "
-                    "to these other users (their email/username/id in /api and /rest object references); "
-                    "authenticated sessions for the leaked identities are available to replay as.\n"
+                    f"\nOSINT intel:\n"
+                    f"Users: {', '.join(o_users[:15])}\n"
+                    + (f"Emails: {', '.join(emails[:10])}\n" if emails else "")
+                    + (f"Leaked creds: {cred_hint}\n" if cred_hint else "")
+                    + (f"Passwords: {', '.join(o_pw[:8])}\n" if o_pw else "")
+                    + "USE: 1) Credential stuff login endpoints. "
+                    f"2) jwt_forge: sub/email={admin_hint}, role=admin, alg=none then HS256. "
+                    "3) IDOR: access other users' objects via /api /rest endpoints.\n"
                 )
         except Exception:
             pass
@@ -5059,6 +5686,11 @@ CRITICAL RULES:
                         )
                 except Exception as e:
                     logger.warning(f"Failed to persist wave aggregation to knowledge store: {e}")
+
+            try:
+                self._write_live_results()
+            except Exception:
+                pass
 
     async def _run_phase_osint_reconnaissance(self):
         """

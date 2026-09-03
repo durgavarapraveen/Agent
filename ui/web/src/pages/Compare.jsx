@@ -64,10 +64,33 @@ export default function Compare() {
 
       {result && (
         <>
-          <div className="card-grid" style={{ marginTop: 16 }}>
-            <CompareCard label="Scan A" data={result.scan_a} />
-            <CompareCard label="Scan B" data={result.scan_b} />
-          </div>
+          {result.delta_summary && (
+            <div className="card-grid" style={{ marginTop: 16 }}>
+              <div className="stat-card">
+                <span className="label">New Vulnerabilities</span>
+                <span className="value" style={{ color: "var(--red)" }}>{result.delta_summary.new || 0}</span>
+              </div>
+              <div className="stat-card">
+                <span className="label">Fixed</span>
+                <span className="value" style={{ color: "var(--green)" }}>{result.delta_summary.fixed || 0}</span>
+              </div>
+              <div className="stat-card">
+                <span className="label">Unchanged</span>
+                <span className="value">{result.delta_summary.unchanged || 0}</span>
+              </div>
+              <div className="stat-card">
+                <span className="label">Severity Changed</span>
+                <span className="value" style={{ color: "var(--amber, #e0a500)" }}>{result.delta_summary.severity_changed || 0}</span>
+              </div>
+            </div>
+          )}
+
+          {result.scan_a && result.scan_b && (
+            <div className="card-grid" style={{ marginTop: 16 }}>
+              <CompareCard label="Scan A" data={result.scan_a} />
+              <CompareCard label="Scan B" data={result.scan_b} />
+            </div>
+          )}
 
           <div className="two-col" style={{ marginTop: 16 }}>
             <div className="card">
@@ -76,7 +99,10 @@ export default function Compare() {
                 <div style={{ fontSize: 13, color: "var(--text-dim)" }}>No new vulnerabilities</div>
               ) : (
                 <ul style={{ paddingLeft: 16, fontSize: 13 }}>
-                  {result.new_in_b.map((t, i) => <li key={i} style={{ marginBottom: 4, color: "var(--red)" }}>{t}</li>)}
+                  {result.new_in_b.map((t, i) => <li key={i} style={{ marginBottom: 4, color: "var(--red)" }}>
+                    {typeof t === "string" ? t : t.title || JSON.stringify(t)}
+                    {t.severity && <span className={`badge ${String(t.severity).toLowerCase()}`} style={{ marginLeft: 8 }}>{t.severity}</span>}
+                  </li>)}
                 </ul>
               )}
             </div>
@@ -86,20 +112,25 @@ export default function Compare() {
                 <div style={{ fontSize: 13, color: "var(--text-dim)" }}>No fixed vulnerabilities</div>
               ) : (
                 <ul style={{ paddingLeft: 16, fontSize: 13 }}>
-                  {result.fixed_in_b.map((t, i) => <li key={i} style={{ marginBottom: 4, color: "var(--green)" }}>{t}</li>)}
+                  {result.fixed_in_b.map((t, i) => <li key={i} style={{ marginBottom: 4, color: "var(--green)" }}>
+                    {typeof t === "string" ? t : t.title || JSON.stringify(t)}
+                    {t.severity && <span className={`badge ${String(t.severity).toLowerCase()}`} style={{ marginLeft: 8 }}>{t.severity}</span>}
+                  </li>)}
                 </ul>
               )}
             </div>
           </div>
 
           <div className="card" style={{ marginTop: 16 }}>
-            <h3>Unchanged ({result.common.length})</h3>
-            {result.common.length === 0 ? (
+            <h3>Unchanged ({result.common?.length || 0})</h3>
+            {!result.common?.length ? (
               <div style={{ fontSize: 13, color: "var(--text-dim)" }}>No common vulnerabilities</div>
             ) : (
               <div style={{ maxHeight: 200, overflowY: "auto" }}>
                 {result.common.map((t, i) => (
-                  <div key={i} style={{ padding: "4px 0", fontSize: 12, borderBottom: "1px solid var(--border)", color: "var(--text)" }}>{t}</div>
+                  <div key={i} style={{ padding: "4px 0", fontSize: 12, borderBottom: "1px solid var(--border)", color: "var(--text)" }}>
+                    {typeof t === "string" ? t : t.title || JSON.stringify(t)}
+                  </div>
                 ))}
               </div>
             )}
@@ -121,11 +152,11 @@ function CompareCard({ label, data }) {
         <span>Confirmed: <strong style={{ color: "var(--green)" }}>{data.confirmed}</strong></span>
       </div>
       <div style={{ display: "flex", gap: 8, fontSize: 11, marginTop: 4 }}>
-        {data.severity_counts.CRITICAL > 0 && <span className="badge critical">{data.severity_counts.CRITICAL} C</span>}
-        {data.severity_counts.HIGH > 0 && <span className="badge high">{data.severity_counts.HIGH} H</span>}
-        {data.severity_counts.MEDIUM > 0 && <span className="badge medium">{data.severity_counts.MEDIUM} M</span>}
-        {data.severity_counts.LOW > 0 && <span className="badge low">{data.severity_counts.LOW} L</span>}
-        {data.severity_counts.INFO > 0 && <span className="badge info">{data.severity_counts.INFO} I</span>}
+        {data.severity_counts?.CRITICAL > 0 && <span className="badge critical">{data.severity_counts.CRITICAL} C</span>}
+        {data.severity_counts?.HIGH > 0 && <span className="badge high">{data.severity_counts.HIGH} H</span>}
+        {data.severity_counts?.MEDIUM > 0 && <span className="badge medium">{data.severity_counts.MEDIUM} M</span>}
+        {data.severity_counts?.LOW > 0 && <span className="badge low">{data.severity_counts.LOW} L</span>}
+        {data.severity_counts?.INFO > 0 && <span className="badge info">{data.severity_counts.INFO} I</span>}
       </div>
     </div>
   );

@@ -137,6 +137,12 @@ class ToolRouter:
                         invocation.params["command"] = f"theHarvester -d {base_domain} -b all -l 100"
                     elif tname == "wpscan":
                         invocation.params["command"] = f"wpscan --url {target} --enumerate vp,vt --no-banner"
+                    elif tname == "dalfox":
+                        invocation.params["command"] = f"dalfox url {target} --silence --no-color --skip-bav"
+                    elif tname == "nikto":
+                        invocation.params["command"] = f"nikto -h {target} -Tuning 1234567890abc -maxtime 600s -nointeractive"
+                    elif tname == "arjun":
+                        invocation.params["command"] = f"arjun -u {target} --stable"
                     else:
                         invocation.params["command"] = f"{tname} {target}"
                     logger.info(f"Auto-constructed command for {tname}: {invocation.params['command']}")

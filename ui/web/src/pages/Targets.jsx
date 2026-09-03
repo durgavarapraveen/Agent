@@ -174,8 +174,9 @@ function ScanModal({ target, onClose, onStarted }) {
         phases: selectedPhases,
         credentials: validCreds,
       });
-      setScanId(data.scan_id);
+      setScanId(data.scan_id || data.job_id);
       setState("running");
+      setTimeout(() => onStarted(data.scan_id || data.job_id), 600);
     } catch (err) {
       setError(err.message || "Failed to start scan");
       setState("failed");

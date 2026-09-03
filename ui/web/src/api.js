@@ -135,8 +135,11 @@ export const api = {
     recon: { subdomains: [], endpoints: [], technologies: {}, ports: [], ips: [] },
     vulnerabilities: [], exploits: [], captured_requests: [],
   })),
+  getToolOutputs: (id) => request(`/api/scans/${id}/tool-outputs`),
+  getActivity: (id) => request(`/api/scans/${id}/activity`),
   getReviewQueue: () => request("/api/review-queue"),
   getReviewSuccesses: () => request("/api/review-queue/successes"),
   getReviewManual: () => request("/api/review-queue/manual"),
   resolveReview: (id, note = "") => post(`/api/review-queue/${id}/resolve`, { note }),
+  killAllScans: () => post("/api/scans/kill-all", {}),
 };

@@ -200,6 +200,10 @@ class ObjectiveAgentLoop:
                 break
             args = decision.get("args", {}) or {}
             obs = await self._dispatch(tool, args)
+            # Truncate large observations to save LLM tokens.
+            obs_s = json.dumps(obs, default=str)
+            if len(obs_s) > 1500:
+                obs = {"truncated": obs_s[:1400] + "…", "full_len": len(obs_s)}
             history.append({"tool": tool, "args": args, "obs": obs})
 
             # Pluggable success check (e.g. benchmark oracle).

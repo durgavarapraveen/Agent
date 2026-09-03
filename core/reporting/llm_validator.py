@@ -127,9 +127,26 @@ Rules for validation:
                         validated["severity_adjusted_by"] = "llm_validator"
 
                 if result.get("is_false_positive"):
-                    validated["status"] = "FALSE_POSITIVE"
-                    validated["fp_reason"] = result.get("fp_reason", "LLM flagged as false positive")
-                    validated["confidence_score"] = min(validated.get("confidence_score", 0.5), 0.2)
+                    # Never drop tool-confirmed findings — the LLM is less
+                    # authoritative than an actual scanner/exploit that produced proof.
+                    _tool_confirmed = bool(
+                        finding.get("exploited") or finding.get("confirmed")
+                        or finding.get("proof") or finding.get("evidence")
+                        or str(finding.get("tool") or "").lower() in
+                        ("sqlmap", "nuclei", "nikto", "sslscan", "nmap", "dalfox",
+                         "ffuf", "gobuster", "profiler", "exploit_agent")
+                        or str(finding.get("type") or "").upper() in
+                        ("SQL_INJECTION", "SQLI", "NUCLEI_MATCH", "XSS",
+                         "COMMAND_INJECTION", "RCE", "SSRF", "XXE", "PATH_TRAVERSAL")
+                    )
+                    if _tool_confirmed:
+                        validated["llm_fp_overridden"] = True
+                        validated["fp_reason"] = result.get("fp_reason", "")
+                        logger.info(f"[LLMValidator] Overriding FP for tool-confirmed: {title}")
+                    else:
+                        validated["status"] = "FALSE_POSITIVE"
+                        validated["fp_reason"] = result.get("fp_reason", "LLM flagged as false positive")
+                        validated["confidence_score"] = min(validated.get("confidence_score", 0.5), 0.2)
 
                 if result.get("is_valid") is False and not result.get("is_false_positive"):
                     validated["status"] = "UNCONFIRMED"

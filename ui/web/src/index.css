@@ -66,7 +66,8 @@ body {
 /* ── Layout ──────────────────────────────────────────────────────────────── */
 .app {
   display: flex;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 
 .sidebar {
@@ -215,10 +216,10 @@ body {
   flex: 1;
   margin-left: 240px;
   padding: 28px 36px;
-  min-height: 100vh;
   max-width: 1200px;
   min-width: 0;
   overflow-x: hidden;
+  overflow-y: auto;
 }
 
 /* ── Page Header ─────────────────────────────────────────────────────────── */
@@ -269,7 +270,7 @@ h3 {
   margin-bottom: 16px;
   box-shadow: none;
   transition: border-color 0.2s;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .card:hover {
@@ -377,6 +378,8 @@ h3 {
 /* ── Table ────────────────────────────────────────────────────────────────── */
 .table-wrap {
   overflow-x: auto;
+  overflow-y: auto;
+  max-height: 70vh;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: none;
@@ -389,7 +392,7 @@ table {
 }
 
 thead th {
-  background: rgba(247, 249, 250, 0.03);
+  background: var(--bg-card, #1a1a2e);
   color: var(--text-dim);
   font-weight: 500;
   text-transform: uppercase;
