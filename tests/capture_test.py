@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO,
                     format="[%(levelname)s] %(name)s: %(message)s")
 
 from core.exploitation.request_capture import RequestCapturer
-from core.memory.shared_context import SharedContext
+from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
 
 
 def main():

@@ -86,7 +86,7 @@ class TestDedupStore(unittest.TestCase):
         self.assertEqual(len(out["report"]), 0)
 
     def test_distinct_missing_headers_on_same_host_are_not_deduplicated(self):
-        from core.memory.shared_context import SharedContext
+        from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
 
         ctx = SharedContext("target.com")
 

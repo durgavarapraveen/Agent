@@ -13,6 +13,7 @@ Core features:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -23,6 +24,26 @@ from enum import Enum
 from typing import Dict, Optional, List, Any
 
 import httpx
+
+# DeepSeek V4 tokenizer (more accurate than tiktoken for DeepSeek models)
+_ds_tokenizer = None
+
+def _get_deepseek_tokenizer():
+    global _ds_tokenizer
+    if _ds_tokenizer is not None:
+        return _ds_tokenizer
+    try:
+        import transformers, pathlib
+        tok_dir = pathlib.Path(__file__).resolve().parent.parent / "deepseek_v4_tokenizer"
+        if tok_dir.exists():
+            _ds_tokenizer = transformers.AutoTokenizer.from_pretrained(
+                str(tok_dir), trust_remote_code=True
+            )
+            return _ds_tokenizer
+    except Exception:
+        pass
+    _ds_tokenizer = False  # sentinel: tried, failed
+    return _ds_tokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -55,43 +76,48 @@ class ProviderType(Enum):
 
 @dataclass
 class PricingTier:
-    """Pricing per 1K tokens"""
-    input: float      # $/1K tokens
-    output: float     # $/1K tokens
+    """Pricing per 1M tokens (converted to per-token internally)"""
+    input: float      # $/1M tokens (cache miss)
+    output: float     # $/1M tokens
+    cache_hit: float = 0.0  # $/1M tokens (cache hit, 0 = no cache discount)
 
 
-# Global pricing reference (2024 rates)
+# Global pricing reference — DeepSeek V4 (Sep 2026), others current
+# All prices per 1M tokens (off-peak rates; peak = 2x during 01:00-04:00 & 06:00-10:00 UTC Mon-Fri)
 PROVIDER_PRICING = {
     "openai": {
-        "gpt-4": PricingTier(0.03, 0.06),
-        "gpt-4-turbo": PricingTier(0.01, 0.03),
-        "gpt-3.5-turbo": PricingTier(0.0005, 0.0015),
+        "gpt-4": PricingTier(30.0, 60.0),
+        "gpt-4-turbo": PricingTier(10.0, 30.0),
+        "gpt-3.5-turbo": PricingTier(0.5, 1.5),
     },
     "anthropic": {
-        "claude-3-opus": PricingTier(0.015, 0.075),
-        "claude-3-sonnet": PricingTier(0.003, 0.015),
-        "claude-3-haiku": PricingTier(0.00025, 0.00125),
+        "claude-3-opus": PricingTier(15.0, 75.0),
+        "claude-3-sonnet": PricingTier(3.0, 15.0),
+        "claude-3-haiku": PricingTier(0.25, 1.25),
     },
     "google": {
-        "gemini-pro": PricingTier(0.0005, 0.0015),
-        "gemini-pro-vision": PricingTier(0.001, 0.002),
+        "gemini-pro": PricingTier(0.5, 1.5),
+        "gemini-pro-vision": PricingTier(1.0, 2.0),
     },
     "deepseek": {
-        "deepseek-chat": PricingTier(0.00014, 0.00028),
-        "deepseek-coder": PricingTier(0.00027, 0.00081),
-        "deepseek-flash": PricingTier(0.00022, 0.00066),
-        "deepseek-pro": PricingTier(0.00066, 0.00198),
+        # V4 models — off-peak $/1M tokens
+        "deepseek-v4-flash": PricingTier(0.22, 0.66, cache_hit=0.007),
+        "deepseek-v4-pro": PricingTier(0.66, 1.98, cache_hit=0.022),
+        "deepseek-v4-flash-vision-exp": PricingTier(0.22, 0.66, cache_hit=0.007),
+        # Legacy aliases
+        "deepseek-chat": PricingTier(0.22, 0.66, cache_hit=0.007),
+        "deepseek-reasoner": PricingTier(0.66, 1.98, cache_hit=0.022),
     },
     "groq": {
-        "mixtral-8x7b": PricingTier(0.0, 0.0),  # Free tier
+        "mixtral-8x7b": PricingTier(0.0, 0.0),
         "llama2-70b": PricingTier(0.0, 0.0),
     },
     "ollama": {
-        "any": PricingTier(0.0, 0.0),  # Local, no cost
+        "any": PricingTier(0.0, 0.0),
     },
     "azure": {
-        "gpt-4": PricingTier(0.03, 0.06),
-        "gpt-35-turbo": PricingTier(0.0015, 0.002),
+        "gpt-4": PricingTier(30.0, 60.0),
+        "gpt-35-turbo": PricingTier(1.5, 2.0),
     }
 }
 
@@ -108,6 +134,9 @@ class UsageMetrics:
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     latency_ms: float = 0.0
     error: Optional[str] = None
+    cache_hit_tokens: int = 0
+    cache_miss_tokens: int = 0
+    reasoning_tokens: int = 0
 
 
 class TokenBudget:
@@ -133,11 +162,9 @@ class TokenBudget:
         """Check if budget allows request"""
         if estimated_tokens <= 0:
             return True
-        
-        # Estimate max cost (assume output=2x input)
         pricing = self._get_pricing(provider, model)
-        estimated_cost = (estimated_tokens * pricing.input) + \
-                        (estimated_tokens * 2 * pricing.output)
+        estimated_cost = (estimated_tokens * pricing.input / 1_000_000) + \
+                        (estimated_tokens * 2 * pricing.output / 1_000_000)
         remaining = self.max_budget_usd - self.spent_usd
         return estimated_cost <= remaining
     
@@ -160,23 +187,32 @@ class TokenBudget:
         """Get aggregate statistics"""
         total_cost = sum(r.cost_usd for r in self.requests)
         total_tokens = sum(r.total_tokens for r in self.requests)
+        total_cache_hit = sum(r.cache_hit_tokens for r in self.requests)
+        total_cache_miss = sum(r.cache_miss_tokens for r in self.requests)
+        total_reasoning = sum(r.reasoning_tokens for r in self.requests)
         avg_latency = sum(r.latency_ms for r in self.requests) / len(self.requests) if self.requests else 0
-        
+
         provider_breakdown = {}
         for req in self.requests:
             key = f"{req.provider}/{req.model}"
             if key not in provider_breakdown:
-                provider_breakdown[key] = {"requests": 0, "tokens": 0, "cost": 0.0}
+                provider_breakdown[key] = {"requests": 0, "tokens": 0, "cost": 0.0,
+                                           "cache_hit_tokens": 0, "reasoning_tokens": 0}
             provider_breakdown[key]["requests"] += 1
             provider_breakdown[key]["tokens"] += req.total_tokens
             provider_breakdown[key]["cost"] += req.cost_usd
-        
+            provider_breakdown[key]["cache_hit_tokens"] += req.cache_hit_tokens
+            provider_breakdown[key]["reasoning_tokens"] += req.reasoning_tokens
+
         return {
             "total_requests": len(self.requests),
             "total_tokens": total_tokens,
             "total_cost_usd": total_cost,
             "remaining_budget_usd": self.max_budget_usd - total_cost,
             "avg_latency_ms": avg_latency,
+            "cache_hit_tokens": total_cache_hit,
+            "cache_miss_tokens": total_cache_miss,
+            "reasoning_tokens": total_reasoning,
             "provider_breakdown": provider_breakdown,
             "errors": [r.error for r in self.requests if r.error],
         }
@@ -198,6 +234,10 @@ class LLMResponse:
     cost_usd: float = 0.0
     error: Optional[str] = None
     latency_ms: float = 0.0
+    reasoning_content: Optional[str] = None
+    cache_hit_tokens: int = 0
+    cache_miss_tokens: int = 0
+    tool_calls: Optional[List[Dict[str, Any]]] = None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -345,142 +385,361 @@ class LLMProvider(ABC):
 # ═══════════════════════════════════════════════════════════════
 
 class DeepSeekProvider(LLMProvider):
-    """DeepSeek OpenAI-compatible API"""
-    
+    """
+    DeepSeek V4 API provider (OpenAI-compatible format).
+
+    Models:
+      - deepseek-v4-flash   : fast, cheap  (concurrency 2500)
+      - deepseek-v4-pro     : powerful reasoning (concurrency 500)
+      - deepseek-v4-flash-vision-exp : flash + image input
+
+    Thinking mode is ON by default (reasoning_effort: high).
+    Context caching is automatic — prompt_cache_hit_tokens in response.
+    Pricing per 1M tokens (off-peak):
+      flash  input $0.22 / cache-hit $0.007 / output $0.66
+      pro    input $0.66 / cache-hit $0.022 / output $1.98
+    Peak hours (2x): Mon-Fri 01:00-04:00 & 06:00-10:00 UTC.
+    """
+
+    MODEL_ALIASES = {
+        "deepseek-chat": "deepseek-v4-flash",
+        "deepseek-reasoner": "deepseek-v4-pro",
+        "deepseek-coder": "deepseek-v4-flash",
+    }
+
     def __init__(
         self,
         api_key: str,
-        small_model: str = "deepseek-chat",
-        large_model: str = "deepseek-chat",
+        small_model: str = "deepseek-v4-flash",
+        large_model: str = "deepseek-v4-pro",
         base_url: str = "https://api.deepseek.com",
-        budget: Optional[TokenBudget] = None
+        budget: Optional[TokenBudget] = None,
+        reasoning_effort: str = "high",
+        user_id: Optional[str] = None,
     ):
         super().__init__(ProviderType.DEEPSEEK, budget or TokenBudget())
         self.api_key = api_key
-        self.small_model = small_model
-        self.large_model = large_model
+        self.small_model = self.MODEL_ALIASES.get(small_model, small_model)
+        self.large_model = self.MODEL_ALIASES.get(large_model, large_model)
         self.base_url = base_url.rstrip("/")
-    
+        self.reasoning_effort = reasoning_effort
+        self.timeout = 180
+        self.user_id = user_id
+        self._retry_count = 0
+        self._max_retries = 3
+        # Per-conversation reasoning_content store for tool-call multi-turn
+        self._reasoning_history: Dict[str, str] = {}
+
     async def is_available(self) -> bool:
+        if not self.api_key:
+            logger.warning("[DeepSeek] no API key configured")
+            return False
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=30) as client:
                 r = await client.post(
                     f"{self.base_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    json={"model": self.small_model, "messages": [{"role": "user", "content": "test"}], "max_tokens": 10}
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.small_model,
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "max_tokens": 1,
+                        "thinking": {"type": "disabled"},
+                    },
                 )
                 if r.status_code == 200:
                     return True
-                else:
-                    logger.warning(f"[DeepSeek] Availability check failed: {r.status_code} - {r.text}")
-                    return False
-        except Exception as e:
-            logger.warning(f"[DeepSeek] Availability check exception: {e}")
+                logger.warning(f"[DeepSeek] availability check HTTP {r.status_code}: {r.text[:200]}")
+                return r.status_code == 401  # Key exists but invalid — still "reachable"
+        except httpx.ConnectTimeout:
+            logger.warning("[DeepSeek] availability check: connection timeout (30s)")
             return False
-    
+        except httpx.ConnectError as e:
+            logger.warning(f"[DeepSeek] availability check: connection error — {type(e).__name__}: {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"[DeepSeek] availability check: {type(e).__name__}: {e}")
+            return False
+
     def get_small_model(self) -> str:
         return self.small_model
-    
+
     def get_large_model(self) -> str:
         return self.large_model
-    
+
+    def _resolve_model(self, model: str) -> str:
+        return self.MODEL_ALIASES.get(model, model)
+
+    def count_tokens(self, text: str) -> int:
+        tok = _get_deepseek_tokenizer()
+        if tok:
+            return len(tok.encode(text))
+        return max(1, len(text) // 4)
+
+    def _build_payload(
+        self, messages: List[Dict], model: str, max_tokens: int,
+        temperature: float, use_thinking: bool,
+        response_format: Optional[str] = None,
+        tools: Optional[List[Dict]] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+
+        if use_thinking:
+            payload["thinking"] = {"type": "enabled"}
+            payload["reasoning_effort"] = self.reasoning_effort
+            # thinking mode ignores temperature/top_p
+        else:
+            payload["thinking"] = {"type": "disabled"}
+            payload["temperature"] = temperature
+
+        if response_format == "json":
+            payload["response_format"] = {"type": "json_object"}
+
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+
+        if self.user_id:
+            payload["user_id"] = self.user_id
+
+        return payload
+
+    def _parse_response_data(self, data: Dict, model: str, latency_ms: float,
+                              response_format: Optional[str] = None) -> LLMResponse:
+        choice = data["choices"][0]
+        message = choice.get("message", {})
+        content = message.get("content") or ""
+        reasoning_content = message.get("reasoning_content") or ""
+        tool_calls = message.get("tool_calls")
+        finish_reason = choice.get("finish_reason")
+
+        if not content and reasoning_content and finish_reason != "tool_calls":
+            content = reasoning_content
+
+        usage = data.get("usage", {})
+        input_tokens = usage.get("prompt_tokens", 0)
+        output_tokens = usage.get("completion_tokens", 0)
+        cache_hit = usage.get("prompt_cache_hit_tokens", 0)
+        cache_miss = usage.get("prompt_cache_miss_tokens", 0)
+        reasoning_tokens = 0
+        if "completion_tokens_details" in usage:
+            reasoning_tokens = usage["completion_tokens_details"].get("reasoning_tokens", 0)
+
+        pricing = self.budget._get_pricing("deepseek", model)
+        if cache_hit > 0 and pricing.cache_hit > 0:
+            input_cost = (cache_hit * pricing.cache_hit / 1_000_000) + \
+                         (cache_miss * pricing.input / 1_000_000)
+        else:
+            input_cost = input_tokens * pricing.input / 1_000_000
+        output_cost = output_tokens * pricing.output / 1_000_000
+        cost = input_cost + output_cost
+
+        metric = UsageMetrics(
+            provider="deepseek", model=model,
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            total_tokens=input_tokens + output_tokens, cost_usd=cost,
+            latency_ms=latency_ms,
+            cache_hit_tokens=cache_hit, cache_miss_tokens=cache_miss,
+            reasoning_tokens=reasoning_tokens,
+        )
+        self.budget.log_request(metric)
+
+        structured = None
+        if response_format == "json" and content:
+            structured = self._parse_json_response(content)
+
+        resp = LLMResponse(
+            content=content, structured_output=structured,
+            finish_reason=finish_reason,
+            provider="deepseek", model=model, cost_usd=cost,
+            usage=usage, latency_ms=latency_ms,
+            reasoning_content=reasoning_content if reasoning_content else None,
+            cache_hit_tokens=cache_hit, cache_miss_tokens=cache_miss,
+        )
+        # Attach raw tool_calls for callers that need them
+        if tool_calls:
+            resp.tool_calls = tool_calls
+        return resp
+
+    async def _post(self, payload: Dict, endpoint: str = "/chat/completions") -> httpx.Response:
+        if not self.session:
+            self.session = httpx.AsyncClient(timeout=self.timeout)
+
+        return await self.session.post(
+            f"{self.base_url}{endpoint}",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+
     async def generate_response(
         self, prompt: str, system: Optional[str] = None, max_tokens: int = 1024,
         temperature: float = 0.3, response_format: Optional[str] = None,
         tier: TaskTier = TaskTier.SMALL
     ) -> LLMResponse:
-        model = self.get_model_for_tier(tier)
-        
+        model = self._resolve_model(self.get_model_for_tier(tier))
+
         if not self.budget.can_afford(max_tokens, "deepseek", model):
+            return LLMResponse(content="", provider="deepseek", model=model, error="Budget exceeded")
+
+        start_time = datetime.now()
+        use_thinking = (tier == TaskTier.LARGE)
+
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+
+        # JSON mode requires "json" in the prompt per API docs
+        user_content = prompt
+        if response_format == "json" and "json" not in prompt.lower():
+            user_content = prompt + "\n\nRespond in JSON format."
+        messages.append({"role": "user", "content": user_content})
+
+        payload = self._build_payload(messages, model, max_tokens, temperature, use_thinking, response_format)
+
+        try:
+            r = await self._post(payload)
+            latency_ms = (datetime.now() - start_time).total_seconds() * 1000
+
+            if r.status_code == 200:
+                self._retry_count = 0
+                return self._parse_response_data(r.json(), model, latency_ms, response_format)
+
+            elif r.status_code == 429:
+                self._retry_count += 1
+                if self._retry_count > self._max_retries:
+                    self._retry_count = 0
+                    return LLMResponse(content="", provider="deepseek", model=model,
+                                       error="Rate limited after max retries", latency_ms=latency_ms)
+                backoff = min(5 * self._retry_count, 30)
+                logger.warning(f"[DeepSeek] 429 rate limited, retry {self._retry_count}/{self._max_retries} in {backoff}s")
+                await asyncio.sleep(backoff)
+                return await self.generate_response(prompt, system, max_tokens, temperature, response_format, tier)
+            else:
+                error = f"HTTP {r.status_code}: {r.text[:300]}"
+                logger.error(f"[DeepSeek] {error}")
+                return LLMResponse(
+                    content="", provider="deepseek", model=model,
+                    error=error, latency_ms=latency_ms,
+                )
+
+        except Exception as e:
+            logger.error(f"[DeepSeek] request failed: {e}")
             return LLMResponse(
                 content="", provider="deepseek", model=model,
-                error="Budget exceeded"
+                error=str(e), latency_ms=(datetime.now() - start_time).total_seconds() * 1000,
             )
-        
-        start_time = datetime.now()
-        is_reasoner = "reasoner" in model
 
-        if is_reasoner:
-            # deepseek-reasoner does not support system role, temperature, or response_format
-            user_content = f"{system}\n\n{prompt}" if system else prompt
-            messages = [{"role": "user", "content": user_content}]
-        else:
-            messages = [
-                {"role": "system", "content": system or "You are a helpful assistant."},
-                {"role": "user", "content": prompt}
-            ]
+    async def generate_with_tools(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        model: Optional[str] = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.1,
+        tier: TaskTier = TaskTier.LARGE,
+        tool_executor: Optional[Any] = None,
+        max_rounds: int = 10,
+    ) -> LLMResponse:
+        """
+        Tool-calling loop. Sends messages with tools, executes tool_calls
+        via tool_executor callback, and loops until the model stops calling tools.
 
-        payload = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "stream": False
-        }
+        tool_executor: async callable(name, arguments_dict) -> str
+        When tools param is present, reasoning_content MUST be passed back
+        in all subsequent turns per DeepSeek API requirement.
+        """
+        model = self._resolve_model(model or self.get_model_for_tier(tier))
+        use_thinking = (tier == TaskTier.LARGE)
+        conv_messages = list(messages)
+        total_cost = 0.0
+        all_content = []
 
-        if not is_reasoner:
-            payload["temperature"] = temperature
-            if response_format == "json":
-                payload["response_format"] = {"type": "json_object"}
-        
-        try:
-            if not self.session:
-                self.session = httpx.AsyncClient(timeout=self.timeout)
-            
-            r = await self.session.post(
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json=payload
+        for round_i in range(max_rounds):
+            start_time = datetime.now()
+            payload = self._build_payload(
+                conv_messages, model, max_tokens, temperature, use_thinking,
+                tools=tools,
             )
-            
-            latency_ms = (datetime.now() - start_time).total_seconds() * 1000
-            
-            if r.status_code == 200:
+
+            try:
+                r = await self._post(payload)
+                latency_ms = (datetime.now() - start_time).total_seconds() * 1000
+
+                if r.status_code != 200:
+                    error = f"HTTP {r.status_code}: {r.text[:300]}"
+                    logger.error(f"[DeepSeek] tool round {round_i}: {error}")
+                    return LLMResponse(content="\n".join(all_content), provider="deepseek",
+                                       model=model, error=error, latency_ms=latency_ms)
+
+                resp = self._parse_response_data(r.json(), model, latency_ms)
+                total_cost += resp.cost_usd
+
                 data = r.json()
                 choice = data["choices"][0]
                 message = choice.get("message", {})
-                content = message.get("content") or ""
-                reasoning_content = message.get("reasoning_content") or ""
-                if not content and reasoning_content:
-                    content = reasoning_content
-                usage = data.get("usage", {})
-                
-                # Calculate cost
-                input_tokens = usage.get("prompt_tokens", 0)
-                output_tokens = usage.get("completion_tokens", 0)
-                pricing = self.budget._get_pricing("deepseek", model)
-                cost = (input_tokens * pricing.input) + (output_tokens * pricing.output)
-                
-                # Log metrics
-                metric = UsageMetrics(
-                    provider="deepseek", model=model,
-                    input_tokens=input_tokens, output_tokens=output_tokens,
-                    total_tokens=input_tokens + output_tokens, cost_usd=cost,
-                    latency_ms=latency_ms
-                )
-                self.budget.log_request(metric)
-                
-                structured = self._parse_json_response(content) if response_format == "json" else None
-                
-                return LLMResponse(
-                    content=content, structured_output=structured,
-                    finish_reason=choice.get("finish_reason"),
-                    provider="deepseek", model=model, cost_usd=cost,
-                    usage=usage, latency_ms=latency_ms
-                )
-            else:
-                error = f"HTTP {r.status_code}: {r.text[:200]}"
-                logger.error(error)
-                return LLMResponse(
-                    content="", provider="deepseek", model=model,
-                    error=error, latency_ms=(datetime.now() - start_time).total_seconds() * 1000
-                )
-        
-        except Exception as e:
-            logger.error(f"DeepSeek request failed: {e}")
-            return LLMResponse(
-                content="", provider="deepseek", model=model,
-                error=str(e), latency_ms=(datetime.now() - start_time).total_seconds() * 1000
-            )
+                tool_calls = message.get("tool_calls")
+                reasoning_content = message.get("reasoning_content")
+
+                if not tool_calls or choice.get("finish_reason") != "tool_calls":
+                    if resp.content:
+                        all_content.append(resp.content)
+                    resp.content = "\n".join(all_content) if all_content else resp.content
+                    resp.cost_usd = total_cost
+                    return resp
+
+                # Append assistant message with reasoning_content (required for multi-turn with tools)
+                assistant_msg: Dict[str, Any] = {"role": "assistant", "content": message.get("content")}
+                if reasoning_content:
+                    assistant_msg["reasoning_content"] = reasoning_content
+                assistant_msg["tool_calls"] = tool_calls
+                conv_messages.append(assistant_msg)
+
+                # Execute each tool call
+                for tc in tool_calls:
+                    fn = tc.get("function", {})
+                    fn_name = fn.get("name", "")
+                    try:
+                        fn_args = json.loads(fn.get("arguments", "{}"))
+                    except json.JSONDecodeError:
+                        fn_args = {}
+
+                    result = ""
+                    if tool_executor:
+                        try:
+                            result = await tool_executor(fn_name, fn_args)
+                        except Exception as e:
+                            result = f"Error executing {fn_name}: {e}"
+                            logger.error(f"[DeepSeek] tool exec error: {e}")
+                    else:
+                        result = f"Tool {fn_name} not implemented"
+
+                    conv_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": str(result),
+                    })
+
+            except Exception as e:
+                logger.error(f"[DeepSeek] tool round {round_i} failed: {e}")
+                return LLMResponse(content="\n".join(all_content), provider="deepseek",
+                                   model=model, error=str(e), cost_usd=total_cost,
+                                   latency_ms=(datetime.now() - start_time).total_seconds() * 1000)
+
+        return LLMResponse(
+            content="\n".join(all_content) if all_content else "",
+            provider="deepseek", model=model, cost_usd=total_cost,
+            error=f"Tool loop exceeded {max_rounds} rounds",
+        )
 
 
 class OllamaProvider(LLMProvider):
@@ -695,11 +954,25 @@ class UniversalLLMHarness:
         ]
         self.provider_config = provider_config
         self.active_provider: Optional[LLMProvider] = None
-    
+        # Economic controller (Feature #5) — set during initialize().
+        self.governor: Optional[Any] = None
+
     async def initialize(self):
         """Initialize & test primary provider, fallback if needed"""
         logger.info(f"[HARNESS] Initializing {self.primary_provider.value}...")
         
+        # Attach the budget governor (graded spend policy over the TokenBudget).
+        try:
+            from core.economics.budget_governor import get_budget_governor
+            self.governor = get_budget_governor(self.budget)
+            if self.governor:
+                logger.info(f"[HARNESS] budget governor active "
+                            f"(downgrade@{self.governor.downgrade_pct:.0%}, "
+                            f"hard-stop@{self.governor.hard_stop_pct:.0%})")
+        except Exception as e:
+            logger.debug(f"[HARNESS] budget governor unavailable: {e}")
+            self.governor = None
+
         # Try primary
         self.active_provider = self._create_provider(self.primary_provider)
         if await self.active_provider.is_available():
@@ -724,9 +997,11 @@ class UniversalLLMHarness:
         if provider_type == ProviderType.DEEPSEEK:
             return DeepSeekProvider(
                 api_key=self.provider_config.get("deepseek_api_key", ""),
-                small_model=self.provider_config.get("deepseek_small_model", "deepseek-chat"),
-                large_model=self.provider_config.get("deepseek_large_model", "deepseek-chat"),
-                budget=self.budget
+                small_model=self.provider_config.get("deepseek_small_model", "deepseek-v4-flash"),
+                large_model=self.provider_config.get("deepseek_large_model", "deepseek-v4-pro"),
+                budget=self.budget,
+                reasoning_effort=self.provider_config.get("deepseek_reasoning_effort", "high"),
+                user_id=self.provider_config.get("deepseek_user_id"),
             )
         
         elif provider_type == ProviderType.GROQ:
@@ -757,13 +1032,46 @@ class UniversalLLMHarness:
         response_format: Optional[str] = None,
         tier: TaskTier = TaskTier.SMALL
     ) -> LLMResponse:
-        """Generate response from active provider"""
+        """Generate response from active provider with mid-session fallback on fatal errors (402, 5xx)."""
         if not self.active_provider:
             await self.initialize()
-        
-        return await self.active_provider.generate_response(
+
+        # Economic policy: hard-stop and tier downgrade before dispatch.
+        if self.governor is not None:
+            model_hint = self.active_provider.get_model_for_tier(tier) if self.active_provider else ""
+            if not self.governor.allow_request(max_tokens, self.primary_provider.value, model_hint):
+                return LLMResponse(content="", provider=self.primary_provider.value,
+                                   model=model_hint, error="Budget governor: hard stop reached")
+            tier = self.governor.adjust_tier(tier)
+
+        resp = await self.active_provider.generate_response(
             prompt, system, max_tokens, temperature, response_format, tier
         )
+
+        if resp.error and self._is_fatal_provider_error(resp.error):
+            fallback = await self._try_fallback_provider(resp.error)
+            if fallback:
+                return await self.active_provider.generate_response(
+                    prompt, system, max_tokens, temperature, response_format, tier
+                )
+
+        return resp
+
+    def _is_fatal_provider_error(self, error: str) -> bool:
+        fatal_indicators = ("402", "Insufficient Balance", "Payment Required", "HTTP 5")
+        return any(ind in str(error) for ind in fatal_indicators)
+
+    async def _try_fallback_provider(self, original_error: str) -> bool:
+        logger.warning(f"[HARNESS] Primary provider failed ({original_error}), attempting mid-session fallback...")
+        for fb in self.fallback_providers:
+            provider = self._create_provider(fb)
+            if await provider.is_available():
+                logger.info(f"[HARNESS] Mid-session failover to {fb.value}")
+                self.active_provider = provider
+                return True
+            logger.warning(f"[HARNESS] Fallback {fb.value} unavailable")
+        logger.error("[HARNESS] All fallback providers exhausted")
+        return False
     
     async def generate_text(
         self,
@@ -789,10 +1097,42 @@ class UniversalLLMHarness:
         )
         return resp.structured_output or {}
     
+    async def generate_with_tools(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        tool_executor: Optional[Any] = None,
+        max_tokens: int = 4096,
+        tier: TaskTier = TaskTier.LARGE,
+        max_rounds: int = 10,
+    ) -> LLMResponse:
+        """Tool-calling loop via active provider with mid-session fallback."""
+        if not self.active_provider:
+            await self.initialize()
+        if isinstance(self.active_provider, DeepSeekProvider):
+            resp = await self.active_provider.generate_with_tools(
+                messages, tools, max_tokens=max_tokens, tier=tier,
+                tool_executor=tool_executor, max_rounds=max_rounds,
+            )
+            if resp.error and self._is_fatal_provider_error(resp.error):
+                if await self._try_fallback_provider(resp.error):
+                    if isinstance(self.active_provider, DeepSeekProvider):
+                        return await self.active_provider.generate_with_tools(
+                            messages, tools, max_tokens=max_tokens, tier=tier,
+                            tool_executor=tool_executor, max_rounds=max_rounds,
+                        )
+            return resp
+        return LLMResponse(content="", error="Tool calling not supported on this provider")
+
+    def count_tokens(self, text: str) -> int:
+        if isinstance(self.active_provider, DeepSeekProvider):
+            return self.active_provider.count_tokens(text)
+        return max(1, len(text) // 4)
+
     def stats(self) -> Dict[str, Any]:
         """Get usage statistics"""
         return self.budget.stats()
-    
+
     async def close(self):
         """Cleanup"""
         if self.active_provider and self.active_provider.session:

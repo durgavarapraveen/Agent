@@ -18,7 +18,7 @@ from core.coverage.catalog import SecurityTestCatalog
 class TestIntelligence(unittest.TestCase):
     def setUp(self):
         # Use an in-memory db for clean tests
-        self.db = MemoryDatabase(":memory:")
+        self.db = MemoryDatabase()
         self.failure_store = FailureStore(self.db)
         self.exp_store = ExperienceStore(self.db)
         self.strat_store = StrategyStore(self.db)

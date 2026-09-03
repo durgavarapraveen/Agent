@@ -171,6 +171,7 @@ class ToolResult(BaseModel):
     data: Dict[str, Any] = Field(default_factory=dict)
     warnings: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    fallback_used: Optional[str] = None
 
     @property
     def success(self) -> bool:

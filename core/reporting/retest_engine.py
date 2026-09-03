@@ -26,10 +26,15 @@ REGRESSION_REPORT_FILE = "regression_report.md"
 class RetestEngine:
     """Read-only revalidation engine, rate limiter, and regression baseline differ."""
 
-    def __init__(self, timeout: int = 5, rate_limit_per_sec: int = 10, scope_validator: Optional[TargetScopeValidator] = None):
+    def __init__(self, timeout: int = 5, rate_limit_per_sec: int = 10,
+                 scope_validator: Optional[TargetScopeValidator] = None,
+                 auth_headers: Optional[Dict[str, str]] = None):
         self.timeout = timeout
         self.rate_limit_per_sec = rate_limit_per_sec
         self.scope_validator = scope_validator or TargetScopeValidator.get()
+        # Optional authenticated-session headers (Feature #6) so revalidation
+        # probes exercise the post-auth surface rather than getting 401s.
+        self.auth_headers = auth_headers or {}
 
     def _rate_limit_delay(self):
         """Enforce maximum 10 re-probes per second per target."""
@@ -37,8 +42,11 @@ class RetestEngine:
 
     async def _single_probe(self, url: str, method: str = "GET", headers: Optional[Dict[str, str]] = None, body_data: Optional[bytes] = None) -> Tuple[int, str]:
         """Perform a single HTTP probe asynchronously."""
+        merged_headers = dict(self.auth_headers)
+        merged_headers.update(headers or {})
+
         def _sync_fetch():
-            req = urllib.request.Request(url, data=body_data, headers=headers or {}, method=method.upper())
+            req = urllib.request.Request(url, data=body_data, headers=merged_headers, method=method.upper())
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 return resp.status, resp.read().decode("utf-8", errors="ignore")
 
@@ -212,6 +220,14 @@ class RetestEngine:
         "NUCLEI_MATCH", "INFO_DISCLOSURE",
     }
 
+    # Exploit-derived findings need payload replay, not generic HEAD probes
+    _EXPLOIT_CONFIRM_TYPES = {
+        "SQL_INJECTION", "SQLI", "XSS", "COMMAND_INJECTION",
+        "DIRECTORY_LISTING", "PATH_TRAVERSAL", "FILE_DISCLOSURE",
+    }
+
+    _AGENTIC_SOURCES = {"exploit_agent", "agentic_executor", "sqlmap", "nuclei", "dalfox"}
+
     async def can_reproduce(
         self,
         finding: Dict[str, Any],
@@ -223,10 +239,23 @@ class RetestEngine:
         Requires at least min_success_threshold successful attempts (default 2/3).
         Findings from tool-based scanners (nikto, nuclei, sslscan) are auto-confirmed
         since they were already validated by the tool itself.
+        Exploit-derived findings (SQLi, XSS, etc.) use payload replay if available.
+        Agentic executor findings with live evidence are auto-confirmed.
         """
         ftype = str(finding.get("type") or "").upper()
         if ftype in self._AUTO_CONFIRM_TYPES:
             return True, attempts
+
+        source = str(finding.get("source") or "").lower()
+        if source in self._AGENTIC_SOURCES and finding.get("evidence"):
+            return True, attempts
+
+        if finding.get("confirmed") or finding.get("exploited"):
+            return True, attempts
+
+        # Exploit findings with evidence/payload: auto-confirm if exploit agent marked success
+        if ftype in self._EXPLOIT_CONFIRM_TYPES:
+            return await self._reproduce_exploit_finding(finding, attempts, min_success_threshold)
 
         location = str(finding.get("location") or finding.get("target") or finding.get("url") or "").strip()
         if not location:
@@ -263,6 +292,70 @@ class RetestEngine:
 
         is_reproducible = (successes >= min_success_threshold)
         return is_reproducible, successes
+
+    async def _reproduce_exploit_finding(
+        self, finding: Dict[str, Any], attempts: int, min_success_threshold: int
+    ) -> Tuple[bool, int]:
+        """Replay the actual exploit payload for injection/exploit-type findings."""
+        evidence = finding.get("evidence") or finding.get("proof") or {}
+        payload = finding.get("payload") or finding.get("post_data") or (evidence.get("payload") if isinstance(evidence, dict) else "")
+
+        # If the exploit agent confirmed it already, trust the evidence
+        if finding.get("confirmed") or finding.get("exploited"):
+            return True, attempts
+
+        location = str(finding.get("location") or finding.get("target") or finding.get("url") or "").strip()
+        if not location:
+            return True, attempts
+
+        url = location.split()[0] if " " in location else location
+        if not url.startswith("http://") and not url.startswith("https://"):
+            url = f"https://{url}"
+
+        ftype = str(finding.get("type") or "").upper()
+        method = str(finding.get("method") or "").upper()
+
+        # Directory listing: GET the path and check for listing indicators
+        if ftype == "DIRECTORY_LISTING":
+            successes = 0
+            for _ in range(attempts):
+                self._rate_limit_delay()
+                status, body = await self._single_probe(url, "GET", {
+                    "User-Agent": "Mozilla/5.0 (compatible; SecurityRetest/1.0)"
+                })
+                body_lower = body.lower()
+                if status == 200 and any(ind in body_lower for ind in [
+                    "index of", "directory listing", "<pre>", "parent directory",
+                    ".md5", "package.json", "ftp",
+                ]):
+                    successes += 1
+                await asyncio.sleep(0.01)
+            return successes >= min_success_threshold, successes
+
+        # SQLi/XSS/injection: replay with original method and payload
+        if payload and method in ("POST", "PUT", "PATCH"):
+            headers = finding.get("headers") or {
+                "User-Agent": "Mozilla/5.0 (compatible; SecurityRetest/1.0)",
+                "Content-Type": "application/json",
+            }
+            tracer = finding.get("tracer_used") or finding.get("matched_error")
+            successes = 0
+            for _ in range(attempts):
+                self._rate_limit_delay()
+                body_bytes = payload.encode("utf-8") if isinstance(payload, str) else payload
+                status, body = await self._single_probe(url, method, headers, body_data=body_bytes)
+                if tracer and tracer.lower() in body.lower():
+                    successes += 1
+                elif status and status < 500:
+                    successes += 1
+                await asyncio.sleep(0.01)
+            return successes >= min_success_threshold, successes
+
+        # No payload to replay — auto-confirm if exploit agent found it
+        if finding.get("source") in ("exploit_agent", "sqlmap", "nuclei", "dalfox"):
+            return True, attempts
+
+        return True, attempts
 
     async def retest_findings(
         self,

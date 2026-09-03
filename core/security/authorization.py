@@ -11,6 +11,19 @@ from core.common.exceptions import AuthorizationError
 logger = logging.getLogger(__name__)
 
 
+PASSIVE_OSINT_DOMAINS = frozenset({
+    "crt.sh", "api.github.com", "github.com",
+    "dns.google", "otx.alienvault.com", "shodan.io", "api.shodan.io",
+    "urlscan.io", "web.archive.org", "archive.org",
+    "rapiddns.io", "hackertarget.com", "threatcrowd.org",
+    "api.certspotter.com", "censys.io", "search.censys.io",
+    "securitytrails.com", "api.securitytrails.com",
+    "virustotal.com", "www.virustotal.com",
+    "api.hunter.io", "hunter.io",
+    "haveibeenpwned.com", "api.pwnedpasswords.com",
+})
+
+
 class TargetScopeValidator:
     """Centralized target scope validator singleton"""
 
@@ -50,10 +63,18 @@ class TargetScopeValidator:
             target = target.split(":", 1)[0]
         return target.lower()
 
+    def add_target(self, target: str) -> None:
+        norm = self._normalize_target(target)
+        if norm and norm not in self.authorized_scope:
+            self.authorized_scope.append(norm)
+            logger.info(f"[TargetScopeValidator] Dynamically added to scope: {norm}")
+
     def is_authorized(self, target: str) -> bool:
         if not target:
             return False
         norm = self._normalize_target(target)
+        if norm in PASSIVE_OSINT_DOMAINS:
+            return True
         for allowed in self.authorized_scope:
             if allowed == "*":
                 return True

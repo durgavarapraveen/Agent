@@ -245,12 +245,37 @@ class KaliDockerExecutor:
 
         return results
 
+    SLOW_TOOLS = frozenset({"nmap", "nuclei", "theharvester", "theHarvester", "nikto", "sqlmap", "wpscan", "ffuf", "feroxbuster", "gobuster", "katana"})
+
+    # Tools that tend to OOM — wrap with ulimit -v (virtual memory cap in KB)
+    MEM_LIMITED_TOOLS = {"theharvester": 512_000, "theHarvester": 512_000, "amass": 512_000}
+
+    @classmethod
+    def _effective_timeout(cls, command: str, requested: int) -> int:
+        try:
+            tool = command.split()[0].lower()
+        except (IndexError, AttributeError):
+            return requested
+        if tool in cls.SLOW_TOOLS or any(t in tool for t in ("harvest", "nuclei", "nmap")):
+            return max(requested, 300)
+        return requested
+
+    @classmethod
+    def _apply_mem_limit(cls, command: str) -> str:
+        """Wrap OOM-prone tool commands with ulimit to cap virtual memory."""
+        try:
+            tool = command.split()[0]
+        except (IndexError, AttributeError):
+            return command
+        limit_kb = cls.MEM_LIMITED_TOOLS.get(tool) or cls.MEM_LIMITED_TOOLS.get(tool.lower())
+        if limit_kb:
+            return f"ulimit -v {limit_kb}; {command}"
+        return command
+
     @classmethod
     def run(cls, command: str, timeout: int = 120, auto_install: bool = True) -> Dict:
-        """
-        Run command inside Kali container or native Linux environment.
-        If first word is a tool that's not installed, auto-install it.
-        """
+        """Run command inside Kali container or native Linux environment."""
+        timeout = cls._effective_timeout(command, timeout)
         if cls.is_native_environment():
             timed_cmd = f"timeout --signal=KILL {int(timeout)}s {command}"
             try:
@@ -293,7 +318,8 @@ class KaliDockerExecutor:
                     "stdout": "", "stderr": ""
                 }
 
-        timed_cmd = f"timeout --signal=KILL {int(timeout)}s {command}"
+        mem_cmd = cls._apply_mem_limit(command)
+        timed_cmd = f"timeout --signal=KILL {int(timeout)}s {mem_cmd}"
         escaped_cmd = timed_cmd.replace('"', '\\"')
         full = f'docker exec {container} bash -c "{escaped_cmd}"'
         grace = int(timeout) + 15
@@ -306,6 +332,8 @@ class KaliDockerExecutor:
                 return {"status": "timeout", "returncode": r.returncode,
                         "error": f"Command exceeded {timeout}s (killed in-container)",
                         "stdout": r.stdout, "stderr": r.stderr}
+            if r.returncode != 0:
+                logger.info(f"[Kali] rc={r.returncode} cmd={command[:80]} stderr={r.stderr[:200]}")
             return {
                 "status": "success" if r.returncode == 0 else "error",
                 "returncode": r.returncode,

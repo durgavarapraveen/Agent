@@ -1,0 +1,1 @@
+from core.adaptation.generic_site_adapter import GenericSiteAdapter, SiteProfile

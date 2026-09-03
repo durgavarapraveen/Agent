@@ -2,7 +2,7 @@ import logging
 from core.domain.endpoint import Endpoint
 from core.domain.request import CapturedRequest
 from core.domain.identity import Identity
-from core.domain.experiment import SecurityExperiment
+from core.domain.experiment_v2 import SecurityExperiment
 
 logger = logging.getLogger(__name__)
 

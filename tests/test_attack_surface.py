@@ -1,6 +1,6 @@
 import unittest
 from core.attack_surface.route_normalizer import RouteNormalizer
-from core.attack_surface.endpoint_inventory import EndpointInventory
+from core.attack_surface.endpoint_inventory_v2 import EndpointInventoryV2
 from core.attack_surface.graph import AttackSurfaceGraph
 from core.domain.endpoint import Endpoint
 from core.domain.request import CapturedRequest
@@ -24,29 +24,26 @@ class TestAttackSurface(unittest.TestCase):
         self.assertEqual(spa, "/dashboard")
 
     def test_endpoint_deduplication(self):
-        inv = EndpointInventory()
+        inv = EndpointInventoryV2()
  
-        ep1 = Endpoint(
-            endpoint_id="EP-1",
-            path="/api/users",
-            url="https://host/api/users",
-            method_set={"GET"}
-        )
+        ep1 = {
+            "endpoint_id": "EP-1",
+            "path": "/api/users",
+            "url": "https://host/api/users",
+            "method": "GET"
+        }
 
-        ep2 = Endpoint(
-            endpoint_id="EP-2",
-            path="/api/users",
-            url="https://host/api/users",
-            method_set={"GET"}
-        )
+        ep2 = {
+            "endpoint_id": "EP-2",
+            "path": "/api/users",
+            "url": "https://host/api/users",
+            "method": "GET"
+        }
 
         inv.add_endpoint(ep1)
         inv.add_endpoint(ep2)
 
-        self.assertEqual(len(inv.get_endpoints()), 2)
-
-        deduped = inv.deduplicate()
-        self.assertEqual(len(deduped), 1)
+        self.assertEqual(len(inv.list_endpoints()), 1)
 
     def test_graph_queries(self):
         graph = AttackSurfaceGraph()

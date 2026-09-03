@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 from core.security.authorization import TargetScopeValidator
-from core.memory.shared_context import SharedContext
+from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
 from core.exploitation.lateral_movement import LateralMovementPlanner
 from core.exploitation.credential_simulator import CredentialSimulator
 from core.exploitation.persistence_auditor import PersistenceAuditor

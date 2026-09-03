@@ -92,8 +92,6 @@ class ToolRouter:
                         invocation.params["command"] = f"subfinder -d {base_domain} -silent"
                     elif tname == "assetfinder":
                         invocation.params["command"] = f"assetfinder --subs-only {base_domain}"
-                    elif tname == "amass":
-                        invocation.params["command"] = f"amass enum -d {base_domain} -passive -timeout 3"
                     elif tname == "dnsenum":
                         invocation.params["command"] = f"dnsenum {base_domain}"
                     elif tname == "fierce":
@@ -103,7 +101,9 @@ class ToolRouter:
                     elif tname == "nuclei":
                         invocation.params["command"] = f"nuclei -u {target} -tags cve,misconfig,exposure -jsonl -silent -severity low,medium,high,critical"
                     elif tname == "nmap":
-                        invocation.params["command"] = f"nmap -sT -sV -F --unprivileged {domain}"
+                        ea = invocation.params.get("extra_args", "") or ""
+                        use_fast = "-F" if "-p" not in ea and "--top-ports" not in ea else ""
+                        invocation.params["command"] = f"nmap -sT -sV {use_fast} --unprivileged {domain}".replace("  ", " ")
                     elif tname == "masscan":
                         invocation.params["command"] = f"masscan {domain} -p1-1000 --rate=1000"
                     elif tname == "whatweb":
@@ -125,8 +125,10 @@ class ToolRouter:
                             invocation.params["command"] = f"feroxbuster -u {target} -w /usr/share/wordlists/dirb/common.txt -q"
                         else:
                             invocation.params["command"] = f"{tname} -u {target}"
-                    elif tname in ("dig", "whois"):
-                        invocation.params["command"] = f"{tname} {domain}"
+                    elif tname == "dig":
+                        invocation.params["command"] = f"dig {base_domain}"
+                    elif tname == "whois":
+                        invocation.params["command"] = f"whois {domain}"
                     elif tname == "sslscan":
                         invocation.params["command"] = f"sslscan --no-colour {domain}"
                     elif tname == "sslyze":
@@ -174,12 +176,63 @@ class ToolRouter:
             # Strip routing-only params that tools don't accept as kwargs
             invocation.params.pop("objective", None)
             invocation.params.pop("preferred_tool", None)
+            extra_args = invocation.params.pop("extra_args", None)
+
+            # Append extra_args to command for KaliTool — only safe flags and their values
+            if extra_args and "command" in invocation.params and best_tool.__class__.__name__ == "KaliTool":
+                # Strip shell operators — pipe, semicolons, backticks, subshells
+                import re as _re
+                clean_args = _re.split(r'[|;&`$()]', extra_args)[0].strip()
+                if clean_args != extra_args.strip():
+                    logger.info(f"Stripped shell operators from extra_args: {extra_args[:80]}")
+                # Strip unmatched quotes that would cause bash parse errors
+                for q in ('"', "'"):
+                    if clean_args.count(q) % 2 != 0:
+                        clean_args = clean_args.replace(q, '')
+                        logger.info(f"Stripped unmatched {q} from extra_args")
+
+                base_cmd = invocation.params["command"]
+                base_tokens = set(base_cmd.split())
+                # Extract the target domain/URL from base command for dedup
+                base_target = invocation.params.get("target", "")
+                tokens = clean_args.split()
+                deduped_parts = []
+                i = 0
+                while i < len(tokens):
+                    token = tokens[i]
+                    if token.startswith("-"):
+                        if token in base_tokens:
+                            i += 1
+                            if i < len(tokens) and not tokens[i].startswith("-"):
+                                i += 1
+                            continue
+                        deduped_parts.append(token)
+                        if i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
+                            i += 1
+                            deduped_parts.append(tokens[i])
+                    else:
+                        # Reject bare words that duplicate the target or are already in base cmd
+                        DNS_RECORD_TYPES = {"A", "AAAA", "MX", "TXT", "NS", "SOA", "CNAME", "PTR", "SRV", "CAA", "ANY"}
+                        if token in base_tokens:
+                            pass
+                        elif base_target and (base_target in token or token in base_target):
+                            logger.debug(f"Rejecting duplicate target in extra_args: {token}")
+                        elif any(c in token for c in ".:/"):
+                            deduped_parts.append(token)
+                        elif token.upper() in DNS_RECORD_TYPES:
+                            deduped_parts.append(token)
+                        else:
+                            logger.debug(f"Rejecting bare-word extra_arg: {token}")
+                    i += 1
+                if deduped_parts:
+                    invocation.params["command"] = f"{base_cmd} {' '.join(deduped_parts)}"
+                    logger.info(f"Appended extra_args to command: {invocation.params['command']}")
+                else:
+                    logger.info(f"Skipped duplicate extra_args for: {base_cmd}")
 
             if inspect.iscoroutinefunction(best_tool.run):
                 raw_result = await best_tool.run(**invocation.params)
             else:
-                # If run is synchronous but it's an I/O operation, ideally we should run in executor.
-                # However, many run methods in tool_registry wrap asyncio.run, so we just call them directly.
                 raw_result = best_tool.run(**invocation.params)
                 
             from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus
@@ -289,8 +342,8 @@ class ToolRouter:
         # Map operation → tool_ids (aligned with HexStrike AI capability architecture)
         op_map = {
             "port_scanning": ["nmap", "masscan", "port_check"],
-            "dns_enumeration": ["subfinder", "amass", "assetfinder", "dnsenum", "fierce"],
-            "subdomain_enumeration": ["subfinder", "amass", "assetfinder"],
+            "dns_enumeration": ["subfinder", "assetfinder", "dnsenum", "fierce"],
+            "subdomain_enumeration": ["subfinder", "assetfinder"],
             "technology_fingerprinting": ["httpx", "whatweb", "wafw00f"],
             "endpoint_discovery": ["katana", "ffuf", "feroxbuster", "gobuster", "dirsearch", "dirb", "http_request"],
             "vulnerability_scanning": ["nuclei", "nikto", "wpscan", "sqlmap"],
@@ -311,12 +364,27 @@ class ToolRouter:
         
         tool_ids = op_map.get(operation, [])
         tools = []
-        
+
         for tool_id in tool_ids:
             tool = self.registry.get(tool_id)
             if tool:
                 tools.append(tool)
-        
+
+        # Fallback: if operation didn't match any op_map key, try it as a direct tool name
+        if not tools:
+            direct = self.registry.get(operation)
+            if direct:
+                tools.append(direct)
+            else:
+                # Try reverse lookup: scan op_map values for the operation string
+                for _op, _ids in op_map.items():
+                    if operation in _ids:
+                        for tid in _ids:
+                            t = self.registry.get(tid)
+                            if t and t not in tools:
+                                tools.append(t)
+                        break
+
         return tools
 
 

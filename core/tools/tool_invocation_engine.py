@@ -1,5 +1,6 @@
+import asyncio
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 from enum import Enum
 from core.common.schemas import ToolInvocation, ToolResult
@@ -23,6 +24,24 @@ class ToolInvocationContext:
     audit_context: Optional[Dict] = None
 
 class ToolInvocationEngine:
+    _TOOL_TO_OP = {
+        "nmap": "port_scanning", "masscan": "port_scanning",
+        "subfinder": "subdomain_enumeration",
+        "assetfinder": "subdomain_enumeration", "dnsenum": "dns_enumeration",
+        "fierce": "dns_enumeration", "dig": "dns_intelligence", "whois": "dns_intelligence",
+        "httpx": "technology_fingerprinting", "whatweb": "technology_fingerprinting",
+        "wafw00f": "waf_detection",
+        "nuclei": "vulnerability_scanning", "nikto": "vulnerability_scanning",
+        "sqlmap": "sql_injection", "wpscan": "vulnerability_scanning",
+        "ffuf": "endpoint_discovery", "gobuster": "endpoint_discovery",
+        "feroxbuster": "endpoint_discovery", "dirb": "endpoint_discovery",
+        "dirsearch": "endpoint_discovery", "katana": "web_crawling",
+        "sslscan": "tls_analysis", "sslyze": "tls_analysis",
+        "hydra": "authentication_testing", "arjun": "parameter_discovery",
+        "dalfox": "xss_scanning", "theharvester": "employee_enumeration",
+        "curl": "http_analysis",
+    }
+
     def __init__(self, tool_gateway):
         self.gateway = tool_gateway
 
@@ -34,9 +53,17 @@ class ToolInvocationEngine:
         logger.info(f"Tool invocation started from source: {context.source.name}")
         
         # Convert engine context to gateway schema
+        resolved_operation = context.operation or ""
+        resolved_tool_id = context.tool_id or ""
+        # If operation equals tool_id (no capability mapping was applied upstream),
+        # resolve it so the router's op_map can find the right tool set.
+        if resolved_operation and resolved_operation == resolved_tool_id:
+            mapped = self._TOOL_TO_OP.get(resolved_operation)
+            if mapped:
+                resolved_operation = mapped
         invocation = ToolInvocation(
-            tool_id=context.tool_id or "",
-            operation=context.operation or "",
+            tool_id=resolved_tool_id,
+            operation=resolved_operation,
             target=context.target,
             params=context.params,
             session_id=context.session_id,
@@ -102,8 +129,95 @@ class ToolInvocationEngine:
         )
         return await self.invoke(context)
 
+    # Capabilities where running ALL tools and merging results is better than picking one
+    MULTI_TOOL_CAPABILITIES = {
+        "dns_enumeration", "subdomain_enumeration", "port_discovery",
+        "port_scanning", "endpoint_discovery", "technology_fingerprinting",
+    }
+
+    async def invoke_all_for_capability(
+        self, capability: str, target: str, params: Dict[str, Any],
+        session_id: str, auth_context: Any,
+        tool_ids: List[str] = None,
+    ) -> ToolResult:
+        """
+        Run multiple tools for a discovery capability concurrently and merge
+        their results. Returns a single merged ToolResult. Tools that fail
+        are logged but don't block the aggregate.
+        """
+        if not tool_ids:
+            if hasattr(self.gateway, 'router') and hasattr(self.gateway.router, '_get_tools_for_operation'):
+                tool_objs = self.gateway.router._get_tools_for_operation(capability)
+                tool_ids = [t.name for t in tool_objs]
+            if not tool_ids:
+                return await self.invoke_from_capability(capability, target, params, session_id, auth_context)
+
+        logger.info(f"MULTI_TOOL_SWEEP: capability={capability} tools={tool_ids}")
+
+        async def _run_one(tool_id: str) -> Optional[ToolResult]:
+            try:
+                ctx = ToolInvocationContext(
+                    tool_id=tool_id, operation=capability,
+                    target=target, params=dict(params),
+                    session_id=session_id, source=InvocationSource.TASK_MANAGER,
+                    auth_context=auth_context,
+                )
+                r = await self.invoke(ctx)
+                if r.success:
+                    logger.info(f"MULTI_TOOL_OK: {tool_id} stdout={len(str(r.stdout or ''))}b")
+                else:
+                    logger.warning(f"MULTI_TOOL_FAIL: {tool_id} — {getattr(r.error, 'message', '') if r.error else 'unknown'}")
+                return r
+            except Exception as e:
+                logger.warning(f"MULTI_TOOL_ERROR: {tool_id} — {e}")
+                return None
+
+        results = await asyncio.gather(*[_run_one(tid) for tid in tool_ids], return_exceptions=False)
+        good = [r for r in results if r and r.success]
+
+        if not good:
+            # Fall back to best single-tool result or first failure
+            any_result = next((r for r in results if r), None)
+            if any_result:
+                return any_result
+            return await self.invoke_from_capability(capability, target, params, session_id, auth_context)
+
+        # Merge: combine stdout and data dicts
+        merged_stdout_parts = []
+        merged_data: Dict[str, Any] = {}
+        tools_used = []
+
+        for r in good:
+            tools_used.append(getattr(r, 'tool', '?'))
+            if r.stdout:
+                merged_stdout_parts.append(f"--- [{getattr(r, 'tool', '?')}] ---\n{r.stdout}")
+            rdata = getattr(r, 'data', None) or {}
+            if isinstance(rdata, dict):
+                for k, v in rdata.items():
+                    if isinstance(v, list):
+                        existing = merged_data.get(k, [])
+                        if isinstance(existing, list):
+                            seen = set(str(x) for x in existing)
+                            for item in v:
+                                if str(item) not in seen:
+                                    existing.append(item)
+                                    seen.add(str(item))
+                            merged_data[k] = existing
+                        else:
+                            merged_data[k] = v
+                    elif k not in merged_data:
+                        merged_data[k] = v
+
+        best = good[0]
+        best.stdout = "\n".join(merged_stdout_parts)
+        best.data = merged_data
+        best.tool = "+".join(tools_used)
+        logger.info(f"MULTI_TOOL_MERGED: {len(good)}/{len(tool_ids)} tools succeeded, "
+                     f"merged data keys={list(merged_data.keys())}")
+        return best
+
     async def invoke_tool_directly(
-        self, tool_id: str, target: str, params: Dict[str, Any], 
+        self, tool_id: str, target: str, params: Dict[str, Any],
         session_id: str, auth_context: Any
     ) -> ToolResult:
         """

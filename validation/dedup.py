@@ -177,12 +177,16 @@ class DedupStore:
                     conn.commit()
         return fps
 
-    def process_scan(self, findings: List[Dict], scan_id: str) -> Dict:
+    def process_scan(self, findings: List[Dict], scan_id: str,
+                     include_recurring: bool = False) -> Dict:
         """Classify a full scan's findings and compute resolved set.
 
         Returns {'results': [DedupResult...], 'report': [findings kept],
                  'suppressed_findings': [suppressed findings],
                  'suppressed': N, 'resolved': [fingerprints]}.
+
+        If include_recurring=True, recurring findings are still included in the
+        report (marked as recurring) instead of being suppressed.
         """
         results, report, suppressed_findings = [], [], []
         suppressed = 0
@@ -192,13 +196,16 @@ class DedupStore:
             f["_dedup"] = res.to_dict()
             title = f.get("title") or f.get("name") or f.get("type") or "unnamed finding"
             loc = f.get("file_path") or f.get("location") or f.get("url") or ""
-            if res.suppressed:
+            if res.suppressed and not include_recurring:
                 suppressed += 1
                 suppressed_findings.append(f)
                 logger.info(f"DEDUP_ACTION: status=RECURRING_SUPPRESSED title='{title}' location='{loc}' fingerprint={res.fingerprint} severity={res.severity} reason='Finding already recorded in prior scan with identical severity'")
             else:
                 report.append(f)
-                logger.info(f"DEDUP_ACTION: status={res.status} title='{title}' location='{loc}' fingerprint={res.fingerprint} severity={res.severity}")
+                if res.suppressed:
+                    logger.info(f"DEDUP_ACTION: status=RECURRING_INCLUDED title='{title}' location='{loc}' fingerprint={res.fingerprint} severity={res.severity}")
+                else:
+                    logger.info(f"DEDUP_ACTION: status={res.status} title='{title}' location='{loc}' fingerprint={res.fingerprint} severity={res.severity}")
         resolved = self.mark_resolved(scan_id)
         return {"results": results, "report": report,
                 "suppressed_findings": suppressed_findings,

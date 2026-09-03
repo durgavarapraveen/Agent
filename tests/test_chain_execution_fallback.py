@@ -1,6 +1,6 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
-from core.memory.shared_context import SharedContext
+from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
 from core.exploitation.request_capture import CapturedRequest
 from core.exploitation.chain_executor import ChainExecutor, ChainResult
 from core.exploitation.chain_detector import ScoredChain

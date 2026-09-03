@@ -5,7 +5,7 @@ import io
 import os
 
 from core.coverage.coverage_engine import CoverageEngine
-from core.coverage.test_definition import TestState
+from core.domain.coverage import TestState
 from core.memory.shared_context_v2 import SharedContextV2
 
 logging.basicConfig(level=logging.INFO)

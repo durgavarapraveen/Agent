@@ -2,6 +2,7 @@ import logging
 import json
 import uuid
 import copy
+from types import SimpleNamespace
 from typing import Dict, Any, Optional
 from urllib.parse import urlparse, urlunparse, urlencode, parse_qsl
 
@@ -51,6 +52,46 @@ class ReplayEngine:
         req_copy.response = response
         
         return req_copy
+
+    def replay(self, request_node: Any, identity_id: Optional[str] = None) -> Optional[ResponseData]:
+        """
+        Access-control adapter used by MatrixEngine.
+
+        Replays a request as the given identity_id (None = anonymous / no auth) and
+        returns the ResponseData. `request_node` may be a CapturedRequest or a dict
+        with a "request" key holding one. When a real session for identity_id has
+        been pre-loaded (see identity_bridge), live credentials are injected;
+        otherwise the request is sent as-is / anonymously.
+        """
+        req = request_node.get("request") if isinstance(request_node, dict) else request_node
+        if req is None:
+            return None
+
+        # Anonymous replay: strip any inherited auth and send.
+        if identity_id is None:
+            rc = copy.deepcopy(req)
+            for k in [h for h in list(rc.full_headers) if h.lower() == "authorization"]:
+                del rc.full_headers[k]
+            try:
+                rc.cookies = {}
+            except Exception:
+                pass
+            try:
+                rc.identity_id = ""   # anonymous (identity_id is a required string field)
+            except Exception:
+                pass
+            resp = self.proxy.forward(rc)
+            rc.response = resp
+            return resp
+
+        # Authenticated replay as a specific identity (uses a pre-loaded real session).
+        shim = SimpleNamespace(identity_id=identity_id)
+        try:
+            replayed = self.replay_request(req, shim)
+            return getattr(replayed, "response", None)
+        except Exception as e:
+            logger.debug(f"[ReplayEngine] replay as '{identity_id}' failed: {e}")
+            return None
 
     def replay_with_modifications(self, request: CapturedRequest, identity: Identity, modifications: Dict[str, Any]) -> CapturedRequest:
         """

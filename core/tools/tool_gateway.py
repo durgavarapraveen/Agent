@@ -26,7 +26,12 @@ class ToolGateway:
         self.audit = audit_logger
         self.resource_limiter = ResourceLimiter()
         from aiolimiter import AsyncLimiter
-        self.rate_limiter = AsyncLimiter(max_rate=5, time_period=60)
+        self.rate_limiter = AsyncLimiter(max_rate=3, time_period=60)
+        self._last_target_hit: dict = {}  # target -> timestamp for per-target throttling
+        from core.tools.tool_router import ToolRouter
+        self.router = ToolRouter(self.registry)
+        from core.tools.rate_limiter import get_rate_limiter
+        self.adaptive_limiter = get_rate_limiter()
     
     async def execute(self, invocation: ToolInvocation, 
                      auth_context: AuthContext) -> ToolResult:
@@ -85,9 +90,14 @@ class ToolGateway:
             if invocation.tool_id and not self._is_tool_available(invocation.tool_id):
                 raise FileNotFoundError(f"Tool binary for {invocation.tool_id} is not installed or available.")
 
+            # Adaptive per-target throttling (WAF/rate-limit aware)
+            target_key = invocation.target or ""
+            if target_key:
+                await self.adaptive_limiter.wait_if_needed(target_key)
+
             logger.info(f"Executing: operation={invocation.operation} tool_id={invocation.tool_id} target={invocation.target}")
             
-            timeout_val = invocation.params.get("timeout", 30)
+            timeout_val = invocation.params.get("timeout", 300)
             
             async with self.rate_limiter:
                 result = await asyncio.wait_for(
@@ -95,8 +105,21 @@ class ToolGateway:
                     timeout=timeout_val
                 )
             
+            # Record result for adaptive rate limiting
+            if target_key:
+                _rc = getattr(result, 'returncode', 0) or 0
+                _stdout = str(getattr(result, 'stdout', '') or '')[:1000]
+                _stderr = str(getattr(result, 'stderr', '') or '')[:1000]
+                await self.adaptive_limiter.record_result(
+                    target_key, result.success, status_code=_rc,
+                    stdout=_stdout, stderr=_stderr,
+                )
+
             if not result.success:
-                raise RuntimeError(result.error.message if result.error else "Tool execution failed")
+                err_detail = result.error.message if result.error else ""
+                stderr_detail = getattr(result, "stderr", "") or ""
+                msg = f"{err_detail} | stderr={stderr_detail[:500]}" if stderr_detail else (err_detail or "Tool execution failed")
+                raise RuntimeError(msg)
                 
         except asyncio.TimeoutError:
             logger.error(f"Timeout: {invocation.tool_id}")
@@ -143,13 +166,10 @@ class ToolGateway:
         
         return True
     
-    async def _execute_tool(self, invocation: ToolInvocation, 
+    async def _execute_tool(self, invocation: ToolInvocation,
                            auth_context: AuthContext) -> ToolResult:
         """Route to ToolRouter (next layer)"""
-        from core.tools.tool_router import ToolRouter
-        
-        router = ToolRouter(self.registry)
-        return await router.route_and_execute(invocation, auth_context)
+        return await self.router.route_and_execute(invocation, auth_context)
     
     async def _handle_timeout(self, invocation: ToolInvocation,
                              auth_context: AuthContext) -> ToolResult:
@@ -254,8 +274,11 @@ class ToolGateway:
             return True
         tool_def = self.registry.get(tool_id)
         if tool_def and tool_def.__class__.__name__ == "KaliTool":
+            from agents.kali_executor import KaliDockerExecutor
+            if KaliDockerExecutor.get_container(auto_create=False):
+                return True
             import shutil
             if not shutil.which(tool_id) and not shutil.which(tool_id.lower()):
-                logger.warning(f"Pre-flight check failed: {tool_id} binary not found in PATH")
+                logger.warning(f"Pre-flight check failed: {tool_id} binary not found in PATH and no Kali container")
                 return False
         return True

@@ -25,4 +25,6 @@ tree_sitter
 weasyprint
 websockets
 xhtml2pdf
+fpdf2
+pdfkit
 PyYAML

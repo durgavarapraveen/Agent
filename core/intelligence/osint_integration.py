@@ -20,7 +20,7 @@ from datetime import datetime
 from core.intelligence.osint_engine import OSINTEngine
 from core.intelligence.threat_intel import ThreatIntelligenceEngine
 from core.intelligence.subdomain_enum import SubdomainEnumerationEngine
-from core.memory.shared_context import SharedContext
+from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
 
 logger = logging.getLogger(__name__)
 

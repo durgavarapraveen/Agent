@@ -80,7 +80,7 @@ class SQLMapAdapter(BaseAdapter):
                 description="SQLMap detected a vulnerable parameter.",
                 severity="CRITICAL",
                 endpoint_id=self.endpoint.endpoint_id,
-                state=FindingState.OPEN,
+                state=FindingState.CANDIDATE,
                 evidence={"output": stdout}
             ))
         return findings
@@ -146,7 +146,7 @@ class NucleiAdapter(BaseAdapter):
                         description=data["info"].get("description", ""),
                         severity=str(data["info"].get("severity", "MEDIUM")).upper(),
                         endpoint_id=self.endpoint.endpoint_id,
-                        state=FindingState.OPEN,
+                        state=FindingState.CANDIDATE,
                         evidence=data
                     ))
             except json.JSONDecodeError:
@@ -204,7 +204,7 @@ class DalfoxAdapter(BaseAdapter):
                 description="Dalfox identified a reflected or stored XSS payload.",
                 severity="HIGH",
                 endpoint_id=self.endpoint.endpoint_id,
-                state=FindingState.OPEN,
+                state=FindingState.CANDIDATE,
                 evidence={"output": stdout}
             ))
         return findings

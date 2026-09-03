@@ -1,0 +1,88 @@
+import { useState } from "react";
+
+export default function Settings() {
+  const [saved, setSaved] = useState(false);
+  const [defaults, setDefaults] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("ag_defaults") || "{}"); }
+    catch { return {}; }
+  });
+
+  const update = (key, val) => {
+    setDefaults(prev => {
+      const next = { ...prev, [key]: val };
+      localStorage.setItem("ag_defaults", JSON.stringify(next));
+      return next;
+    });
+    setSaved(false);
+  };
+
+  const save = () => {
+    localStorage.setItem("ag_defaults", JSON.stringify(defaults));
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  return (
+    <div>
+      <div className="page-header">
+        <h1>Settings</h1>
+      </div>
+
+      <div className="card">
+        <h3>Scan Defaults</h3>
+        <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 12 }}>
+          <div className="form-group">
+            <label>Default Tier</label>
+            <select value={defaults.tier || "DEEP"} onChange={(e) => update("tier", e.target.value)}
+              style={{ padding: "9px 14px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)", background: "var(--bg)", color: "var(--text-h)", fontSize: 13, width: 200 }}>
+              <option value="POC">POC</option>
+              <option value="SHALLOW">Shallow</option>
+              <option value="DEEP">Deep</option>
+            </select>
+          </div>
+          <label className="scan-option" style={{ maxWidth: 300 }}>
+            <input type="checkbox" checked={defaults.auto_approve !== false} onChange={(e) => update("auto_approve", e.target.checked)} />
+            Auto-approve exploits by default
+          </label>
+          <label className="scan-option" style={{ maxWidth: 300 }}>
+            <input type="checkbox" checked={!!defaults.skip_osint} onChange={(e) => update("skip_osint", e.target.checked)} />
+            Skip OSINT by default
+          </label>
+        </div>
+        <div style={{ marginTop: 16 }}>
+          <button className="btn btn-primary" onClick={save}>
+            {saved ? "Saved" : "Save Defaults"}
+          </button>
+        </div>
+      </div>
+
+      <div className="card">
+        <h3>API Connection</h3>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 13 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ color: "var(--text-dim)", fontWeight: 600, minWidth: 100 }}>Endpoint</span>
+            <code style={{ fontFamily: "var(--mono)", color: "var(--accent)", fontSize: 12, padding: "4px 10px", background: "var(--bg)", borderRadius: "var(--radius-sm)" }}>
+              http://localhost:8900/api
+            </code>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ color: "var(--text-dim)", fontWeight: 600, minWidth: 100 }}>Status</span>
+            <span style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--green)" }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--green)", display: "inline-block" }} />
+              Connected
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <h3>About</h3>
+        <div style={{ fontSize: 13, color: "var(--text-dim)", lineHeight: 1.8 }}>
+          <div><span style={{ color: "var(--text)", fontWeight: 600 }}>AntiGravity</span> v2.0 Autonomous Security Testing Engine</div>
+          <div>Coverage Matrix: 43 test types across 858+ cells</div>
+          <div>Powered by multi-LLM reasoning with DeepSeek + Claude</div>
+        </div>
+      </div>
+    </div>
+  );
+}

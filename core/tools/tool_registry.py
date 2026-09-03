@@ -61,6 +61,14 @@ class KaliTool(Tool):
     def __init__(self, name: str, description: str, category: str = "recon"):
         super().__init__(name, description, category)
 
+    # Tools that use non-zero exit codes for normal results
+    _LENIENT_RC_TOOLS = {
+        "nikto", "nuclei", "feroxbuster", "gobuster", "dirb", "dirsearch",
+        "ffuf", "sqlmap", "whatweb", "wafw00f", "wpscan", "katana",
+        "theharvester", "sslscan", "sslyze", "testssl.sh", "commix",
+        "xsser", "dalfox", "arjun", "paramspider", "httpx", "httpx-toolkit",
+    }
+
     def run(self, command: str, timeout: int = 300) -> ToolResult:
         """Run raw command in Kali container"""
         logger.info(f"  [{self.name}] {command}")
@@ -68,11 +76,24 @@ class KaliTool(Tool):
         stdout = strip_ansi(r.get("stdout", ""))
         stderr = strip_ansi(r.get("stderr", ""))
         rc = r.get("returncode")
-        # Exit code is the source of truth. Many recon tools (subfinder, amass,
-        # nuclei, ...) print banners/progress to stderr while still succeeding —
-        # don't surface that as an error when the process exited cleanly.
-        success = r["status"] == "success" if rc is None else rc == 0
+        status = r.get("status", "error")
+        # Many security tools return non-zero for normal results (nikto=1 when
+        # findings exist, nuclei=1 when no matches, feroxbuster for various).
+        # Treat as success if: exit 0, OR tool produced stdout, OR tool is in
+        # the lenient set and didn't hard-crash (signal kill / timeout).
+        if rc == 0 or status == "success":
+            success = True
+        elif status == "timeout":
+            success = False
+        elif stdout.strip():
+            success = True
+        elif self.name in self._LENIENT_RC_TOOLS and rc is not None and rc < 128:
+            success = True
+        else:
+            success = False
         error = "" if success else (stderr or r.get("error", ""))
+        if not success:
+            logger.warning(f"  [{self.name}] FAILED rc={rc} stderr={stderr[:300]}")
         return ToolResult(
             success=success,
             output=stdout or (stderr if success else ""),
@@ -170,6 +191,13 @@ class PythonDNSTool(Tool):
         try:
             addrs = socket.getaddrinfo(domain, None)
             ips = sorted(set(r[4][0] for r in addrs))
+            try:
+                from core.security.authorization import TargetScopeValidator
+                validator = TargetScopeValidator.get()
+                for ip in ips:
+                    validator.add_target(ip)
+            except Exception:
+                pass
             return ToolResult(success=True, output="\n".join(ips), data={"ips": ips})
         except Exception as e:
             return ToolResult(success=False, error=str(e))
@@ -403,7 +431,6 @@ class ToolRegistry:
             ("nmap", "Port scanning + service detection + vuln scripts"),
             ("masscan", "Fast port scanning"),
             ("subfinder", "Passive subdomain discovery"),
-            ("amass", "Subdomain enumeration"),
             ("assetfinder", "Asset discovery"),
             ("dnsenum", "DNS enumeration"),
             ("fierce", "DNS reconnaissance"),

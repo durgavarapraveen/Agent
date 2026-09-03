@@ -32,7 +32,7 @@ class PhaseState:
 
 from agents.llm_client import LLMClient, TaskTier
 from agents.authorization import AuthorizationManager
-from core.memory.shared_context import SharedContext
+from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
 from core.tools.tool_registry import ToolRegistry
 from core.orchestration.agent_spawner import AgentSpawner
 from core.exploitation.chain_integration import ChainManager
@@ -58,6 +58,7 @@ from core.tools.tool_invocation_engine import ToolInvocationEngine
 from core.orchestration.execution_mode import get_execution_config
 from core.tools.tool_gateway import ToolGateway
 from core.orchestration.claude_agent_loop import ClaudeAgentLoop
+from core.orchestration.agentic_executor import AgenticExecutor
 
 from core.common.schemas import (
     BrainDecision, BrainDecisionAction, ExecutionState, TaskSpec,
@@ -69,6 +70,83 @@ from core.intelligence.target_profiler import TargetProfiler
 from core.tools.tool_effectiveness import ToolEffectivenessEngine
 from core.exploitation.api_reconstructor import APIReconstructor
 from core.exploitation.poc_generator import POCGenerator
+
+from core.coverage.coverage_engine import CoverageEngine
+from core.coverage.catalog import SecurityTestCatalog
+from core.hypothesis import HypothesisGenerator, HypothesisRanker
+from core.convergence import ConvergenceEngine, CompletionValidator
+from core.learning import ExperienceLearner
+from core.decisions import DecisionGuardV2
+from core.scheduling.experiment_scheduler_v2 import ExperimentScheduler
+# Replaced by execution_pipeline_v2
+from core.adaptation.generic_site_adapter import GenericSiteAdapter
+from core.checkpointing.secure_checkpoint import SecureCheckpoint
+from core.security.secret_manager import SecretManager
+from core.security.execution_auditor import ExecutionAuditor
+from core.validation.contract_validator import ContractValidator
+from core.attack_surface.graph import AttackSurfaceGraph
+from core.identity.credential_store import CredentialStore
+from core.identity.identity_manager import IdentityManager
+from core.identity.session_manager import SessionManager as IdentitySessionManager
+from core.extraction.endpoint_extractor import EndpointExtractor
+from core.replay.replay_engine import ReplayEngine
+from core.replay.session_manager import SessionManager as ReplaySessionManager
+from core.replay.identity_store import IdentityStore
+from core.replay.http_proxy import HttpProxy
+from core.fuzzing.fuzzer_orchestrator import FuzzerOrchestrator
+from core.injection.injection_matrix import InjectionMatrix
+from core.injection.injection_executor import InjectionExecutor
+from core.access_control.matrix_engine import MatrixEngine
+
+# P0 — Foundation
+from core.security.security_context import SecurityContext as SecurityContextV2
+from core.security.capability_registry import CapabilityRegistry, CapabilityDefinition
+from core.security.authorization_service import AuthorizationService, AuthorizationPolicy
+from core.reasoning.reasoning_engine import ReasoningEngine
+
+# P1a — Experiment Model
+from core.domain.experiment_v2 import SecurityExperiment, ExperimentState
+from core.domain.task_state_machine import TaskStateMachine, TaskState
+from core.scheduling.experiment_scheduler_v2 import ExperimentScheduler as ExperimentSchedulerV2
+from core.scheduling.duplicate_detector import DuplicateDetector
+
+# P1b — Deterministic Executors
+from core.execution.executors.base import ExecutorBase, ExecutionResult as ExecutorResult, ExecutionStatus
+from core.execution.executors.authentication import AuthenticationExecutor
+from core.execution.executors.authorization import AuthorizationExecutor
+from core.execution.executors.sql_injection import SQLiExecutor
+from core.execution.executors.xss import XSSExecutor
+from core.execution.executors.generic import (
+    CORSExecutor, InfoDisclosureExecutor, GraphQLExecutor,
+    WebSocketExecutor, BusinessLogicExecutor, PathTraversalExecutor,
+)
+from core.tools.tool_portfolio import ToolPortfolio
+
+# P1c — Evidence / Oracle / Finding
+from core.evidence.evidence import Evidence
+from core.evidence.oracle import (
+    DifferentialResponseOracle, ErrorSignatureOracle,
+    ReflectionOracle, TimingDifferenceOracle, DOMExecutionOracle,
+)
+from core.evidence.validator import EvidenceValidator
+from core.findings.finding import Finding as FindingV2, FindingState
+from core.findings.finding_state_machine import FindingStateMachine
+from core.findings.finding_store import FindingStore as FindingStoreV2
+
+# P2 — Coverage
+from core.coverage.security_test_catalog import SecurityTestCatalog as SecurityTestCatalogV2, build_default_catalog
+from core.coverage.applicability_engine import ApplicabilityEngine
+from core.coverage.coverage_matrix import CoverageMatrix, CoverageState
+from core.coverage.convergence_engine_v2 import ConvergenceEngine as ConvergenceEngineV2
+from core.attack_surface.endpoint_inventory_v2 import EndpointInventoryV2
+
+# P3 — Integration + Reporting
+from core.execution.execution_pipeline_v2 import ExecutionPipelineV2
+from core.reasoning.hypothesis_engine import HypothesisEngine
+from core.knowledge.knowledge_graph import KnowledgeGraph
+from core.reporting.coverage_report import CoverageReport
+from core.failure.failure_taxonomy import FailureClassifier, FailureType
+from core.recovery.recovery_policy import RecoveryPolicy, RetryAction
 
 logger = logging.getLogger(__name__)
 
@@ -168,17 +246,144 @@ class CentralBrain:
             
         return False
         
+    def request_stop(self):
+        """Request graceful stop. The brain will finish the current phase, save checkpoint, and exit."""
+        self._stop_requested = True
+        self._stop_file.parent.mkdir(parents=True, exist_ok=True)
+        self._stop_file.touch()
+        logger.info("STOP_REQUESTED: Will stop after current phase completes")
+
+    def _check_stop_signal(self) -> bool:
+        """Check if stop was requested (via method call or signal file from API)."""
+        if self._stop_requested:
+            return True
+        if self._stop_file.exists():
+            self._stop_requested = True
+            try:
+                self._stop_file.unlink()
+            except Exception:
+                pass
+            logger.info("STOP_SIGNAL_DETECTED: Stop file found, will stop after current phase")
+            return True
+        return False
+
+    def _clean_stop_signal(self):
+        """Remove stop signal file on clean exit."""
+        try:
+            if self._stop_file.exists():
+                self._stop_file.unlink()
+        except Exception:
+            pass
+
+    def _write_progress(self, extra: dict = None):
+        """Write live progress JSON for the dashboard to poll."""
+        try:
+            progress = {
+                "target": self.ctx.target,
+                "phase": self.current_phase.value if self.current_phase else "COMPLETE",
+                "elapsed_seconds": (datetime.now() - self.start_time).total_seconds(),
+                "agents_spawned": len(self.ctx.agents_spawned),
+                "subdomains": len(getattr(self.ctx, "subdomains", []) or []),
+                "endpoints": len(getattr(self.ctx, "endpoints", []) or []),
+                "vulnerabilities": len(self.ctx.vulnerabilities),
+                "exploits": len(self.ctx.exploit_results),
+                "timestamp": datetime.now().isoformat(),
+            }
+            if extra:
+                progress.update(extra)
+            progress_file = self.report_dir / "live_progress.json"
+            import json as _json
+            progress_file.write_text(_json.dumps(progress, indent=2), encoding="utf-8")
+            try:
+                from core.database.pg_store import LiveDataRepo
+                LiveDataRepo.upsert_progress(self._scan_id, progress)
+            except Exception:
+                pass
+        except Exception:
+            pass
+        self._write_live_results()
+
+    def _write_live_results(self):
+        """Write structured live results for the UI to poll."""
+        try:
+            import json as _json
+            subs = getattr(self.ctx, "subdomains", []) or []
+            eps = getattr(self.ctx, "endpoints", []) or []
+            ports = getattr(self.ctx, "ports", []) or []
+            ips = getattr(self.ctx, "ips", []) or []
+            techs = getattr(self.ctx, "technologies", {}) or {}
+            vulns = self.ctx.vulnerabilities or []
+            exploits = self.ctx.exploit_results or []
+
+            def _serialize(items):
+                out = []
+                for item in items:
+                    if isinstance(item, dict):
+                        out.append(item)
+                    elif isinstance(item, str):
+                        out.append({"name": item})
+                    elif hasattr(item, "__dict__"):
+                        out.append({k: v for k, v in item.__dict__.items() if not k.startswith("_")})
+                    else:
+                        out.append({"value": str(item)})
+                return out
+
+            captured = getattr(self.ctx, 'captured_requests', []) or []
+            attack_chains = getattr(self.ctx, 'attack_chains', None) or {}
+
+            results = {
+                "recon": {
+                    "subdomains": _serialize(subs),
+                    "endpoints": _serialize(eps),
+                    "technologies": techs if isinstance(techs, dict) else {},
+                    "ports": _serialize(ports),
+                    "ips": _serialize(ips),
+                },
+                "vulnerabilities": _serialize(vulns),
+                "exploits": _serialize(exploits),
+                "captured_requests": _serialize(captured[:100]),
+                "attack_chains": attack_chains,
+            }
+            results_file = self.report_dir / "live_results.json"
+            results_file.write_text(_json.dumps(results, default=str), encoding="utf-8")
+            try:
+                from core.database.pg_store import LiveDataRepo
+                LiveDataRepo.upsert_results(self._scan_id, results)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def _transition_to_next_phase(self):
         next_phase = self._evaluate_phase_transition()
         if next_phase:
-            self.transition_phase(next_phase)
+            if self._allowed_phases and next_phase.value not in self._allowed_phases:
+                further = self._skip_to_next_allowed(next_phase)
+                if further:
+                    self.transition_phase(further)
+                else:
+                    self.current_phase = None
+            else:
+                self.transition_phase(next_phase)
         else:
             self.current_phase = None
+
+    def _skip_to_next_allowed(self, from_phase: ExecutionPhase) -> Optional[ExecutionPhase]:
+        order = [ExecutionPhase.RECON, ExecutionPhase.ACTIVE_SCANNING,
+                 ExecutionPhase.EXPLOITATION, ExecutionPhase.REPORTING]
+        start = order.index(from_phase) if from_phase in order else len(order)
+        for p in order[start:]:
+            if p.value in (self._allowed_phases or set()):
+                return p
+        return None
 
     def __init__(self, target: str, scope: Dict = None, resume_checkpoint: str = None):
         from core.memory.dedup_tracker import DeduplicationTracker
         from core.orchestration.checkpointer import Checkpointer
-        
+
+        self._stop_requested = False
+        self._stop_file = Path(f".antigravity/stop_{target.replace('://', '_').replace('/', '_')}.signal")
+
         self.llm = LLMClient.get()
         self.ctx = SharedContext(target, scope)
         self.checkpointer = Checkpointer()
@@ -187,6 +392,7 @@ class CentralBrain:
         self.auth = AuthorizationManager()
         self.dedup = DeduplicationTracker()
         self.start_time = datetime.now()
+        self._scan_id = self.start_time.strftime("%Y%m%d_%H%M%S")
         self.max_agents_per_phase = 15
         self.report_dir = Path("reports")
         self.report_dir.mkdir(exist_ok=True)
@@ -258,12 +464,532 @@ class CentralBrain:
         self.task_manager = TaskManager()
         self.scheduler = Scheduler(self.task_manager)
         self.context_resolver = ContextResolver(self.knowledge_store)
-        
+
+        # AntiGravity v2.0 modules
+        self.security_catalog = SecurityTestCatalog()
+        self.coverage_engine = CoverageEngine(self.security_catalog)
+        self.hypothesis_ranker = None  # initialized lazily when LLMRouter available
+        self.convergence_engine = ConvergenceEngine(self.coverage_engine)
+        self.completion_validator = CompletionValidator(self.coverage_engine, self.convergence_engine)
+        self.experience_learner = ExperienceLearner()
+        # Closed-loop reward policy — persistent self-improvement across runs.
+        try:
+            from core.learning.reward_policy import get_reward_policy
+            self.reward_policy = get_reward_policy()
+            _rp_stats = self.reward_policy.stats()
+            if _rp_stats.get("total_pulls"):
+                logger.info(f"[RewardPolicy] warm start: {_rp_stats['strategies_tracked']} strategies, "
+                            f"{_rp_stats['total_pulls']} prior outcomes")
+        except Exception as _e:
+            self.reward_policy = None
+            logger.debug(f"[RewardPolicy] init skipped: {_e}")
+        self.decision_guard = DecisionGuardV2(
+            self.coverage_engine, self.experience_learner,
+            available_tools=list(self.tools.tools.keys()) if hasattr(self.tools, 'tools') else None,
+        )
+        # Let the decision guard consult reward scores when picking alternatives.
+        if self.reward_policy is not None:
+            try:
+                self.decision_guard.reward_policy = self.reward_policy
+            except Exception:
+                pass
+        self.experiment_scheduler = ExperimentScheduler()
+        # execution_pipeline replaced by self.pipeline_v2 (initialized in P3 block below)
+        self.execution_auditor = ExecutionAuditor()
+        self.secure_checkpoint = SecureCheckpoint()
+        self.secret_manager = SecretManager()
+
+        # Attack Surface Graph
+        self.attack_surface = AttackSurfaceGraph()
+        self.hypothesis_generator = HypothesisGenerator(self.coverage_engine, self.attack_surface)
+
+        # Identity & Session Management
+        self.credential_store = CredentialStore()
+        self.identity_manager = IdentityManager(self.credential_store, shared_context=self.ctx)
+        self.identity_session_manager = IdentitySessionManager(shared_context=self.ctx)
+
+        # Endpoint Extraction
+        self.endpoint_extractor = EndpointExtractor()
+
+        # Request-Response Replay
+        self.identity_store = IdentityStore()
+        self.replay_session_manager = ReplaySessionManager(self.identity_store)
+        self.http_proxy = HttpProxy(verify_ssl=False)
+        self.replay_engine = ReplayEngine(self.replay_session_manager, self.http_proxy)
+
+        # Fuzzer Orchestration
+        self.fuzzer_orchestrator = FuzzerOrchestrator(target)
+
+        # Injection Matrix
+        self.injection_matrix = InjectionMatrix()
+        self.injection_executor = InjectionExecutor()
+
+        # Access Control Matrix Engine
+        self.access_control_engine = MatrixEngine(
+            replayer=self.replay_engine,
+            identities=self.identity_manager.identities,
+            shared_context=self.ctx,
+        )
+
+        # Contract validation at startup
+        try:
+            ContractValidator.validate_startup()
+            logger.info("[ContractValidator] Domain model contracts validated")
+        except Exception as e:
+            logger.warning(f"[ContractValidator] Validation warning: {e}")
+
+        # ── P0: Foundation Layer ──
+        self.security_context_v2 = SecurityContextV2(
+            target=target,
+            scope=[f"*.{target}", target],
+        )
+        self.capability_registry = CapabilityRegistry()
+        self.authorization_service = AuthorizationService()
+        self.authorization_service.register_policy(AuthorizationPolicy(
+            target=target,
+            allowed_identities=["admin", "tester", "scanner"],
+            allowed_actions=["scan", "fuzz", "enumerate", "exploit"],
+            blocked_patterns=[],
+        ))
+        self.reasoning_engine = ReasoningEngine(llm_client=None)
+
+        # ── P1a: Experiment Model ──
+        self.experiment_scheduler_v2 = ExperimentSchedulerV2(max_queue_size=2000)
+        self.duplicate_detector = DuplicateDetector()
+
+        # ── P1b: Deterministic Executors ──
+        self.sqli_executor = SQLiExecutor(timeout_seconds=30)
+        self.xss_executor = XSSExecutor(timeout_seconds=30)
+        self.auth_executor = AuthenticationExecutor(timeout_seconds=30)
+        self.authz_executor = AuthorizationExecutor(timeout_seconds=30)
+        self.cors_executor = CORSExecutor(timeout_seconds=15)
+        self.info_disc_executor = InfoDisclosureExecutor(timeout_seconds=15)
+        self.graphql_executor = GraphQLExecutor(timeout_seconds=15)
+        self.ws_executor = WebSocketExecutor(timeout_seconds=15)
+        self.bizlogic_executor = BusinessLogicExecutor(timeout_seconds=15)
+        self.pathtraversal_executor = PathTraversalExecutor(timeout_seconds=15)
+        self.executor_registry = {
+            "sqli": self.sqli_executor,
+            "sqli_basic_01": self.sqli_executor,
+            "sqli_time_based_01": self.sqli_executor,
+            "sqli_error_based_01": self.sqli_executor,
+            "sqli_union_01": self.sqli_executor,
+            "sqli_stacked_01": self.sqli_executor,
+            "xss": self.xss_executor,
+            "xss_reflected_01": self.xss_executor,
+            "xss_stored_01": self.xss_executor,
+            "xss_dom_01": self.xss_executor,
+            "authentication": self.auth_executor,
+            "auth_login_01": self.auth_executor,
+            "auth_session_hijack_01": self.auth_executor,
+            "auth_default_creds_01": self.auth_executor,
+            "auth_credential_stuffing_01": self.auth_executor,
+            "auth_password_policy_01": self.auth_executor,
+            "authorization": self.authz_executor,
+            "authz_idor_01": self.authz_executor,
+            "authz_priv_esc_01": self.authz_executor,
+            "authz_horizontal_01": self.authz_executor,
+            "authz_forced_browsing_01": self.info_disc_executor,
+            "cors_misconfig_01": self.cors_executor,
+            "info_disclosure_01": self.info_disc_executor,
+            "graphql_introspection_01": self.graphql_executor,
+            "graphql_mutation_01": self.graphql_executor,
+            "graphql_dos_01": self.graphql_executor,
+            "ws_hijack_01": self.ws_executor,
+            "race_condition_01": self.bizlogic_executor,
+            "workflow_bypass_01": self.bizlogic_executor,
+            "path_traversal_01": self.pathtraversal_executor,
+            "path_directory_01": self.pathtraversal_executor,
+        }
+        self._register_capabilities()
+        self.tool_portfolio = ToolPortfolio()
+        self.tool_portfolio.register_fallback_chain("sql_injection", ["sqlmap", "nuclei", "custom_mutator"])
+        self.tool_portfolio.register_fallback_chain("xss", ["dalfox", "nuclei", "browser"])
+        self.tool_portfolio.register_fallback_chain("port_discovery", ["nmap", "masscan", "port_check"])
+
+        # ── P1c: Evidence / Oracle / Finding ──
+        self.evidence_validator = EvidenceValidator()
+        self.finding_state_machine = FindingStateMachine()
+        self.finding_store_v2 = FindingStoreV2(storage_path="findings_v2.json")
+
+        # ── P2: Coverage ──
+        self.test_catalog_v2 = build_default_catalog()
+        self.endpoint_inventory_v2 = EndpointInventoryV2()
+        self.applicability_engine = ApplicabilityEngine(self.test_catalog_v2, self.attack_surface)
+        self.coverage_matrix = CoverageMatrix([], [])
+        self.convergence_engine_v2 = ConvergenceEngineV2(self.coverage_matrix)
+
+        # ── P3: Integration + Reporting ──
+        self.pipeline_v2 = ExecutionPipelineV2(
+            executor_registry=self.executor_registry,
+            tool_portfolio=self.tool_portfolio,
+            coverage_matrix=self.coverage_matrix,
+            finding_store=self.finding_store_v2,
+            evidence_validator=self.evidence_validator,
+        )
+        self.hypothesis_engine = HypothesisEngine(
+            test_catalog=self.test_catalog_v2,
+            attack_surface=self.attack_surface,
+        )
+        self.knowledge_graph = KnowledgeGraph()
+        self.failure_classifier = FailureClassifier()
+        self.recovery_policy = RecoveryPolicy()
+
+        logger.info("[CentralBrain] P0-P3 modules initialized and linked")
+
         if resume_checkpoint:
             logger.info(f"Resuming from checkpoint: {resume_checkpoint}")
             state = self.checkpointer.load_checkpoint(resume_checkpoint)
             if state:
                 self.checkpointer.apply_checkpoint(self, state)
+
+    def _register_capabilities(self):
+        """Register all deterministic executors in the capability registry."""
+        for name, executor in [
+            ("sqli", self.sqli_executor),
+            ("xss", self.xss_executor),
+            ("authentication", self.auth_executor),
+            ("authorization", self.authz_executor),
+        ]:
+            self.capability_registry.register(CapabilityDefinition(
+                name=name,
+                executor_class=type(executor),
+                timeout_seconds=executor.timeout_seconds,
+                description=f"Deterministic {name} executor",
+            ))
+
+    def _build_coverage_matrix_from_surface(self):
+        """Rebuild the coverage matrix from current endpoint inventory + test catalog."""
+        endpoints = self.endpoint_inventory_v2.list_endpoints()
+        ep_ids = [ep.get("endpoint_id", ep.get("url", "")) for ep in endpoints]
+
+        applicable_pairs = []
+        for ep in endpoints:
+            tests = self.applicability_engine.get_applicable_tests(
+                ep,
+                identities=list(self.security_context_v2.identities.keys()) or ["default"],
+            )
+            for t in tests:
+                applicable_pairs.append((ep.get("endpoint_id", ep.get("url", "")), t.test_id))
+
+        if not applicable_pairs:
+            return
+
+        all_ep_ids = list({p[0] for p in applicable_pairs})
+        all_test_ids = list({p[1] for p in applicable_pairs})
+        self.coverage_matrix = CoverageMatrix(all_ep_ids, all_test_ids)
+        self.convergence_engine_v2 = ConvergenceEngineV2(self.coverage_matrix)
+        self.pipeline_v2 = ExecutionPipelineV2(
+            executor_registry=self.executor_registry,
+            tool_portfolio=self.tool_portfolio,
+            coverage_matrix=self.coverage_matrix,
+            finding_store=self.finding_store_v2,
+            evidence_validator=self.evidence_validator,
+        )
+        logger.info(f"[CoverageMatrix] Built: {len(all_ep_ids)} endpoints × {len(all_test_ids)} tests = {len(applicable_pairs)} cells")
+
+    def _feed_endpoints_to_v2(self):
+        """Sync discovered endpoints from ctx/attack_surface into the v2 inventory."""
+        count = 0
+        if hasattr(self.ctx, 'endpoints') and self.ctx.endpoints:
+            for ep in self.ctx.endpoints:
+                if isinstance(ep, str):
+                    self.endpoint_inventory_v2.add_endpoint({"url": ep, "method": "GET"})
+                elif isinstance(ep, dict):
+                    self.endpoint_inventory_v2.add_endpoint(ep)
+                count += 1
+
+        try:
+            for ep in self.attack_surface.endpoints.get_endpoints():
+                self.endpoint_inventory_v2.add_endpoint({
+                    "endpoint_id": ep.endpoint_id,
+                    "url": ep.path,
+                    "method": ep.method_set[0] if ep.method_set else "GET",
+                    "parameters": [{"name": p.name, "location": getattr(p, 'parameter_type', {}).value if hasattr(getattr(p, 'parameter_type', None), 'value') else "query"} for p in getattr(ep, 'parameters', [])],
+                    "auth_required": getattr(ep, 'auth_required', False),
+                    "content_type": getattr(ep, 'content_type', "text/html"),
+                })
+                count += 1
+        except Exception as e:
+            logger.debug(f"[V2Sync] Could not sync attack surface endpoints: {e}")
+
+        if count > 0:
+            logger.info(f"[V2Sync] Fed {count} endpoints into EndpointInventoryV2 ({self.endpoint_inventory_v2.list_endpoints().__len__()} unique)")
+            self.security_context_v2.endpoints = {
+                ep.get("endpoint_id", ep.get("url", "")): ep
+                for ep in self.endpoint_inventory_v2.list_endpoints()
+            }
+
+    def _sync_v1_findings_to_coverage_matrix(self):
+        """Bridge V1 scan findings into the V2 coverage matrix so cells reflect actual testing."""
+        if not hasattr(self, 'coverage_matrix') or not self.coverage_matrix:
+            return
+
+        matrix = self.coverage_matrix.get_matrix()
+        if not matrix:
+            return
+
+        _VULN_TO_TESTS = {
+            "NUCLEI_MATCH": ["info_disclosure_01", "cors_misconfig_01"],
+            "NIKTO_FINDING": ["info_disclosure_01", "path_directory_01"],
+            "MISSING_HEADER": ["header_injection_01", "info_disclosure_01"],
+            "TLS_WEAKNESS": ["info_disclosure_01"],
+            "INFO_DISCLOSURE": ["info_disclosure_01"],
+        }
+        _KEYWORD_TO_TESTS = {
+            "sqli": ["sqli_basic_01", "sqli_time_based_01", "sqli_error_based_01", "sqli_union_01"],
+            "sql injection": ["sqli_basic_01", "sqli_time_based_01", "sqli_error_based_01"],
+            "xss": ["xss_reflected_01", "xss_stored_01", "xss_dom_01"],
+            "cross-site scripting": ["xss_reflected_01", "xss_stored_01"],
+            "csrf": ["csrf_token_01"],
+            "ssrf": ["ssrf_basic_01", "ssrf_cloud_01"],
+            "command injection": ["cmdi_basic_01"],
+            "path traversal": ["path_traversal_01"],
+            "directory": ["path_directory_01"],
+            "open redirect": ["open_redirect_01"],
+            "cors": ["cors_misconfig_01"],
+            "idor": ["authz_idor_01", "authz_horizontal_01"],
+            "privilege": ["authz_priv_esc_01"],
+            "brute": ["auth_login_01"],
+            "default cred": ["auth_default_creds_01"],
+            "session": ["auth_session_hijack_01"],
+            "jwt": ["jwt_manipulation_01", "jwt_algo_confusion_01", "jwt_none_algo_01"],
+            "xxe": ["xxe_basic_01"],
+            "ssti": ["ssti_basic_01"],
+            "template injection": ["ssti_basic_01"],
+            "nosql": ["nosqli_basic_01", "nosqli_logical_01"],
+            "file upload": ["upload_type_01", "upload_rce_01"],
+            "graphql": ["graphql_introspection_01", "graphql_mutation_01"],
+            "websocket": ["ws_hijack_01"],
+            "race condition": ["race_condition_01"],
+            "ldap": ["ldap_injection_01"],
+            "nuclei": ["info_disclosure_01"],
+        }
+
+        ep_ids = list(matrix.keys())
+        confirmed_cells = set()
+        tested_tests = set()
+
+        for vuln in getattr(self.ctx, 'vulnerabilities', []):
+            if not isinstance(vuln, dict):
+                continue
+            vtype = vuln.get("type", "")
+            title = (vuln.get("title", "") or "").lower()
+            location = vuln.get("location", "") or vuln.get("target", "")
+
+            matched_tests = set()
+            if vtype in _VULN_TO_TESTS:
+                matched_tests.update(_VULN_TO_TESTS[vtype])
+            for kw, tids in _KEYWORD_TO_TESTS.items():
+                if kw in title:
+                    matched_tests.update(tids)
+
+            if not matched_tests:
+                matched_tests.add("info_disclosure_01")
+
+            best_ep = None
+            if location:
+                loc_lower = location.lower()
+                for eid in ep_ids:
+                    if eid.lower() in loc_lower or loc_lower in eid.lower():
+                        best_ep = eid
+                        break
+            if not best_ep and ep_ids:
+                best_ep = ep_ids[0]
+
+            if best_ep:
+                for tid in matched_tests:
+                    if tid in matrix.get(best_ep, {}):
+                        from core.coverage.coverage_matrix import CoverageState
+                        self.coverage_matrix.update_state(best_ep, tid, CoverageState.CONFIRMED)
+                        confirmed_cells.add((best_ep, tid))
+                        tested_tests.add(tid)
+
+        _TOOL_CAPS_TO_TESTS = {
+            "vulnerability_scanning": [
+                "sqli_basic_01", "xss_reflected_01", "xss_stored_01", "cmdi_basic_01",
+                "path_traversal_01", "path_directory_01", "info_disclosure_01",
+                "cors_misconfig_01", "header_injection_01", "open_redirect_01",
+                "ssti_basic_01", "csrf_token_01",
+            ],
+            "tls_analysis": ["info_disclosure_01"],
+            "port_scanning": ["info_disclosure_01"],
+            "header_analysis": ["header_injection_01", "cors_misconfig_01", "info_disclosure_01"],
+        }
+
+        ran_caps = set()
+        for task in getattr(self.ctx, 'completed_tasks', []):
+            if isinstance(task, dict):
+                ran_caps.add(task.get("capability", ""))
+            elif isinstance(task, str):
+                ran_caps.add(task)
+
+        from core.coverage.coverage_matrix import CoverageState
+        for cap, test_ids in _TOOL_CAPS_TO_TESTS.items():
+            if cap not in ran_caps:
+                continue
+            for eid in ep_ids:
+                for tid in test_ids:
+                    if tid not in matrix.get(eid, {}):
+                        continue
+                    if (eid, tid) in confirmed_cells:
+                        continue
+                    self.coverage_matrix.update_state(eid, tid, CoverageState.REJECTED)
+                    tested_tests.add(tid)
+
+        total_cells = sum(len(tests) for tests in matrix.values())
+        gaps_after = len(self.coverage_matrix.get_gaps())
+        logger.info(
+            f"[V1→V2Bridge] Synced {len(self.ctx.vulnerabilities)} findings → "
+            f"{len(confirmed_cells)} confirmed, {total_cells - gaps_after - len(confirmed_cells)} rejected, "
+            f"{gaps_after} remaining gaps (was {total_cells})"
+        )
+
+    AUTH_TEST_IDS = frozenset({
+        "auth_login_01", "auth_session_hijack_01", "auth_default_creds_01",
+        "auth_credential_stuffing_01", "auth_password_policy_01", "authentication",
+    })
+
+    def _run_v2_experiment_cycle(self, max_experiments: int = None):
+        """Run coverage experiments until max_experiments or gaps exhausted.
+
+        Budget scales with the number of unique endpoints (min 500, max 5000)
+        so that large attack surfaces don't get stuck at 2% coverage.
+        """
+        gaps = self.coverage_matrix.get_gaps()
+        if not gaps:
+            return
+
+        if max_experiments is None:
+            n_endpoints = len(getattr(self, 'endpoint_inventory_v2', {}) or {})
+            max_experiments = max(500, min(n_endpoints * 4, 5000))
+
+        hypotheses = self.hypothesis_engine.generate(gaps)
+        ranked = self.hypothesis_engine.rank(hypotheses)
+
+        identity_ctx = self._build_identity_context()
+        all_creds = identity_ctx.get("all_credentials", [])
+        has_creds = bool(all_creds)
+
+        executed = 0
+        batch_size = min(len(ranked), max_experiments)
+        for h in ranked[:batch_size]:
+            # Skip auth tests early when no credentials are available
+            if h.test_id in self.AUTH_TEST_IDS and not has_creds:
+                self.coverage_matrix.update_state(h.endpoint_id, h.test_id, CoverageState.NOT_APPLICABLE)
+                continue
+            ep_data = self.security_context_v2.endpoints.get(h.endpoint_id, {})
+            base_url = ep_data.get("url", h.endpoint_id)
+
+            is_auth_test = h.test_id in self.AUTH_TEST_IDS
+            if is_auth_test and len(all_creds) > 1:
+                for cred in all_creds:
+                    exp = SecurityExperiment(
+                        hypothesis_id=f"{h.hypothesis_id}_{cred['role']}",
+                        endpoint_id=h.endpoint_id,
+                        capability=h.test_id,
+                        priority=h.priority,
+                        input_parameters={
+                            "url": base_url,
+                            "username": cred["username"],
+                            "password": cred["password"],
+                            "login_url": cred.get("login_url", ""),
+                            "role": cred["role"],
+                        },
+                    )
+                    self.experiment_scheduler_v2.queue(exp)
+            else:
+                exp = SecurityExperiment(
+                    hypothesis_id=h.hypothesis_id,
+                    endpoint_id=h.endpoint_id,
+                    capability=h.test_id,
+                    priority=h.priority,
+                    input_parameters={
+                        "url": base_url,
+                        **identity_ctx,
+                    },
+                )
+                if not self.experiment_scheduler_v2.queue(exp):
+                    continue
+
+        while self.experiment_scheduler_v2.size() > 0 and executed < max_experiments:
+            exp = self.experiment_scheduler_v2.next()
+            if not exp:
+                break
+
+            result = self.pipeline_v2.execute(exp)
+            executed += 1
+
+            if result.finding:
+                self.knowledge_graph.add_finding(result.finding)
+                self.security_context_v2.add_finding(result.finding.finding_id, result.finding.to_dict())
+            if result.evidence:
+                self.knowledge_graph.add_evidence(result.evidence)
+                if result.finding:
+                    self.knowledge_graph.connect_evidence(result.finding.finding_id, result.evidence.evidence_id)
+
+            if not result.success and result.error:
+                error_code = result.execution_result.error_code if result.execution_result else ""
+                if error_code == "NO_CREDENTIALS":
+                    self.coverage_matrix.update_state(exp.endpoint_id, exp.capability, CoverageState.NOT_APPLICABLE)
+                    continue
+                exc = Exception(result.error)
+                ft = self.failure_classifier.classify(exc, {"error_code": error_code})
+                action = self.recovery_policy.get_action(ft)
+                if action == RetryAction.BLOCK:
+                    self.coverage_matrix.update_state(exp.endpoint_id, exp.capability, CoverageState.BLOCKED)
+                logger.info(f"[V2Recovery] {ft.value} → {action.value} for {exp.capability}@{exp.endpoint_id}")
+
+        conv = self.convergence_engine_v2.calculate_convergence()
+        logger.info(f"[V2Cycle] Executed {executed} experiments, coverage={conv:.1%}, gaps={len(self.coverage_matrix.get_gaps())}")
+
+    def _build_identity_context(self) -> Dict[str, Any]:
+        """Extract harvested creds and sessions for experiment input_parameters."""
+        ctx: Dict[str, Any] = {}
+        if self.ctx.harvested_creds:
+            best = self.ctx.harvested_creds[0]
+            ctx["username"] = best.get("username", best.get("email", ""))
+            ctx["password"] = best.get("password", "")
+            ctx["login_url"] = best.get("login_url", "")
+            ctx["role"] = best.get("role", "default")
+            # Store all credential sets for multi-role testing
+            ctx["all_credentials"] = [
+                {
+                    "role": c.get("role", "default"),
+                    "username": c.get("username", c.get("email", "")),
+                    "password": c.get("password", ""),
+                    "login_url": c.get("login_url", ""),
+                }
+                for c in self.ctx.harvested_creds if c.get("username")
+            ]
+        if self.ctx.sessions:
+            for sid, sess in self.ctx.sessions.items():
+                token = getattr(sess, "token", None) or getattr(sess, "jwt", None)
+                if token:
+                    ctx["auth_token"] = token
+                    ctx["auth_header"] = f"Bearer {token}"
+                    break
+        for vuln in self.ctx.vulnerabilities:
+            evidence = vuln.get("evidence") or vuln.get("proof") or {}
+            if isinstance(evidence, dict):
+                token = evidence.get("token") or evidence.get("jwt") or evidence.get("auth_token")
+                if token and "auth_token" not in ctx:
+                    ctx["auth_token"] = token
+                    ctx["auth_header"] = f"Bearer {token}"
+        return ctx
+
+    def _generate_coverage_report(self) -> str:
+        """Generate the v2 coverage report."""
+        cat_map = {}
+        for t in self.test_catalog_v2.list_all():
+            cat_map[t.test_id] = t.attack_type
+        report = CoverageReport(
+            coverage_matrix=self.coverage_matrix,
+            finding_store=self.finding_store_v2,
+            knowledge_graph=self.knowledge_graph,
+            test_category_map=cat_map,
+        )
+        return report.generate()
 
     async def _heartbeat_loop(self):
         while True:
@@ -299,8 +1025,20 @@ class CentralBrain:
             except asyncio.CancelledError:
                 pass
 
-    async def run_main_loop(self, auth_document: str = ""):
-        """Main entry point. Runs full pentest autonomously via state machine."""
+    async def run_main_loop(self, auth_document: str = "", phases: list = None):
+        """Main entry point. Runs full pentest autonomously via state machine.
+
+        Args:
+            phases: Optional list of phase names to run (e.g. ["RECON", "ACTIVE_SCANNING"]).
+                    If None, runs all phases.
+        """
+        self._allowed_phases = None
+        if phases:
+            valid = {p.upper() for p in phases if p.upper() in [e.value for e in ExecutionPhase]}
+            if valid:
+                self._allowed_phases = valid
+                logger.info(f"SELECTIVE EXECUTION: Running phases {sorted(valid)}")
+
         logger.info("=" * 60)
         logger.info("AUTONOMOUS PENTESTING BRAIN (STATE MACHINE)")
         logger.info("=" * 60)
@@ -308,7 +1046,10 @@ class CentralBrain:
         # Phase 0: Parse authorization
         if auth_document:
             await self._parse_authorization(auth_document)
-            
+
+        # Establish a real authenticated session for post-auth testing.
+        await self._setup_auth_session()
+
         logger.info("\nValidating tools...")
         await self.tools.validate_tools()
 
@@ -326,23 +1067,55 @@ class CentralBrain:
         except ImportError:
             pass
 
+        self._write_progress({"phase": self.current_phase.value if self.current_phase else None, "status": "starting"})
+
+        if self._allowed_phases and self.current_phase and self.current_phase.value not in self._allowed_phases:
+            skip = self._skip_to_next_allowed(self.current_phase)
+            if skip:
+                self.transition_phase(skip)
+            else:
+                self.current_phase = None
+
+        stopped = False
         async with self.run_with_heartbeat():
             while self.current_phase:
+                if self._check_stop_signal():
+                    logger.info(f"STOP: Saving checkpoint at phase {self.current_phase.value} (will resume here)")
+                    self.checkpointer.save_checkpoint(self)
+                    stopped = True
+                    break
+
+                self._write_progress({"phase": self.current_phase.value, "status": "running"})
                 logger.info(f"\n>>> ENTERING MAIN PHASE: {self.current_phase.value}")
                 await self.run_phase(self.current_phase.value)
-                
+
                 # Record state
                 if hasattr(self, 'phase_state'):
                     self.phase_history.append(self.phase_state)
-                    
-                self.checkpointer.save_checkpoint(self)
+
                 self._transition_to_next_phase()
-            
+                self.checkpointer.save_checkpoint(self)
+
+                if self._check_stop_signal():
+                    if self.current_phase:
+                        logger.info(f"STOP: Saving checkpoint, next phase would be {self.current_phase.value}")
+                    else:
+                        logger.info("STOP: All phases already complete")
+                    self.checkpointer.save_checkpoint(self)
+                    stopped = True
+                    break
+
+        self._clean_stop_signal()
+        self._write_progress({"status": "stopped" if stopped else "completed"})
         duration = (datetime.now() - self.start_time).total_seconds()
-        logger.info(f"\nCompleted in {duration:.0f}s")
+        if stopped:
+            logger.info(f"\nScan STOPPED after {duration:.0f}s (checkpoint saved, resume with --resume)")
+        else:
+            logger.info(f"\nCompleted in {duration:.0f}s")
         logger.info(f"Agents spawned: {len(self.ctx.agents_spawned)}")
         logger.info(f"Vulnerabilities: {len(self.ctx.vulnerabilities)}")
         logger.info(f"Exploits executed: {len(self.ctx.exploit_results)}")
+        return {"stopped": stopped, "phase": self.current_phase.value if self.current_phase else None}
 
     async def run_phase(self, phase: str):
         self.phase_state = PhaseState(phase_name=phase)
@@ -355,24 +1128,231 @@ class CentralBrain:
                 await self._run_phase("OSINT_RECONNAISSANCE")
             await self._run_phase("DEEP_RECONNAISSANCE")
             await self._persist_recon_findings()
+            await self._scan_subdomain_endpoints()
             await self._capture_requests()
             await self._persist_captured_requests()
             await self._analyze_client_scripts()
-            
+
+            # API Schema Auto-Import (OpenAPI/Swagger/GraphQL)
+            try:
+                from core.discovery.api_schema_importer import APISchemaImporter
+                importer = APISchemaImporter(target=self.ctx.target)
+                schema_endpoints = importer.import_all()
+                if schema_endpoints:
+                    domain_eps = importer.to_domain_endpoints()
+                    self.ctx.add_endpoints(domain_eps, source="api_schema")
+                    for dep in domain_eps:
+                        self.attack_surface.add_endpoint(dep)
+                    logger.info(f"[APIImporter] Imported {len(schema_endpoints)} endpoints from "
+                                f"{importer.schema_source or 'API schema'}")
+                else:
+                    logger.info("[APIImporter] No API schema (OpenAPI/Swagger/GraphQL) discovered")
+            except Exception as e:
+                logger.warning(f"[APIImporter] Schema import failed (non-fatal): {e}")
+
+            # Deep JavaScript Analysis (secrets, endpoints, source maps)
+            try:
+                from core.discovery.js_analyzer import JSAnalyzer
+                js_analyzer = JSAnalyzer(target=self.ctx.target)
+                html = getattr(self.ctx, 'page_content', '') or ''
+                eps_list = getattr(self.ctx, 'endpoints', {}) or {}
+                ep_values = list(eps_list.values()) if isinstance(eps_list, dict) else list(eps_list)
+                js_findings = js_analyzer.analyze(html=html, endpoints=ep_values)
+                if js_findings:
+                    js_endpoints = js_analyzer.get_endpoints()
+                    if js_endpoints:
+                        self.ctx.add_endpoints(js_endpoints, source="js_analysis")
+                        logger.info(f"[JSAnalyzer] Found {len(js_endpoints)} endpoints in JavaScript")
+                    js_secrets = js_analyzer.get_secrets()
+                    for sf in js_secrets:
+                        self.ctx.add_vulnerability(sf)
+                    if js_secrets:
+                        logger.info(f"[JSAnalyzer] Found {len(js_secrets)} exposed secrets in JavaScript")
+                    source_map_findings = js_analyzer.get_source_map_findings()
+                    for smf in source_map_findings:
+                        self.ctx.add_vulnerability(smf)
+                    if source_map_findings:
+                        logger.info(f"[JSAnalyzer] Found {len(source_map_findings)} exposed source maps")
+                else:
+                    logger.info("[JSAnalyzer] No significant findings from JavaScript analysis")
+            except Exception as e:
+                logger.warning(f"[JSAnalyzer] JavaScript analysis failed (non-fatal): {e}")
+
+            # Canonical Endpoint Extraction from captured requests
+            try:
+                captured = getattr(self.ctx, 'captured_requests', []) or []
+                if captured:
+                    from core.domain.request import CapturedRequest as DomainCapturedRequest
+                    domain_requests = []
+                    for r in captured:
+                        if isinstance(r, dict):
+                            try:
+                                domain_requests.append(DomainCapturedRequest(
+                                    url=r.get('url', ''),
+                                    method=r.get('method', 'GET'),
+                                    headers=r.get('headers', {}),
+                                    body=r.get('post_data', r.get('body', '')),
+                                    status_code=r.get('status', r.get('status_code', 0)),
+                                ))
+                            except Exception:
+                                pass
+                        elif hasattr(r, 'url'):
+                            domain_requests.append(r)
+
+                    if domain_requests:
+                        extracted_endpoints = self.endpoint_extractor.extract(domain_requests)
+                        logger.info(f"[EndpointExtractor] Extracted {len(extracted_endpoints)} canonical endpoints from {len(domain_requests)} requests")
+
+                        # Feed into AttackSurfaceGraph
+                        for ep in extracted_endpoints:
+                            self.attack_surface.add_endpoint(ep)
+                        for req in domain_requests:
+                            self.attack_surface.add_request(req)
+                        self.attack_surface.build_graph()
+                        logger.info(f"[AttackSurface] Graph built: {len(extracted_endpoints)} endpoints, "
+                                    f"{len(domain_requests)} requests")
+            except Exception as e:
+                logger.warning(f"[EndpointExtractor/AttackSurface] Failed (non-fatal): {e}")
+
+            # Identity loading from environment
+            try:
+                identity_config = []
+                for role in ["admin", "user", "guest"]:
+                    user_env = f"IDENTITY_{role.upper()}_USERNAME"
+                    pass_env = f"IDENTITY_{role.upper()}_PASSWORD"
+                    if os.getenv(user_env) and os.getenv(pass_env):
+                        identity_config.append({
+                            "id": role,
+                            "role": role,
+                            "username_env": user_env,
+                            "password_env": pass_env,
+                        })
+                if identity_config:
+                    self.identity_manager.load_identities(identity_config)
+                    logger.info(f"[IdentityManager] Loaded {len(identity_config)} identities")
+            except Exception as e:
+                logger.warning(f"[IdentityManager] Identity loading failed (non-fatal): {e}")
+
+            # Site adaptation: profile target for applicable tests
+            try:
+                adapter = GenericSiteAdapter(
+                    target_url=self.ctx.target,
+                    headers=getattr(self.ctx, 'response_headers', None) or {},
+                    body_content=getattr(self.ctx, 'body_content', '') or '',
+                )
+                site_profile = adapter.profile()
+                self.ctx.update('site_profile', site_profile.to_dict())
+                logger.info(f"[SiteAdapter] Profiled: tech={site_profile.technology_stack} "
+                            f"auth={site_profile.auth_model.value} tests={len(site_profile.applicable_tests)}")
+            except Exception as e:
+                logger.warning(f"[SiteAdapter] Profiling failed (non-fatal): {e}")
+
+            # ── V2 Hook: Feed discovered endpoints into v2 inventory + build coverage matrix ──
+            try:
+                self._feed_endpoints_to_v2()
+                self._build_coverage_matrix_from_surface()
+            except Exception as e:
+                logger.warning(f"[V2Sync] Endpoint/coverage sync failed (non-fatal): {e}")
+
         elif phase == ExecutionPhase.ACTIVE_SCANNING.value:
             from core.tools.nuclei_runner import NucleiRunner
             nuclei_runner = NucleiRunner()
             await nuclei_runner.scan_context_technologies(self.ctx, timeout=60)
             await self._run_phase("analyze")
             await self._persist_vulnerabilities()
-            
+
+            # Build injection test matrix from attack surface endpoints
+            try:
+                as_endpoints = self.attack_surface.api_endpoints()
+                if as_endpoints:
+                    test_matrix = self.injection_matrix.build_matrix(as_endpoints)
+                    matrix_tests = getattr(test_matrix, 'tests', [])
+                    logger.info(f"[InjectionMatrix] Built matrix: {len(matrix_tests)} injection tests "
+                                f"across {len(as_endpoints)} API endpoints")
+                    self.ctx.update('injection_matrix', {
+                        'test_count': len(matrix_tests),
+                        'endpoint_count': len(as_endpoints),
+                    })
+                else:
+                    logger.info("[InjectionMatrix] No API endpoints in attack surface — skipping matrix build")
+            except Exception as e:
+                logger.warning(f"[InjectionMatrix] Matrix build failed (non-fatal): {e}")
+
+            # Modern API surface — GraphQL / gRPC / WebSocket testing.
+            from core.common.config import get_config as _get_cfg_api
+            if _get_cfg_api().get_bool("MODERN_API_ENABLED", True):
+                try:
+                    await self._scan_modern_apis()
+                except Exception as e:
+                    logger.warning(f"[ModernAPI] scan failed (non-fatal): {e}")
+
+            # ── V2 Hook: Sync V1 scan findings into coverage matrix ──
+            try:
+                self._sync_v1_findings_to_coverage_matrix()
+            except Exception as e:
+                logger.warning(f"[V1→V2Bridge] Post-scan sync failed (non-fatal): {e}")
+
         elif phase == ExecutionPhase.EXPLOITATION.value:
             # Compliance Gate check
             check = self.compliance_gate.check_before_exploit(self.ctx.target)
             if not check.authorized:
                 logger.warning(f"Compliance check failed: {check.reason}. Skipping EXPLOIT phase.")
                 return
-                
+
+            # Hypothesis generation from coverage gaps
+            try:
+                gaps = self.coverage_engine.get_coverage_gaps()
+                if gaps:
+                    gap_ids = [g if isinstance(g, str) else g.test_id for g in gaps]
+                    hypotheses = self.hypothesis_generator.generate(gap_ids)
+                    if hypotheses:
+                        logger.info(f"[HypothesisGen] Generated {len(hypotheses)} hypotheses from {len(gap_ids)} coverage gaps")
+                        for h in hypotheses[:10]:
+                            self.experiment_scheduler.queue(h, priority=h.confidence)
+                        logger.info(f"[Scheduler] Queued {min(len(hypotheses), 10)} experiments")
+                else:
+                    logger.info("[HypothesisGen] No coverage gaps — all tests addressed")
+            except Exception as e:
+                logger.warning(f"[HypothesisGen] Hypothesis generation failed (non-fatal): {e}")
+
+            # Convergence check
+            try:
+                conv_score = self.convergence_engine.calculate_convergence()
+                conv_state = self.convergence_engine.get_state()
+                logger.info(f"[Convergence] Score={conv_score:.1f}% State={conv_state.value}")
+            except Exception as e:
+                logger.warning(f"[Convergence] Check failed (non-fatal): {e}")
+
+            # Fuzzer-driven injection testing on attack surface endpoints
+            try:
+                as_endpoints = self.attack_surface.api_endpoints()
+                if as_endpoints:
+                    fuzz_count = 0
+                    for ep in as_endpoints[:10]:
+                        for test_type in ["sqli", "xss"]:
+                            tools = self.fuzzer_orchestrator.get_applicable_tools(test_type)
+                            if tools:
+                                params = {
+                                    "endpoint_url": getattr(ep, 'url', ''),
+                                    "method": getattr(ep, 'method', 'GET'),
+                                }
+                                try:
+                                    result = await asyncio.to_thread(
+                                        self.fuzzer_orchestrator.run_fuzzing, test_type, ep, params)
+                                    if result and getattr(result, 'success', False):
+                                        fuzz_count += 1
+                                        self.experience_learner.record_success(
+                                            test_type, tools[0], {"endpoint": getattr(ep, 'url', '')})
+                                    else:
+                                        self.experience_learner.record_failure(
+                                            test_type, tools[0], getattr(result, 'error', 'no_result'))
+                                except Exception:
+                                    pass
+                    if fuzz_count:
+                        logger.info(f"[FuzzerOrchestrator] {fuzz_count} successful fuzzing results")
+            except Exception as e:
+                logger.warning(f"[FuzzerOrchestrator] Fuzzing failed (non-fatal): {e}")
+
             chain_plan = None
             if self.ctx.vulnerabilities:
                 self.chain_mgr.build_graph()
@@ -404,14 +1384,316 @@ class CentralBrain:
                         await self._run_phase("exploit")
                         await self._persist_exploit_results()
                         
+            # Replay-based authorization testing (IDOR/privilege escalation)
+            try:
+                captured = getattr(self.ctx, 'captured_requests', []) or []
+                auth_endpoints = self.attack_surface.endpoints_requiring_auth()
+                if captured and auth_endpoints and self.identity_manager.identities:
+                    replay_count = 0
+                    for ep in auth_endpoints[:5]:
+                        ep_requests = self.attack_surface.requests_for_endpoint(
+                            getattr(ep, 'endpoint_id', getattr(ep, 'id', '')))
+                        if not ep_requests:
+                            continue
+                        for ident_id, identity in self.identity_manager.identities.items():
+                            try:
+                                replayed = self.replay_engine.replay_request(
+                                    ep_requests[0], identity)
+                                if replayed:
+                                    replay_count += 1
+                            except Exception:
+                                pass
+                    if replay_count:
+                        logger.info(f"[ReplayEngine] Replayed {replay_count} requests for auth testing")
+            except Exception as e:
+                logger.warning(f"[ReplayEngine] Replay testing failed (non-fatal): {e}")
+
+            # Access Control Matrix Testing
+            try:
+                auth_endpoints = self.attack_surface.endpoints_requiring_auth()
+                if auth_endpoints and self.identity_manager.identities:
+                    tested = 0
+                    for ep in auth_endpoints[:5]:
+                        ep_requests = self.attack_surface.requests_for_endpoint(
+                            getattr(ep, 'endpoint_id', getattr(ep, 'id', '')))
+                        if ep_requests:
+                            req_node = {
+                                "path": getattr(ep, 'path', getattr(ep, 'url', '')),
+                                "method": getattr(ep, 'method', 'GET'),
+                                "request": ep_requests[0],
+                            }
+                            self.access_control_engine.analyze(req_node)
+                            tested += 1
+                    if tested:
+                        logger.info(f"[AccessControlMatrix] Tested {tested} auth-required endpoints")
+            except Exception as e:
+                logger.warning(f"[AccessControlMatrix] Testing failed (non-fatal): {e}")
+
+            # Credential Spray — test default creds against discovered login pages
+            try:
+                from core.exploitation.credential_spray import CredentialSprayEngine
+                spray = CredentialSprayEngine(target=self.ctx.target)
+                endpoints = getattr(self.ctx, 'endpoints', []) or []
+                captured = getattr(self.ctx, 'captured_requests', []) or []
+                spray_results = await spray.spray(endpoints, captured)
+                spray_findings = spray.get_findings()
+                for sf in spray_findings:
+                    self.ctx.add_vulnerability(sf)
+                successes = [r for r in spray_results if r.success]
+                if successes:
+                    logger.info(f"[CredSpray] {len(successes)} default credential logins found!")
+                    for s in successes:
+                        self.ctx.harvested_creds.append({
+                            "username": s.username, "url": s.url,
+                            "login_type": s.login_type, "source": "credential_spray",
+                        })
+                else:
+                    logger.info("[CredSpray] No default credentials found")
+            except Exception as e:
+                logger.warning(f"[CredSpray] Credential spray failed (non-fatal): {e}")
+
+            # Exploit synthesis + sandbox detonation (opt-in) — the agent writes a
+            # custom non-destructive PoC and fires it in an ephemeral sandbox.
+            from core.common.config import get_config as _get_cfg_synth
+            if _get_cfg_synth().get_bool("EXPLOIT_SYNTHESIS_ENABLED", False):
+                try:
+                    await self._synthesize_and_detonate_exploits()
+                except Exception as e:
+                    logger.warning(f"[Sandbox] exploit synthesis failed (non-fatal): {e}")
+
+            # Cloud IAM / RBAC / container privilege-escalation analysis (opt-in,
+            # data-driven from exported policy files or live cloud credentials).
+            if _get_cfg_synth().get_bool("CLOUD_PRIVESC_ENABLED", False):
+                try:
+                    self._analyze_cloud_privesc()
+                except Exception as e:
+                    logger.warning(f"[CloudPrivesc] analysis failed (non-fatal): {e}")
+
+            # Audit exploitation actions
+            try:
+                self.execution_auditor.log_action(
+                    "EXPLOITATION_COMPLETE",
+                    {"target": self.ctx.target,
+                     "vulns": len(self.ctx.vulnerabilities),
+                     "exploits": len(self.ctx.exploit_results)},
+                )
+            except Exception:
+                pass
+
             await self._run_post_exploitation()
-            
+
+            # ── V2 Hook: Sync V1 findings + run experiment cycle on remaining gaps ──
+            try:
+                self._feed_endpoints_to_v2()
+                self._build_coverage_matrix_from_surface()
+                self._sync_v1_findings_to_coverage_matrix()
+                self._run_v2_experiment_cycle()
+                conv = self.convergence_engine_v2.calculate_convergence()
+                logger.info(f"[V2ExploitCycle] Post-exploitation coverage={conv:.1%}, "
+                            f"gaps={len(self.coverage_matrix.get_gaps())}, "
+                            f"blocked={len(self.coverage_matrix.get_blocked())}")
+            except Exception as e:
+                logger.warning(f"[V2ExploitCycle] Failed (non-fatal): {e}")
+
         elif phase == ExecutionPhase.REPORTING.value:
+            # Convergence validation before reporting
+            try:
+                is_complete, issues = self.completion_validator.validate_completion()
+                conv_score = self.convergence_engine.calculate_convergence()
+                logger.info(f"[CompletionValidator] complete={is_complete} score={conv_score:.1f}%")
+                if issues:
+                    for issue in issues:
+                        logger.info(f"[CompletionValidator] Issue: {issue}")
+            except Exception as e:
+                logger.warning(f"[CompletionValidator] Validation failed (non-fatal): {e}")
+
+            # Finding Correlation — chain related findings into attack narratives
+            if self.ctx.vulnerabilities:
+                try:
+                    from core.analysis.correlation_engine import CorrelationEngine
+                    correlator = CorrelationEngine()
+                    chains = correlator.correlate(self.ctx.vulnerabilities)
+                    if chains:
+                        summary = correlator.get_summary()
+                        logger.info(f"[Correlation] {summary['total_chains']} attack chains: "
+                                    f"{summary['critical_chains']} critical, {summary['high_chains']} high")
+                        for chain in chains[:5]:
+                            logger.info(f"  Chain: {chain.name} (severity={chain.severity}, likelihood={chain.likelihood:.0%})")
+                            for step in chain.steps:
+                                logger.info(f"    {step}")
+                        chain_findings = correlator.get_findings()
+                        for cf in chain_findings:
+                            self.ctx.add_vulnerability(cf)
+                        self.ctx.update('attack_chains', summary)
+                    else:
+                        logger.info("[Correlation] No attack chains identified")
+                except Exception as e:
+                    logger.warning(f"[Correlation] Finding correlation failed (non-fatal): {e}")
+
             if self.ctx.vulnerabilities:
                 from core.reporting.retest_engine import RetestEngine
-                retest_engine = RetestEngine()
+                retest_engine = RetestEngine(auth_headers=getattr(self.ctx, "auth_headers", None))
                 await retest_engine.retest_findings(self.ctx.vulnerabilities)
+
+            # Adversarial Critic (Planner–Worker–Critic loop) — semantic second
+            # opinion that challenges each surviving finding and quarantines the
+            # confidently-rejected ones before they reach the report.
+            from core.common.config import get_config as _get_cfg
+            if self.ctx.vulnerabilities and _get_cfg().get_bool("CRITIC_ENABLED", True):
+                try:
+                    from core.verification.critic_agent import CriticAgent
+                    critic = CriticAgent(
+                        llm_client=self.llm,
+                        max_concurrency=_get_cfg().get_int("CRITIC_CONCURRENCY", 4),
+                    )
+                    # Keep a reference to the full annotated set (survivors +
+                    # quarantined) so the reward policy learns from both.
+                    annotated = list(self.ctx.vulnerabilities)
+                    critic_summary = await critic.verify_findings(
+                        self.ctx.vulnerabilities, quarantine=True
+                    )
+                    self.ctx.vulnerabilities = critic_summary["findings"]
+                    logger.info(
+                        f"[Critic] confirmed={critic_summary['confirmed']} "
+                        f"false_positive={critic_summary['false_positive']} "
+                        f"uncertain={critic_summary['uncertain']} "
+                        f"quarantined={critic_summary['quarantined']}"
+                    )
+                    self.ctx.update("critic_summary", {
+                        k: v for k, v in critic_summary.items() if k != "findings"
+                    })
+                    # Feed the closed-loop reward policy (self-improvement).
+                    try:
+                        self._record_critic_outcomes(annotated)
+                    except Exception as _re:
+                        logger.debug(f"[RewardPolicy] recording skipped: {_re}")
+                except Exception as e:
+                    logger.warning(f"[Critic] Adversarial verification failed (non-fatal): {e}")
+
+            # LLM-Powered Finding Validation — confidence scoring & false positive detection
+            if self.ctx.vulnerabilities:
+                try:
+                    from core.reporting.llm_validator import LLMFindingValidator
+                    validator = LLMFindingValidator(max_concurrent=3)
+                    self.ctx.vulnerabilities = await validator.validate_findings(
+                        self.ctx.vulnerabilities, max_findings=50
+                    )
+                    summary = validator.get_summary()
+                    logger.info(f"[LLMValidator] {summary['validated']} validated, "
+                                f"{summary['false_positives']} FPs removed, "
+                                f"{summary['severity_adjustments']} severity adjustments")
+                    # Filter out false positives
+                    self.ctx.vulnerabilities = [
+                        v for v in self.ctx.vulnerabilities
+                        if v.get("status") != "FALSE_POSITIVE"
+                    ]
+                except Exception as e:
+                    logger.warning(f"[LLMValidator] Validation failed (non-fatal): {e}")
+
+            # Evidence Screenshot Capture — screenshot vulnerable pages as proof
+            if self.ctx.vulnerabilities:
+                try:
+                    from core.evidence.screenshot_capture import ScreenshotCapture
+                    screenshotter = ScreenshotCapture(output_dir="reports/evidence")
+                    screenshotter.capture_findings(self.ctx.vulnerabilities, max_screenshots=20)
+                    ev_summary = screenshotter.get_evidence_summary()
+                    logger.info(f"[Screenshots] {ev_summary['successful']}/{ev_summary['total_attempted']} captured")
+                except Exception as e:
+                    logger.warning(f"[Screenshots] Capture failed (non-fatal): {e}")
+
+            # Custom Nuclei Template Generation — create templates from discovered patterns
+            if self.ctx.vulnerabilities:
+                try:
+                    from core.tools.nuclei_template_gen import NucleiTemplateGenerator
+                    template_gen = NucleiTemplateGenerator(output_dir="reports/custom_templates")
+                    generated = template_gen.generate_all(self.ctx.vulnerabilities, max_templates=50)
+                    if generated:
+                        logger.info(f"[TemplateGen] Generated {len(generated)} custom nuclei templates")
+                except Exception as e:
+                    logger.warning(f"[TemplateGen] Generation failed (non-fatal): {e}")
+
+            # SARIF Export — auto-generate SARIF for CI/CD integration
+            if self.ctx.vulnerabilities:
+                try:
+                    from core.reporting.sarif_export import SARIFExporter
+                    sarif_exporter = SARIFExporter()
+                    sarif_path = "reports/findings.sarif"
+                    sarif_exporter.export(
+                        self.ctx.vulnerabilities,
+                        target=self.ctx.target,
+                        output_path=sarif_path,
+                    )
+                    logger.info(f"[SARIF] Exported {len(self.ctx.vulnerabilities)} findings to {sarif_path}")
+                except Exception as e:
+                    logger.warning(f"[SARIF] Export failed (non-fatal): {e}")
+
+            # Audit log for reporting phase
+            try:
+                self.execution_auditor.log_action(
+                    "REPORT_GENERATION",
+                    {"target": self.ctx.target, "vuln_count": len(self.ctx.vulnerabilities)},
+                )
+            except Exception:
+                pass
+
             await self._generate_report()
+
+            # Continuous ASM — snapshot the attack surface and diff against the
+            # previous run so scheduled re-scans surface only what changed.
+            from core.common.config import get_config as _get_cfg_asm
+            if _get_cfg_asm().get_bool("ASM_MONITOR_ENABLED", True):
+                try:
+                    from core.monitoring.asm_monitor import ASMMonitor
+                    delta = await ASMMonitor().record_and_diff(self.ctx)
+                    self.ctx.update("asm_delta", delta.to_dict())
+                except Exception as e:
+                    logger.warning(f"[ASM] snapshot/diff failed (non-fatal): {e}")
+
+            # ── V2 Hook: Final sync + generate coverage analysis report ──
+            try:
+                self._sync_v1_findings_to_coverage_matrix()
+                coverage_text = self._generate_coverage_report()
+                logger.info(f"[V2CoverageReport]\n{coverage_text}")
+                self.ctx.update('coverage_report_v2', coverage_text)
+
+                report_obj = CoverageReport(
+                    coverage_matrix=self.coverage_matrix,
+                    finding_store=self.finding_store_v2,
+                    knowledge_graph=self.knowledge_graph,
+                    test_category_map={t.test_id: t.attack_type for t in self.test_catalog_v2.list_all()},
+                )
+                json_report = report_obj.generate_json()
+                self.ctx.update('coverage_json_v2', json_report)
+                logger.info(f"[V2Report] coverage={json_report['overall_coverage']:.1%} "
+                            f"converged={json_report['converged']} "
+                            f"findings={json_report['total_findings']} "
+                            f"confirmed={json_report['confirmed_findings']}")
+
+                attack_paths = self.knowledge_graph.get_attack_paths()
+                if attack_paths:
+                    logger.info(f"[KnowledgeGraph] {len(attack_paths)} validated attack paths")
+            except Exception as e:
+                logger.warning(f"[V2CoverageReport] Failed (non-fatal): {e}")
+
+            # Save secure checkpoint after reporting
+            try:
+                v2_conv = 0.0
+                try:
+                    v2_conv = self.convergence_engine_v2.calculate_convergence()
+                except Exception:
+                    pass
+                self.secure_checkpoint.save_checkpoint({
+                    "target": self.ctx.target,
+                    "phase": "REPORTING_COMPLETE",
+                    "vuln_count": len(self.ctx.vulnerabilities),
+                    "exploit_count": len(self.ctx.exploit_results),
+                    "convergence": self.convergence_engine.calculate_convergence(),
+                    "v2_coverage": v2_conv,
+                    "v2_findings": len(self.finding_store_v2.list_all()),
+                    "v2_gaps": len(self.coverage_matrix.get_gaps()),
+                })
+            except Exception as e:
+                logger.warning(f"[SecureCheckpoint] Save failed (non-fatal): {e}")
 
     async def _capture_requests(self):
         """Phase 1b: crawl the site with a headless browser and intercept every
@@ -448,7 +1730,7 @@ class CentralBrain:
         logger.info("\n>>> PHASE 6: POST-EXPLOITATION (privesc / lateral / persistence)")
 
         def should_skip_postex():
-            has_rce = self.ctx.has_shell_access()
+            has_rce = self.ctx.has_shell_access
             has_creds = len(self.ctx.harvested_creds) > 0
             has_exploitable_logic = any(
                 v.get("type", "").lower() in ("business_logic", "idor", "auth_bypass") 
@@ -518,18 +1800,136 @@ class CentralBrain:
 
 
     async def _run_phase(self, phase: str):
-        if self.execution_config.should_use_mode_a_primary():
+        try:
+            await self._run_phase_agentic(phase)
+        except Exception as e:
+            logger.warning(f"Agentic executor failed: {e}, falling back to Approach A")
+            if self.execution_config.should_use_mode_a_primary():
+                try:
+                    await self._run_phase_approach_a(phase)
+                except Exception as e2:
+                    logger.exception(f"Approach A failed: {e2}")
+                    if self.execution_config.can_fallback_to_b():
+                        logger.info("Falling back to Approach B...")
+                        await self._run_phase_approach_b(phase)
+            elif self.execution_config.should_use_mode_b_primary():
+                await self._run_phase_approach_b(phase)
+            else:
+                await self._run_phase_legacy(phase)
+
+    async def _run_phase_agentic(self, phase: str):
+        """
+        LLM-driven agentic execution. The LLM gets tools, sees every result,
+        reasons about errors, adapts strategy, chains discoveries, and filters noise.
+        """
+        logger.info(f"\n>>> AGENTIC EXECUTION: phase={phase}")
+
+        from core.security.authorization import AuthContext
+        allowed_tools = list(self.tools.tools.keys()) if hasattr(self, 'tools') and hasattr(self.tools, 'tools') else []
+        auth_context = AuthContext(
+            allowed_tools=allowed_tools,
+            has_elevated_privilege=True,
+            target_profile=getattr(self, 'target_profile', None),
+        )
+
+        phase_objectives = {
+            "recon": (
+                f"Perform comprehensive reconnaissance on {self.ctx.target}. "
+                "1) Enumerate subdomains using multiple DNS tools (subfinder, amass, assetfinder). "
+                "2) Fingerprint technologies (web server, framework, CMS, WAF). "
+                "3) Scan ports to find open services. "
+                "4) Crawl the application to discover endpoints and parameters. "
+                "5) Filter out static assets (.js, .css, .png) and focus on actionable endpoints. "
+                "Record every discovery with analyze_results."
+            ),
+            "OSINT_RECONNAISSANCE": (
+                f"Perform OSINT reconnaissance on {self.ctx.target}. "
+                "Look for: exposed employee info, GitHub repos, leaked credentials, "
+                "DNS intelligence, WHOIS data, technology details. "
+                "Use theharvester, whois, dig, and manual HTTP requests to gather intelligence."
+            ),
+            "DEEP_RECON": (
+                f"Deep reconnaissance on {self.ctx.target}. "
+                "1) Parameter discovery on known endpoints (arjun, paramspider). "
+                "2) JavaScript analysis for hidden API routes and hardcoded secrets. "
+                "3) Directory brute-forcing on interesting paths (ffuf, gobuster). "
+                "4) TLS/SSL analysis for certificate issues and weak ciphers. "
+                "Focus on endpoints most likely to have vulnerabilities."
+            ),
+            "analyze": (
+                f"Active vulnerability scanning on {self.ctx.target}. "
+                "1) Run nuclei with CVE, misconfig, and exposure tags. "
+                "2) Run nikto for server misconfigurations. "
+                "3) Test for SQL injection on parameterized endpoints using sqlmap. "
+                "4) Check for XSS on input-accepting endpoints. "
+                "5) Check security headers (CSP, CORS, X-Frame-Options, HSTS). "
+                "Analyze each tool's output — if it reveals a new attack surface, investigate it."
+            ),
+            "ACTIVE_SCANNING": (
+                f"Active vulnerability scanning on {self.ctx.target}. "
+                "Same as analyze phase — use nuclei, nikto, sqlmap, and header checks."
+            ),
+            "exploit": (
+                f"Exploit confirmed vulnerabilities on {self.ctx.target}. "
+                "Review known vulnerabilities and attempt controlled exploitation: "
+                "1) SQL injection: Use sqlmap with --batch --level=5 on injectable endpoints. "
+                "2) XSS: Craft payloads and verify execution. "
+                "3) Authentication bypass: Test default credentials, parameter manipulation. "
+                "4) IDOR: Test object references with different user contexts. "
+                "If exploitation fails, analyze the error and try alternative approaches. "
+                "If you discover new vulnerabilities during exploitation, record and investigate them."
+            ),
+            "EXPLOITATION": (
+                f"Same as exploit phase for {self.ctx.target}."
+            ),
+        }
+
+        objective = phase_objectives.get(phase, f"Perform {phase} phase testing on {self.ctx.target}. Use available tools to find security issues.")
+
+        context_hint = ""
+        if self.ctx.vulnerabilities:
+            vuln_summary = "\n".join(
+                f"  - [{v.get('severity', 'info')}] {v.get('title', v.get('type', 'unknown'))}"
+                for v in self.ctx.vulnerabilities[:15]
+            )
+            context_hint += f"Known vulnerabilities:\n{vuln_summary}\n\n"
+
+        if self.ctx.subdomains:
+            context_hint += f"Known subdomains: {', '.join(self.ctx.subdomains[:20])}\n\n"
+
+        max_rounds = 20 if phase in ("exploit", "EXPLOITATION", "analyze", "ACTIVE_SCANNING") else 15
+
+        from agents.llm_harness_adapter import get_llm, initialize_llm
+        llm_harness = get_llm()
+        if llm_harness is None:
             try:
-                await self._run_phase_approach_a(phase)
-            except Exception as e:
-                logger.exception(f"Approach A failed: {e}")
-                if self.execution_config.can_fallback_to_b():
-                    logger.info("Falling back to Approach B...")
-                    await self._run_phase_approach_b(phase)
-        elif self.execution_config.should_use_mode_b_primary():
-            await self._run_phase_approach_b(phase)
-        else:
-            await self._run_phase_legacy(phase)
+                await initialize_llm()
+            except Exception as init_err:
+                logger.error(f"[AgenticPhase] LLM initialization failed: {init_err}")
+                raise RuntimeError(f"LLM harness init failed: {init_err}") from init_err
+            llm_harness = get_llm()
+            if llm_harness is None:
+                raise RuntimeError("LLM harness is None after initialization")
+
+        executor = AgenticExecutor(
+            llm_harness=llm_harness,
+            tool_invocation_engine=self.tool_invocation_engine,
+            shared_context=self.ctx,
+            auth_context=auth_context,
+        )
+
+        result = await executor.execute(
+            objective=objective,
+            phase=phase,
+            max_rounds=max_rounds,
+            context_hint=context_hint,
+        )
+
+        logger.info(
+            f"[AgenticPhase] {phase} complete: "
+            f"{len(result.findings)} findings, {result.steps_taken} steps, "
+            f"${result.total_cost:.4f} cost"
+        )
 
     def _deterministic_fallback(self, phase: str, executed_caps: set = None):
         """Return a BrainDecision with default tasks when the LLM planner fails.
@@ -608,8 +2008,8 @@ class CentralBrain:
         elif "exploit" in phase_lower:
             api_paths = []
             if hasattr(self.ctx, 'endpoints'):
-                api_paths = [e.get('url', '') for e in (self.ctx.endpoints or [])
-                             if '/api' in e.get('url', '').lower()]
+                api_paths = [(e if isinstance(e, str) else e.get('url', '')) for e in (self.ctx.endpoints or [])
+                             if '/api' in (e if isinstance(e, str) else e.get('url', '')).lower()]
             api_target = api_paths[0] if api_paths else f"{target}/api/"
             all_tasks = [
                 TaskSpec(task_id=str(uuid4()), objective=f"Run nuclei exploitation templates on {target} with tags cve,rce,sqli,xss,lfi",
@@ -637,7 +2037,7 @@ class CentralBrain:
         )
 
     async def _run_phase_approach_a(self, phase: str):
-        logger.info(f"--- Running Approach A for phase: {phase} ---")
+        logger.debug(f"phase={phase} approach=A")
         
         session_id = f"session_{phase}"
         from core.security.authorization import AuthContext
@@ -667,10 +2067,11 @@ class CentralBrain:
                     break
                     
             summary = self.ctx.get_full_summary(max_chars=8000)
-            
+            summary_str = json.dumps(summary, default=str) if isinstance(summary, dict) else str(summary)
+
             from core.common.token_optimizer import TokenOptimizer
             token_opt = TokenOptimizer()
-            compressed_summary = token_opt.compress_context(summary)
+            compressed_summary = token_opt.compress_context(summary_str)
             
             history_text = "\n".join([
                 f"- {'✓' if h['success'] else '✗'} {h['capability']} on {h['target']} (tool: {h.get('tool', 'auto')})"
@@ -747,9 +2148,14 @@ class CentralBrain:
                 except Exception as e:
                     logger.debug(f"Task {actual_task_id} couldn't be started: {e}")
 
-                result = await self.tool_invocation_engine.invoke_from_capability(
-                    capability, target, params, session_id, auth_context
-                )
+                if capability in self.tool_invocation_engine.MULTI_TOOL_CAPABILITIES:
+                    result = await self.tool_invocation_engine.invoke_all_for_capability(
+                        capability, target, params, session_id, auth_context
+                    )
+                else:
+                    result = await self.tool_invocation_engine.invoke_from_capability(
+                        capability, target, params, session_id, auth_context
+                    )
                 
                 tool_name = result.tool if hasattr(result, 'tool') else 'unknown'
                 
@@ -969,6 +2375,8 @@ class CentralBrain:
                 for v in vulns:
                     if hasattr(self.ctx, 'add_vulnerability'):
                         self.ctx.add_vulnerability(v)
+                for v in vulns:
+                    logger.info(f"  [VULN] [{v.get('severity','?')}] {v.get('title','')} | type={v.get('type','')} | location={v.get('location','')}")
                 logger.info(f"Ingested {len(vulns)} vulnerability findings from {tool_name}")
 
         # 6. Ingest TLS findings from sslscan output
@@ -1020,6 +2428,8 @@ class CentralBrain:
             for hdr, (title, detail) in important_headers.items():
                 if hdr not in response_headers and "missing" not in capability:
                     pass  # Only flag from explicit header checks
+
+        self._write_progress({"status": "running"})
 
     async def _run_phase_approach_b(self, phase: str):
         logger.info(f"--- Running Approach B for phase: {phase} ---")
@@ -1074,10 +2484,11 @@ class CentralBrain:
                     break
                     
             summary = self.ctx.get_full_summary(max_chars=8000)
-            
+            summary_str = json.dumps(summary, default=str) if isinstance(summary, dict) else str(summary)
+
             from core.common.token_optimizer import TokenOptimizer
             token_opt = TokenOptimizer()
-            compressed_summary = token_opt.compress_context(summary)
+            compressed_summary = token_opt.compress_context(summary_str)
 
             # ── Build failed tools warning ──
             failed_tools_warning = ""
@@ -1567,8 +2978,12 @@ class CentralBrain:
             # ── Debug: Log what's actually in the context ──
             logger.debug(f"subdomains: {getattr(self.ctx, 'subdomains', [])}")
             logger.debug(f"ips: {getattr(self.ctx, 'ips', [])}")
-            logger.debug(f"ports keys: {getattr(self.ctx, 'ports', {}).keys()}")
-            logger.debug(f"ports data: {getattr(self.ctx, 'ports', {})}")
+            
+            ports = getattr(self.ctx, 'ports', [])
+            if isinstance(ports, dict):
+                logger.debug(f"ports keys: {ports.keys()}")
+            else:
+                logger.debug(f"ports is list, len: {len(ports)}")
             
             # ── Subdomains ──
             if hasattr(self.ctx, 'subdomains') and self.ctx.subdomains:
@@ -1581,23 +2996,48 @@ class CentralBrain:
             
             # ── IPs ──
             if hasattr(self.ctx, 'ips') and self.ctx.ips:
+                from core.security.authorization import TargetScopeValidator
+                scope_validator = TargetScopeValidator.get()
                 for ip in self.ctx.ips:
+                    scope_validator.add_target(ip)
                     self.persistent_knowledge_store.add_asset(
                         self.target_id, "ip", ip,
                         metadata=json.dumps({"discovered_at": datetime.now().isoformat()})
                     )
-                logger.info(f"  ✓ Persisted {len(self.ctx.ips)} IPs")
+                logger.info(f"  ✓ Persisted {len(self.ctx.ips)} IPs (added to authorized scope)")
             
             # ── Ports - FIXED ──
             if hasattr(self.ctx, 'ports') and self.ctx.ports:
-                for host, port_list in self.ctx.ports.items():
+                ports = self.ctx.ports
+                if isinstance(ports, dict):
+                    for host, port_list in ports.items():
+                        host_asset_id = self.persistent_knowledge_store.add_asset(
+                            self.target_id, "host", host,
+                            metadata=json.dumps({"discovered_at": datetime.now().isoformat()})
+                        )
+                        for port_item in port_list:
+                            if isinstance(port_item, dict):
+                                port_num = port_item.get("port", "unknown")
+                                service = port_item.get("service", "unknown")
+                                version = port_item.get("version", "")
+                            else:
+                                port_num = str(port_item)
+                                service = "unknown"
+                                version = ""
+                            self.persistent_knowledge_store.add_technology(
+                                host_asset_id, 
+                                f"{service}:{port_num}", 
+                                version,
+                                source="port_scan"
+                            )
+                    logger.info(f"  ✓ Persisted ports for {len(ports)} hosts")
+                else:
+                    # In V2, it's just a list
                     host_asset_id = self.persistent_knowledge_store.add_asset(
-                        self.target_id, "host", host,
+                        self.target_id, "host", self.ctx.target,
                         metadata=json.dumps({"discovered_at": datetime.now().isoformat()})
                     )
-                    
-                    for port_item in port_list:
-                        # Handle both dict and int formats
+                    for port_item in ports:
                         if isinstance(port_item, dict):
                             port_num = port_item.get("port", "unknown")
                             service = port_item.get("service", "unknown")
@@ -1606,15 +3046,13 @@ class CentralBrain:
                             port_num = str(port_item)
                             service = "unknown"
                             version = ""
-                        
-                        # Add technology with port info
                         self.persistent_knowledge_store.add_technology(
                             host_asset_id, 
                             f"{service}:{port_num}", 
                             version,
                             source="port_scan"
                         )
-                logger.info(f"  ✓ Persisted ports for {len(self.ctx.ports)} hosts")
+                    logger.info(f"  ✓ Persisted {len(ports)} ports for target")
             
             # ── Technologies ──
             if hasattr(self.ctx, 'technologies') and self.ctx.technologies:
@@ -1708,13 +3146,103 @@ class CentralBrain:
             import traceback
             logger.error(traceback.format_exc())
     
+    async def _scan_subdomain_endpoints(self):
+        """Run endpoint discovery tools (katana, ffuf, nikto) against each discovered subdomain."""
+        subdomains = getattr(self.ctx, 'subdomains', []) or []
+        if not subdomains:
+            logger.info("[SubdomainScan] No subdomains discovered — skipping endpoint enumeration")
+            return
+
+        from urllib.parse import urlparse
+        base = urlparse(self.ctx.target)
+        base_host = base.hostname or ""
+
+        targets = []
+        for sub in subdomains:
+            sub_clean = sub.strip().lower().rstrip(".")
+            if not sub_clean or sub_clean == base_host:
+                continue
+            targets.append(f"https://{sub_clean}")
+
+        if not targets:
+            logger.info("[SubdomainScan] All subdomains match primary target — skipping")
+            return
+
+        logger.info(f"\n>>> PHASE 1b: SUBDOMAIN ENDPOINT ENUMERATION ({len(targets)} subdomains)")
+
+        from core.security.authorization import TargetScopeValidator, AuthContext
+        scope = TargetScopeValidator.get()
+        for t in targets:
+            scope.add_target(urlparse(t).hostname)
+
+        allowed_tools = list(self.tools.tools.keys()) if hasattr(self, 'tools') and hasattr(self.tools, 'tools') else []
+        auth_context = AuthContext(
+            allowed_tools=allowed_tools,
+            has_elevated_privilege=True,
+            target_profile=getattr(self, 'target_profile', None),
+        )
+
+        from agents.llm_harness_adapter import get_llm, initialize_llm
+        llm_harness = get_llm()
+        if llm_harness is None:
+            try:
+                await initialize_llm()
+            except Exception:
+                logger.warning("[SubdomainScan] LLM init failed — skipping subdomain enumeration")
+                return
+            llm_harness = get_llm()
+            if llm_harness is None:
+                logger.warning("[SubdomainScan] LLM harness unavailable — skipping")
+                return
+
+        for sub_url in targets:
+            sub_host = urlparse(sub_url).hostname
+            logger.info(f"[SubdomainScan] Scanning endpoints on {sub_host}")
+
+            objective = (
+                f"Perform endpoint discovery and technology fingerprinting on {sub_url}. "
+                f"This is a subdomain of {base_host} discovered during recon. "
+                "1) Run katana to crawl and discover URLs/endpoints. "
+                "2) Run ffuf with /usr/share/wordlists/dirb/common.txt against common paths (/api/FUZZ, /FUZZ). "
+                "3) Run nikto for web server vulnerability scanning. "
+                "4) Run whatweb/httpx for technology fingerprinting. "
+                "5) Check for exposed API endpoints, admin panels, login pages. "
+                "Report all discovered endpoints, technologies, and findings. "
+                f"IMPORTANT: Only scan {sub_url} — stay in scope."
+            )
+
+            try:
+                executor = AgenticExecutor(
+                    llm_harness=llm_harness,
+                    tool_invocation_engine=self.tool_invocation_engine,
+                    shared_context=self.ctx,
+                    auth_context=auth_context,
+                )
+                result = await executor.execute(
+                    objective=objective,
+                    phase=f"subdomain_recon_{sub_host}",
+                    max_rounds=10,
+                )
+                findings = result.get("findings", []) if isinstance(result, dict) else []
+                steps = result.get("steps", 0) if isinstance(result, dict) else 0
+                logger.info(f"[SubdomainScan] {sub_host}: {len(findings)} findings, {steps} steps")
+
+                for f in findings:
+                    if hasattr(self.ctx, 'add_vulnerability'):
+                        self.ctx.add_vulnerability(f)
+
+            except Exception as e:
+                logger.warning(f"[SubdomainScan] {sub_host} scan failed (non-fatal): {e}")
+
+        logger.info(f"[SubdomainScan] Completed endpoint enumeration for {len(targets)} subdomains")
+
     async def _persist_captured_requests(self):
         """Save captured HTTP requests to disk for replay."""
         try:
             if not self.ctx.captured_requests:
                 logger.debug("No captured requests to persist")
                 return
-            
+
             logger.info("Persisting captured HTTP requests...")
             request_file = self.report_dir / f"captured_requests_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
             with open(request_file, 'w') as f:
@@ -1784,6 +3312,22 @@ class CentralBrain:
                 )
             
             logger.info(f"Persisted {len(self.ctx.exploit_results)} exploitation results")
+
+            # Record experience for learning
+            for result in self.ctx.exploit_results:
+                strategy = result.get("strategy", result.get("vuln_type", "unknown"))
+                test_type = result.get("test_type", result.get("capability", "unknown"))
+                if result.get("success"):
+                    self.experience_learner.record_success(strategy, test_type, result)
+                else:
+                    self.experience_learner.record_failure(
+                        strategy, test_type, result.get("error", "exploit_failed"))
+            patterns = self.experience_learner.detect_patterns()
+            if patterns:
+                logger.info(f"[ExperienceLearner] Detected {len(patterns)} failure patterns")
+                for p in patterns:
+                    logger.info(f"  Pattern: {p}")
+
         except Exception as e:
             logger.error(f"Failed to persist exploit results: {e}")
 
@@ -1899,14 +3443,39 @@ class CentralBrain:
         print("=" * 60)
         print(f"\nTarget: {self.ctx.target}")
         print(f"Risk: {plan.get('risk_assessment', 'Unknown')}")
-        print(f"\nVulnerabilities to exploit ({len(plan.get('exploits', []))}):\n")
 
-        for i, exp in enumerate(plan.get("exploits", []), 1):
-            print(f"  [{i}] [{exp.get('risk','?').upper()}] {exp.get('title', 'Unknown')}")
-            print(f"      Method: {exp.get('method', '')[:80]}")
-            print(f"      Proof: {exp.get('proof', '')[:80]}")
-            if exp.get("chains_to"):
-                print(f"      Chains to: {exp['chains_to']}")
+        # Support both formats: direct exploits and chain-based plans
+        exploits = plan.get("exploits", [])
+        top_chains = plan.get("top_chains", [])
+
+        if exploits:
+            print(f"\nVulnerabilities to exploit ({len(exploits)}):\n")
+            for i, exp in enumerate(exploits, 1):
+                print(f"  [{i}] [{exp.get('risk','?').upper()}] {exp.get('title', 'Unknown')}")
+                print(f"      Method: {exp.get('method', '')[:80]}")
+                print(f"      Proof: {exp.get('proof', '')[:80]}")
+                if exp.get("chains_to"):
+                    print(f"      Chains to: {exp['chains_to']}")
+                print()
+
+        if top_chains:
+            stats = plan.get("graph_stats", {})
+            print(f"\nVulnerabilities in graph: {stats.get('vulnerabilities', '?')}")
+            print(f"Attack chains found: {len(top_chains)}\n")
+            for i, chain in enumerate(top_chains, 1):
+                print(f"  [{i}] {chain.get('description', 'Chain')} (score: {chain.get('score', '?'):.2f}, steps: {chain.get('steps', '?')})")
+            print()
+            suggestions = plan.get("next_exploit_suggestions", [])
+            if suggestions:
+                print("Next exploit suggestions:")
+                for s in suggestions[:5]:
+                    print(f"  - {s}")
+                print()
+
+        if not exploits and not top_chains:
+            print(f"\nKnown vulnerabilities: {len(self.ctx.vulnerabilities)}")
+            for i, v in enumerate(self.ctx.vulnerabilities[:10], 1):
+                print(f"  [{i}] [{v.get('severity','?')}] {v.get('title', 'Unknown')} | {v.get('type', '')}")
             print()
 
         if plan.get("attack_chains"):
@@ -1917,32 +3486,221 @@ class CentralBrain:
 
         print("=" * 60)
 
+        # Route the decision through the async escalation gate. In an attended
+        # terminal this prompts y/n; when UNATTENDED_MODE is set it parks the
+        # request in the approval queue and waits for an out-of-band decision
+        # (resolver CLI / API / webhook), applying a safe default on timeout.
+        # A legacy env auto-approve is still honoured for backward compatibility.
         try:
-            import os, sys
-            if os.environ.get("AUTO_APPROVE") == "1" or not sys.stdin.isatty():
-                response = "YES"
-            else:
-                response = input("Approve this plan? [YES/NO/MODIFY]: ").strip().upper()
-        except (EOFError, KeyboardInterrupt):
-            response = "NO"
+            import os as _os
+            from core.security.consent import get_consent
+            consent = get_consent()
+            if consent.auto_approve or _os.environ.get("AUTO_APPROVE_EXPLOITS", "").lower() in ("1", "true", "yes"):
+                logger.info("Plan AUTO-APPROVED (consent/env)")
+                self.ctx.log_brain("Auto-approved exploitation plan", "plan_approved")
+                return True
+        except Exception:
+            pass
 
-        if response == "YES":
-            logger.info("Plan APPROVED by human")
-            self.ctx.log_brain("Human approved exploitation plan", "plan_approved")
-            return True
-        elif response == "MODIFY":
-            modifications = input("Describe modifications: ").strip()
-            self.ctx.log_brain(f"Human requested modifications: {modifications}", "plan_modified")
-            # TODO: Re-generate plan with modifications
+        try:
+            from core.escalation import get_escalation_gate, RiskLevel
+            risk = RiskLevel.parse(plan.get("risk_assessment", "HIGH"), RiskLevel.HIGH)
+            decision = await get_escalation_gate().request_approval(
+                action="exploitation_plan",
+                risk_level=risk,
+                target=self.ctx.target,
+                details={
+                    "exploits": len(plan.get("exploits", [])),
+                    "chains": len(plan.get("top_chains", [])),
+                    "risk_assessment": plan.get("risk_assessment", "Unknown"),
+                },
+            )
+            if decision.approved:
+                logger.info(f"Plan APPROVED via escalation gate ({decision.status})")
+                self.ctx.log_brain(f"Exploitation plan approved ({decision.status})", "plan_approved")
+                return True
+            logger.info(f"Plan REJECTED via escalation gate ({decision.status}: {decision.reason})")
+            self.ctx.log_brain(f"Exploitation plan rejected ({decision.status})", "plan_rejected")
             return False
-        else:
-            logger.info("Plan REJECTED by human")
-            self.ctx.log_brain("Human rejected exploitation plan", "plan_rejected")
+        except Exception as e:
+            logger.warning(f"[Escalation] gate error, defaulting to DENY: {e}")
+            self.ctx.log_brain("Exploitation plan denied (gate error)", "plan_rejected")
             return False
+
+    async def _synthesize_and_detonate_exploits(self, max_exploits: int = 3) -> None:
+        """Synthesize custom PoCs for top findings and detonate them in a sandbox."""
+        from core.exploitation.sandbox_detonator import ExploitSandbox
+        from core.common.config import get_config as _cfg
+
+        scope_validator = getattr(self, "scope_validator", None)
+        sandbox = ExploitSandbox(
+            llm_client=self.llm,
+            scope_validator=scope_validator,
+            timeout=_cfg().get_int("SANDBOX_TIMEOUT", 60),
+        )
+        # Prefer confirmed / high-severity findings.
+        sev_rank = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+        candidates = sorted(
+            (v for v in self.ctx.vulnerabilities
+             if str(v.get("severity", "INFO")).upper() in ("CRITICAL", "HIGH", "MEDIUM")),
+            key=lambda v: sev_rank.get(str(v.get("severity", "INFO")).upper(), 4),
+        )[:max_exploits]
+
+        detonated = 0
+        for finding in candidates:
+            result = await sandbox.synthesize_and_detonate(
+                finding, self.ctx.target, require_approval=True
+            )
+            if result.attempted:
+                detonated += 1
+                finding["sandbox_detonation"] = result.to_dict()
+                if result.success:
+                    finding["exploited"] = True
+                    finding["confidence_score"] = min(0.98, float(finding.get("confidence_score", 0.75)) + 0.1)
+                    self.ctx.exploit_results.append({
+                        "title": finding.get("title"), "type": finding.get("type"),
+                        "target": self.ctx.target, "sandbox": result.sandbox,
+                        "proof_found": result.proof_found, "source": "sandbox_detonator",
+                    })
+                    logger.info(f"[Sandbox] PoC SUCCEEDED for '{finding.get('title')}' "
+                                f"(proof={result.proof_found})")
+            elif result.blocked_reason:
+                logger.info(f"[Sandbox] skipped '{finding.get('title')}': {result.blocked_reason}")
+        if detonated:
+            logger.info(f"[Sandbox] detonated {detonated} synthesized exploits")
+
+    def _analyze_cloud_privesc(self) -> None:
+        """Analyze cloud IAM/RBAC/container config for privilege-escalation paths."""
+        from core.cloud.iam_privesc import CloudPrivescScanner
+        from core.common.config import get_config as _cfg
+        cfg = _cfg()
+
+        iam_perms = None
+        raw_perms = cfg.get("CLOUD_IAM_PERMISSIONS", "")
+        if raw_perms:
+            iam_perms = [p.strip() for p in raw_perms.split(",") if p.strip()]
+
+        findings = CloudPrivescScanner().scan(
+            iam_policy_file=cfg.get("CLOUD_IAM_POLICY_FILE") or None,
+            iam_permissions=iam_perms,
+            k8s_rbac_file=cfg.get("K8S_RBAC_FILE") or None,
+            container_spec_file=cfg.get("CONTAINER_SPEC_FILE") or None,
+            enumerate_live=cfg.get_bool("CLOUD_PRIVESC_LIVE", False),
+        )
+        for f in findings:
+            self.ctx.add_vulnerability(f)
+        if findings:
+            logger.info(f"[CloudPrivesc] added {len(findings)} cloud privilege-escalation findings")
+
+    async def _scan_modern_apis(self) -> None:
+        """Run GraphQL/gRPC/WebSocket testers against the discovered surface."""
+        from core.exploitation.modern_api import ModernAPIScanner
+
+        # Collect candidate endpoint strings from context.
+        endpoints: list = []
+        raw_eps = getattr(self.ctx, "endpoints", {}) or {}
+        for e in (raw_eps.keys() if isinstance(raw_eps, dict) else raw_eps):
+            s = str(e)
+            # endpoint ids may be "METHOD:url" — keep the url part.
+            endpoints.append(s.split(":", 1)[1] if s[:7].upper().startswith(("GET:", "POST:")) else s)
+        endpoints.extend(str(d) for d in (getattr(self.ctx, "directories", []) or []))
+        for req in (getattr(self.ctx, "captured_requests", []) or []):
+            if isinstance(req, dict) and req.get("url"):
+                endpoints.append(str(req["url"]))
+
+        grpc_targets = []
+        for p in (getattr(self.ctx, "ports", []) or []):
+            if isinstance(p, dict):
+                svc = str(p.get("service", "")).lower()
+                if "grpc" in svc or p.get("port") in (50051,):
+                    host = p.get("host") or p.get("ip") or self.ctx.target
+                    grpc_targets.append(f"{host}:{p.get('port')}")
+
+        scanner = ModernAPIScanner(auth_headers=getattr(self.ctx, "auth_headers", None))
+        findings = await scanner.scan(self.ctx.target, endpoints=endpoints, grpc_targets=grpc_targets)
+        for f in findings:
+            self.ctx.add_vulnerability(f)
+        if findings:
+            logger.info(f"[ModernAPI] added {len(findings)} GraphQL/gRPC/WebSocket findings")
+
+    async def _setup_auth_session(self) -> None:
+        """
+        Establish real authenticated session(s) and expose them to scanners via ctx.
+
+        Priority:
+          1. Per-role credentials from the UI (ctx.auth_credentials / harvested_creds)
+             — one live session per role (user, admin, sales, marketing…), shared
+             logins deduplicated. The highest-privilege role becomes the default
+             session for single-session consumers.
+          2. Fall back to a single .env-configured session (AUTH_ENABLED).
+        """
+        self.auth_session = None
+        self.multi_auth = None
+        try:
+            # 1. Multi-role credentials supplied by the UI / CLI.
+            creds = getattr(self.ctx, "auth_credentials", None) \
+                or [c for c in getattr(self.ctx, "harvested_creds", []) if isinstance(c, dict) and c.get("username")]
+            if creds:
+                from core.authentication.auth_session import MultiIdentityAuthManager
+                multi = MultiIdentityAuthManager(creds)
+                await multi.authenticate_all()
+                self.multi_auth = multi
+                # Expose per-role sessions for cross-role (IDOR / access-control) testing.
+                self.ctx.auth_sessions = multi.sessions_map()
+                default = multi.default_session()
+                if default:
+                    self.auth_session = default
+                    self.ctx.auth_headers = default.auth_headers()
+                    self.ctx.auth_cookies = dict(default.cookies)
+                self.ctx.update("auth_summary", multi.summary())
+                self.ctx.log_brain(
+                    f"Authenticated {len(multi.summary()['authenticated_roles'])} role session(s)", "auth")
+                logger.info(f"[Auth] multi-role sessions ready: {multi.summary()['authenticated_roles']}")
+
+                # Connect real role sessions into the access-control / IDOR replay
+                # engine so cross-role authorization tests use live credentials.
+                try:
+                    from core.authentication.identity_bridge import build_replay_sessions
+                    bridge = build_replay_sessions(
+                        multi_auth=multi,
+                        replay_session_manager=getattr(self, "replay_session_manager", None),
+                        identity_manager=self.identity_manager,
+                        shared_context=self.ctx,
+                    )
+                    self.ctx.update("replay_identity_bridge", bridge)
+                except Exception as e:
+                    logger.warning(f"[Auth] replay-engine bridge failed (non-fatal): {e}")
+                return
+
+            # 2. Single .env-configured session.
+            from core.authentication.auth_session import AuthSessionManager
+            mgr = AuthSessionManager()
+            if not mgr.enabled:
+                return
+            ok = await mgr.authenticate()
+            self.auth_session = mgr
+            self.ctx.auth_headers = mgr.auth_headers()
+            self.ctx.auth_cookies = dict(mgr.cookies)
+            self.ctx.update("auth_summary", mgr.summary())
+            if ok and mgr.config.probe_url:
+                live = await mgr.is_authenticated()
+                logger.info(f"[Auth] session live-check on probe url: {'OK' if live else 'FAILED'}")
+            if ok:
+                logger.info("[Auth] authenticated session active — post-auth surface unlocked")
+                self.ctx.log_brain("Authenticated session established", "auth")
+        except Exception as e:
+            logger.warning(f"[Auth] session setup failed (non-fatal): {e}")
+
+    def _record_critic_outcomes(self, findings: list) -> None:
+        """Feed critic-annotated findings into the reward policy for self-improvement."""
+        if not getattr(self, "reward_policy", None) or not findings:
+            return
+        counts = self.reward_policy.record_finding_outcomes(findings)
+        logger.info(f"[RewardPolicy] outcomes recorded: {counts}")
 
     def _summarize_context(self) -> str:
         """Summarize current reconnaissance state"""
-        
+
         lines = []
         
         # Target
@@ -2214,7 +3972,7 @@ CRITICAL RULES:
         # 2. Cross-scan dedup — suppress recurring-unchanged, flag new/resolved.
         try:
             dedup = DedupStore()
-            dd = dedup.process_scan(reported, scan_id=ts)
+            dd = dedup.process_scan(reported, scan_id=ts, include_recurring=True)
             reported = dd["report"]
             suppressed_findings = dd.get("suppressed_findings", [])
             
@@ -2243,11 +4001,12 @@ CRITICAL RULES:
     async def _generate_report(self):
         """LLM generates final report"""
         summary = self.ctx.get_full_summary(max_chars=8000)
+        summary_str = json.dumps(summary, default=str) if isinstance(summary, dict) else str(summary)
 
         # Generate executive summary via LLM
         exec_summary = await self.llm.generate(
             f"Write a professional executive summary for this penetration test.\n\n"
-            f"DATA:\n{summary}\n\n"
+            f"DATA:\n{summary_str}\n\n"
             f"Include: overall risk, key findings, attack chains, recommendations.\n"
             f"Be concise (3 paragraphs max).",
             tier=TaskTier.LARGE,
@@ -2273,6 +4032,7 @@ CRITICAL RULES:
                 "timestamp": datetime.now().isoformat(),
                 "duration_seconds": (datetime.now() - self.start_time).total_seconds(),
                 "agents_used": len(self.ctx.agents_spawned),
+                "token_usage": self._get_token_usage(),
             },
             "executive_summary": exec_summary,
             "scope": self.ctx.scope,
@@ -2329,6 +4089,15 @@ CRITICAL RULES:
             json.dump(report, f, indent=2, default=str, ensure_ascii=False)
         logger.info(f"Report saved: {report_path}")
 
+        # Persist to PostgreSQL
+        try:
+            from core.database.pg_store import ScanRepo, VulnRepo
+            ScanRepo.create(ts, self.ctx.target, self.tier)
+            ScanRepo.save_report(ts, report)
+            VulnRepo.bulk_insert(ts, validated["reported"])
+        except Exception as pg_err:
+            logger.warning(f"[report] PG persist failed (non-fatal): {pg_err}")
+
         # Enterprise HTML/PDF report + final dashboard
         try:
             self.reporter.active_frameworks = frameworks
@@ -2344,6 +4113,21 @@ CRITICAL RULES:
         ctx_path = self.report_dir / f"context_{ts}.json"
         self.ctx.save(str(ctx_path))
         logger.info(f"Context saved: {ctx_path}")
+
+    def _get_token_usage(self) -> Dict[str, Any]:
+        try:
+            from agents.llm_harness_adapter import get_llm
+            harness = get_llm()
+            if harness and hasattr(harness, "budget"):
+                stats = harness.budget.stats()
+                total_input = sum(r.input_tokens for r in harness.budget.requests)
+                total_output = sum(r.output_tokens for r in harness.budget.requests)
+                stats["input_tokens"] = total_input
+                stats["output_tokens"] = total_output
+                return stats
+        except Exception:
+            pass
+        return {}
 
     def plan_reconnaissance(self, state: ExecutionState) -> BrainDecision:
         """
@@ -2813,15 +4597,16 @@ CRITICAL RULES:
             new_secrets = results.get("secrets", [])
 
             if new_endpoints:
-                existing_eps = getattr(self.ctx, "endpoints", []) or []
                 for ep in new_endpoints:
-                    if ep not in existing_eps:
-                        existing_eps.append(ep)
-                self.ctx.update("endpoints", existing_eps)
+                    eid = ep if isinstance(ep, str) else getattr(ep, 'endpoint_id', str(ep))
+                    if eid not in self.ctx.endpoints:
+                        self.ctx.endpoints[eid] = ep
                 logger.info(f"[JS_Reconstructor] Discovered {len(new_endpoints)} hidden API routes from JS bundles")
 
             if new_params:
                 existing_params = getattr(self.ctx, "parameters", []) or []
+                if isinstance(existing_params, dict):
+                    existing_params = list(existing_params.values())
                 for p in new_params:
                     if p not in existing_params:
                         existing_params.append(p)
@@ -2835,7 +4620,7 @@ CRITICAL RULES:
 
             # Update TargetProfile with newly discovered endpoints
             if self.target_profile:
-                self.target_profile.endpoints = getattr(self.ctx, "endpoints", [])
+                self.target_profile.endpoints = list(self.ctx.endpoints.values())
                 self.ctx.update("target_profile", self.target_profile.to_dict())
 
         except Exception as e:
