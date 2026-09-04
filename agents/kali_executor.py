@@ -252,17 +252,17 @@ class KaliDockerExecutor:
 
     @classmethod
     def _effective_timeout(cls, command: str, requested: int) -> int:
-        # Match the tool ANYWHERE in the command (it may be wrapped in a path,
-        # env prefix, or shell pipeline), not just the first token — otherwise
-        # nuclei falls back to the caller's short default and gets SIGKILLed (rc=137).
         cmd = (command or "").lower()
         if "nuclei" in cmd:
             return max(requested, 900)
         if any(t in cmd for t in ("theharvester", "harvester", "nmap", "amass",
                                   "feroxbuster", "ffuf", "gobuster", "dirsearch",
-                                  "katana", "sqlmap", "wpscan", "dalfox", "nikto")):
-            return max(requested, 600)
-        return requested
+                                  "katana", "sqlmap", "wpscan", "dalfox", "nikto",
+                                  "subfinder", "assetfinder", "whatweb", "wafw00f",
+                                  "httpx", "sslscan", "testssl", "masscan",
+                                  "commix", "xsstrike", "arjun")):
+            return max(requested, 900)
+        return max(requested, 900)
 
     @classmethod
     def _normalize_command(cls, command: str) -> str:
@@ -335,7 +335,7 @@ class KaliDockerExecutor:
         return command
 
     @classmethod
-    def run(cls, command: str, timeout: int = 120, auto_install: bool = True) -> Dict:
+    def run(cls, command: str, timeout: int = 900, auto_install: bool = True) -> Dict:
         """Run command inside Kali container or native Linux environment."""
         timeout = cls._effective_timeout(command, timeout)
         if cls.is_native_environment():
@@ -403,7 +403,7 @@ class KaliDockerExecutor:
                         "error": f"Command exceeded {timeout}s (killed in-container)",
                         "stdout": r.stdout, "stderr": r.stderr}
             if r.returncode != 0:
-                logger.info(f"[Kali] rc={r.returncode} cmd={command[:80]} stderr={r.stderr[:200]}")
+                logger.info(f"[Kali] rc={r.returncode} cmd={command} stderr={r.stderr}")
             return {
                 "status": "success" if r.returncode == 0 else "error",
                 "returncode": r.returncode,
@@ -411,7 +411,7 @@ class KaliDockerExecutor:
                 "stderr": r.stderr,
             }
         except subprocess.TimeoutExpired as e:
-            logger.warning(f"[Kali] subprocess backstop timeout after {grace}s: {command[:60]}")
+            logger.warning(f"[Kali] subprocess backstop timeout after {grace}s: {command}")
             cls._kill_in_container(container, command)  # host gave up — kill it in the container too
             partial = ""
             try:

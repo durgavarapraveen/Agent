@@ -191,11 +191,27 @@ class ToolRouter:
                 clean_args = _re.split(r'[|;&`$()]', extra_args)[0].strip()
                 if clean_args != extra_args.strip():
                     logger.info(f"Stripped shell operators from extra_args: {extra_args[:80]}")
-                # Strip unmatched quotes that would cause bash parse errors
-                for q in ('"', "'"):
-                    if clean_args.count(q) % 2 != 0:
-                        clean_args = clean_args.replace(q, '')
-                        logger.info(f"Stripped unmatched {q} from extra_args")
+                # Strip ALL quotes from extra_args — quoted values from LLM break
+                # when split on spaces; the underlying tools don't need them
+                clean_args = clean_args.replace('"', '').replace("'", '')
+
+                # Strip known-bad flags that LLMs generate but tools reject
+                # sslscan doesn't accept --target=; nmap --top-ports needs int validation
+                _BAD_FLAG_PATTERNS = [
+                    r'--target=[^\s]*',        # sslscan doesn't use --target=
+                    r'--host=[^\s]*',           # not a valid flag for most tools
+                ]
+                for pat in _BAD_FLAG_PATTERNS:
+                    clean_args = _re.sub(pat, '', clean_args).strip()
+
+                # Validate --top-ports value is a positive integer
+                top_ports_match = _re.search(r'--top-ports\s+(\S+)', clean_args)
+                if top_ports_match:
+                    try:
+                        int(top_ports_match.group(1))
+                    except ValueError:
+                        clean_args = _re.sub(r'--top-ports\s+\S+', '', clean_args).strip()
+                        logger.info(f"Stripped invalid --top-ports value: {top_ports_match.group(1)}")
 
                 base_cmd = invocation.params["command"]
                 base_tokens = set(base_cmd.split())
@@ -212,6 +228,15 @@ class ToolRouter:
                             if i < len(tokens) and not tokens[i].startswith("-"):
                                 i += 1
                             continue
+                        # Check if this flag's value is just the target again
+                        if i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
+                            flag_val = tokens[i + 1]
+                            norm_val = flag_val.replace("https://", "").replace("http://", "").split(":")[0].rstrip("/")
+                            norm_tgt = base_target.replace("https://", "").replace("http://", "").split(":")[0].rstrip("/") if base_target else ""
+                            if norm_tgt and (norm_val == norm_tgt or norm_tgt in norm_val or norm_val in norm_tgt):
+                                logger.debug(f"Rejecting flag {token} {flag_val} (duplicate target)")
+                                i += 2
+                                continue
                         deduped_parts.append(token)
                         if i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
                             i += 1

@@ -1,1 +1,2 @@
 from core.learning.experience_learner import ExperienceLearner
+from core.learning.structured_learning import StructuredLearningEngine, LearningRecord

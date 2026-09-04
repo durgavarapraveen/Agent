@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 class CoverageState(Enum):
     NOT_APPLICABLE = "not_applicable"
+    NOT_DISCOVERED = "not_discovered"
     NOT_TESTED = "not_tested"
     SCHEDULED = "scheduled"
     RUNNING = "running"
@@ -57,7 +58,7 @@ class CoverageMatrix:
         for ep_id, tests in self._matrix.items():
             for test_id, cell in tests.items():
                 s = cell["state"]
-                if s == CoverageState.NOT_APPLICABLE:
+                if s in (CoverageState.NOT_APPLICABLE, CoverageState.NOT_DISCOVERED):
                     continue
                 applicable += 1
                 if s in (CoverageState.CONFIRMED, CoverageState.REJECTED):
@@ -70,7 +71,7 @@ class CoverageMatrix:
         for ep_id, tests in self._matrix.items():
             for test_id, cell in tests.items():
                 s = cell["state"]
-                if s == CoverageState.NOT_APPLICABLE:
+                if s in (CoverageState.NOT_APPLICABLE, CoverageState.NOT_DISCOVERED):
                     continue
                 cat = test_category_map.get(test_id, "unknown")
                 cat_totals[cat] = cat_totals.get(cat, 0) + 1
@@ -88,6 +89,21 @@ class CoverageMatrix:
                 if cell["state"] == CoverageState.NOT_TESTED:
                     gaps.append((ep_id, test_id))
         return gaps
+
+    def get_not_discovered(self) -> List[Tuple[str, str]]:
+        nd = []
+        for ep_id, tests in self._matrix.items():
+            for test_id, cell in tests.items():
+                if cell["state"] == CoverageState.NOT_DISCOVERED:
+                    nd.append((ep_id, test_id))
+        return nd
+
+    def promote_discovered(self, endpoint_id: str, test_id: str) -> None:
+        """When recon discovers a surface, promote NOT_DISCOVERED to NOT_TESTED."""
+        ep = self._matrix.get(endpoint_id, {})
+        cell = ep.get(test_id)
+        if cell and cell["state"] == CoverageState.NOT_DISCOVERED:
+            cell["state"] = CoverageState.NOT_TESTED
 
     def get_blocked(self) -> List[Tuple[str, str]]:
         blocked = []

@@ -7,7 +7,7 @@ _harness = None
 async def initialize_llm():
     global _harness
     config = get_config()
-    
+
     _harness = UniversalLLMHarness(
         primary_provider=ProviderType.DEEPSEEK,
         fallback_providers=[ProviderType.GROQ, ProviderType.OLLAMA],
@@ -22,6 +22,15 @@ async def initialize_llm():
         groq_large_model=config.get("GROQ_LARGE_MODEL", "mixtral-8x7b-32768"),
     )
     await _harness.initialize()
+
+    # Initialize RAG pipeline (seeds cybersecurity knowledge on first run)
+    try:
+        from core.rag.pipeline import SecurityRAGPipeline
+        rag = SecurityRAGPipeline(api_key=config.get("DEEPSEEK_API_KEY"))
+        await rag.initialize()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"RAG pipeline init skipped (non-fatal): {e}")
 
 def get_llm():
     return _harness

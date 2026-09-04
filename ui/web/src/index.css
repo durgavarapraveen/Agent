@@ -513,11 +513,12 @@ tbody tr:hover { background: rgba(247, 249, 250, 0.03); }
   border-bottom: 1px solid var(--border);
   margin-bottom: 24px;
   overflow-x: auto;
+  flex-wrap: wrap;
 }
 
 .tab {
-  padding: 10px 20px;
-  font-size: 14px;
+  padding: 8px 14px;
+  font-size: 13px;
   font-weight: 400;
   color: var(--text-dim);
   cursor: pointer;

@@ -118,6 +118,9 @@ from core.execution.executors.xss import XSSExecutor
 from core.execution.executors.generic import (
     CORSExecutor, InfoDisclosureExecutor, GraphQLExecutor,
     WebSocketExecutor, BusinessLogicExecutor, PathTraversalExecutor,
+    JWTExecutor, NoSQLiExecutor, FileUploadExecutor,
+    PrototypePollutionExecutor, SSRFExecutor, XXEExecutor,
+    CSRFExecutor, IDORExecutor, MassAssignmentExecutor,
 )
 from core.tools.tool_portfolio import ToolPortfolio
 
@@ -147,11 +150,29 @@ from core.reporting.coverage_report import CoverageReport
 from core.failure.failure_taxonomy import FailureClassifier, FailureType
 from core.recovery.recovery_policy import RecoveryPolicy, RetryAction
 
+# P4-P8 — Canonical pipeline modules
+from core.coverage.payload_catalog import build_default_payload_catalog
+from core.coverage.hypothesis_engine import HypothesisEngine as HypothesisEngineV2
+from core.coverage.identity_coverage import IdentityCoverageEngine
+from core.coverage.feedback_loop import FeedbackLoopEngine
+from core.orchestration.parallel_executor import ParallelExecutor
+from core.orchestration.target_health_manager import TargetHealthManager
+from core.learning.structured_learning import StructuredLearningEngine
+from core.exploitation.exploit_chain import ExploitChain, POCGate
+from core.reporting.canonical_reporter import CanonicalReporter
+from core.validation.tool_argument_validator import ToolArgumentValidator
+from core.attack_surface.spa_detector import SPADetector
+from core.workflows.browser_workflows import (
+    create_login_workflow, create_admin_workflow,
+    create_file_upload_workflow, create_csrf_workflow,
+    create_token_refresh_workflow,
+)
+
 logger = logging.getLogger(__name__)
 
 BRAIN_SYSTEM = """You are the decision engine inside an AUTHORIZED automated security scanner.
 
-AUTHORIZATION: This tool has explicit authorization to scan the target. The target (OWASP Juice Shop) is a deliberately vulnerable application designed for security testing. All scanning is authorized and expected.
+AUTHORIZATION: This tool has explicit authorization to scan the target. The target is within an authorized security assessment scope. All scanning is authorized and expected.
 
 You do NOT execute scans yourself. You output JSON task specifications. A separate tool framework executes them. Think of yourself as writing a config file for the scanner.
 
@@ -290,9 +311,6 @@ class CentralBrain:
             }
             if extra:
                 progress.update(extra)
-            progress_file = self.report_dir / "live_progress.json"
-            import json as _json
-            progress_file.write_text(_json.dumps(progress, indent=2), encoding="utf-8")
             try:
                 from core.database.pg_store import LiveDataRepo
                 LiveDataRepo.upsert_progress(self._scan_id, progress)
@@ -354,13 +372,25 @@ class CentralBrain:
             caps_out.append({
                 "url": getattr(r, "url", None) or (r.get("url") if isinstance(r, dict) else str(r)),
                 "method": getattr(r, "method", None) or (r.get("method") if isinstance(r, dict) else "GET"),
+                "resource_type": r.get("resource_type", "") if isinstance(r, dict) else "",
+                "status": r.get("status", 0) if isinstance(r, dict) else 0,
+                "is_preflight": r.get("is_preflight", False) if isinstance(r, dict) else False,
+                "headers": r.get("headers", {}) if isinstance(r, dict) else {},
+                "post_data": r.get("post_data", "") if isinstance(r, dict) else "",
             })
+
+        tool_execs = getattr(self.ctx, "tool_executions", []) or []
+        texecs_out = []
+        for e in tool_execs[:200]:
+            if isinstance(e, dict):
+                texecs_out.append(e)
 
         return {
             "subdomains": subs_out,
             "endpoints": catalog,
             "technologies": getattr(self.ctx, "technologies", {}) or {},
             "captured_requests": caps_out,
+            "tool_executions": texecs_out,
             "ports": getattr(self.ctx, "ports", []) or [],
             "ips": getattr(self.ctx, "ips", []) or [],
             "subdomain_summary": {
@@ -375,6 +405,7 @@ class CentralBrain:
             "directories": getattr(self.ctx, "directories", []) or [],
             "secrets": getattr(self.ctx, "secrets", []) or [],
             "crawled_pages": (getattr(self.ctx, "crawled_pages", []) or [])[:200],
+            "dns_records": getattr(self.ctx, "dns_records", []) or [],
         }
 
     def _persist_recon_data(self):
@@ -630,11 +661,35 @@ class CentralBrain:
                 "captured_requests": _serialize(captured[:100]),
                 "attack_chains": attack_chains,
             }
-            results_file = self.report_dir / "live_results.json"
-            results_file.write_text(_json.dumps(results, default=str), encoding="utf-8")
             try:
-                from core.database.pg_store import LiveDataRepo
+                from core.database.pg_store import (LiveDataRepo, ReconRepo, VulnRepo,
+                    ExploitResultRepo, AttackChainRepo, PostExploitRepo, ScanMetadataRepo)
                 LiveDataRepo.upsert_results(self._scan_id, results)
+                ReconRepo.save(self._scan_id, self.ctx.target, recon_ctx)
+                if results.get("vulnerabilities"):
+                    VulnRepo.bulk_insert(self._scan_id, results["vulnerabilities"])
+                if results.get("exploits"):
+                    ExploitResultRepo.bulk_insert(self._scan_id, results["exploits"])
+                if attack_chains:
+                    AttackChainRepo.bulk_upsert(self._scan_id, attack_chains if isinstance(attack_chains, list) else list(attack_chains.values()) if isinstance(attack_chains, dict) else [])
+                privesc = getattr(self.ctx, 'privesc_findings', None)
+                if privesc:
+                    PostExploitRepo.bulk_upsert(self._scan_id, 'privesc', privesc)
+                creds = getattr(self.ctx, 'harvested_creds', None)
+                if creds:
+                    PostExploitRepo.bulk_upsert(self._scan_id, 'credentials', creds)
+                lateral = getattr(self.ctx, 'lateral_plan', None)
+                if lateral:
+                    PostExploitRepo.bulk_upsert(self._scan_id, 'lateral_movement', lateral if isinstance(lateral, list) else [lateral])
+                persist_plan = getattr(self.ctx, 'persistence_plan', None)
+                if persist_plan:
+                    PostExploitRepo.bulk_upsert(self._scan_id, 'persistence', persist_plan if isinstance(persist_plan, list) else [persist_plan])
+                mitre = getattr(self.ctx, 'mitre_mappings', None)
+                if mitre:
+                    ScanMetadataRepo.upsert(self._scan_id, 'mitre_mappings', mitre)
+                agents = getattr(self.ctx, 'agents_spawned', None)
+                if agents:
+                    ScanMetadataRepo.upsert(self._scan_id, 'agents_spawned', agents)
             except Exception:
                 pass
         except Exception:
@@ -861,8 +916,17 @@ class CentralBrain:
         self.info_disc_executor = InfoDisclosureExecutor(timeout_seconds=15)
         self.graphql_executor = GraphQLExecutor(timeout_seconds=15)
         self.ws_executor = WebSocketExecutor(timeout_seconds=15)
-        self.bizlogic_executor = BusinessLogicExecutor(timeout_seconds=15)
+        self.bizlogic_executor = BusinessLogicExecutor(timeout_seconds=30)
         self.pathtraversal_executor = PathTraversalExecutor(timeout_seconds=15)
+        self.jwt_executor = JWTExecutor(timeout_seconds=30)
+        self.nosqli_executor = NoSQLiExecutor(timeout_seconds=30)
+        self.fileupload_executor = FileUploadExecutor(timeout_seconds=30)
+        self.protopollution_executor = PrototypePollutionExecutor(timeout_seconds=30)
+        self.ssrf_executor = SSRFExecutor(timeout_seconds=30)
+        self.xxe_executor = XXEExecutor(timeout_seconds=30)
+        self.csrf_executor = CSRFExecutor(timeout_seconds=30)
+        self.idor_executor = IDORExecutor(timeout_seconds=30)
+        self.mass_assign_executor = MassAssignmentExecutor(timeout_seconds=30)
         self.executor_registry = {
             "sqli": self.sqli_executor,
             "sqli_basic_01": self.sqli_executor,
@@ -870,6 +934,7 @@ class CentralBrain:
             "sqli_error_based_01": self.sqli_executor,
             "sqli_union_01": self.sqli_executor,
             "sqli_stacked_01": self.sqli_executor,
+            "sqli_blind_01": self.sqli_executor,
             "xss": self.xss_executor,
             "xss_reflected_01": self.xss_executor,
             "xss_stored_01": self.xss_executor,
@@ -880,12 +945,21 @@ class CentralBrain:
             "auth_default_creds_01": self.auth_executor,
             "auth_credential_stuffing_01": self.auth_executor,
             "auth_password_policy_01": self.auth_executor,
+            "auth_mfa_bypass_01": self.auth_executor,
+            "auth_session_fixation_01": self.auth_executor,
             "authorization": self.authz_executor,
-            "authz_idor_01": self.authz_executor,
+            "authz_idor_01": self.idor_executor,
+            "authz_idor_02": self.idor_executor,
             "authz_priv_esc_01": self.authz_executor,
-            "authz_horizontal_01": self.authz_executor,
+            "authz_horizontal_01": self.idor_executor,
             "authz_forced_browsing_01": self.info_disc_executor,
+            "authz_mass_assignment_01": self.mass_assign_executor,
+            "authz_mass_assignment_02": self.mass_assign_executor,
+            "authz_mass_assignment_03": self.mass_assign_executor,
             "cors_misconfig_01": self.cors_executor,
+            "cors_misconfig_02": self.cors_executor,
+            "cors_misconfig_03": self.cors_executor,
+            "cors_wildcard_01": self.cors_executor,
             "info_disclosure_01": self.info_disc_executor,
             "graphql_introspection_01": self.graphql_executor,
             "graphql_mutation_01": self.graphql_executor,
@@ -893,8 +967,66 @@ class CentralBrain:
             "ws_hijack_01": self.ws_executor,
             "race_condition_01": self.bizlogic_executor,
             "workflow_bypass_01": self.bizlogic_executor,
+            "bizlogic_price_manipulation_01": self.bizlogic_executor,
+            "bizlogic_negative_quantity_01": self.bizlogic_executor,
+            "bizlogic_coupon_abuse_01": self.bizlogic_executor,
+            "bizlogic_free_item_01": self.bizlogic_executor,
             "path_traversal_01": self.pathtraversal_executor,
             "path_directory_01": self.pathtraversal_executor,
+            # JWT
+            "jwt_manipulation_01": self.jwt_executor,
+            "jwt_algo_confusion_01": self.jwt_executor,
+            "jwt_none_algo_01": self.jwt_executor,
+            "jwt_expiry_01": self.jwt_executor,
+            "jwt_jwk_injection_01": self.jwt_executor,
+            # NoSQL injection
+            "nosqli_basic_01": self.nosqli_executor,
+            "nosqli_logical_01": self.nosqli_executor,
+            "nosqli_regex_01": self.nosqli_executor,
+            "nosqli_js_01": self.nosqli_executor,
+            # File upload
+            "upload_type_01": self.fileupload_executor,
+            "upload_rce_01": self.fileupload_executor,
+            "upload_archive_01": self.fileupload_executor,
+            "upload_zip_slip_01": self.fileupload_executor,
+            "upload_mime_bypass_01": self.fileupload_executor,
+            "upload_filename_01": self.fileupload_executor,
+            "upload_svg_xss_01": self.fileupload_executor,
+            "upload_polyglot_01": self.fileupload_executor,
+            # Prototype pollution
+            "proto_pollution_01": self.protopollution_executor,
+            "proto_pollution_param_01": self.protopollution_executor,
+            "proto_pollution_merge_01": self.protopollution_executor,
+            # SSRF
+            "ssrf_basic_01": self.ssrf_executor,
+            "ssrf_cloud_01": self.ssrf_executor,
+            "ssrf_redirect_01": self.ssrf_executor,
+            "ssrf_protocol_01": self.ssrf_executor,
+            # XXE
+            "xxe_basic_01": self.xxe_executor,
+            "xxe_blind_01": self.xxe_executor,
+            "xxe_oob_01": self.xxe_executor,
+            # CSRF
+            "csrf_basic_01": self.csrf_executor,
+            "csrf_token_01": self.csrf_executor,
+            "csrf_method_01": self.csrf_executor,
+            "csrf_samesite_01": self.csrf_executor,
+            "csrf_referer_01": self.csrf_executor,
+            # SSTI
+            "ssti_basic_01": self.info_disc_executor,
+            "ssti_sandbox_01": self.info_disc_executor,
+            # Command injection
+            "cmdi_basic_01": self.info_disc_executor,
+            "cmdi_blind_01": self.info_disc_executor,
+            # Deserialization
+            "deser_java_01": self.info_disc_executor,
+            "deser_php_01": self.info_disc_executor,
+            # Open redirect
+            "redirect_basic_01": self.info_disc_executor,
+            "redirect_param_01": self.info_disc_executor,
+            # CRLF
+            "crlf_basic_01": self.info_disc_executor,
+            "crlf_header_01": self.info_disc_executor,
         }
         self._register_capabilities()
         self.tool_portfolio = ToolPortfolio()
@@ -930,7 +1062,56 @@ class CentralBrain:
         self.failure_classifier = FailureClassifier()
         self.recovery_policy = RecoveryPolicy()
 
-        logger.info("[CentralBrain] P0-P3 modules initialized and linked")
+        # ── P4-P8: Canonical Pipeline Modules ──
+        self.payload_catalog = build_default_payload_catalog()
+        self.hypothesis_engine_v2 = HypothesisEngineV2(self.test_catalog_v2)
+        self.identity_coverage = IdentityCoverageEngine()
+        self.feedback_loop = FeedbackLoopEngine()
+        self.target_health_manager = TargetHealthManager(target=target, max_concurrency=10)
+        self.parallel_executor = ParallelExecutor(
+            max_concurrency=5,
+            task_timeout=120.0,
+            health_manager=self.target_health_manager,
+        )
+        self.structured_learning = StructuredLearningEngine()
+        self.poc_gate = POCGate()
+        self.tool_argument_validator = ToolArgumentValidator(
+            tool_registry=self.tools,
+            scope_manager=self.scope_manager if hasattr(self, 'scope_manager') else None,
+        )
+        self.spa_detector = SPADetector()
+        from core.orchestration.decision_pipeline import GranularBudget
+        self.granular_budget = GranularBudget()
+
+        # ── Strix Pattern #1: Skill System ──
+        from core.skills import SkillLoader
+        self.skill_loader = SkillLoader()
+
+        # ── Strix Pattern #2: Coverage Tracker ──
+        from core.coverage.coverage_tracker import CoverageTracker
+        self.coverage_tracker = CoverageTracker(
+            output_dir=str(Path(getattr(self, 'output_dir', 'reports')))
+        )
+
+        # ── Strix Pattern #3: Error Classifier + Retry Executor ──
+        from core.error.error_classifier import ErrorClassifier, RetryExecutor
+        self.error_classifier = ErrorClassifier()
+        self.retry_executor = RetryExecutor(self.error_classifier)
+
+        # ── Strix Pattern #4: Confidence Scorer ──
+        from core.scoring.confidence_scorer import ConfidenceScorer
+        self.confidence_scorer = ConfidenceScorer()
+
+        self.canonical_reporter = CanonicalReporter(
+            attack_surface=getattr(self.ctx, 'attack_surface', None),
+            coverage_engine=self.coverage_engine if hasattr(self, 'coverage_engine') else None,
+            identity_coverage=self.identity_coverage,
+            learning_engine=self.structured_learning,
+            convergence_engine=self.convergence_engine_v2,
+            target_health=self.target_health_manager,
+        )
+
+        logger.info("[CentralBrain] P0-P8 modules initialized and linked")
 
         if resume_checkpoint:
             logger.info(f"Resuming from checkpoint: {resume_checkpoint}")
@@ -970,20 +1151,46 @@ class CentralBrain:
         ep_ids = [ep.get("endpoint_id", ep.get("url", "")) for ep in endpoints]
 
         applicable_pairs = []
+        not_discovered_pairs = []
+        identities = list(self.security_context_v2.identities.keys()) or ["default"]
+
+        # Phase 5/30: Use classify_all_tests for NOT_DISCOVERED distinction
+        discovered_features = {}
+        if hasattr(self.ctx, 'attack_surface') and self.ctx.attack_surface:
+            surface = self.ctx.attack_surface
+            discovered_features = {
+                "has_jwt": any("jwt" in str(t).lower() for t in getattr(surface, '_technologies', {}).values()),
+                "has_graphql": any("graphql" in str(ep).lower() for ep in getattr(surface, '_endpoints', {}).values()),
+                "has_websocket": any("ws" in str(ep).lower() for ep in getattr(surface, '_endpoints', {}).values()),
+                "has_login": any(kw in str(ep).lower() for ep in getattr(surface, '_endpoints', {}).values() for kw in ("login", "signin", "auth")),
+                "has_otp": any(kw in str(ep).lower() for ep in getattr(surface, '_endpoints', {}).values() for kw in ("otp", "mfa", "2fa")),
+            }
+
         for ep in endpoints:
-            tests = self.applicability_engine.get_applicable_tests(
-                ep,
-                identities=list(self.security_context_v2.identities.keys()) or ["default"],
+            classified = self.applicability_engine.classify_all_tests(
+                ep, identities=identities, discovered_features=discovered_features,
             )
-            for t in tests:
-                applicable_pairs.append((ep.get("endpoint_id", ep.get("url", "")), t.test_id))
+            ep_id = ep.get("endpoint_id", ep.get("url", ""))
+            for t in classified.get("applicable", []):
+                applicable_pairs.append((ep_id, t.test_id))
+            for t in classified.get("not_discovered", []):
+                not_discovered_pairs.append((ep_id, t.test_id))
 
         if not applicable_pairs:
             return
 
-        all_ep_ids = list({p[0] for p in applicable_pairs})
-        all_test_ids = list({p[1] for p in applicable_pairs})
+        # Include NOT_DISCOVERED test IDs in the matrix so they can be promoted later
+        nd_test_ids = {p[1] for p in not_discovered_pairs}
+        all_ep_ids = list({p[0] for p in applicable_pairs} | {p[0] for p in not_discovered_pairs})
+        all_test_ids = list({p[1] for p in applicable_pairs} | nd_test_ids)
         self.coverage_matrix = CoverageMatrix(all_ep_ids, all_test_ids)
+
+        # Mark NOT_DISCOVERED cells
+        from core.coverage.coverage_matrix import CoverageState
+        for ep_id, test_id in not_discovered_pairs:
+            if (ep_id, test_id) not in {(a, b) for a, b in applicable_pairs}:
+                self.coverage_matrix.update(ep_id, test_id, CoverageState.NOT_DISCOVERED)
+
         self.convergence_engine_v2 = ConvergenceEngineV2(self.coverage_matrix)
         self.pipeline_v2 = ExecutionPipelineV2(
             executor_registry=self.executor_registry,
@@ -992,7 +1199,8 @@ class CentralBrain:
             finding_store=self.finding_store_v2,
             evidence_validator=self.evidence_validator,
         )
-        logger.info(f"[CoverageMatrix] Built: {len(all_ep_ids)} endpoints × {len(all_test_ids)} tests = {len(applicable_pairs)} cells")
+        logger.info(f"[CoverageMatrix] Built: {len(all_ep_ids)} endpoints × {len(all_test_ids)} tests "
+                    f"= {len(applicable_pairs)} applicable + {len(not_discovered_pairs)} not_discovered")
 
     def _feed_endpoints_to_v2(self):
         """Sync discovered endpoints from ctx/attack_surface into the v2 inventory."""
@@ -1317,6 +1525,7 @@ class CentralBrain:
                     f"Pending Tasks: {pending_count} | "
                     f"Failure Streak: {self.phase_state.consecutive_failures}"
                 )
+                self._write_progress({"phase": self.current_phase.value, "status": "running"})
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -1432,6 +1641,22 @@ class CentralBrain:
             detail=f"Agents: {len(self.ctx.agents_spawned)}, Vulns: {len(self.ctx.vulnerabilities)}, "
                    f"Exploits: {len(self.ctx.exploit_results)}",
             duration_s=duration)
+
+        # Ingest confirmed findings into RAG knowledge base for future scans
+        if not stopped and self.ctx.vulnerabilities:
+            try:
+                from core.rag.pipeline import get_rag
+                rag = get_rag()
+                if rag:
+                    import asyncio
+                    confirmed = [v for v in self.ctx.vulnerabilities
+                                 if v.get("status") in ("CONFIRMED", "EXPLOITED")]
+                    if confirmed:
+                        count = await rag.ingest_scan_findings(confirmed, target=self.ctx.target)
+                        logger.info(f"[RAG] Ingested {count} confirmed findings into knowledge base")
+            except Exception as e:
+                logger.debug(f"[RAG] Finding ingestion skipped: {e}")
+
         return {"stopped": stopped, "phase": self.current_phase.value if self.current_phase else None}
 
     async def run_phase(self, phase: str):
@@ -1586,6 +1811,59 @@ class CentralBrain:
             except Exception as e:
                 logger.warning(f"[V2Sync] Endpoint/coverage sync failed (non-fatal): {e}")
 
+            # ── V2 Hook: SPA detection baseline ──
+            try:
+                if hasattr(self.ctx, 'target') and self.ctx.target:
+                    from urllib.parse import urlparse
+                    parsed = urlparse(self.ctx.target if self.ctx.target.startswith("http") else f"https://{self.ctx.target}")
+                    host = parsed.netloc or parsed.path
+                    baseline_path = self.spa_detector.create_baseline_path()
+                    # Actually request the baseline path and record the response
+                    import httpx
+                    base_url = f"{parsed.scheme or 'https'}://{host}{baseline_path}"
+                    try:
+                        async with httpx.AsyncClient(timeout=10, verify=False, follow_redirects=True) as client:
+                            resp = await client.get(base_url)
+                            self.spa_detector.record_baseline(
+                                host=host,
+                                status=resp.status_code,
+                                content_length=len(resp.content),
+                                body=resp.text[:50000],
+                                title="",
+                            )
+                            logger.info(f"[SPADetector] Baseline recorded for {host}: "
+                                        f"status={resp.status_code} len={len(resp.content)}")
+                            if hasattr(self.ctx, 'attack_surface') and self.ctx.attack_surface:
+                                self.ctx.attack_surface.set_spa_baseline(host, {
+                                    "status": resp.status_code,
+                                    "content_length": len(resp.content),
+                                    "path": baseline_path,
+                                })
+                    except Exception as req_err:
+                        logger.debug(f"[SPADetector] Baseline request failed: {req_err}")
+            except Exception as e:
+                logger.debug(f"[SPADetector] Baseline setup skipped: {e}")
+
+            # ── V2 Hook: Generate hypotheses from attack surface ──
+            try:
+                if hasattr(self.ctx, 'attack_surface') and self.ctx.attack_surface:
+                    hypotheses = self.hypothesis_engine_v2.generate_from_surface(self.ctx.attack_surface)
+                    logger.info(f"[HypothesisEngineV2] Generated {len(hypotheses)} hypotheses from attack surface")
+                    self.ctx.update('hypotheses_v2', hypotheses[:50])
+            except Exception as e:
+                logger.warning(f"[HypothesisEngineV2] Generation failed (non-fatal): {e}")
+
+            # ── V2 Hook: Initialize identity-aware coverage ──
+            try:
+                identities = list(getattr(self.identity_manager, '_identities', {}).keys()) if hasattr(self, 'identity_manager') else []
+                if identities:
+                    ep_ids = [ep.get("endpoint_id", str(i)) for i, ep in enumerate(self.endpoint_inventory_v2.list_endpoints())]
+                    test_ids = [t.test_id for t in self.test_catalog_v2.list_all()]
+                    cells = self.identity_coverage.initialize_matrix(test_ids, ep_ids, identities)
+                    logger.info(f"[IdentityCoverage] Initialized {cells} coverage cells for {len(identities)} identities")
+            except Exception as e:
+                logger.debug(f"[IdentityCoverage] Init skipped: {e}")
+
         elif phase == ExecutionPhase.ACTIVE_SCANNING.value:
             from core.tools.nuclei_runner import NucleiRunner
             nuclei_runner = NucleiRunner()
@@ -1634,6 +1912,39 @@ class CentralBrain:
                 self._sync_v1_findings_to_coverage_matrix()
             except Exception as e:
                 logger.warning(f"[V1→V2Bridge] Post-scan sync failed (non-fatal): {e}")
+
+            # ── V2 Hook: Record scan responses in feedback loop + structured learning ──
+            try:
+                scan_findings = getattr(self.ctx, 'findings', [])
+                if isinstance(scan_findings, dict):
+                    scan_findings = list(scan_findings.values())
+                for finding in scan_findings[-20:]:
+                    attack_type = finding.get("attack_type", finding.get("category", ""))
+                    test_id = finding.get("test_id", "")
+                    if attack_type and test_id:
+                        self.structured_learning.record_experiment_outcome(
+                            test_id=test_id,
+                            attack_type=attack_type,
+                            technology=finding.get("technology", ""),
+                            payload=finding.get("payload", ""),
+                            success=finding.get("state") in ("CONFIRMED", "REPORTABLE"),
+                            details=finding.get("title", ""),
+                        )
+                logger.info(f"[StructuredLearning] Recorded {min(len(scan_findings), 20)} scan outcomes")
+            except Exception as e:
+                logger.debug(f"[StructuredLearning] Scan recording skipped: {e}")
+
+            # ── V2 Hook: Record target health from scan phase ──
+            try:
+                if hasattr(self.target_health_manager, 'record_response'):
+                    self.target_health_manager.record_response(
+                        status_code=200,
+                        response_time_ms=0,
+                        error=False,
+                    )
+                    logger.debug("[TargetHealth] Post-scan health check recorded")
+            except Exception as e:
+                logger.debug(f"[TargetHealth] Health recording skipped: {e}")
 
         elif phase == ExecutionPhase.EXPLOITATION.value:
             # Compliance Gate check
@@ -1805,6 +2116,61 @@ class CentralBrain:
             except Exception as e:
                 logger.warning(f"[CredSpray] Credential spray failed (non-fatal): {e}")
 
+            # Credential chaining: auto-run IDOR/JWT/authz/mass-assignment tests
+            # with harvested credentials against all discovered endpoints
+            if self.ctx.harvested_creds:
+                try:
+                    logger.info(f"[CredChain] {len(self.ctx.harvested_creds)} creds found — running authenticated sweep")
+                    base_url = self.ctx.target.rstrip("/")
+                    if not base_url.startswith(("http://", "https://")):
+                        base_url = f"https://{base_url}"
+
+                    ep_list = []
+                    for raw_ep in (getattr(self.ctx, "endpoints", []) or [])[:50]:
+                        ep = raw_ep if isinstance(raw_ep, str) else raw_ep.get("url", raw_ep.get("path", ""))
+                        if ep:
+                            ep_list.append(ep)
+
+                    auth_token = None
+                    for cred in self.ctx.harvested_creds:
+                        if cred.get('token'):
+                            auth_token = cred['token']
+                            break
+
+                    auth_test_ids = [
+                        "authz_idor_01", "authz_idor_02", "authz_horizontal_01",
+                        "jwt_manipulation_01", "jwt_none_algo_01", "jwt_algo_confusion_01",
+                        "authz_mass_assignment_01", "csrf_basic_01",
+                        "bizlogic_price_manipulation_01", "bizlogic_negative_quantity_01",
+                    ]
+                    from core.domain.experiment_v2 import SecurityExperiment
+                    cred_chain_ran = 0
+                    for tid in auth_test_ids:
+                        executor = self.executor_registry.get(tid)
+                        if not executor:
+                            continue
+                        try:
+                            exp = SecurityExperiment(
+                                hypothesis_id=f"credchain_{tid}",
+                                endpoint_id=base_url,
+                                capability=tid.split("_")[0],
+                                test_id=tid,
+                                input_parameters={
+                                    "url": base_url,
+                                    "endpoints": ep_list,
+                                    "auth_token": auth_token,
+                                },
+                            )
+                            result = executor.execute(exp)
+                            cred_chain_ran += 1
+                            if result.evidence:
+                                self._ingest_executor_findings(tid, base_url, result.evidence)
+                        except Exception as ex:
+                            logger.debug(f"[CredChain] Test {tid} failed: {ex}")
+                    logger.info(f"[CredChain] Executed {cred_chain_ran} authenticated tests")
+                except Exception as e:
+                    logger.warning(f"[CredChain] Authenticated sweep failed (non-fatal): {e}")
+
             # Web-level privilege escalation: forced browsing to admin paths + role
             # escalation with any harvested credentials.
             try:
@@ -1873,6 +2239,87 @@ class CentralBrain:
                             f"blocked={len(self.coverage_matrix.get_blocked())}")
             except Exception as e:
                 logger.warning(f"[V2ExploitCycle] Failed (non-fatal): {e}")
+
+            # ── V2 Hook: Exploit chain prerequisite checks ──
+            try:
+                from core.exploitation.exploit_chain import create_cors_credential_chain, create_sqli_to_rce_chain, create_idor_to_data_chain
+                chain_context = {
+                    "endpoints": getattr(self.ctx, 'attack_surface', {}).endpoints if hasattr(getattr(self.ctx, 'attack_surface', None), 'endpoints') else {},
+                    "findings": {f.get("finding_id", str(i)): f for i, f in enumerate(self.ctx.vulnerabilities)} if hasattr(self.ctx, 'vulnerabilities') else {},
+                    "identities": getattr(getattr(self.ctx, 'attack_surface', None), 'identities', {}) if hasattr(self.ctx, 'attack_surface') else {},
+                    "technologies": getattr(getattr(self.ctx, 'attack_surface', None), 'technologies', {}) if hasattr(self.ctx, 'attack_surface') else {},
+                    "cors_findings": [f for f in self.ctx.vulnerabilities if f.get("attack_type") == "cors"] if hasattr(self.ctx, 'vulnerabilities') else [],
+                }
+                chains_ready = 0
+                for finding in self.ctx.vulnerabilities[:20]:
+                    ep = finding.get("endpoint", finding.get("url", ""))
+                    attack_type = finding.get("attack_type", "")
+                    if attack_type == "cors":
+                        chain = create_cors_credential_chain(ep)
+                    elif attack_type == "sqli":
+                        chain = create_sqli_to_rce_chain(ep)
+                    elif attack_type in ("idor", "authorization"):
+                        chain = create_idor_to_data_chain(ep)
+                    else:
+                        continue
+                    missing = chain.check_prerequisites(chain_context)
+                    if chain.is_ready:
+                        chains_ready += 1
+                logger.info(f"[ExploitChain] {chains_ready} chains ready from {len(self.ctx.vulnerabilities)} findings")
+            except Exception as e:
+                logger.debug(f"[ExploitChain] Chain check skipped: {e}")
+
+            # ── V2 Hook: POC gating on confirmed findings ──
+            try:
+                all_findings = self.ctx.vulnerabilities if hasattr(self.ctx, 'vulnerabilities') else []
+                finding_dicts = [f if isinstance(f, dict) else getattr(f, '__dict__', {}) for f in all_findings]
+                reportable = self.poc_gate.filter_reportable(finding_dicts)
+                logger.info(f"[POCGate] {len(reportable)}/{len(finding_dicts)} findings pass POC gate")
+            except Exception as e:
+                logger.debug(f"[POCGate] Gating skipped: {e}")
+
+            # ── V2 Hook: Structured learning from exploitation outcomes ──
+            try:
+                exploit_results = self.ctx.exploit_results if hasattr(self.ctx, 'exploit_results') else []
+                for result in exploit_results[-20:]:
+                    if isinstance(result, dict):
+                        self.structured_learning.record_experiment_outcome(
+                            test_id=result.get("test_id", result.get("exploit_type", "")),
+                            attack_type=result.get("attack_type", result.get("exploit_type", "")),
+                            technology=result.get("technology", ""),
+                            payload=result.get("payload", ""),
+                            success=result.get("success", False),
+                            details=result.get("title", result.get("description", "")),
+                        )
+                logger.info(f"[StructuredLearning] Recorded {min(len(exploit_results), 20)} exploit outcomes")
+            except Exception as e:
+                logger.debug(f"[StructuredLearning] Exploit recording skipped: {e}")
+
+            # ── V2 Hook: Feed hypothesis results back ──
+            try:
+                hypotheses_v2 = self.ctx.get('hypotheses_v2', []) if hasattr(self.ctx, 'get') else getattr(self.ctx, 'hypotheses_v2', [])
+                if hypotheses_v2:
+                    confirmed_types = {f.get("attack_type") for f in self.ctx.vulnerabilities if f.get("state") in ("CONFIRMED", "REPORTABLE")}
+                    for h in hypotheses_v2:
+                        if hasattr(h, 'attack_type') and h.attack_type in confirmed_types:
+                            self.hypothesis_engine_v2.record_feedback(h, "CONFIRMED")
+                        elif hasattr(h, 'state') and h.state == "TESTING":
+                            self.hypothesis_engine_v2.record_feedback(h, "REJECTED")
+                    logger.info(f"[HypothesisEngineV2] Fed back results for {len(hypotheses_v2)} hypotheses")
+            except Exception as e:
+                logger.debug(f"[HypothesisEngineV2] Feedback skipped: {e}")
+
+            # ── V2 Hook: Update identity coverage from exploitation ──
+            try:
+                for finding in self.ctx.vulnerabilities[-20:]:
+                    if isinstance(finding, dict):
+                        ep_id = finding.get("endpoint_id", finding.get("endpoint", ""))
+                        identity_id = finding.get("identity_id", finding.get("identity", ""))
+                        test_id = finding.get("test_id", "")
+                        if ep_id and test_id:
+                            self.identity_coverage.mark_tested(test_id, ep_id, identity_id or "anonymous", finding.get("state", "TESTED"))
+            except Exception as e:
+                logger.debug(f"[IdentityCoverage] Update skipped: {e}")
 
         elif phase == ExecutionPhase.REPORTING.value:
             # Convergence validation before reporting
@@ -1982,6 +2429,58 @@ class CentralBrain:
                     ]
                 except Exception as e:
                     logger.warning(f"[LLMValidator] Validation failed (non-fatal): {e}")
+
+            # Strix Pattern #4: Auto-calculate confidence scores
+            if self.ctx.vulnerabilities:
+                try:
+                    from core.scoring.confidence_scorer import ResponseSample, EvidenceType
+                    for v in self.ctx.vulnerabilities:
+                        proof = str(v.get("proof", "") or v.get("evidence", "") or "")
+                        payload = str(v.get("payload", "") or "")
+                        severity = str(v.get("severity", "medium")).lower()
+
+                        ev_type = self.confidence_scorer.classify_evidence_type(proof, payload)
+                        samples = [ResponseSample(
+                            status_code=v.get("status_code", 200),
+                            response_length=len(proof),
+                            response_time_ms=v.get("response_time_ms", 0) or 0,
+                            contains_error="error" in proof.lower() or "syntax" in proof.lower(),
+                            payload_used=payload,
+                        )]
+                        conf_result = self.confidence_scorer.score(
+                            samples=samples,
+                            evidence_type=ev_type,
+                            severity=severity,
+                            payload=payload,
+                            counterevidence=str(v.get("counterevidence", "") or ""),
+                        )
+                        v["confidence_score"] = conf_result.score_pct
+                        v["confidence_level"] = conf_result.level.value
+                        v["confidence_rationale"] = conf_result.rationale
+                        v["auto_reportable"] = conf_result.is_reportable
+                        v["needs_review"] = conf_result.needs_review
+
+                    reportable, needs_review, rejected = self.confidence_scorer.gate_findings(
+                        self.ctx.vulnerabilities
+                    )
+                    logger.info(
+                        f"[ConfidenceScorer] reportable={len(reportable)} "
+                        f"needs_review={len(needs_review)} rejected={len(rejected)}"
+                    )
+                    self._log_activity("confidence_scoring",
+                        f"Auto-scored {len(self.ctx.vulnerabilities)} findings: "
+                        f"{len(reportable)} reportable, {len(needs_review)} review, {len(rejected)} rejected",
+                        tool="confidence_scorer")
+
+                    # Enforce confidence gate: keep only reportable + needs_review
+                    if rejected:
+                        logger.info(f"[ConfidenceGate] Removing {len(rejected)} rejected findings from vulnerabilities")
+                        rejected_ids = {id(r) for r in rejected}
+                        self.ctx.vulnerabilities = [
+                            v for v in self.ctx.vulnerabilities if id(v) not in rejected_ids
+                        ]
+                except Exception as cs_err:
+                    logger.warning(f"[ConfidenceScorer] Scoring failed (non-fatal): {cs_err}")
 
             # Persist final validated vulnerabilities back to DB so the stored data
             # reflects post-retest/critic/validator filtering (not stale pre-validation state).
@@ -2165,6 +2664,77 @@ class CentralBrain:
             except Exception as e:
                 logger.warning(f"[V2CoverageReport] Failed (non-fatal): {e}")
 
+            # ── V2 Hook: Canonical reporter output ──
+            try:
+                self.canonical_reporter._surface = getattr(self.ctx, 'attack_surface', None)
+                all_findings = self.ctx.vulnerabilities if hasattr(self.ctx, 'vulnerabilities') else []
+                self.canonical_reporter._findings = [
+                    f if isinstance(f, dict) else getattr(f, '__dict__', {})
+                    for f in all_findings
+                ]
+                canonical_path = self.canonical_reporter.save_json("reports/canonical_summary.json")
+                canonical_md = self.canonical_reporter.generate_markdown()
+                self.ctx.update('canonical_report_md', canonical_md)
+                logger.info(f"[CanonicalReporter] Saved to {canonical_path}")
+
+                # Strix Pattern #2: Persist coverage tracker report
+                try:
+                    self.coverage_tracker.persist("reports/coverage_tracker.json")
+                    ct_report = self.coverage_tracker.generate_report()
+                    self.ctx.update('coverage_tracker_report', ct_report)
+                    logger.info(f"[CoverageTracker] {ct_report.get('coverage', {}).get('honest_summary', '')}")
+                except Exception as ct_e:
+                    logger.debug(f"[CoverageTracker] Persist failed: {ct_e}")
+
+                # Strix Pattern #3: Log and persist retry stats
+                try:
+                    retry_stats = self.retry_executor.stats
+                    logger.info(f"[RetryExecutor] Stats: {retry_stats}")
+                    self.ctx.update('retry_stats', retry_stats)
+                    import json as _json
+                    retry_path = Path("reports/retry_stats.json")
+                    retry_path.parent.mkdir(parents=True, exist_ok=True)
+                    retry_path.write_text(_json.dumps(retry_stats, default=str), encoding="utf-8")
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.warning(f"[CanonicalReporter] Report generation failed (non-fatal): {e}")
+
+            # ── V2 Hook: Identity coverage summary ──
+            try:
+                if hasattr(self.identity_coverage, 'summary'):
+                    ic_summary = self.identity_coverage.summary()
+                    self.ctx.update('identity_coverage_summary', ic_summary)
+                    logger.info(f"[IdentityCoverage] Summary: {ic_summary}")
+            except Exception as e:
+                logger.debug(f"[IdentityCoverage] Summary skipped: {e}")
+
+            # ── V2 Hook: Structured learning summary ──
+            try:
+                if hasattr(self.structured_learning, 'summary'):
+                    learn_summary = self.structured_learning.summary()
+                    self.ctx.update('learning_summary', learn_summary)
+                    logger.info(f"[StructuredLearning] Summary: {learn_summary}")
+            except Exception as e:
+                logger.debug(f"[StructuredLearning] Summary skipped: {e}")
+
+            # ── V2 Hook: Convergence final evaluation ──
+            try:
+                conv_status = self.convergence_engine_v2.evaluate(
+                    remaining_tests=len(self.coverage_matrix.get_gaps()) if hasattr(self, 'coverage_matrix') and self.coverage_matrix else 0,
+                    blocked_tests=len(self.coverage_matrix.get_blocked()) if hasattr(self, 'coverage_matrix') and self.coverage_matrix else 0,
+                    budget_exhausted=getattr(self.budget_governor, 'is_exhausted', lambda: False)() if hasattr(self, 'budget_governor') else False,
+                    target_paused=getattr(self.target_health_manager, 'state', '') == 'PAUSED',
+                )
+                self.ctx.update('convergence_status', {
+                    'is_converged': conv_status.is_converged,
+                    'reason': conv_status.reason,
+                    'coverage_pct': conv_status.coverage_pct,
+                })
+                logger.info(f"[Convergence] Final: converged={conv_status.is_converged} reason={conv_status.reason}")
+            except Exception as e:
+                logger.debug(f"[Convergence] Final evaluation skipped: {e}")
+
             # Save secure checkpoint after reporting
             try:
                 v2_conv = 0.0
@@ -2259,7 +2829,7 @@ class CentralBrain:
                 rec = pv.get("recommended")
                 if rec:
                     logger.info(f"Recommended escalation: {rec.get('technique')} — "
-                                f"{rec.get('path','')[:80]}")
+                                f"{rec.get('path','')}")
         except Exception as e:      # noqa: BLE001
             logger.error(f"Post-exploitation phase failed: {e}")
 
@@ -2387,7 +2957,17 @@ class CentralBrain:
         if self.ctx.subdomains:
             context_hint += f"Known subdomains: {', '.join(self.ctx.subdomains[:20])}\n\n"
 
-        max_rounds = 20 if phase in ("exploit", "EXPLOITATION", "analyze", "ACTIVE_SCANNING") else 15
+        if phase in ("exploit", "EXPLOITATION"):
+            failed_exploits = sum(1 for e in self.ctx.exploit_results if not e.get("success"))
+            total_exploits = len(self.ctx.exploit_results)
+            if total_exploits >= 5 and failed_exploits == total_exploits:
+                logger.info(f"[AgenticPhase] Skipping {phase}: {failed_exploits}/{total_exploits} exploits failed, 0% success")
+                return
+            max_rounds = 12
+        elif phase in ("analyze", "ACTIVE_SCANNING"):
+            max_rounds = 15
+        else:
+            max_rounds = 12
 
         from agents.llm_harness_adapter import get_llm, initialize_llm
         llm_harness = get_llm()
@@ -2400,6 +2980,34 @@ class CentralBrain:
             llm_harness = get_llm()
             if llm_harness is None:
                 raise RuntimeError("LLM harness is None after initialization")
+
+        # Strix Pattern #1: Inject skills into agentic executor context
+        try:
+            phase_at_map = {
+                "exploit": ["sql_injection", "xss_reflected", "idor", "authentication", "authorization"],
+                "EXPLOITATION": ["sql_injection", "xss_reflected", "idor", "authentication"],
+                "analyze": ["sql_injection", "xss_reflected"],
+                "ACTIVE_SCANNING": ["sql_injection", "xss_reflected"],
+            }
+            skill_types = phase_at_map.get(phase, [])
+            loaded = []
+            seen_names = set()
+            for at in skill_types:
+                for s in self.skill_loader.load_for_attack_type(at):
+                    if s.name not in seen_names:
+                        seen_names.add(s.name)
+                        loaded.append(s)
+            if loaded:
+                context_hint += "\n" + self.skill_loader.format_for_prompt(loaded[:2], max_chars=1500)
+        except Exception as skill_err:
+            logger.debug(f"[SkillLoader] Agentic skill injection failed: {skill_err}")
+
+        # Strix Pattern #2: Coverage context for agentic path
+        try:
+            cr = self.coverage_tracker.real_coverage(max_rounds)
+            context_hint += f"\nCoverage: {cr.get('honest_summary', '')}\n"
+        except Exception:
+            pass
 
         executor = AgenticExecutor(
             llm_harness=llm_harness,
@@ -2415,11 +3023,38 @@ class CentralBrain:
             context_hint=context_hint,
         )
 
+        # Strix Pattern #2: Record agentic findings in coverage tracker
+        try:
+            from core.coverage.coverage_tracker import TestAttempt, TestOutcome, FailureReason
+            for finding in result.findings:
+                self.coverage_tracker.record(TestAttempt(
+                    test_id=finding.get("id", ""),
+                    category=finding.get("type", phase),
+                    endpoint=finding.get("target", self.ctx.target),
+                    parameter="",
+                    payload=finding.get("payload", "")[:200],
+                    outcome=TestOutcome.CONFIRMED,
+                    failure_reason=FailureReason.NONE,
+                    tool_name="agentic_executor",
+                ))
+        except Exception:
+            pass
+
         logger.info(
             f"[AgenticPhase] {phase} complete: "
             f"{len(result.findings)} findings, {result.steps_taken} steps, "
             f"${result.total_cost:.4f} cost"
         )
+
+        try:
+            self._write_live_results()
+        except Exception:
+            pass
+
+        # If agentic execution produced nothing useful (LLM down, connection errors),
+        # raise to trigger approach A fallback with deterministic tasks
+        if result.steps_taken == 0 and len(result.findings) == 0:
+            raise RuntimeError(f"Agentic executor produced no results for {phase} (LLM likely unreachable)")
 
     def _deterministic_fallback(self, phase: str, executed_caps: set = None):
         """Return a BrainDecision with default tasks when the LLM planner fails.
@@ -2568,11 +3203,62 @@ class CentralBrain:
                 for h in task_history[-5:]
             ]) if task_history else "None yet"
 
+            # Phase 33: Build structured state bundle for LLM decision-making
+            from core.orchestration.decision_pipeline import StructuredStateBuilder, DecisionValidator as V2DecisionValidator
+            v2_state = StructuredStateBuilder.build(
+                attack_surface=getattr(self.ctx, 'attack_surface', None),
+                target_health=getattr(self, 'target_health_manager', None),
+                findings=getattr(self.ctx, 'findings', []),
+                coverage_summary=self.coverage_matrix.get_coverage() if hasattr(self, 'coverage_matrix') and self.coverage_matrix else {},
+                identities=list(self.security_context_v2.identities.keys()) if hasattr(self, 'security_context_v2') else [],
+                learning_summary=self.structured_learning.get_summary() if hasattr(self, 'structured_learning') and hasattr(self.structured_learning, 'get_summary') else {},
+                convergence_status=self.convergence_engine_v2.check() if hasattr(self, 'convergence_engine_v2') and hasattr(self.convergence_engine_v2, 'check') else None,
+                budget_status=self.granular_budget.remaining_summary() if hasattr(self, 'granular_budget') else {},
+            )
+            v2_state_str = json.dumps(v2_state, default=str)[:3000]
+
+            # Strix Pattern #1: Load relevant skills for this phase
+            skill_text = ""
+            try:
+                phase_attack_types = {
+                    "exploit": ["sql_injection", "xss_reflected", "authentication", "idor", "authorization"],
+                    "EXPLOITATION": ["sql_injection", "xss_reflected", "authentication", "idor", "authorization"],
+                    "analyze": ["sql_injection", "xss_reflected", "authentication"],
+                    "ACTIVE_SCANNING": ["sql_injection", "xss_reflected", "authentication"],
+                }
+                attack_types = phase_attack_types.get(phase, [])
+                loaded_skills = []
+                for at in attack_types:
+                    loaded_skills.extend(self.skill_loader.load_for_attack_type(at))
+                seen = set()
+                unique_skills = []
+                for s in loaded_skills:
+                    if s.name not in seen:
+                        seen.add(s.name)
+                        unique_skills.append(s)
+                if unique_skills:
+                    skill_text = self.skill_loader.format_for_prompt(unique_skills[:2], max_chars=1500)
+            except Exception as skill_err:
+                logger.debug(f"[SkillLoader] Failed to load skills for phase: {skill_err}")
+
+            # Strix Pattern #2: Include honest coverage in prompt
+            coverage_honest = ""
+            try:
+                tracker_report = self.coverage_tracker.real_coverage(
+                    total_planned=len(task_history) + 10
+                )
+                coverage_honest = f"\nCoverage Status: {tracker_report.get('honest_summary', '')}\n"
+            except Exception:
+                pass
+
             prompt = (
                 f"Identify capability requests for phase {phase}.\n"
                 f"Target: {self.ctx.target}\n"
                 f"Current Context Summary:\n{compressed_summary}\n\n"
+                f"Structured State:\n{v2_state_str}\n\n"
+                f"{coverage_honest}"
                 f"Already Executed Tasks in this phase:\n{history_text}\n\n"
+                f"{skill_text}\n"
                 f"{hex_suggestions}\n"
                 f"Evaluate the HexStrike suggestions against the current context. If they have already been run or are unnecessary, do not use them. Otherwise, prioritize them.\n"
                 f"If the phase is complete or no more tasks are needed, output: {{\"action\": \"phase_complete\"}}\n"
@@ -2638,21 +3324,87 @@ class CentralBrain:
                 except Exception as e:
                     logger.debug(f"Task {actual_task_id} couldn't be started: {e}")
 
-                if capability in self.tool_invocation_engine.MULTI_TOOL_CAPABILITIES:
-                    result = await self.tool_invocation_engine.invoke_all_for_capability(
-                        capability, target, params, session_id, auth_context
+                # Phase 44: Validate tool arguments before execution
+                try:
+                    self.tool_argument_validator.validate(
+                        tool_name=params.get('preferred_tool', capability),
+                        target=target,
+                        args=params,
+                        capability=capability,
                     )
-                else:
-                    result = await self.tool_invocation_engine.invoke_from_capability(
-                        capability, target, params, session_id, auth_context
-                    )
-                
+                except Exception as val_err:
+                    logger.warning(f"TOOL_VALIDATION_REJECTED cap={capability} target={target}: {val_err}")
+                    self.task_manager.fail_task(actual_task_id, f"Validation rejected: {val_err}")
+                    continue
+
+                # Strix Pattern #3: Wrap tool execution with error-classified retry
+                async def _invoke_tool():
+                    if capability in self.tool_invocation_engine.MULTI_TOOL_CAPABILITIES:
+                        return await self.tool_invocation_engine.invoke_all_for_capability(
+                            capability, target, params, session_id, auth_context
+                        )
+                    else:
+                        return await self.tool_invocation_engine.invoke_from_capability(
+                            capability, target, params, session_id, auth_context
+                        )
+
+                result = await self.retry_executor.execute_with_retry(_invoke_tool)
+
                 tool_name = result.tool if hasattr(result, 'tool') else 'unknown'
-                
+
+                # Phase 36: Record request in granular budget
+                if hasattr(self, 'granular_budget'):
+                    risk_cost = 3 if 'exploit' in capability.lower() else 1
+                    self.granular_budget.record_request(tool=tool_name, target=target, risk_cost=risk_cost)
+
+                # Strix Pattern #3: Classify error if failed
+                failure_reason_str = "none"
+                if not result.success:
+                    classified = self.error_classifier.classify(
+                        status_code=getattr(result, 'status_code', 0) or 0,
+                        stderr=str(getattr(result, 'stderr', '') or ''),
+                        stdout=str(getattr(result, 'stdout', '') or ''),
+                        return_code=getattr(result, 'return_code', 0) or 0,
+                        response_body=str(getattr(result, 'data', '') or '')[:2000],
+                    )
+                    failure_reason_str = classified.category.value
+                    logger.info(f"ERROR_CLASSIFIED tool={tool_name} category={classified.category.value} "
+                                f"recovery={classified.recovery.value} msg={classified.message}")
+
+                # Strix Pattern #2: Record test attempt in coverage tracker
+                try:
+                    from core.coverage.coverage_tracker import TestAttempt, TestOutcome, FailureReason
+                    _fr_map = {
+                        "rate_limited": FailureReason.RATE_LIMITED,
+                        "waf_blocked": FailureReason.WAF_BLOCKED,
+                        "auth_failed": FailureReason.AUTH_FAILED,
+                        "not_found": FailureReason.ENDPOINT_NOT_FOUND,
+                        "timeout": FailureReason.TIMEOUT,
+                        "invalid_input": FailureReason.INVALID_INPUT,
+                        "transient": FailureReason.TRANSIENT_ERROR,
+                        "unknown": FailureReason.UNKNOWN,
+                    }
+                    attempt = TestAttempt(
+                        test_id=actual_task_id,
+                        category=capability,
+                        endpoint=target,
+                        parameter=params.get('preferred_tool', ''),
+                        payload=str(params.get('objective', ''))[:200],
+                        http_status=getattr(result, 'status_code', 0) or 0,
+                        response_length=len(str(getattr(result, 'data', '') or '')),
+                        response_time_ms=getattr(result, 'duration', 0) * 1000 if getattr(result, 'duration', 0) else 0,
+                        outcome=TestOutcome.CONFIRMED if result.success else TestOutcome.NO_ISSUE_FOUND,
+                        failure_reason=_fr_map.get(failure_reason_str, FailureReason.NONE) if not result.success else FailureReason.NONE,
+                        tool_name=tool_name,
+                    )
+                    self.coverage_tracker.record(attempt)
+                except Exception as ct_err:
+                    logger.debug(f"[CoverageTracker] Record failed: {ct_err}")
+
                 if result.success:
                     self.task_manager.complete_task(actual_task_id, {"status": "success", "result": result.data or result.stdout[:200]})
                 else:
-                    self.task_manager.fail_task(actual_task_id, f"Tool invocation failed for capability {capability}")
+                    self.task_manager.fail_task(actual_task_id, f"Tool failed ({failure_reason_str}): {capability}")
                     
                 self._log_activity("tool_run",
                     f"{tool_name}: {capability} on {target}",
@@ -2705,6 +3457,53 @@ class CentralBrain:
             if self._evaluate_phase_gate(phase, db_context):
                 logger.info(f"Phase gate satisfied for phase {phase}. Advancing to next phase.")
                 break
+
+    def _ingest_executor_findings(self, test_id: str, target: str, evidence: dict) -> None:
+        """Convert V2 executor evidence into SharedContext vulnerability records."""
+        SEVERITY_MAP = {
+            "jwt": "HIGH", "nosqli": "CRITICAL", "upload": "HIGH",
+            "proto_pollution": "MEDIUM", "ssrf": "HIGH", "xxe": "HIGH",
+            "csrf": "MEDIUM", "idor": "HIGH", "mass_assignment": "HIGH",
+            "bizlogic": "MEDIUM", "race_condition": "MEDIUM",
+        }
+        test_prefix = test_id.split("_")[0] if "_" in test_id else test_id
+        default_sev = SEVERITY_MAP.get(test_prefix, "MEDIUM")
+
+        findings_keys = [k for k in evidence if k.endswith("_findings") or k == "logic_findings"]
+        for fk in findings_keys:
+            items = evidence.get(fk, [])
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                test_name = item.get("test", test_id)
+                vuln = {
+                    "type": test_id.upper(),
+                    "title": f"Deterministic test: {test_name} on {item.get('path', item.get('endpoint', target))}",
+                    "severity": default_sev,
+                    "status": "CONFIRMED" if item.get("status") in (200, 201) else "UNCONFIRMED",
+                    "target": target,
+                    "location": item.get("path", item.get("endpoint", "")),
+                    "evidence": item.get("body_snippet", ""),
+                    "source": "deterministic_executor",
+                    "test_id": test_id,
+                }
+                self.ctx.add_vulnerability(vuln)
+
+        # Also check for direct boolean indicators
+        for bool_key in ["vulnerable", "introspection_enabled", "directory_listing", "traversal_detected"]:
+            if evidence.get(bool_key):
+                vuln = {
+                    "type": test_id.upper(),
+                    "title": f"Deterministic test: {bool_key} detected ({test_id})",
+                    "severity": default_sev,
+                    "status": "CONFIRMED",
+                    "target": target,
+                    "source": "deterministic_executor",
+                    "test_id": test_id,
+                }
+                self.ctx.add_vulnerability(vuln)
 
     def _ingest_approach_a_result(self, capability: str, target: str, result: Any) -> None:
         """Parse and ingest tool results into SharedContext and knowledge stores."""
@@ -3042,38 +3841,93 @@ class CentralBrain:
                     })
                     self.ctx.update("leaked_credentials", existing_creds)
 
-        # 11. Record tool invocation as captured request for audit trail
+        # 11. Record tool invocation in tool_executions (not captured_requests)
         tool_name = getattr(result, "tool", capability)
         command = getattr(result, "command", "") or ""
         if command:
-            self.ctx.add_captured_request({
+            exec_record = {
                 "tool": tool_name, "command": command[:500], "target": target,
                 "capability": capability, "success": bool(result.success),
                 "stdout_bytes": len(stdout),
-            })
+            }
+            self.ctx.add_tool_execution(exec_record)
+            try:
+                from core.database.pg_store import ToolExecutionRepo
+                ToolExecutionRepo.save(
+                    scan_id=self.scan_id, tool=tool_name,
+                    command=command[:500], target=target,
+                    capability=capability, success=bool(result.success),
+                    stdout_bytes=len(stdout))
+            except Exception:
+                pass
 
         self._write_progress({"status": "running"})
 
     async def _run_phase_approach_b(self, phase: str):
         logger.info(f"--- Running Approach B for phase: {phase} ---")
         from core.tools.tool_use_executor import ToolUseExecutor
-        
+
         # Claude Agent Loop creation
         executor = ToolUseExecutor(self.tool_invocation_engine)
         claude_loop = ClaudeAgentLoop(
-            tool_use_executor=executor, 
+            tool_use_executor=executor,
             invocation_engine=self.tool_invocation_engine
         )
         objective = f"Execute tasks for phase {phase}"
+
+        # Strix Pattern #1: Inject skills into Approach B objective
+        try:
+            phase_at_map = {
+                "exploit": ["sql_injection", "xss_reflected", "idor", "authentication"],
+                "EXPLOITATION": ["sql_injection", "xss_reflected", "idor"],
+                "analyze": ["sql_injection", "xss_reflected"],
+                "ACTIVE_SCANNING": ["sql_injection", "xss_reflected"],
+            }
+            skill_types = phase_at_map.get(phase, [])
+            loaded = []
+            seen_names = set()
+            for at in skill_types:
+                for s in self.skill_loader.load_for_attack_type(at):
+                    if s.name not in seen_names:
+                        seen_names.add(s.name)
+                        loaded.append(s)
+            if loaded:
+                objective += "\n" + self.skill_loader.format_for_prompt(loaded[:3], max_chars=4000)
+        except Exception as skill_err:
+            logger.debug(f"[SkillLoader] Approach B skill injection failed: {skill_err}")
+
+        # Strix Pattern #2: Coverage context
+        try:
+            cr = self.coverage_tracker.real_coverage(50)
+            objective += f"\nCoverage: {cr.get('honest_summary', '')}\n"
+        except Exception:
+            pass
+
         from core.security.authorization import AuthContext
         allowed_tools = list(self.tools.tools.keys()) if hasattr(self, 'tools') and hasattr(self.tools, 'tools') else []
         auth_context = AuthContext(allowed_tools=allowed_tools, has_elevated_privilege=True, target_profile=getattr(self, 'target_profile', None))
-        
+
         session_id = f"session_{phase}_b"
         result = await claude_loop.run(objective, auth_context, session_id)
-        
-        # ToolUseExecutor is assumed to be part of ClaudeAgentLoop internally intercepting calls
-        
+
+        # Strix Pattern #2: Record Approach B results in coverage tracker
+        try:
+            from core.coverage.coverage_tracker import TestAttempt, TestOutcome, FailureReason
+            if hasattr(result, 'findings') and result.findings:
+                for finding in result.findings:
+                    self.coverage_tracker.record(TestAttempt(
+                        test_id=finding.get("id", ""),
+                        category=finding.get("type", phase),
+                        endpoint=finding.get("target", self.ctx.target),
+                        parameter="",
+                        payload=finding.get("payload", "")[:200],
+                        outcome=TestOutcome.CONFIRMED,
+                        failure_reason=FailureReason.NONE,
+                        tool_name="approach_b",
+                    ))
+        except Exception:
+            pass
+
         logger.info(f"Claude Loop completed for {phase}")
 
     def _parse_deepseek_response(self, response_text: str) -> List[TaskSpec]:
@@ -3126,7 +3980,7 @@ class CentralBrain:
                 history_section = "\nCOMPLETED AGENTS:\n"
                 for h in agent_history[-3:]:
                     status = "✓" if h["success"] else "✗"
-                    history_section += f"  {status} {h['agent_id']}: {h['objective'][:50]}\n"
+                    history_section += f"  {status} {h['agent_id']}: {h['objective']}\n"
 
             if phase == 'OSINT_RECONNAISSANCE':
                 await self._run_phase_osint_reconnaissance()
@@ -3190,6 +4044,32 @@ class CentralBrain:
                     except Exception:
                         pass
 
+            # Strix Pattern #1: Load skills for legacy path
+            legacy_skill_text = ""
+            try:
+                phase_lower = phase.lower()
+                at_map = {"exploit": ["sql_injection", "xss_reflected", "idor", "authentication"],
+                          "exploitation": ["sql_injection", "xss_reflected", "idor", "authentication"],
+                          "analyze": ["sql_injection", "xss_reflected"], "active_scanning": ["sql_injection", "xss_reflected"]}
+                for at in at_map.get(phase_lower, []):
+                    for s in self.skill_loader.load_for_attack_type(at):
+                        if s.name not in legacy_skill_text:
+                            legacy_skill_text += f"\n### {s.name}\n{s.content[:1500]}\n"
+                            if len(legacy_skill_text) > 3000:
+                                break
+                    if len(legacy_skill_text) > 3000:
+                        break
+            except Exception:
+                pass
+
+            # Strix Pattern #2: Coverage context for legacy path
+            legacy_coverage = ""
+            try:
+                cr = self.coverage_tracker.real_coverage(agents_this_phase + 10)
+                legacy_coverage = f"\nCoverage: {cr.get('honest_summary', '')}\n"
+            except Exception:
+                pass
+
             prompt = (
                 f"Authorized security assessment task planner.\n\n"
                 f"Phase: {phase.upper()}\n"
@@ -3197,10 +4077,12 @@ class CentralBrain:
                 f"{intel_context}\n"
                 f"{failed_tools_warning}"
                 f"{history_section}"
+                f"{legacy_coverage}"
                 f"\n--- DISCOVERED CONTEXT ---\n"
                 f"{db_context_str}\n"
                 f"\nSummary:\n{compressed_summary}\n"
                 f"{chain_context}"
+                f"{legacy_skill_text}"
                 f"{circuit_breaker_hint}"
                 f"Tasks completed: {agents_this_phase}/{max_agents}\n\n"
                 f"Based on data above, output JSON for next task. "
@@ -3278,67 +4160,86 @@ class CentralBrain:
             if not decision:
                 logger.warning(f"[CentralBrain] Brain returned empty/invalid response after {max_retries} retries (failure streak: {self.failure_streak})")
                 
-                # Deterministic fallback decision tree when LLM returns empty/invalid responses
+                # Deterministic fallback: run ALL unexecuted catalog tests via V2 pipeline
                 if self.failure_streak >= self.max_consecutive_failures or self.failure_streak >= 2:
-                    logger.warning(f"[CentralBrain] Failure threshold reached ({self.failure_streak}). Injecting safe deterministic fallback task: http_request probe.")
-                    
-                    # 1. Base URL
+                    logger.warning(f"[CentralBrain] Failure threshold reached ({self.failure_streak}). Running deterministic fallback: full catalog sweep.")
+
                     base_url = self.ctx.target.rstrip("/")
                     if not base_url.startswith(("http://", "https://")):
                         base_url = f"https://{base_url}"
 
-                    # 2. Extract first discovered endpoint
-                    discovered_endpoints = getattr(self.ctx, "endpoints", []) or []
-                    first_ep = ""
-                    if discovered_endpoints:
-                        raw_ep = discovered_endpoints[0]
-                        first_ep = raw_ep if isinstance(raw_ep, str) else raw_ep.get("url", "")
-
-                    # 3. Construct full target URL
-                    if first_ep.startswith(("http://", "https://")):
-                        full_target = first_ep
-                    elif first_ep:
-                        endpoint_path = "/" + first_ep.lstrip("/")
-                        full_target = f"{base_url}{endpoint_path}"
-                    else:
-                        full_target = base_url
-
-                    # 4. Scope validation
                     from core.security.authorization import TargetScopeValidator
                     from urllib.parse import urlparse
-                    parsed_host = urlparse(full_target).hostname or full_target.split("/")[0].split(":")[0]
-                    scope_pass = TargetScopeValidator.get().is_authorized(parsed_host)
-                    scope_str = "pass" if scope_pass else "fail"
-
-                    logger.info(f"FALLBACK_TARGET_CONSTRUCTED: target={full_target} scope_check={scope_str}")
-
-                    if not scope_pass:
-                        logger.warning(f"FALLBACK_TARGET_OUT_OF_SCOPE: '{full_target}' failed authorization scope check. Skipping fallback.")
+                    parsed_host = urlparse(base_url).hostname or base_url.split("/")[0].split(":")[0]
+                    if not TargetScopeValidator.get().is_authorized(parsed_host):
+                        logger.warning(f"FALLBACK_TARGET_OUT_OF_SCOPE: '{base_url}' failed scope check.")
                         self.failure_streak = 0
                         break
 
-                    fallback_task = TaskSpec(
-                        objective=f"HTTP request probe and security header verification for {full_target}",
-                        capability=CapabilityType.HTTP_ANALYSIS,
-                        inputs={"target": full_target, "url": full_target, "tools": ["http_request"]}
-                    )
                     try:
-                        if hasattr(self, "scheduler") and hasattr(self.scheduler, "schedule_tasks"):
-                            self.scheduler.schedule_tasks([fallback_task])
-                        else:
-                            agent = self.spawner.spawn({
-                                "objective": fallback_task.objective,
-                                "capability": fallback_task.capability.value,
-                                "target": full_target,
-                                "tools": ["http_request"]
-                            })
-                            if agent and hasattr(agent, "run"):
-                                await agent.run()
+                        # Collect all registered test IDs from the catalog
+                        all_test_ids = list(self.executor_registry.keys())
+
+                        # Get already-executed test IDs from coverage matrix
+                        executed = set()
+                        if hasattr(self, 'coverage_matrix'):
+                            for cell in getattr(self.coverage_matrix, '_cells', {}).values():
+                                if hasattr(cell, 'test_id') and hasattr(cell, 'status'):
+                                    if cell.status in ('PASS', 'FAIL', 'NOT_APPLICABLE'):
+                                        executed.add(cell.test_id)
+
+                        remaining = [tid for tid in all_test_ids if tid not in executed]
+                        logger.info(f"[FallbackSweep] {len(remaining)} unexecuted tests out of {len(all_test_ids)} total")
+
+                        # Collect discovered endpoints for context
+                        discovered_endpoints = getattr(self.ctx, "endpoints", []) or []
+                        ep_list = []
+                        for raw_ep in discovered_endpoints[:50]:
+                            ep = raw_ep if isinstance(raw_ep, str) else raw_ep.get("url", raw_ep.get("path", ""))
+                            if ep:
+                                ep_list.append(ep)
+
+                        # Get auth tokens if available
+                        auth_token = None
+                        for cred in getattr(self.ctx, 'harvested_creds', []):
+                            if cred.get('token'):
+                                auth_token = cred['token']
+                                break
+
+                        # Run each remaining test via its executor
+                        from core.domain.experiment_v2 import SecurityExperiment
+                        fallback_ran = 0
+                        for tid in remaining[:80]:
+                            executor = self.executor_registry.get(tid)
+                            if not executor:
+                                continue
+                            try:
+                                exp = SecurityExperiment(
+                                    hypothesis_id=f"fallback_{tid}",
+                                    endpoint_id=base_url,
+                                    capability=tid.split("_")[0],
+                                    test_id=tid,
+                                    input_parameters={
+                                        "url": base_url,
+                                        "endpoints": ep_list,
+                                        "auth_token": auth_token,
+                                    },
+                                )
+                                result = executor.execute(exp)
+                                fallback_ran += 1
+
+                                # Convert executor evidence to vulnerabilities
+                                if result.evidence:
+                                    self._ingest_executor_findings(tid, base_url, result.evidence)
+                            except Exception as ex:
+                                logger.debug(f"[FallbackSweep] Test {tid} failed: {ex}")
+
+                        logger.info(f"[FallbackSweep] Executed {fallback_ran} deterministic tests")
                         self.failure_streak = 0
                         agents_this_phase += 1
                         break
                     except Exception as ex:
-                        logger.error(f"Fallback HTTP probe execution failed: {ex}")
+                        logger.error(f"Fallback catalog sweep failed: {ex}")
                         break
                 continue
 
@@ -3372,12 +4273,12 @@ class CentralBrain:
                         if not creds:
                             has_extracted = getattr(self.ctx, "has_run_data_extraction", False)
                             if not has_extracted:
-                                logger.info(f"CREDENTIAL_EXTRACTION_REQUIRED: Scheduling data & credential extraction before auth testing for objective='{spec.objective[:50]}'")
-                                self.ctx.has_run_data_extraction = True
+                                logger.info(f"CREDENTIAL_EXTRACTION_REQUIRED: Scheduling data & credential extraction before auth testing for objective='{spec.objective}'")
+                                self.ctx.update("has_run_data_extraction", True)
                                 spec.capability = CapabilityType.ENDPOINT_DISCOVERY
                                 spec.objective = f"Discover API endpoints and extract leaked credentials or tokens for {self.ctx.target}"
                             else:
-                                logger.info(f"NO_EXTRACTED_CREDENTIALS_FALLBACK: Data extraction complete (0 creds found). Proceeding with default/anonymous auth testing for '{spec.objective[:50]}'")
+                                logger.info(f"NO_EXTRACTED_CREDENTIALS_FALLBACK: Data extraction complete (0 creds found). Proceeding with default/anonymous auth testing for '{spec.objective}'")
                         else:
                             sample = creds[0].get("username") or creds[0].get("secret") or "user"
                             logger.info(f"CREDENTIALS_AVAILABLE: count={len(creds)}, sample_user='{sample}'")
@@ -3387,7 +4288,7 @@ class CentralBrain:
                         vulns = getattr(self.ctx, "vulnerabilities", [])
                         requests_cap = getattr(self.ctx, "captured_requests", [])
                         if not token and not vulns and not requests_cap and not getattr(self.ctx, "has_run_data_extraction", False):
-                            logger.warning(f"[WARN] NO_UPSTREAM_PROOF: postponing downstream exploit '{spec.objective[:50]}' until recon/auth completes")
+                            logger.warning(f"[WARN] NO_UPSTREAM_PROOF: postponing downstream exploit '{spec.objective}' until recon/auth completes")
                             continue
                             
                     validated_specs.append(spec)
@@ -3443,7 +4344,7 @@ class CentralBrain:
                     for task, s_dict in spawn_specs:
                         agent_inst = self.spawner.spawn(s_dict)
                         if agent_inst is None:
-                            logger.info(f"TASK_SKIPPED_OR_DEDUPLICATED: task_id={task.spec.task_id} objective='{task.spec.objective[:50]}'")
+                            logger.info(f"TASK_SKIPPED_OR_DEDUPLICATED: task_id={task.spec.task_id} objective='{task.spec.objective}'")
                             self.task_manager.complete_task(task.spec.task_id, {"status": "skipped", "reason": "Deduplicated or skipped by spawner"})
                         else:
                             valid_specs_and_agents.append((task, s_dict, agent_inst))
@@ -3518,6 +4419,41 @@ class CentralBrain:
                         self.metrics.record_event("agent", entry["agent_id"],
                                                   entry["success"], entry["findings"])
 
+                        # Strix Pattern #2+3: Record coverage + classify errors for legacy path
+                        try:
+                            from core.coverage.coverage_tracker import TestAttempt, TestOutcome, FailureReason
+                            _outcome = TestOutcome.CONFIRMED if entry["success"] else TestOutcome.NEEDS_FOLLOW_UP
+                            _failure = FailureReason.NONE
+                            if not entry["success"]:
+                                if isinstance(result, dict) and result.get("status") == "timeout":
+                                    _failure = FailureReason.TIMEOUT
+                                elif isinstance(result, Exception):
+                                    classified = self.error_classifier.classify(
+                                        exception=result if isinstance(result, Exception) else None,
+                                        stderr=str(entry.get("findings", ""))[:500],
+                                    )
+                                    _failure = {
+                                        "rate_limited": FailureReason.RATE_LIMITED,
+                                        "waf_blocked": FailureReason.WAF_BLOCKED,
+                                        "auth_failed": FailureReason.AUTH_FAILED,
+                                        "timeout": FailureReason.TIMEOUT,
+                                        "not_found": FailureReason.ENDPOINT_NOT_FOUND,
+                                    }.get(classified.category.value, FailureReason.UNKNOWN)
+                                else:
+                                    _failure = FailureReason.UNKNOWN
+                            self.coverage_tracker.record(TestAttempt(
+                                test_id=task.spec.task_id,
+                                category=task.spec.capability.value,
+                                endpoint=task.spec.inputs.get("target", self.ctx.target),
+                                parameter="",
+                                payload=task.spec.objective[:200],
+                                outcome=_outcome,
+                                failure_reason=_failure,
+                                tool_name=entry["agent_id"],
+                            ))
+                        except Exception:
+                            pass
+
                     # Aggregate wave results into shared context and persistent database
                     self._aggregate_wave_results(agents, results)
 
@@ -3538,14 +4474,14 @@ class CentralBrain:
                 
                 # Check duplicate
                 if obj.lower().strip() in completed_objectives:
-                    logger.info(f"Skipping duplicate objective: {obj[:60]}")
+                    logger.info(f"Skipping duplicate objective: {obj}")
                     self.consecutive_agent_failures += 1
                     continue
                 
                 # Strip failed tools
                 spec["tools"] = [t for t in spec.get("tools", []) if t not in self.failed_tools]
                 if not spec["tools"]:
-                    logger.warning(f"Skipping agent - all tools unavailable: {obj[:60]}")
+                    logger.warning(f"Skipping agent - all tools unavailable: {obj}")
                     self.consecutive_agent_failures += 1
                     continue
 
@@ -3688,6 +4624,12 @@ class CentralBrain:
             # ── Technologies ──
             if hasattr(self.ctx, 'technologies') and self.ctx.technologies:
                 for host, techs in self.ctx.technologies.items():
+                    if isinstance(techs, bool) or techs is None:
+                        techs = [host] if isinstance(host, str) else []
+                    elif isinstance(techs, str):
+                        techs = [techs]
+                    elif not isinstance(techs, list):
+                        continue
                     host_asset_id = self.persistent_knowledge_store.add_asset(
                         self.target_id, "host", host
                     )
@@ -3695,9 +4637,11 @@ class CentralBrain:
                         if isinstance(tech, dict):
                             name = tech.get("name", "")
                             version = tech.get("version", "")
-                        else:
+                        elif isinstance(tech, str):
                             name = str(tech)
                             version = ""
+                        else:
+                            continue
                         if name:
                             self.persistent_knowledge_store.add_technology(
                                 host_asset_id, name, version,
@@ -3772,11 +4716,144 @@ class CentralBrain:
                         f"{len(getattr(self.ctx, 'ports', {}))} hosts with ports, "
                         f"{len(getattr(self.ctx, 'endpoints', []))} endpoints")
 
+            # ── V2: Feed recon into canonical AttackSurfaceState ──
+            self._feed_recon_to_attack_surface_state()
+
         except Exception as e:
             logger.error(f"Failed to persist recon findings: {e}")
             import traceback
             logger.error(traceback.format_exc())
     
+    def _feed_recon_to_attack_surface_state(self):
+        """Wire V1 recon discoveries into canonical AttackSurfaceState (V2)."""
+        surface = getattr(self.ctx, 'attack_surface', None)
+        if not surface:
+            logger.debug("[ReconV2Wire] No AttackSurfaceState on ctx, skipping")
+            return
+
+        fed = {"assets": 0, "endpoints": 0, "technologies": 0, "parameters": 0}
+
+        # Subdomains → assets
+        for sub in getattr(self.ctx, 'subdomains', []) or []:
+            if isinstance(sub, str) and sub.strip():
+                surface.add_asset(sub.strip(), "subdomain", {"hostname": sub.strip()},
+                                  source="recon_pipeline")
+                fed["assets"] += 1
+
+        # IPs → assets
+        for ip in getattr(self.ctx, 'ips', []) or []:
+            if isinstance(ip, str) and ip.strip():
+                surface.add_asset(ip.strip(), "ip", {"address": ip.strip()},
+                                  source="recon_pipeline")
+                fed["assets"] += 1
+
+        # Technologies → technologies
+        for host, techs in (getattr(self.ctx, 'technologies', {}) or {}).items():
+            if isinstance(techs, bool) or techs is None:
+                continue
+            for tech in (techs if isinstance(techs, list) else [techs]):
+                try:
+                    if isinstance(tech, dict):
+                        from core.domain.asset import Technology as TechObj
+                        t = TechObj(name=tech.get("name", ""), version=tech.get("version", ""),
+                                    source="recon_pipeline")
+                        surface.add_technology(host, t)
+                    elif isinstance(tech, str):
+                        from core.domain.asset import Technology as TechObj
+                        surface.add_technology(host, TechObj(name=tech, source="recon_pipeline"))
+                    else:
+                        continue
+                    fed["technologies"] += 1
+                except Exception:
+                    pass
+
+        # Endpoints → endpoints
+        from core.domain.endpoint import Endpoint as EPObj
+        from core.domain.parameter import Parameter as ParamObj
+        from urllib.parse import urlparse
+        ep_errors = 0
+        for ep_data in getattr(self.ctx, 'endpoints', []) or []:
+            try:
+                if isinstance(ep_data, dict):
+                    url = ep_data.get("url", ep_data.get("path", ""))
+                    method = ep_data.get("method", "GET").upper()
+                elif isinstance(ep_data, str):
+                    url = ep_data
+                    method = "GET"
+                else:
+                    continue
+                if not url:
+                    continue
+
+                parsed = urlparse(url if "://" in url else f"https://{url}")
+                path = parsed.path or "/"
+                host = parsed.hostname or self.ctx.target if hasattr(self.ctx, 'target') else ""
+                scheme = parsed.scheme or "https"
+                port = parsed.port or (443 if scheme == "https" else 80)
+
+                import uuid as _uuid
+                ep_id = str(_uuid.uuid4())
+                ep = EPObj(
+                    endpoint_id=ep_id,
+                    url=url,
+                    path=path,
+                    method_set=[method],
+                    host=host,
+                    scheme=scheme,
+                    port=port,
+                    source="recon_pipeline",
+                )
+                if surface.add_endpoint(ep, source="recon_pipeline"):
+                    fed["endpoints"] += 1
+
+                    # Parameters for this endpoint
+                    params = ep_data.get("params", []) if isinstance(ep_data, dict) else []
+                    for p in params:
+                        try:
+                            if isinstance(p, dict):
+                                param = ParamObj(name=p.get("name", ""), parameter_type=p.get("type", "query"))
+                            elif isinstance(p, str):
+                                param = ParamObj(name=p, parameter_type="query")
+                            else:
+                                continue
+                            surface.add_parameter(ep.endpoint_id, param, source="recon_pipeline")
+                            fed["parameters"] += 1
+                        except Exception as pe:
+                            logger.debug(f"[ReconV2Wire] Parameter add failed: {pe}")
+            except Exception as ep_err:
+                ep_errors += 1
+                if ep_errors <= 3:
+                    logger.warning(f"[ReconV2Wire] Endpoint construction failed: {ep_err}")
+        if ep_errors > 3:
+            logger.warning(f"[ReconV2Wire] {ep_errors} total endpoint construction failures")
+
+        # Phase 5: Wire redirects from subdomain_status into AttackSurfaceState
+        subdomain_status = getattr(self.ctx, 'subdomain_status', {}) or {}
+        for host, info in subdomain_status.items():
+            if isinstance(info, dict):
+                redirect_url = info.get("url", "")
+                if redirect_url and host and redirect_url != f"https://{host}" and redirect_url != f"http://{host}":
+                    from urllib.parse import urlparse as _up
+                    redirect_host = _up(redirect_url).netloc
+                    if redirect_host and redirect_host != host:
+                        surface.add_redirect(host, redirect_host)
+
+        # Phase 5: Wire related applications (e.g., API subdomains as related apps)
+        target = self.ctx.target if hasattr(self.ctx, 'target') else ""
+        api_subs = [s for s in getattr(self.ctx, 'subdomains', []) or []
+                    if isinstance(s, str) and any(kw in s.lower() for kw in ("api.", "admin.", "staging.", "dev.", "app."))]
+        for sub in api_subs:
+            surface.add_related_application(target, sub)
+
+        # Mark transferred counts for Phase 4 tracking
+        if fed["endpoints"] > 0 or fed["parameters"] > 0:
+            surface.mark_transferred_to_v2(fed["endpoints"], fed["parameters"])
+
+        surface.log_transfer_counts()
+        logger.info(f"[ReconV2Wire] Fed to AttackSurfaceState: "
+                    f"assets={fed['assets']} endpoints={fed['endpoints']} "
+                    f"technologies={fed['technologies']} parameters={fed['parameters']}")
+
     async def _classify_subdomains(self):
         """
         Probe EVERY discovered subdomain and record live/dead status so the UI can
@@ -4035,8 +5112,13 @@ class CentralBrain:
             url = ep if isinstance(ep, str) else (ep.get("url", "") if isinstance(ep, dict) else "")
             if url and "?" in url:
                 test_urls.append(url)
-        # Also add common search/query endpoints
-        for path in ["/search", "/#/search", "/rest/products/search"]:
+        # Also add common search/query endpoints discovered or generic
+        search_paths = ["/search", "/#/search"]
+        for ep in (getattr(self.ctx, "endpoints", []) or []):
+            ep_url = ep if isinstance(ep, str) else (ep.get("url", "") if isinstance(ep, dict) else "")
+            if ep_url and any(k in ep_url.lower() for k in ["search", "query", "find", "lookup"]):
+                search_paths.append(ep_url if ep_url.startswith("/") else f"/{ep_url.lstrip('/')}")
+        for path in search_paths[:10]:
             test_urls.append(f"{target}{path}?q=<script>alert('xss')</script>")
 
         xss_probe = "<img src=x onerror=window.__xss_proof__=1>"
@@ -4138,13 +5220,18 @@ class CentralBrain:
         from agents.kali_executor import KaliDockerExecutor
         target = self.ctx.target.rstrip("/")
         admin_paths = [
-            "/admin", "/administration", "/api/admin", "/rest/admin",
-            "/#/administration", "/admin/dashboard", "/api/Users",
-            "/panel", "/manage", "/console", "/api/v1/admin",
-            "/admin/users", "/api/admin/users", "/rest/admin/orders",
-            "/accounting", "/support/logs", "/api/Feedbacks",
-            "/api/Complaints", "/api/Recycles", "/api/SecurityQuestions",
+            "/admin", "/administration", "/api/admin",
+            "/admin/dashboard", "/panel", "/manage", "/console",
+            "/api/v1/admin", "/admin/users", "/api/admin/users",
         ]
+        # Add admin/sensitive paths from discovered endpoints
+        for ep in (getattr(self.ctx, "endpoints", []) or []):
+            ep_url = ep if isinstance(ep, str) else (ep.get("url", "") if isinstance(ep, dict) else "")
+            if ep_url and any(k in ep_url.lower() for k in ["admin", "manage", "dashboard", "panel",
+                                                              "internal", "config", "users", "staff"]):
+                path = ep_url if ep_url.startswith("/") else f"/{ep_url.lstrip('/')}"
+                if path not in admin_paths:
+                    admin_paths.append(path)
         findings = []
         for path in admin_paths:
             url = f"{target}{path}"
@@ -4359,8 +5446,15 @@ class CentralBrain:
                     phase=f"subdomain_scan_{sub_host}",
                     max_rounds=rounds,
                 )
-                findings = result.get("findings", []) if isinstance(result, dict) else []
-                steps = result.get("steps", 0) if isinstance(result, dict) else 0
+                if isinstance(result, dict):
+                    findings = result.get("findings", [])
+                    steps = result.get("steps", 0)
+                elif hasattr(result, "findings"):
+                    findings = result.findings
+                    steps = getattr(result, "steps_taken", 0)
+                else:
+                    findings = []
+                    steps = 0
                 logger.info(f"[SubdomainScan] {sub_host}: {len(findings)} findings, {steps} steps")
 
                 for f in findings:
@@ -4371,10 +5465,19 @@ class CentralBrain:
                     if hasattr(self.ctx, 'add_vulnerability'):
                         self.ctx.add_vulnerability(f)
 
+                try:
+                    self._write_live_results()
+                except Exception:
+                    pass
+
             except Exception as e:
                 logger.warning(f"[SubdomainScan] {sub_host} scan failed (non-fatal): {e}")
 
         logger.info(f"[SubdomainScan] Completed testing {len(targets)} live subdomains")
+        try:
+            self._write_live_results()
+        except Exception:
+            pass
 
     async def _persist_captured_requests(self):
         """Save captured HTTP requests to disk for replay."""
@@ -4571,7 +5674,6 @@ class CentralBrain:
         )
 
         if plan:
-            self.ctx.exploit_plan = plan
             self.ctx.attack_chains = plan.get("attack_chains", [])
 
         return plan

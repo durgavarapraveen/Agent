@@ -98,14 +98,14 @@ class AgentSpawner:
         obj_hash = hashlib.md5(f"{obj_clean}:{tools_str}".encode("utf-8")).hexdigest()[:8]
         gravity_vector = f"{capability_name}:{target_val}:{subdomain_val}:{port_val}:{ip_val}:{sorted_params}:{ctx_hash}:{obj_hash}"
 
-        logger.info(f"GRAVITY_VECTOR: task='{objective[:50]}' vector='{gravity_vector}'")
+        logger.info(f"GRAVITY_VECTOR: task='{objective}' vector='{gravity_vector}'")
 
         from core.memory.dedup_tracker import DeduplicationTracker
         dedup = DeduplicationTracker()
 
         # Only compare gravity vectors when target field is populated and valid
         if not skip_dedup and dedup.is_duplicate(tool="spawner", finding_type="task_gravity", data=gravity_vector):
-            logger.info(f"TASK_DEDUPLICATED: target='{target_val}' objective='{objective[:60]}' gravity='{gravity_vector}' (already spawned)")
+            logger.info(f"TASK_DEDUPLICATED: target='{target_val}' objective='{objective}' gravity='{gravity_vector}' (already spawned)")
             return None
 
         if not skip_dedup:
@@ -114,7 +114,7 @@ class AgentSpawner:
         self.counter += 1
         agent_id = f"AGENT-{self.counter:03d}"
 
-        logger.info(f"SPAWN_ATTEMPT: agent_id={agent_id} capability={capability_name} objective='{objective[:60]}'")
+        logger.info(f"SPAWN_ATTEMPT: agent_id={agent_id} capability={capability_name} objective='{objective}'")
 
         # BUG-004: Disambiguate objective type (RECON vs EXPLOIT)
         recon_keywords = ["analyze", "discover", "enumerate", "extract", "scan", "fingerprint", "crawl"]
@@ -171,7 +171,7 @@ class AgentSpawner:
             logger.info(f"CAPABILITY_TOOL_FALLBACK: capability='{capability_name}' resolved tools={allowed_tools}")
 
         if not allowed_tools and not is_exploit:
-            logger.error(f"AGENT_VALIDATION_FAILED: tools list is empty for agent task '{objective[:50]}'")
+            logger.error(f"AGENT_VALIDATION_FAILED: tools list is empty for agent task '{objective}'")
             return None
 
         # Build filtered context

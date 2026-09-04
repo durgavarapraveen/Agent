@@ -5,25 +5,32 @@ from core.domain.endpoint import Endpoint
 from core.domain.identity import Identity
 from core.domain.session import Session
 from core.coverage.coverage_state import CoverageStateV2
+from core.attack_surface.attack_surface_state import AttackSurfaceState
 
 logger = logging.getLogger(__name__)
+
 
 class SharedContextV2:
     """
     Central memory and state orchestrator for Pentest V2.
+    Single source of truth for all runtime state.
     """
     def __init__(self, target: str = None, scope: Dict = None):
-        # Tracks keys added dynamically via update() (OSINT/recon intelligence) so
-        # they can be serialized and shared. Set first so update() can use it.
         self._dynamic_keys: set = set()
         self.target = target
         self.scope = scope or {}
+
+        # --- Canonical V2 state (active fields only) ---
         self.endpoints: Dict[str, Endpoint] = {}
         self.identities: Dict[str, Identity] = {}
         self.sessions: Dict[str, Session] = {}
+        self.tool_results: Dict[str, Dict] = {}
+        self.exploit_results: List[Dict] = []
         self.coverage_state: Optional[CoverageStateV2] = None
-        
-        # Backward compatibility with V1
+        self.attack_surface: Optional[AttackSurfaceState] = AttackSurfaceState(target or "") if target else None
+        self.auth_credentials: List[Dict] = []
+
+        # --- V1 backward compatibility ---
         self.subdomains: List[str] = []
         self.ports: List[Dict] = []
         self.agents_spawned: List[str] = []
@@ -36,10 +43,8 @@ class SharedContextV2:
         self.secrets: List[Dict] = []
         self.crawled_pages: List[str] = []
         self.captured_requests: List[Dict] = []
-        self.js_files: List[str] = []
+        self.tool_executions: List[Dict] = []
         self.brain_log: List[str] = []
-        self.exploit_results: List[Dict] = []
-        self.exploit_plan: Dict[str, Any] = {}
         self.attack_chains: List[Dict] = []
         self.privesc_findings: List[Dict] = []
         self.harvested_creds: List[Dict] = []
@@ -47,7 +52,6 @@ class SharedContextV2:
         self.persistence_plan: Dict[str, Any] = {}
         self.mitre_mappings: List[Dict] = []
         self.has_shell_access: bool = False
-        self.has_run_data_extraction: bool = False
 
         self.target_summary = {
             "tech_stack": [],
@@ -128,10 +132,9 @@ class SharedContextV2:
         else:
             actual_ports = ports
         for p in actual_ports:
-            if isinstance(p, dict) and p not in self.ports:
-                self.ports.append(p)
-            elif not isinstance(p, dict):
-                self.ports.append(p)
+            if isinstance(p, dict) and "port" in p and isinstance(p.get("port"), int):
+                if p not in self.ports:
+                    self.ports.append(p)
 
     def add_technologies(self, host: str, techs: List[str]):
         if host not in self.technologies:
@@ -153,6 +156,12 @@ class SharedContextV2:
     def add_exploit_result(self, result: Dict):
         self.exploit_results.append(result)
 
+    def add_tool_result(self, tool_id: str = None, result: Dict = None):
+        if tool_id and result:
+            self.tool_results[tool_id] = result
+        elif isinstance(result, dict) and "tool" in result:
+            self.tool_results[result["tool"]] = result
+
     def add_directory(self, directory: str, source: str = None):
         if directory not in self.directories:
             self.directories.append(directory)
@@ -165,6 +174,14 @@ class SharedContextV2:
 
     def add_captured_request(self, req: Dict):
         self.captured_requests.append(req)
+
+    def add_captured_requests(self, reqs: list, **kwargs):
+        for r in reqs:
+            if isinstance(r, dict):
+                self.captured_requests.append(r)
+
+    def add_tool_execution(self, exec_record: Dict):
+        self.tool_executions.append(exec_record)
 
     def add_ssl_info(self, host: str, info: Dict):
         self.ssl_info[host] = info
@@ -194,9 +211,11 @@ class SharedContextV2:
             "secrets": self.secrets,
             "crawled_pages": self.crawled_pages,
             "captured_requests": self.captured_requests,
+            "tool_executions": self.tool_executions,
             "exploit_results": self.exploit_results,
             "attack_chains": self.attack_chains,
             "agents_spawned": self.agents_spawned,
+            "tool_results_count": len(self.tool_results),
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, default=str)

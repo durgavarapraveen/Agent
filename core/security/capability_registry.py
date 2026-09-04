@@ -13,7 +13,7 @@ class CapabilityDefinition:
     description: str = ""
 
 
-class CapabilityRegistry:
+class ExecutorRegistry:
 
     def __init__(self) -> None:
         self._capabilities: Dict[str, CapabilityDefinition] = {}
@@ -33,3 +33,7 @@ class CapabilityRegistry:
 
     def get_definition(self, capability_name: str) -> Optional[CapabilityDefinition]:
         return self._capabilities.get(capability_name)
+
+
+# Backward compat alias — new code should use ExecutorRegistry
+CapabilityRegistry = ExecutorRegistry

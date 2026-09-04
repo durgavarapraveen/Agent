@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 WORDLIST_TEMPLATES: Dict[str, List[str]] = {
     "nodejs_express": [
         "api", "api/v1", "api/v2", "api/v3", "routes", "rest", "rest/user", "rest/admin",
-        "rest/products", "rest/basket", "auth", "login", "signup", "register", "logout",
+        "rest/products", "rest/user", "auth", "login", "signup", "register", "logout",
         "package.json", "package-lock.json", ".env", ".env.local", ".env.production",
         "npm-debug.log", "yarn.lock", "server.js", "app.js", "index.js", "config",
         "config/default.json", "config/production.json", "swagger.json", "api-docs",

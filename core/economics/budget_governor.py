@@ -25,14 +25,7 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-try:  # avoid a hard import cycle if the harness is unavailable
-    from agents.universal_llm_harness import TaskTier
-except Exception:  # pragma: no cover
-    from enum import Enum
-
-    class TaskTier(Enum):  # type: ignore
-        SMALL = "small"
-        LARGE = "large"
+from core.common.schemas import TaskTier  # canonical enum
 
 
 class BudgetGovernor:

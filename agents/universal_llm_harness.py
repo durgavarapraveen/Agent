@@ -52,10 +52,7 @@ logger = logging.getLogger(__name__)
 # ENUMS & CONSTANTS
 # ═══════════════════════════════════════════════════════════════
 
-class TaskTier(Enum):
-    """Task complexity tier - determines model selection"""
-    SMALL = "small"   # Fast, cheaper model for simple tasks
-    LARGE = "large"   # Powerful model for complex reasoning
+from core.common.schemas import TaskTier  # noqa: E402 — canonical enum
 
 
 class ProviderType(Enum):
@@ -636,6 +633,19 @@ class DeepSeekProvider(LLMProvider):
                     error=error, latency_ms=latency_ms,
                 )
 
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+            self._retry_count += 1
+            if self._retry_count <= self._max_retries:
+                backoff = min(10 * self._retry_count, 60)
+                logger.warning(f"[DeepSeek] {type(e).__name__}, retry {self._retry_count}/{self._max_retries} in {backoff}s")
+                await asyncio.sleep(backoff)
+                return await self.generate_response(prompt, system, max_tokens, temperature, response_format, tier)
+            self._retry_count = 0
+            logger.error(f"[DeepSeek] {type(e).__name__} after {self._max_retries} retries: {e}")
+            return LLMResponse(
+                content="", provider="deepseek", model=model,
+                error=str(e), latency_ms=(datetime.now() - start_time).total_seconds() * 1000,
+            )
         except Exception as e:
             logger.error(f"[DeepSeek] request failed: {e}")
             return LLMResponse(
@@ -734,9 +744,9 @@ class DeepSeekProvider(LLMProvider):
                     })
 
             except Exception as e:
-                logger.error(f"[DeepSeek] tool round {round_i} failed: {e}")
+                logger.error(f"[DeepSeek] tool round {round_i} failed: {type(e).__name__}: {e}", exc_info=True)
                 return LLMResponse(content="\n".join(all_content), provider="deepseek",
-                                   model=model, error=str(e), cost_usd=total_cost,
+                                   model=model, error=f"{type(e).__name__}: {e}", cost_usd=total_cost,
                                    latency_ms=(datetime.now() - start_time).total_seconds() * 1000)
 
         return LLMResponse(
@@ -1040,6 +1050,9 @@ class UniversalLLMHarness:
         if not self.active_provider:
             await self.initialize()
 
+        # RAG context injection: retrieve relevant security knowledge and prepend to system prompt
+        system = await self._inject_rag_context(prompt, system)
+
         # Economic policy: hard-stop and tier downgrade before dispatch.
         if self.governor is not None:
             model_hint = self.active_provider.get_model_for_tier(tier) if self.active_provider else ""
@@ -1142,6 +1155,21 @@ class UniversalLLMHarness:
     def stats(self) -> Dict[str, Any]:
         """Get usage statistics"""
         return self.budget.stats()
+
+    async def _inject_rag_context(self, prompt: str, system: Optional[str]) -> Optional[str]:
+        """Retrieve relevant security knowledge and augment the system prompt."""
+        try:
+            from core.rag.pipeline import get_rag
+            rag = get_rag()
+            if rag is None:
+                return system
+            docs = await rag.retrieve(prompt, top_k=3, min_similarity=0.05)
+            if not docs:
+                return system
+            return rag.build_system_context(docs, system)
+        except Exception as e:
+            logger.debug(f"[HARNESS] RAG injection skipped: {e}")
+            return system
 
     async def close(self):
         """Cleanup"""

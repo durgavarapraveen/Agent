@@ -226,7 +226,13 @@ class NucleiRunner:
             tech_dict = {ctx.target: ["general"]}
 
         for host, techs in tech_dict.items():
-            tags = [self.find_templates_for(t) for t in techs if t]
+            if isinstance(techs, bool) or techs is None:
+                techs = [host] if isinstance(host, str) else []
+            elif isinstance(techs, str):
+                techs = [techs]
+            elif not isinstance(techs, list):
+                techs = []
+            tags = [self.find_templates_for(t) for t in techs if t and isinstance(t, str)]
             tags = [t for t in tags if t]  # drop empties from unmapped/invalid tech names
             # Always include broad vulnerability categories alongside tech-specific tags
             tags.extend(["cve", "misconfig", "exposure"])

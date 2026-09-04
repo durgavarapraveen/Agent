@@ -1,7 +1,7 @@
 const BASE = window.__ANTIGRAVITY_API__ || "";
 
 async function request(path) {
-  const res = await fetch(`${BASE}${path}`);
+  const res = await fetch(`${BASE}${path}`, { cache: "no-store" });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
 }
@@ -122,6 +122,10 @@ export const api = {
   getSarif: (id) => request(`/api/scans/${id}/sarif`),
   getGitLabDast: (id) => request(`/api/scans/${id}/gitlab-dast`),
   getSarifUrl: (id) => `${BASE}/api/scans/${id}/sarif`,
+  getExploitReports: (id) => request(`/api/scans/${id}/exploit-reports`),
+  getExecutiveSummary: (id) => request(`/api/scans/${id}/executive-summary`),
+  getEvidenceList: () => request("/api/evidence"),
+  getEvidenceUrl: (filename) => `${BASE}/api/evidence/${filename}`,
   getSchedules: () => request("/api/schedules"),
   addSchedule: (data) => post("/api/schedules", data),
   deleteSchedule: (id) => del(`/api/schedules/${id}`),
@@ -142,4 +146,53 @@ export const api = {
   getReviewManual: () => request("/api/review-queue/manual"),
   resolveReview: (id, note = "") => post(`/api/review-queue/${id}/resolve`, { note }),
   killAllScans: () => post("/api/scans/kill-all", {}),
+  // Canonical state
+  getCanonicalSummary: () => request("/api/canonical/summary"),
+  getCanonicalCoverage: () => request("/api/canonical/coverage"),
+  getCanonicalConvergence: () => request("/api/canonical/convergence"),
+  getCanonicalAttackSurface: () => request("/api/canonical/attack-surface"),
+  getCanonicalLearning: () => request("/api/canonical/learning"),
+  getCanonicalHealth: () => request("/api/canonical/health"),
+  // Strix patterns
+  getCoverageTracker: () => request("/api/coverage/tracker"),
+  getHonestCoverage: () => request("/api/coverage/honest"),
+  getSkills: () => request("/api/skills"),
+  getConfidenceSummary: () => request("/api/confidence/summary"),
+  getErrorStats: () => request("/api/error-stats"),
+  // Intelligence
+  getDecisionLog: () => request("/api/decision-log"),
+  getExperiences: () => request("/api/experiences"),
+  getStrategies: () => request("/api/strategies"),
+  getLlmFailures: () => request("/api/llm-failures"),
+  getFindingsV2: () => request("/api/findings-v2"),
+  getFindingsV2Confirmed: () => request("/api/findings-v2/confirmed"),
+  getExploitResults: (id) => request(`/api/scans/${id}/exploit-results`),
+  getDedupStats: () => request("/api/dedup-stats"),
+  getCollectedData: (id) => request(`/api/scans/${id}/collected-data`),
+  getAttackChains: (id) => request(`/api/scans/${id}/attack-chains`),
+  getPostExploit: (id, type) => request(`/api/scans/${id}/post-exploit${type ? '?data_type=' + type : ''}`),
+  getScanMetadata: (id, key) => request(`/api/scans/${id}/metadata${key ? '?key=' + key : ''}`),
+  getExploitReports: (id) => request(`/api/scans/${id}/exploit-reports`),
+  getReviewQueue: () => request("/api/review-queue"),
+  // RAG Knowledge Base
+  ragInit: () => post("/api/rag/init", {}),
+  ragStats: () => request("/api/rag/stats"),
+  ragIngestText: (text, title, metadata) => post("/api/rag/ingest/text", { text, title, metadata: metadata || {} }),
+  ragIngestUrl: (url, metadata) => post("/api/rag/ingest/url", { url, metadata: metadata || {} }),
+  ragSearch: (query, max_results) => post("/api/rag/ingest/search", { query, max_results: max_results || 3 }),
+  ragQuery: (query, top_k, category) => post("/api/rag/query", { query, top_k: top_k || 5, category: category || "" }),
+  ragDelete: (source_type, source_ref) => fetch(`${BASE}/api/rag/documents`, {
+    method: "DELETE", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ source_type, source_ref: source_ref || "" }),
+  }).then(r => r.json()),
+  ragListDocuments: (source_type, limit, offset) => request(`/api/rag/documents?${new URLSearchParams({...(source_type ? {source_type} : {}), limit: limit || 100, offset: offset || 0})}`),
+  ragDeleteDoc: (doc_id) => fetch(`${BASE}/api/rag/documents/${doc_id}`, { method: "DELETE" }).then(r => r.json()),
+  ragUploadFile: async (file, metadata) => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("metadata", JSON.stringify(metadata || {}));
+    const res = await fetch(`${BASE}/api/rag/ingest/uploaded`, { method: "POST", body: form });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.detail || `${res.status}`); }
+    return res.json();
+  },
 };

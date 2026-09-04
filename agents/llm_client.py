@@ -34,12 +34,10 @@ def validate_json_payload(data: Any, mandatory_fields: Optional[List[str]] = Non
     return True
 
 
-class TaskTier(Enum):
-    SMALL = "small"
-    LARGE = "large"
+from core.common.schemas import TaskTier  # canonical enum
 
 from agents.llm_harness_adapter import get_llm, initialize_llm
-from agents.universal_llm_harness import TaskTier as HarnessTaskTier
+HarnessTaskTier = TaskTier  # backward compat alias
 
 class LLMProvider(ABC):
     """Base provider interface (Deprecated - routing to Universal Harness)"""

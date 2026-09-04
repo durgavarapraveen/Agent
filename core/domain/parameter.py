@@ -6,8 +6,13 @@ class ParameterType(str, Enum):
     QUERY = "query"
     PATH = "path"
     BODY = "body"
+    JSON = "json"
+    FORM = "form"
     HEADER = "header"
     COOKIE = "cookie"
+    GRAPHQL = "graphql"
+    WEBSOCKET = "websocket"
+    INFERRED = "inferred"
     UNKNOWN = "unknown"
 
 class Parameter(DomainModel):
