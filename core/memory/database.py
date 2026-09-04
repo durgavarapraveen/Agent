@@ -38,14 +38,28 @@ class DatabaseManager:
             except Exception as e:
                 logger.error(f"Failed to initialize PostgreSQL pool: {e}")
                 raise
-    
+
     @classmethod
     def _init_extensions(cls):
-        """Ensure pgvector is enabled."""
-        with cls.get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-                conn.commit()
+        """
+        Best-effort: enable pgvector if the role is allowed to. This is OPTIONAL —
+        only the vector-memory feature needs it. It must never abort startup, or the
+        core tables (targets, scans, vulnerabilities, review_queue) would never be
+        created. CREATE EXTENSION requires superuser/rds_superuser; a plain app role
+        will fail here, which is fine.
+        """
+        try:
+            with cls.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+                    conn.commit()
+        except Exception as e:
+            try:
+                # roll back the aborted transaction so the connection is reusable
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning(f"pgvector extension not enabled (vector memory disabled, core DB unaffected): {e}")
 
     @classmethod
     @contextmanager
@@ -53,7 +67,7 @@ class DatabaseManager:
         """Context manager for getting a connection from the pool."""
         if cls._pool is None:
             cls.initialize()
-            
+
         conn = cls._pool.getconn()
         try:
             yield conn
@@ -69,3 +83,107 @@ class DatabaseManager:
 
 # Singleton instance access
 db_manager = DatabaseManager()
+
+
+class MemoryDatabase:
+    """PostgreSQL-backed memory system for experiences, strategies, and LLM failures."""
+
+    def __init__(self, db_path=None):
+        self._ensure_schema()
+
+    def _ensure_schema(self):
+        try:
+            from core.database.pg_store import _init_schema
+            _init_schema()
+        except Exception:
+            pass
+
+    def get_connection(self):
+        return DatabaseManager.get_connection()
+
+    def record_experience(self, experience_id, test_type="", target_fingerprint="",
+                          endpoint_pattern="", parameter_type="", identity_context="",
+                          strategy_id="", tool="", outcome="", evidence_quality=0.0,
+                          cost_ms=0.0, latency_ms=0.0, failure_reason=""):
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO experiences
+                    (experience_id, test_type, target_fingerprint, endpoint_pattern,
+                     parameter_type, identity_context, strategy_id, tool, outcome,
+                     evidence_quality, cost_ms, latency_ms, failure_reason)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (experience_id) DO UPDATE SET
+                        outcome=EXCLUDED.outcome, evidence_quality=EXCLUDED.evidence_quality
+                """, (experience_id, test_type, target_fingerprint, endpoint_pattern,
+                      parameter_type, identity_context, strategy_id, tool, outcome,
+                      evidence_quality, cost_ms, latency_ms, failure_reason))
+                conn.commit()
+
+    def record_strategy(self, strategy_id, test_type="", description="", tool="",
+                        prerequisites="", success_rate_global=0.0, success_rate_target=0.0,
+                        success_rate_type=0.0, success_rate_recent=0.0, average_cost_ms=0.0,
+                        average_duration_ms=0.0, evidence_quality=0.0, failure_count=0):
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO strategies
+                    (strategy_id, test_type, description, tool, prerequisites,
+                     success_rate_global, success_rate_target, success_rate_type,
+                     success_rate_recent, average_cost_ms, average_duration_ms,
+                     evidence_quality, failure_count)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (strategy_id) DO UPDATE SET
+                        success_rate_global=EXCLUDED.success_rate_global,
+                        success_rate_recent=EXCLUDED.success_rate_recent,
+                        failure_count=EXCLUDED.failure_count, last_used=NOW()
+                """, (strategy_id, test_type, description, tool, prerequisites,
+                      success_rate_global, success_rate_target, success_rate_type,
+                      success_rate_recent, average_cost_ms, average_duration_ms,
+                      evidence_quality, failure_count))
+                conn.commit()
+
+    def record_llm_failure(self, failure_id, provider="", model="", task="",
+                           prompt_category="", target_fingerprint="",
+                           failure_type="", failure_reason="", retry_count=0):
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO llm_failures
+                    (failure_id, provider, model, task, prompt_category,
+                     target_fingerprint, failure_type, failure_reason, retry_count)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (failure_id) DO UPDATE SET
+                        retry_count=EXCLUDED.retry_count, failure_reason=EXCLUDED.failure_reason
+                """, (failure_id, provider, model, task, prompt_category,
+                      target_fingerprint, failure_type, failure_reason, retry_count))
+                conn.commit()
+
+    def get_experiences(self, test_type: str = "", limit: int = 100):
+        with DatabaseManager.get_connection() as conn:
+            import psycopg2.extras
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                if test_type:
+                    cur.execute("SELECT * FROM experiences WHERE test_type=%s ORDER BY created_at DESC LIMIT %s",
+                                (test_type, limit))
+                else:
+                    cur.execute("SELECT * FROM experiences ORDER BY created_at DESC LIMIT %s", (limit,))
+                return [dict(r) for r in cur.fetchall()]
+
+    def get_strategies(self, test_type: str = "", limit: int = 50):
+        with DatabaseManager.get_connection() as conn:
+            import psycopg2.extras
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                if test_type:
+                    cur.execute("SELECT * FROM strategies WHERE test_type=%s ORDER BY success_rate_global DESC LIMIT %s",
+                                (test_type, limit))
+                else:
+                    cur.execute("SELECT * FROM strategies ORDER BY success_rate_global DESC LIMIT %s", (limit,))
+                return [dict(r) for r in cur.fetchall()]
+
+    def get_llm_failures(self, limit: int = 100):
+        with DatabaseManager.get_connection() as conn:
+            import psycopg2.extras
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SELECT * FROM llm_failures ORDER BY created_at DESC LIMIT %s", (limit,))
+                return [dict(r) for r in cur.fetchall()]

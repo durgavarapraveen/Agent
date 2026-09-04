@@ -19,6 +19,6 @@ def test_database_singleton_instances():
     assert sdb1 is sdb2
 
     # 4. In-memory databases are isolated when requested
-    mem1 = OSINTDatabase(":memory:")
-    mem2 = OSINTDatabase(":memory:")
+    mem1 = OSINTDatabase()
+    mem2 = OSINTDatabase()
     assert mem1 is not mem2

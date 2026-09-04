@@ -89,7 +89,7 @@ class EncryptedTrendStore:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        CREATE TABLE IF NOT EXISTS scan_history (
+                        CREATE TABLE IF NOT EXISTS scan_history_encrypted (
                             id SERIAL PRIMARY KEY,
                             timestamp TEXT NOT NULL,
                             target TEXT NOT NULL,
@@ -116,7 +116,7 @@ class EncryptedTrendStore:
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("INSERT INTO scan_history (timestamp, target, encrypted_data) VALUES (%s, %s, %s)",
+                    cursor.execute("INSERT INTO scan_history_encrypted (timestamp, target, encrypted_data) VALUES (%s, %s, %s)",
                                  (ts, target, enc_blob))
                     conn.commit()
         except Exception as e:
@@ -129,7 +129,7 @@ class EncryptedTrendStore:
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT encrypted_data FROM scan_history WHERE target = %s ORDER BY id ASC", (target,))
+                    cursor.execute("SELECT encrypted_data FROM scan_history_encrypted WHERE target = %s ORDER BY id ASC", (target,))
                     for row in cursor.fetchall():
                         try:
                             dec_bytes = self._xor_cipher(row[0])
@@ -686,7 +686,69 @@ class EnterpriseReporter:
             except Exception as e:
                 logger.info(f"[Report] xhtml2pdf fallback skipped: {e}")
 
+        if not pdf_generated:
+            try:
+                import pdfkit
+                pdfkit.from_string(html_str, str(pdf_path), options={"quiet": "", "encoding": "UTF-8"})
+                out["pdf"] = str(pdf_path)
+                pdf_generated = True
+                logger.info(f"[Report] PDF report written via pdfkit: {pdf_path}")
+            except Exception as e:
+                logger.info(f"[Report] pdfkit fallback skipped: {e}")
+
+        if not pdf_generated:
+            try:
+                from fpdf import FPDF
+                pdf = self._html_to_fpdf(html_str)
+                pdf.output(str(pdf_path))
+                out["pdf"] = str(pdf_path)
+                pdf_generated = True
+                logger.info(f"[Report] PDF report written via fpdf2: {pdf_path}")
+            except Exception as e:
+                logger.info(f"[Report] fpdf2 fallback skipped: {e}")
+
+        if not pdf_generated:
+            logger.warning("[Report] No PDF renderer available. Install one of: "
+                           "weasyprint, xhtml2pdf, pdfkit (+ wkhtmltopdf), or fpdf2")
+
         return out
+
+    @staticmethod
+    def _html_to_fpdf(html_str: str):
+        """Convert HTML report to a basic PDF using fpdf2 (pure Python)."""
+        from fpdf import FPDF
+        import re as _re
+
+        pdf = FPDF()
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.add_page()
+
+        # Strip HTML tags for text extraction
+        text = _re.sub(r'<style[^>]*>.*?</style>', '', html_str, flags=_re.DOTALL)
+        text = _re.sub(r'<script[^>]*>.*?</script>', '', text, flags=_re.DOTALL)
+        text = _re.sub(r'<br\s*/?>', '\n', text, flags=_re.IGNORECASE)
+        text = _re.sub(r'</?(p|div|tr|li|h[1-6])[^>]*>', '\n', text, flags=_re.IGNORECASE)
+        text = _re.sub(r'<[^>]+>', '', text)
+        text = _re.sub(r'&amp;', '&', text)
+        text = _re.sub(r'&lt;', '<', text)
+        text = _re.sub(r'&gt;', '>', text)
+        text = _re.sub(r'&nbsp;', ' ', text)
+        text = _re.sub(r'&#\d+;', '', text)
+        text = _re.sub(r'\n{3,}', '\n\n', text)
+
+        pdf.set_font("Helvetica", size=10)
+        for line in text.split('\n'):
+            line = line.strip()
+            if not line:
+                pdf.ln(3)
+                continue
+            try:
+                pdf.multi_cell(0, 5, line)
+            except Exception:
+                safe = line.encode('latin-1', 'replace').decode('latin-1')
+                pdf.multi_cell(0, 5, safe)
+
+        return pdf
 
 
     def add_osint_findings(self, report_html: str) -> str:

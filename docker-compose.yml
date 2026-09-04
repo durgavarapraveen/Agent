@@ -1,6 +1,56 @@
 services:
 
   # ==========================================================
+  # AntiGravity Web — API + React frontend
+  # ==========================================================
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+
+    container_name: antigravity-web
+    hostname: web
+
+    environment:
+      PYTHONUNBUFFERED: "1"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: pentesting_db
+      POSTGRES_USER: pentesting_user
+      POSTGRES_PASSWORD: pentesting_password
+      DATABASE_URL: postgresql://pentesting_user:pentesting_password@postgres:5432/pentesting_db
+      KALI_CONTAINER: kali-pentesting
+
+    ports:
+      - "8900:8900"
+
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - pentesting_reports:/app/reports
+      - pentesting_data:/app/data
+
+    networks:
+      - pentesting
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kali:
+        condition: service_started
+
+    restart: unless-stopped
+
+    cpus: "2.0"
+    mem_limit: 2g
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ==========================================================
   # Comprehensive Kali Cybersecurity Container
   # ==========================================================
 
@@ -11,6 +61,10 @@ services:
 
     container_name: kali-pentesting
     hostname: kali-pentesting
+
+    # Run tini as PID 1 so killed tools (nuclei/ffuf on timeout) are reaped
+    # instead of piling up as zombie processes inside the container.
+    init: true
 
     working_dir: /pentesting
 
@@ -44,6 +98,13 @@ services:
         condition: service_healthy
 
     restart: unless-stopped
+
+    # Security — nmap, masscan, etc. need raw sockets
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    security_opt:
+      - seccomp=unconfined
 
     # Resource limits
     cpus: "4.0"

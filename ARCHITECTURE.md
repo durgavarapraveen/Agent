@@ -9,6 +9,8 @@ This document provides a detailed technical overview of the **AntiGravity Autono
 ```mermaid
 graph TD
     CLI[CLI / User Input: main.py] -->|Target & Scope| Auth[TargetScopeValidator]
+    WebUI[Web UI: React Dashboard] -->|User Actions & State| API[API Server: FastAPI]
+    API -->|Target & Scope| Auth
     Auth -->|Validated Target| CentralBrain[CentralBrain Orchestrator]
     
     subgraph "Core Orchestration & Memory"
@@ -57,8 +59,10 @@ graph TD
 
 ## 2. Component Breakdown
 
-### 2.1 CentralBrain (`core/central_brain.py`)
-`CentralBrain` is the core autonomous engine. It operates as an asynchronous state machine driven by LLM prompts and deterministic fallback decision trees.
+### 2.1 CentralBrain (`core/central_brain.py`) & Core Engines (V2)
+`CentralBrain` is the core autonomous engine. It operates as an asynchronous state machine driven by LLM prompts, while utilizing V2 Core Engines for deterministic validation:
+- **`ExecutionPipelineV2`**: Provides robust, repeatable fallback mechanisms using specialized executors (e.g., `SQLiExecutor`, `XSSExecutor`).
+- **`CoverageMatrix` & `EndpointInventoryV2`**: Ensures 100% test coverage by tracking endpoints against the test catalog.
 
 - **Phases Managed**:
   1. `RECON`: Network discovery, DNS resolution, port scanning, web crawling.
@@ -84,7 +88,8 @@ graph TD
 
 ### 2.4 Tool Execution Layer (`tools/`, `agents/kali_executor.py`)
 - **`ToolRegistry`**: Manages tool registration, input validation, and execution routing.
-- **`KaliDockerExecutor`**: Interacts with the `kalilinux/kali-rolling` Docker container (`Dockerfile.kali`). Automatically checks for tool availability (`nmap`, `gobuster`, `nikto`, `sqlmap`, `hydra`, `john`, `metasploit-framework`, etc.) and auto-installs missing binaries during execution.
+- **`KaliDockerExecutor`**: Interacts with the `kalilinux/kali-rolling` Docker container (`Dockerfile`). 
+- **10-Layer Docker Architecture**: The Kali Dockerfile is deeply optimized using a 10-layer BuildKit cache strategy. It separates System Base, Build Deps, Meta-Packages, Individual Tools, Python Env, Playwright, Go Tools, Workspace, Nuclei templates, and final Verification. This ensures rapid incremental builds and isolated tool failure debugging.
 - **Fallback Execution**: If Docker is unavailable, falls back to local tools or mock emulators without crashing the pipeline.
 
 ### 2.5 Reporting & Compliance Engine (`core/reporting.py`, `compliance/`)

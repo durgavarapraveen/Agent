@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch, AsyncMock
 
 from core.tools.nuclei_runner import NucleiRunner
-from core.memory.shared_context import SharedContext
+from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
 
 
 class TestNucleiRunner(unittest.TestCase):

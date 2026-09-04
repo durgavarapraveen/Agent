@@ -19,6 +19,26 @@ try:
 except ImportError:
     HAS_TIKTOKEN = False
 
+# Prefer DeepSeek V4 tokenizer when available
+_ds_tokenizer_checked = False
+_ds_tokenizer = None
+
+def _get_ds_tokenizer():
+    global _ds_tokenizer_checked, _ds_tokenizer
+    if _ds_tokenizer_checked:
+        return _ds_tokenizer
+    _ds_tokenizer_checked = True
+    try:
+        import transformers, pathlib
+        tok_dir = pathlib.Path(__file__).resolve().parent.parent.parent / "deepseek_v4_tokenizer"
+        if tok_dir.exists():
+            _ds_tokenizer = transformers.AutoTokenizer.from_pretrained(
+                str(tok_dir), trust_remote_code=True
+            )
+    except Exception:
+        pass
+    return _ds_tokenizer
+
 STRIPPED_FINDINGS_LOG = "logs/stripped_findings_audit.log"
 
 
@@ -75,9 +95,12 @@ class TokenOptimizer:
             self.encoding = None
 
     def count_tokens(self, text: str) -> int:
-        """Count tokens using tiktoken if available, else approximate 1 token = ~4 chars."""
+        """Count tokens using DeepSeek V4 tokenizer > tiktoken > char estimate."""
         if not text:
             return 0
+        ds = _get_ds_tokenizer()
+        if ds:
+            return len(ds.encode(text))
         if self.encoding:
             return len(self.encoding.encode(text))
         return max(1, len(text) // 4)

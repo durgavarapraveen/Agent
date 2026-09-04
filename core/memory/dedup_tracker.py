@@ -1,54 +1,41 @@
 """
 Deduplication Tracker for Repeated Tasks.
-Tracks findings by SHA-256 signature in SQLite, detects delta updates between runs,
+Tracks findings by SHA-256 signature in PostgreSQL, detects delta updates between runs,
 and prevents re-sending duplicate data across multiple agent execution steps.
 """
 
 import hashlib
 import json
 import logging
-import os
-import sqlite3
 import threading
 from datetime import datetime, timedelta
 from typing import Any, Dict, List
+
+from psycopg2.extras import RealDictCursor
+
+from core.memory.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
 
 class DeduplicationTracker:
-    """Thread-safe SQLite-backed deduplication tracker for findings and assets."""
+    """Thread-safe PostgreSQL-backed deduplication tracker for findings and assets."""
 
-    def __init__(self, db_path: str = "reports/findings_dedup.db"):
-        self.db_path = db_path
-        os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
+    def __init__(self):
         self._lock = threading.Lock()
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
-        conn.row_factory = sqlite3.Row
-        return conn
-
     def _init_db(self) -> None:
+        """Verify that the findings_dedup table exists (created by pg_store.py)."""
         with self._lock:
-            conn = self._get_connection()
-            try:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS findings_dedup (
-                        signature TEXT PRIMARY KEY,
-                        tool TEXT NOT NULL,
-                        finding_type TEXT NOT NULL,
-                        data_repr TEXT NOT NULL,
-                        first_seen TEXT NOT NULL,
-                        last_seen TEXT NOT NULL,
-                        count INTEGER DEFAULT 1,
-                        task_id TEXT
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'findings_dedup')"
                     )
-                """)
-                conn.commit()
-            finally:
-                conn.close()
+                    exists = cur.fetchone()[0]
+                    if not exists:
+                        logger.warning("findings_dedup table does not exist — expected pg_store.py to create it")
 
     def generate_task_key(self, capability: str, target: str, resource: str = "") -> str:
         """
@@ -57,13 +44,13 @@ class DeduplicationTracker:
         Example: port_scanning:millisecond.speshway.com:80
         """
         cap_clean = (capability or "").lower().strip()
-        
+
         target_str = str(target or "").strip().lower()
         if "://" in target_str:
             target_str = target_str.split("://", 1)[1]
         if "/" in target_str:
             target_str = target_str.split("/", 1)[0]
-        
+
         res_str = str(resource or "").strip().lower()
         if ":" in target_str and not res_str:
             parts = target_str.split(":", 1)
@@ -78,7 +65,7 @@ class DeduplicationTracker:
         """Generate SHA-256 fingerprint signature: tool:finding_type:sha256(data)"""
         tool_clean = (tool or "").lower().strip()
         type_clean = (finding_type or "").lower().strip()
-        
+
         if isinstance(data, (dict, list)):
             data_str = json.dumps(data, sort_keys=True, default=str)
         else:
@@ -91,12 +78,11 @@ class DeduplicationTracker:
         """Check if finding signature already exists in deduplication database."""
         sig = self.generate_signature(tool, finding_type, data)
         with self._lock:
-            conn = self._get_connection()
-            try:
-                row = conn.execute("SELECT 1 FROM findings_dedup WHERE signature = ?", (sig,)).fetchone()
-                return row is not None
-            finally:
-                conn.close()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1 FROM findings_dedup WHERE signature = %s", (sig,))
+                    row = cur.fetchone()
+                    return row is not None
 
     def register_finding(self, tool: str, finding_type: str, data: Any, task_id: str = "") -> str:
         """Register a finding. If signature exists, update last_seen and count; otherwise insert new."""
@@ -105,24 +91,23 @@ class DeduplicationTracker:
         data_repr = str(data)[:300]
 
         with self._lock:
-            conn = self._get_connection()
-            try:
-                row = conn.execute("SELECT count FROM findings_dedup WHERE signature = ?", (sig,)).fetchone()
-                if row:
-                    new_count = row["count"] + 1
-                    conn.execute("""
-                        UPDATE findings_dedup 
-                        SET last_seen = ?, count = ?, task_id = ?
-                        WHERE signature = ?
-                    """, (now, new_count, task_id, sig))
-                else:
-                    conn.execute("""
-                        INSERT INTO findings_dedup (signature, tool, finding_type, data_repr, first_seen, last_seen, count, task_id)
-                        VALUES (?, ?, ?, ?, ?, ?, 1, ?)
-                    """, (sig, tool, finding_type, data_repr, now, now, task_id))
-                conn.commit()
-            finally:
-                conn.close()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("SELECT count FROM findings_dedup WHERE signature = %s", (sig,))
+                    row = cur.fetchone()
+                    if row:
+                        new_count = row["count"] + 1
+                        cur.execute("""
+                            UPDATE findings_dedup
+                            SET last_seen = %s, count = %s, task_id = %s
+                            WHERE signature = %s
+                        """, (now, new_count, task_id, sig))
+                    else:
+                        cur.execute("""
+                            INSERT INTO findings_dedup (signature, tool, finding_type, data_repr, first_seen, last_seen, count, task_id)
+                            VALUES (%s, %s, %s, %s, %s, %s, 1, %s)
+                        """, (sig, tool, finding_type, data_repr, now, now, task_id))
+                    conn.commit()
         return sig
 
     def get_delta(self, tool: str, finding_type: str, new_data: List[Any], task_id: str = "") -> Dict[str, Any]:
@@ -133,7 +118,7 @@ class DeduplicationTracker:
         """
         tool_clean = (tool or "").lower().strip()
         type_clean = (finding_type or "").lower().strip()
-        
+
         new_items = []
         known_items = []
 
@@ -176,7 +161,7 @@ class DeduplicationTracker:
         """Format delta analysis into canonical update string."""
         sample_str = ", ".join([str(x) for x in new_items[:3]]) if new_items else "none"
         prev_task = task_id if task_id else "previous_task"
-        
+
         lines = [
             f"TOOL_RESULT: {tool}",
             f"Status: SUCCESS (update)",
@@ -191,26 +176,21 @@ class DeduplicationTracker:
         """Purge entries older than specified hours."""
         cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
         with self._lock:
-            conn = self._get_connection()
-            try:
-                cur = conn.execute("DELETE FROM findings_dedup WHERE last_seen < ?", (cutoff,))
-                deleted = cur.rowcount
-                conn.commit()
-                logger.info(f"DEDUP_CACHE_PURGED: removed {deleted} entries older than {hours}h")
-                return deleted
-            finally:
-                conn.close()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM findings_dedup WHERE last_seen < %s", (cutoff,))
+                    deleted = cur.rowcount
+                    conn.commit()
+                    logger.info(f"DEDUP_CACHE_PURGED: removed {deleted} entries older than {hours}h")
+                    return deleted
 
     def reset_all(self) -> None:
         """Clear all deduplication records from the database."""
         with self._lock:
-            conn = self._get_connection()
-            try:
-                conn.execute("DELETE FROM findings_dedup")
-                conn.commit()
-                logger.info("DEDUP_CACHE_RESET: cleared all deduplication entries")
-            finally:
-                conn.close()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM findings_dedup")
+                    conn.commit()
 
 
 from dataclasses import dataclass

@@ -20,7 +20,7 @@ from datetime import datetime
 from core.intelligence.osint_engine import OSINTEngine
 from core.intelligence.threat_intel import ThreatIntelligenceEngine
 from core.intelligence.subdomain_enum import SubdomainEnumerationEngine
-from core.memory.shared_context import SharedContext
+from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +160,9 @@ class OSINTOrchestrator:
         # Save to shared context
         self.ctx.update('discovered_subdomains', results['subdomains'])
         self.ctx.update('cloud_buckets', results['cloud_buckets'])
+        # Also merge into the main subdomains list so they appear in recon UI
+        sub_names = [s.name if hasattr(s, 'name') else str(s) for s in results['subdomains']]
+        self.ctx.add_subdomains(sub_names, source="osint_subdomain_enum")
         
         return {
             'spec': spec.to_dict(),

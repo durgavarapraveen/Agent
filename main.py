@@ -37,25 +37,17 @@ from core.orchestration.meta_brain import MetaBrain
 _LOG_FMT = '[%(asctime)s] %(name)s - %(levelname)s - %(message)s'
 
 
-class _TruncatingFormatter(logging.Formatter):
-    """Console-only: keep the terminal readable by capping long messages.
-    The file handler uses the plain formatter and records the FULL message."""
-
-    def __init__(self, fmt=None, max_len=220):
-        super().__init__(fmt)
-        self.max_len = max_len
+class _AnsiResetFormatter(logging.Formatter):
+    """Reset terminal color after each line so stray ANSI codes from tool
+    output (e.g. sslscan's green) don't bleed into following lines."""
 
     def format(self, record):
         s = super().format(record)
-        if len(s) > self.max_len:
-            s = s[:self.max_len] + " …(full in pentest.log)"
-        # Always reset terminal color so a stray ANSI code from tool output
-        # (e.g. sslscan's green) can't bleed into following lines.
         return s + "\x1b[0m"
 
 
 _console = logging.StreamHandler(sys.stdout)
-_console.setFormatter(_TruncatingFormatter(_LOG_FMT))
+_console.setFormatter(_AnsiResetFormatter(_LOG_FMT))
 
 _file = logging.FileHandler("pentest.log", encoding="utf-8")   # FULL, untruncated
 _file.setFormatter(logging.Formatter(_LOG_FMT))
@@ -63,7 +55,9 @@ _file.setFormatter(logging.Formatter(_LOG_FMT))
 logging.basicConfig(level=logging.INFO, handlers=[_console, _file])
 logger = logging.getLogger(__name__)
 
-async def run_single(target: str, auth_file: str = None, tier: str = "POC"):
+async def run_single(target: str, auth_file: str = None, tier: str = "POC",
+                     resume: bool = False, phases: list = None, credentials: dict = None,
+                     scan_id: str = None):
     """Single target pentest"""
     auth_document = ""
     if auth_file:
@@ -75,8 +69,34 @@ async def run_single(target: str, auth_file: str = None, tier: str = "POC"):
             sys.exit(1)
 
     scope = {"domains": [target], "max_tier": tier}
-    brain = CentralBrain(target=target, scope=scope)
-    await brain.run_main_loop(auth_document=auth_document)
+    brain = CentralBrain(target=target, scope=scope, scan_id=scan_id)
+
+    if credentials:
+        cred_list = credentials if isinstance(credentials, list) else [credentials]
+        # Feed the multi-role auth manager: one live session per role.
+        brain.ctx.auth_credentials = [c for c in cred_list if isinstance(c, dict) and c.get("username")]
+        for cred in cred_list:
+            if cred.get("username"):
+                brain.ctx.harvested_creds.append(cred)
+                logger.info(f"Injected credentials: role={cred.get('role', 'default')}, user={cred['username']}, login_url={cred.get('login_url', 'N/A')}")
+        if brain.ctx.auth_credentials:
+            logger.info(f"Total credential sets loaded: {len(brain.ctx.auth_credentials)} "
+                        f"(roles: {', '.join(c.get('role','?') for c in brain.ctx.auth_credentials)})")
+
+    if resume:
+        cp_path = brain.checkpointer.get_latest_checkpoint(target)
+        if cp_path:
+            state = brain.checkpointer.load_checkpoint(cp_path)
+            if state:
+                brain.checkpointer.apply_checkpoint(brain, state)
+                logger.info(f"RESUMED from checkpoint: {cp_path}")
+                logger.info(f"Resuming at phase: {brain.current_phase.value if brain.current_phase else 'COMPLETE'}")
+            else:
+                logger.warning("Checkpoint file corrupt, starting fresh")
+        else:
+            logger.warning("No checkpoint found for this target, starting fresh")
+
+    await brain.run_main_loop(auth_document=auth_document, phases=phases)
 
 
 async def run_multi(targets: list, auth_file: str = None):
@@ -117,10 +137,26 @@ Examples:
                          help="Reset deduplication database before starting pentest")
     parser.add_argument("--auto-approve", "-y", action="store_true",
                          help="Auto-approve active exploit attempts without interactive consent prompts")
+    parser.add_argument("--resume", action="store_true",
+                         help="Resume a previously stopped scan from its last checkpoint")
+    parser.add_argument("--phases", default="",
+                         help="Comma-separated phases to run (RECON,ACTIVE_SCANNING,EXPLOITATION,REPORTING). Default: all")
+    parser.add_argument("--credentials", default="",
+                         help='JSON string with login creds: {"username":"x","password":"y","login_url":"https://..."}')
+    parser.add_argument("--scan-id", default=None,
+                         help="Canonical run id (from the UI); every DB row for this run uses it so runs never merge")
     parser.add_argument("--frameworks", default="",
                          help="Comma-separated compliance frameworks to map findings "
                               "to (choices: pci,soc2,hipaa,cis,nist). "
                               "Default: all. Example: --frameworks pci,soc2,hipaa")
+    parser.add_argument("--campaign", action="store_true",
+                         help="Use campaign mode for multi-target: parallel scanning with shared reporting")
+    parser.add_argument("--max-parallel", type=int, default=3,
+                         help="Max parallel targets in campaign mode (default: 3)")
+    parser.add_argument("--schedule", type=int, default=0,
+                         help="Schedule recurring scans every N hours (0 = disabled)")
+    parser.add_argument("--sarif", action="store_true",
+                         help="Also export findings in SARIF format to reports/findings.sarif")
     args = parser.parse_args()
 
     if args.auto_approve:
@@ -167,7 +203,31 @@ Examples:
         logger.info(f"Target: {args.target}")
         logger.info(f"Tier: {args.tier}")
         logger.info("=" * 60)
-        asyncio.run(run_single(args.target, args.auth, args.tier))
+        phases_list = [p.strip().upper() for p in args.phases.split(",") if p.strip()] if args.phases else None
+        creds = None
+        if args.credentials:
+            import json as _json
+            try:
+                creds = _json.loads(args.credentials)
+            except _json.JSONDecodeError:
+                logger.error(f"Invalid --credentials JSON: {args.credentials[:100]}")
+                sys.exit(1)
+        asyncio.run(run_single(args.target, args.auth, args.tier, resume=args.resume, phases=phases_list, credentials=creds, scan_id=args.scan_id))
+
+        if args.schedule and args.schedule > 0:
+            from core.orchestration.scheduler import get_scheduler
+            scheduler = get_scheduler()
+            scheduler.add_schedule(args.target, interval_hours=args.schedule, tier=args.tier,
+                                   phases=phases_list)
+            logger.info(f"Scheduled recurring scan every {args.schedule}h for {args.target}")
+            scheduler.start()
+            try:
+                while True:
+                    import time
+                    time.sleep(3600)
+            except KeyboardInterrupt:
+                scheduler.stop()
+                logger.info("Scheduler stopped")
 
     elif args.targets:
         # Multi-target from CLI
@@ -177,7 +237,13 @@ Examples:
             logger.info(f"  - {t}")
         logger.info(f"Tier: {args.tier}")
         logger.info("=" * 60)
-        asyncio.run(run_multi(targets, args.auth))
+        if args.campaign:
+            from core.orchestration.campaign import CampaignManager
+            campaign = CampaignManager(targets, tier=args.tier, max_parallel=args.max_parallel,
+                                        auth_file=args.auth)
+            asyncio.run(campaign.run())
+        else:
+            asyncio.run(run_multi(targets, args.auth))
 
     elif args.targets_file:
         # Multi-target from file
@@ -192,7 +258,13 @@ Examples:
         logger.info(f"Mode: Multi-target ({len(targets)} from {path})")
         logger.info(f"Tier: {args.tier}")
         logger.info("=" * 60)
-        asyncio.run(run_multi(targets, args.auth))
+        if args.campaign:
+            from core.orchestration.campaign import CampaignManager
+            campaign = CampaignManager(targets, tier=args.tier, max_parallel=args.max_parallel,
+                                        auth_file=args.auth)
+            asyncio.run(campaign.run())
+        else:
+            asyncio.run(run_multi(targets, args.auth))
 
 
 if __name__ == "__main__":

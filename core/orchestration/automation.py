@@ -62,7 +62,7 @@ class AutomationEngine:
 
     def _default_rules(self) -> List[Rule]:
         def has_rce(ctx):
-            return ctx.has_shell_access() if hasattr(ctx, "has_shell_access") else any(
+            return ctx.has_shell_access if hasattr(ctx, "has_shell_access") else any(
                 v.get("type", "").lower() in ("rce", "file_upload", "ssti", "command_injection")
                 for v in ctx.vulnerabilities)
 

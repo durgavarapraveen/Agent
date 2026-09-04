@@ -58,7 +58,7 @@ class LLMProvider(ABC):
         
         # If the format is JSON, force JSON generation
         if response_format == "json":
-            json_out = await harness.generate_json(prompt, system, max_tokens, harness_tier)
+            json_out = await harness.generate_json(prompt, system, max_tokens, tier=harness_tier)
             if isinstance(json_out, list):
                 json_out = {"agents": json_out}
             elif not isinstance(json_out, dict):
@@ -70,7 +70,7 @@ class LLMProvider(ABC):
                 model=harness.active_provider.get_model_for_tier(harness_tier) if harness.active_provider else "unknown"
             )
             
-        text_out = await harness.generate_text(prompt, system, max_tokens, harness_tier)
+        text_out = await harness.generate_text(prompt, system, max_tokens, tier=harness_tier)
         return NormalizedLLMResponse(
             content=text_out,
             structured_output=None,

@@ -812,7 +812,7 @@ class TestP0Reliability:
     async def test_12_max_steps_does_not_mark_task_successful(self):
         from core.orchestration.dynamic_agent import DynamicAgent
         from core.tools.tool_registry import ToolRegistry
-        from core.memory.shared_context import SharedContext
+        from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
         from unittest.mock import AsyncMock, patch
 
         ctx = SharedContext("example.com")
@@ -895,7 +895,7 @@ class TestPhaseArchitectureRefinements:
         from core.orchestration.capability_worker import CapabilityWorker
         from core.common.schemas import CapabilityType
         from core.tools.tool_registry import ToolRegistry
-        from core.memory.shared_context import SharedContext
+        from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
         from unittest.mock import AsyncMock, patch
 
         ctx = SharedContext("example.com")
@@ -1193,7 +1193,7 @@ class TestDynamicToolIntelligencePlatform:
     async def test_7_dynamic_agent_works_without_hardcoded_tools(self):
         from core.orchestration.dynamic_agent import ControlledDynamicAgent
         from core.tools.tool_registry import ToolRegistry
-        from core.memory.shared_context import SharedContext
+        from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
         from core.security.authorization import TargetScopeValidator
         from unittest.mock import AsyncMock, patch
 

@@ -3,7 +3,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch, MagicMock
 from core.orchestration.central_brain import CentralBrain
-from core.memory.shared_context import SharedContext
+from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
 from core.reporting import EnterpriseReporter
 from core.intelligence.osint_engine import Employee
 from core.intelligence.subdomain_enum import Subdomain

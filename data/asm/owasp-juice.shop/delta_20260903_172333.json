@@ -1,0 +1,156 @@
+{
+  "target": "owasp-juice.shop",
+  "timestamp": "2026-09-03T17:23:33.771907+00:00",
+  "is_first_run": false,
+  "new_subdomains": [
+    "https://preview.owasp-juice.shop",
+    "preview.owasp-juice.shop",
+    "staging.owasp-juice.shop"
+  ],
+  "removed_subdomains": [
+    "https://demo.owasp-juice.shop"
+  ],
+  "new_ips": [],
+  "removed_ips": [],
+  "new_services": [
+    "owasp-juice.shop:Host 81.169.145.156 open ports: 21,80,443,8080 behind LB"
+  ],
+  "removed_services": [
+    "owasp-juice.shop:Open ports: 21, 80, 443, 8080 on F5 BIG-IP edge"
+  ],
+  "new_endpoints": [
+    "https://preview.owasp-juice.shop",
+    "preview.owasp-juice.shop",
+    "staging.owasp-juice.shop"
+  ],
+  "removed_endpoints": [
+    "https://demo.owasp-juice.shop",
+    "https://demo.owasp-juice.shop/ftp/",
+    "owasp-juice.shop"
+  ],
+  "new_technologies": [
+    "apex owasp-juice.shop redirects to github pages marketing site",
+    "demo.owasp-juice.shop runs owasp juice shop on heroku",
+    "github org 'juice-shop' and full repo inventory identified",
+    "juice shop v20.2.0 on express/node backend",
+    "preview.owasp-juice.shop runs v20.3.0-snapshot (dev preview)",
+    "preview.owasp-juice.shop tech fingerprint",
+    "verbose express error page leaks stack version (demo)"
+  ],
+  "removed_technologies": [
+    "demo.owasp-juice.shop is live owasp juice shop on heroku",
+    "live app instances and tech fingerprint across subdomains",
+    "main domain redirects to github pages (jekyll site)",
+    "osint: technology stack across subdomains",
+    "server/stack fingerprinting summary"
+  ],
+  "new_findings": [
+    {
+      "type": "MISCONFIGURATION",
+      "title": "Wildcard CORS + missing security headers on API",
+      "severity": "LOW",
+      "location": "https://preview.owasp-juice.shop"
+    },
+    {
+      "type": "VULNERABILITY",
+      "title": "Unauthenticated SQL injection in product search \u2192 full SQLite DB read",
+      "severity": "CRITICAL",
+      "location": "preview.owasp-juice.shop"
+    },
+    {
+      "type": "MISSING_HEADER",
+      "title": "Missing X-Content-Type-Options header",
+      "severity": "LOW",
+      "location": "owasp-juice.shop"
+    },
+    {
+      "type": "VULNERABILITY",
+      "title": "Preview Juice Shop crashed by sqlmap traffic (Heroku free dyno DoS)",
+      "severity": "MEDIUM",
+      "location": "preview.owasp-juice.shop"
+    },
+    {
+      "type": "MISCONFIGURATION",
+      "title": "CORS wildcard + verbose error pages",
+      "severity": "LOW",
+      "location": "demo.owasp-juice.shop"
+    },
+    {
+      "type": "MISCONFIGURATION",
+      "title": "staging.owasp-juice.shop is a pure 302 redirect vhost to preview",
+      "severity": "INFO",
+      "location": "staging.owasp-juice.shop"
+    },
+    {
+      "type": "MISSING_HEADER",
+      "title": "Missing Content-Security-Policy header",
+      "severity": "LOW",
+      "location": "owasp-juice.shop"
+    },
+    {
+      "type": "VULNERABILITY",
+      "title": "Preview Juice Shop crashes under request load (Heroku free-dyno DoS)",
+      "severity": "MEDIUM",
+      "location": "preview.owasp-juice.shop"
+    },
+    {
+      "type": "MISCONFIGURATION",
+      "title": "Missing SPF/DMARC email authentication (spoofing exposure)",
+      "severity": "MEDIUM",
+      "location": "owasp-juice.shop"
+    },
+    {
+      "type": "MISSING_HEADER",
+      "title": "Missing X-Frame-Options header",
+      "severity": "LOW",
+      "location": "owasp-juice.shop"
+    },
+    {
+      "type": "NUCLEI_MATCH",
+      "title": "Nuclei Match: Fastly CDN Debug Headers Exposure",
+      "severity": "LOW",
+      "location": "https://owasp-juice.shop"
+    },
+    {
+      "type": "MISSING_HEADER",
+      "title": "Missing HSTS header",
+      "severity": "LOW",
+      "location": "owasp-juice.shop"
+    },
+    {
+      "type": "VULNERABILITY",
+      "title": "Verbose Express error pages leak version and filesystem paths",
+      "severity": "LOW",
+      "location": "preview.owasp-juice.shop"
+    },
+    {
+      "type": "VULNERABILITY",
+      "title": "Exposed /ftp directory with confidential files on preview",
+      "severity": "MEDIUM",
+      "location": "preview.owasp-juice.shop"
+    }
+  ],
+  "resolved_findings": [
+    {
+      "type": "VULNERABILITY",
+      "title": "Directory listing enabled at /ftp despite robots.txt disallow",
+      "severity": "LOW",
+      "location": "demo.owasp-juice.shop"
+    },
+    {
+      "type": "VULNERABILITY",
+      "title": "/rest/memories leaks user password hashes & deluxe tokens",
+      "severity": "CRITICAL",
+      "location": "demo.owasp-juice.shop"
+    },
+    {
+      "type": "VULNERABILITY",
+      "title": "Unauthenticated user email/data disclosure via Feedbacks & Reviews",
+      "severity": "HIGH",
+      "location": "demo.owasp-juice.shop"
+    }
+  ],
+  "header_regressions": [],
+  "severity": "HIGH",
+  "has_changes": true
+}

@@ -20,7 +20,7 @@ def test_github_scanner_fallback():
 
 def test_threat_intel_feed_fallbacks():
     async def _test():
-        db = ThreatIntelDatabase(":memory:")
+        db = ThreatIntelDatabase()
         intel = AbuseChIntelligence(db)
         phishing = await intel.query_phishing_army()
         assert isinstance(phishing, list)

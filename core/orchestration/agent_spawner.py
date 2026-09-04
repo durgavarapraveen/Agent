@@ -12,7 +12,7 @@ from typing import Dict, Union
 
 from core.orchestration.dynamic_agent import DynamicAgent
 from core.tools.tool_registry import ToolRegistry
-from core.memory.shared_context import SharedContext
+from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
 from core.common.schemas import CapabilityType
 
 logger = logging.getLogger(__name__)

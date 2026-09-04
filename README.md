@@ -16,7 +16,9 @@
   - **Phase 5 (Retest & Reporting)**: Automatic false-positive filtering, vulnerability retesting, and multi-framework compliance mapping (PCI-DSS, SOC2, HIPAA, CIS, NIST).
   - **Phase 6 (Post-Exploitation & Hardening)**: Credential harvesting simulation, persistence auditing, and MITRE ATT&CK mapping.
   - **Phase 7 (OSINT & EASM)**: Certificate Transparency, employee enumeration, cloud bucket discovery, and dark web/leak database correlation.
-- **Docker & Kali Linux Integration**: Containerized security tools via `KaliDockerExecutor` with auto-provisioning capabilities.
+- **Docker & Kali Linux Integration**: Containerized security tools via `KaliDockerExecutor` utilizing a heavily optimized 10-layer BuildKit cache strategy for ultra-fast incremental builds and isolated tool failure debugging.
+- **Interactive Web UI & API**: A modern React-based frontend and FastAPI backend for real-time monitoring of scan execution, vulnerability timelines, and reports.
+- **Coverage Engine (V2)**: Utilizes a `CoverageMatrix` and deterministic executors to automatically map endpoints to security tests for rigorous completeness.
 - **Thread-Safe Shared Memory (`SharedContext`)**: Synchronized real-time state sharing across all worker agents and orchestrators.
 - **PostgreSQL & pgvector Engine**: Highly scalable persistent storage for OSINT, threat intelligence, and vector-based semantic search across findings and context.
 
@@ -30,7 +32,8 @@
 | **LLM & AI Engine** | Groq / LLM API (`LLMClient`), Prompt A/B Testing, Fallback Decision Trees |
 | **Recon & OSINT** | Sublist3r, `crt.sh` (CT Logs), `dnspython`, Shodan, Censys, AbuseIPDB, VirusTotal, GitHub Scanner |
 | **Scanners & Encoders** | Nmap, Naabu, Katana, Nuclei (v3+), SQLMap, OWASP ZAP, FFuf, HTTPx |
-| **Container Environment** | Docker, Kali Linux Container (`Dockerfile.kali`), `docker-compose` |
+| **Container Environment** | Docker, 10-Layer Kali Container (`Dockerfile`), Web App (`Dockerfile.web`), `docker-compose` |
+| **Web UI & API Server**   | React, Vite, Node.js, FastAPI, Uvicorn |
 | **Reporting & Export** | ReportLab, WeasyPrint, Matplotlib, Jinja2, HTML5/CSS3 Executive Dashboards |
 
 ---
@@ -123,7 +126,12 @@ python main.py --target example.com --frameworks pci,soc2,hipaa
 ├── main.py                     # Primary CLI Entrypoint
 ├── .env.example                # Template for environment variables
 ├── requirements.txt            # Python dependency manifest
-├── Dockerfile.kali             # Kali Linux container definition
+├── Dockerfile                  # Kali Linux 10-layer container definition (Tools & Pentest Environment)
+├── Dockerfile.web              # Web UI & FastAPI server container definition
+│
+├── ui/                         # Interactive Web Dashboard
+│   ├── web/                    # React frontend (Vite)
+│   └── api/                    # FastAPI backend server
 │
 ├── core/                       # Core Orchestration & Engines
 │   ├── central_brain.py        # Main LLM-driven orchestrator state machine

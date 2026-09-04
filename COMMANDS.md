@@ -19,7 +19,18 @@ cp .env.example .env
 docker compose up -d
 ```
 
-### B. Running Penetration Tests (`main.py`)
+### B. Starting the Web UI & API Server (V2 Architecture)
+```powershell
+# 1. Start the FastAPI Backend Server
+python -m uvicorn ui.api.server:app --port 8900
+
+# 2. Start the React/Vite Frontend
+cd ui/web
+npm install
+npm run dev
+```
+
+### C. Running Penetration Tests (`main.py`)
 ```powershell
 # Standard Single-Target Scan (POC Tier)
 python main.py --target https://www.decibyl.ai/
@@ -82,8 +93,13 @@ docker compose stop
 # Stop and remove containers and networks
 docker compose down
 
-# Rebuild containers from scratch (after editing Dockerfile)
+# Build containers (utilizes the 10-Layer Docker caching strategy for Kali)
+# Tip: Use without --no-cache to resume from transient network failures during apt-get
+docker compose build
+
+# Rebuild containers from scratch (forces downloading everything)
 docker compose build --no-cache
+
 docker compose up -d
 ```
 

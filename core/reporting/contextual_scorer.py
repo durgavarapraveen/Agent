@@ -10,37 +10,30 @@ import json
 import logging
 import os
 import re
-import sqlite3
 from datetime import datetime
 from typing import Dict, Tuple
+
+from core.memory.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
 
 def parse_cvss_vector(vector_str: str) -> Dict[str, str]:
-    """
-    Parse a CVSS v3.1 vector string (e.g. 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H')
-    into individual metrics: AV, AC, PR, UI, S, C, I, A.
-    """
     metrics = {}
     if not vector_str:
         return metrics
-
     pattern = r"\b(AV|AC|PR|UI|S|C|I|A):([NLLHUPR])\b"
     matches = re.findall(pattern, vector_str)
     for key, val in matches:
         metrics[key] = val
-
     return metrics
 
 
 def check_exploit_availability(cve_id: str, csv_path: str = "exploit_availability.csv") -> bool:
-    """Check local exploit_availability.csv file to see if a public PoC or Metasploit module exists."""
     if not os.path.exists(csv_path) and os.path.exists(os.path.join("data", csv_path)):
         csv_path = os.path.join("data", csv_path)
     if not cve_id or not os.path.exists(csv_path):
         return False
-
     cve_clean = cve_id.strip().upper()
     try:
         with open(csv_path, "r", encoding="utf-8") as f:
@@ -53,25 +46,19 @@ def check_exploit_availability(cve_id: str, csv_path: str = "exploit_availabilit
                         return True
     except Exception as e:
         logger.debug(f"[ContextualScorer] CSV exploit lookup error: {e}")
-
     return False
 
 
 class ContextualScorer:
     """Computes contextual risk scores and maintains immutable hash-chain override audit log."""
 
-    def __init__(self, db_path: str = "vuln_intel.sqlite", overrides_path: str = "overrides.json", audit_log_path: str = "audit_overrides.hashlog"):
-        if not os.path.exists(db_path) and os.path.exists(os.path.join("data", db_path)):
-            db_path = os.path.join("data", db_path)
+    def __init__(self, db_path: str = None, overrides_path: str = "overrides.json", audit_log_path: str = "audit_overrides.hashlog"):
         if not os.path.exists(overrides_path) and os.path.exists(os.path.join("data", overrides_path)):
             overrides_path = os.path.join("data", overrides_path)
-        self.db_path = db_path
         self.overrides_path = overrides_path
         self.audit_log_path = audit_log_path
         self.business_impact_multipliers = {
-            "critical_asset": 1.5,
-            "public_facing": 1.3,
-            "internal_only": 1.0,
+            "critical_asset": 1.5, "public_facing": 1.3, "internal_only": 1.0,
         }
         self.overrides = self._load_overrides()
         self.last_hash = "0" * 64
@@ -87,87 +74,62 @@ class ContextualScorer:
         return {}
 
     def _log_audit_entry(self, cve_id: str, old_score: float, new_score: float, user: str):
-        """Append an entry to the immutable hash-chain audit log."""
         timestamp = datetime.now().isoformat()
         entry_raw = f"{self.last_hash}|{timestamp}|{user}|{cve_id}|{old_score}|{new_score}"
         entry_hash = hashlib.sha256(entry_raw.encode("utf-8")).hexdigest()
         self.last_hash = entry_hash
-
         log_line = f"HASH={entry_hash} | TIMESTAMP={timestamp} | USER={user} | CVE={cve_id} | OLD={old_score} | NEW={new_score}\n"
         try:
             with open(self.audit_log_path, "a", encoding="utf-8") as f:
                 f.write(log_line)
-            logger.info(f"[AuditTrail] Logged hash-chain override: {cve_id} -> {new_score} by {user}")
         except Exception as e:
             logger.error(f"[AuditTrail] Failed to write hash-chain log: {e}")
 
     def get_cve_base_info(self, cve_id: str) -> Tuple[float, str]:
-        """Query local SQLite DB for CVSS vector and base score for a CVE."""
         cve_clean = cve_id.strip().upper()
-        if os.path.exists(self.db_path):
-            try:
-                with sqlite3.connect(self.db_path) as conn:
-                    cur = conn.cursor()
-                    cur.execute("SELECT cvss_v3_base_score, cvss_v3_vector FROM cves WHERE id=?", (cve_clean,))
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT cvss_v3_base_score, cvss_v3_vector FROM vuln_intel WHERE id = %s", (cve_clean,))
                     row = cur.fetchone()
                     if row:
                         return (float(row[0] or 7.5), str(row[1] or "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"))
-            except Exception:
-                pass
-
-        # Fallback default info for testing/demonstration
+        except Exception:
+            pass
         return (8.5, "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H")
 
     def calculate_adjusted_score(self, cve_id: str, is_critical_asset: bool = False, is_public_facing: bool = False, csv_path: str = "exploit_availability.csv") -> float:
-        """
-        Compute adjusted score: min(base_score * multiplier + bonus, 10.0).
-        Enforces user overrides from overrides.json if present.
-        """
         cve_clean = cve_id.strip().upper()
         if cve_clean in self.overrides:
             return self.overrides[cve_clean]
-
         base_score, _ = self.get_cve_base_info(cve_clean)
-
-        # Multipliers
         multiplier = 1.0
         if is_critical_asset:
             multiplier *= self.business_impact_multipliers["critical_asset"]
         if is_public_facing:
             multiplier *= self.business_impact_multipliers["public_facing"]
-
-        # Bonus for public PoC or Metasploit module
         bonus = 1.5 if check_exploit_availability(cve_clean, csv_path) else 0.0
-
         adjusted = min(base_score * multiplier + bonus, 10.0)
         return round(adjusted, 1)
 
     def apply_override(self, cve_id: str, new_score: float, user: str = "admin") -> float:
-        """Manually override score for a CVE and record immutable hash-chain audit log entry."""
         cve_clean = cve_id.strip().upper()
         old_score = self.calculate_adjusted_score(cve_clean)
         new_score_clamped = min(max(float(new_score), 0.0), 10.0)
-
         self.overrides[cve_clean] = new_score_clamped
         try:
             with open(self.overrides_path, "w", encoding="utf-8") as f:
                 json.dump(self.overrides, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to update overrides file: {e}")
-
         self._log_audit_entry(cve_clean, old_score, new_score_clamped, user)
         return new_score_clamped
 
     def format_cve_summary(self, cve_id: str, is_critical_asset: bool = False, is_public_facing: bool = False, csv_path: str = "exploit_availability.csv") -> str:
-        """
-        Generate human-readable summary:
-        'CVE-2023-12345 | CVSS: 8.5 (High) | Vector: AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H | Exploit: Public PoC available'
-        """
         cve_clean = cve_id.strip().upper()
         adj_score = self.calculate_adjusted_score(cve_clean, is_critical_asset, is_public_facing, csv_path)
         _, vector_str = self.get_cve_base_info(cve_clean)
         has_exploit = check_exploit_availability(cve_clean, csv_path)
-
         severity_label = "Low"
         if adj_score >= 9.0:
             severity_label = "Critical"
@@ -175,6 +137,5 @@ class ContextualScorer:
             severity_label = "High"
         elif adj_score >= 4.0:
             severity_label = "Medium"
-
         exploit_str = "Public PoC available" if has_exploit else "No public exploit listed"
         return f"{cve_clean} | CVSS: {adj_score} ({severity_label}) | Vector: {vector_str} | Exploit: {exploit_str}"
