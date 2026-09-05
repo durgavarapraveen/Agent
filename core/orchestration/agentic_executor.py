@@ -247,6 +247,7 @@ class AgenticExecutor:
         adapting strategy, and chaining discoveries until it determines
         the objective is met or no more useful actions can be taken.
         """
+        self._phase = phase or ""
         self._available_tools = self._probe_tool_availability()
         available_tools_str = ", ".join(sorted(self._available_tools)) if self._available_tools else "none (use http_request for all testing)"
 
@@ -569,8 +570,21 @@ class AgenticExecutor:
                     if len(parts) >= 5 and parts[2] == "IN":
                         rec_name = parts[0].rstrip(".")
                         rec_type = parts[3]
-                        rec_value = parts[4].rstrip(".")
                         ttl = int(parts[1]) if parts[1].isdigit() else 0
+                        # MX/SRV: preference (+ weight/port for SRV) precedes the host;
+                        # SOA: mname rname serial refresh retry expire minimum;
+                        # TXT: value may be multiple quoted chunks; preserve full remainder.
+                        rest = parts[4:]
+                        if rec_type == "MX" and len(rest) >= 2:
+                            rec_value = f"{rest[0]} {rest[1].rstrip('.')}"
+                        elif rec_type == "SRV" and len(rest) >= 4:
+                            rec_value = f"{rest[0]} {rest[1]} {rest[2]} {rest[3].rstrip('.')}"
+                        elif rec_type == "SOA":
+                            rec_value = " ".join(p.rstrip(".") for p in rest)
+                        elif rec_type == "TXT":
+                            rec_value = " ".join(rest)
+                        else:
+                            rec_value = rest[0].rstrip(".")
                         if rec_type in ("A", "AAAA", "CNAME", "MX", "NS", "SOA", "TXT", "SRV", "PTR"):
                             dns_records.append({
                                 "name": rec_name, "type": rec_type,
@@ -763,8 +777,28 @@ class AgenticExecutor:
                         })
             if vulns and hasattr(self.ctx, "add_vulnerability"):
                 for v in vulns:
+                    v.setdefault("status", "CONFIRMED")
+                    v.setdefault("confirmed", True)
                     self.ctx.add_vulnerability(v)
                 logger.info(f"[AgenticExecutor] Extracted {len(vulns)} vulnerability findings from {tool_id}")
+            elif not vulns and len(stdout) > 1000:
+                # Sizable output but nothing parsed — surface it so the LLM can act on it,
+                # and log a warning so we know a parser rule may be missing.
+                logger.warning(
+                    f"[AgenticExecutor] {tool_id} produced {len(stdout)} bytes of stdout but "
+                    f"no vulnerabilities were extracted by the parser — LLM will need to summarize"
+                )
+                snippet = stdout[:800]
+                if hasattr(self.ctx, "get") and hasattr(self.ctx, "update"):
+                    try:
+                        unparsed = self.ctx.get("unparsed_tool_outputs", []) or []
+                        unparsed.append({
+                            "tool": tool_id, "target": target,
+                            "size": len(stdout), "snippet": snippet,
+                        })
+                        self.ctx.update("unparsed_tool_outputs", unparsed[-50:])
+                    except Exception:
+                        pass
 
     def _regex_extract_recon(self, tool_id, stdout, target_base, re):
         """Fallback regex-based extraction if LLM call fails."""
@@ -1695,6 +1729,34 @@ RULES:
                             f"Chatbot returned function/command data. URL: {url[:200]}")
                     logger.info(f"[AutoDetect] Chatbot injection: {url[:120]}")
 
+    _TOOL_CONFIRM_PATTERNS = (
+        ("sqlmap", ("sqlmap:", "sqlmap confirmed", "parameter 'q' is vulnerable",
+                    "parameter is vulnerable", "boolean-based blind", "union query",
+                    "time-based blind", "error-based")),
+        ("nuclei", ("nuclei", "[critical]", "[high]", "[medium]", "template matched")),
+        ("nikto", ("nikto:", "+ osvdb", "+ /")),
+        ("dalfox", ("dalfox", "[poc]", "[vuln]")),
+        ("wpscan", ("wpscan", "[!] title:")),
+        ("ffuf", ("ffuf ::",)),
+        ("hydra", ("hydra", "login:", "password:")),
+        ("burp", ("burp",)),
+    )
+
+    def _infer_tool_and_confirmation(self, finding: Dict[str, Any]) -> tuple:
+        """Look at evidence/details/title to attribute the tool that produced a
+        finding, and decide whether the tool's own output implies a confirmed
+        vulnerability. Returns (tool_name, is_confirmed)."""
+        blob = " ".join([
+            str(finding.get("evidence", "")),
+            str(finding.get("details", "")),
+            str(finding.get("title", "")),
+        ]).lower()
+        for tool, patterns in self._TOOL_CONFIRM_PATTERNS:
+            for p in patterns:
+                if p in blob:
+                    return tool, True
+        return "", False
+
     def _record_finding(self, args: Dict[str, Any]) -> str:
         finding = {
             "type": args.get("type", "information"),
@@ -1706,10 +1768,16 @@ RULES:
             "next_steps": args.get("next_steps", ""),
             "source": "agentic_executor",
         }
+        tool, confirmed_by_tool = self._infer_tool_and_confirmation(finding)
+        if tool:
+            finding["tool"] = tool
+        if confirmed_by_tool:
+            finding["confirmed"] = True
         self.result.findings.append(finding)
         logger.info(f"[AgenticExecutor] Finding: [{finding['severity']}] {finding['title']}"
                     f" | target={finding.get('target', '')} | details={finding.get('details', '')}"
-                    f"{(' | evidence=' + finding.get('evidence', '')) if finding.get('evidence') else ''}")
+                    f"{(' | evidence=' + finding.get('evidence', '')) if finding.get('evidence') else ''}"
+                    f"{(' | tool=' + tool) if tool else ''}")
 
         ftype = finding.get("type", "").lower().strip()
         if hasattr(self.ctx, "add_vulnerability") and (
@@ -1725,9 +1793,11 @@ RULES:
                 "proof": finding.get("evidence", ""),
                 "target": finding.get("target", self.ctx.target),
                 "location": finding.get("target", self.ctx.target),
+                "tool": tool,
+                "status": "CONFIRMED" if confirmed_by_tool else "UNCONFIRMED",
                 "source": "agentic_executor",
                 "source_agent": "agentic_executor",
-                "confirmed": True,
+                "confirmed": bool(confirmed_by_tool),
             })
 
         if finding["type"] == "subdomain":
@@ -1813,6 +1883,8 @@ RULES:
             ftype = finding.get("type", "").lower().strip()
 
             if ftype in self._VULN_TYPES or "vuln" in ftype or "inject" in ftype:
+                _tool = finding.get("tool", "")
+                _confirmed = bool(finding.get("confirmed"))
                 self.ctx.add_vulnerability({
                     "title": finding["title"],
                     "type": ftype.upper(),
@@ -1822,9 +1894,11 @@ RULES:
                     "proof": finding.get("evidence", ""),
                     "target": finding.get("target", self.ctx.target),
                     "location": finding.get("target", self.ctx.target),
+                    "tool": _tool,
+                    "status": "CONFIRMED" if _confirmed else "UNCONFIRMED",
                     "source": "agentic_executor",
                     "source_agent": "agentic_executor",
-                    "confirmed": True,
+                    "confirmed": _confirmed,
                 })
 
             elif ftype == "subdomain":
@@ -1868,6 +1942,8 @@ RULES:
             elif ftype not in ("info", "note", "recon", ""):
                 sev = (finding.get("severity") or "info").upper()
                 if sev in ("LOW", "MEDIUM", "HIGH", "CRITICAL"):
+                    _tool2 = finding.get("tool", "")
+                    _conf2 = bool(finding.get("confirmed"))
                     self.ctx.add_vulnerability({
                         "title": finding["title"],
                         "type": ftype.upper(),
@@ -1877,11 +1953,149 @@ RULES:
                         "proof": finding.get("evidence", ""),
                         "target": finding.get("target", self.ctx.target),
                         "location": finding.get("target", self.ctx.target),
+                        "tool": _tool2,
+                        "status": "CONFIRMED" if _conf2 else "UNCONFIRMED",
                         "source": "agentic_executor",
                         "source_agent": "agentic_executor",
-                        "confirmed": True,
+                        "confirmed": _conf2,
                     })
+
+        self._route_osint_findings()
 
         logger.info(
             f"[AgenticExecutor] Ingested {len(self.result.findings)} findings into shared context"
         )
+
+    def _route_osint_findings(self):
+        """When the phase is OSINT (or the finding is OSINT-shaped), mirror findings
+        into the OSINT ctx fields that `_build_osint_context()` reads. Otherwise
+        every OSINT finding lands only in result.findings and the OSINT summary
+        panels stay at zero."""
+        import re as _re
+
+        phase_l = (getattr(self, "_phase", "") or "").lower()
+        is_osint_phase = "osint" in phase_l
+
+        osint_type_keywords = (
+            "osint", "employee", "leak", "breach", "credential",
+            "github", "cloud_bucket", "s3", "bucket", "domain_intel",
+            "whois", "dns_intel", "threat", "identity",
+        )
+
+        email_re = _re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+        gh_re = _re.compile(r'github\.com/([A-Za-z0-9_.-]+)', _re.IGNORECASE)
+        breach_re = _re.compile(r'(\d+)\s+(?:total\s+)?(?:compromised|leaked|breached|infected)', _re.IGNORECASE)
+        bucket_re = _re.compile(r'([a-z0-9.\-]+\.s3[.\-][a-z0-9\-]*\.amazonaws\.com|s3://[a-z0-9.\-]+|storage\.googleapis\.com/[a-z0-9.\-]+)', _re.IGNORECASE)
+
+        def _get_list(name):
+            cur = None
+            if hasattr(self.ctx, name):
+                cur = getattr(self.ctx, name, None)
+            if cur is None and hasattr(self.ctx, "get"):
+                try:
+                    cur = self.ctx.get(name, None)
+                except Exception:
+                    cur = None
+            return list(cur) if isinstance(cur, list) else []
+
+        def _set_list(name, value):
+            if hasattr(self.ctx, "update"):
+                try:
+                    self.ctx.update(name, value)
+                    return
+                except Exception:
+                    pass
+            try:
+                setattr(self.ctx, name, value)
+            except Exception:
+                pass
+
+        emps = _get_list("discovered_employees")
+        emp_emails = {(e.get("email") or "").lower() for e in emps if isinstance(e, dict)}
+        gh_profiles = _get_list("github_profiles")
+        gh_names = {(g.get("username") or "") for g in gh_profiles if isinstance(g, dict)}
+        leaks = _get_list("leaked_credentials")
+        buckets = _get_list("cloud_buckets")
+        bucket_names = {(b.get("name") or "") for b in buckets if isinstance(b, dict)}
+        osint_findings = _get_list("osint_findings")
+
+        touched = {"emp": False, "gh": False, "leak": False, "bucket": False, "osint": False}
+
+        for finding in self.result.findings:
+            ftype = (finding.get("type") or "").lower()
+            title = finding.get("title") or ""
+            details = finding.get("details") or ""
+            evidence = finding.get("evidence") or ""
+            blob = f"{title}\n{details}\n{evidence}"
+
+            is_osint_finding = is_osint_phase or any(k in ftype for k in osint_type_keywords) \
+                or "osint" in title.lower() or "leak" in title.lower() or "breach" in title.lower()
+
+            if not is_osint_finding:
+                continue
+
+            osint_findings.append({
+                "type": ftype or "osint",
+                "title": title,
+                "severity": finding.get("severity", "info"),
+                "details": details,
+                "evidence": evidence,
+                "target": finding.get("target", getattr(self.ctx, "target", "")),
+                "source": "agentic_executor",
+            })
+            touched["osint"] = True
+
+            for m in email_re.finditer(blob):
+                email = m.group(0).lower()
+                if email.endswith((".png", ".jpg", ".gif", ".svg")):
+                    continue
+                if email in emp_emails:
+                    continue
+                name_part = email.split("@")[0].replace(".", " ").replace("_", " ").replace("-", " ")
+                emps.append({"email": email, "name": name_part.title(), "source": "agentic_executor"})
+                emp_emails.add(email)
+                touched["emp"] = True
+
+            for m in gh_re.finditer(blob):
+                user = m.group(1)
+                if user.lower() in ("orgs", "search", "settings", "login"):
+                    continue
+                if user in gh_names:
+                    continue
+                gh_profiles.append({"username": user, "source": "agentic_executor"})
+                gh_names.add(user)
+                touched["gh"] = True
+
+            bm = breach_re.search(blob)
+            if bm:
+                try:
+                    count = int(bm.group(1))
+                    leaks.append({
+                        "type": "breach_indicator",
+                        "count": count,
+                        "source": finding.get("target", "") or "agentic_executor",
+                        "title": title,
+                        "details": details[:500],
+                    })
+                    touched["leak"] = True
+                except ValueError:
+                    pass
+
+            for m in bucket_re.finditer(blob):
+                name = m.group(1)
+                if name in bucket_names:
+                    continue
+                buckets.append({"name": name, "source": "agentic_executor", "title": title})
+                bucket_names.add(name)
+                touched["bucket"] = True
+
+        if touched["emp"]:
+            _set_list("discovered_employees", emps)
+        if touched["gh"]:
+            _set_list("github_profiles", gh_profiles)
+        if touched["leak"]:
+            _set_list("leaked_credentials", leaks)
+        if touched["bucket"]:
+            _set_list("cloud_buckets", buckets)
+        if touched["osint"]:
+            _set_list("osint_findings", osint_findings)

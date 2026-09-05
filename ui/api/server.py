@@ -283,25 +283,71 @@ def compare_scans(a: str, b: str):
     return VulnRepo.compare_scans(a, b)
 
 
+def _empty_live_results():
+    return {
+        "recon": {"subdomains": [], "endpoints": [], "technologies": {}, "ports": [], "ips": []},
+        "vulnerabilities": [], "exploits": [], "captured_requests": [],
+    }
+
+
+def _live_singleton_scan_id() -> str:
+    try:
+        from core.database.pg_store import DatabaseManager
+        import psycopg2.extras
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SELECT scan_id FROM live_results WHERE id = 1")
+                row = cur.fetchone()
+                return (row or {}).get("scan_id") or ""
+    except Exception:
+        return ""
+
+
 @app.get("/api/scans/live-progress")
-def get_live_progress():
-    """Return live progress from PostgreSQL."""
+def get_live_progress(scan_id: str = ""):
+    """Return live progress from PostgreSQL, scoped to scan_id when provided."""
     try:
         data = LiveDataRepo.get_progress()
-        if data:
-            return data
+        if not data:
+            return {}
+        if scan_id:
+            stored = _live_singleton_scan_id()
+            if stored and stored != scan_id:
+                return {}
+        return data
     except Exception:
-        pass
-    return {}
+        return {}
 
 
 @app.get("/api/scans/live-results")
-def get_live_results():
-    """Return structured live results from PostgreSQL."""
+def get_live_results(scan_id: str = ""):
+    """Return structured live results from PostgreSQL, scoped to scan_id when provided.
+
+    When scan_id is given, the live singleton is only returned if it belongs to that
+    scan; cross-scan finding merges are skipped and only that scan's persisted vulns
+    are added. This prevents leakage from previous scans into the Live Scan view.
+    """
     try:
-        data = LiveDataRepo.get_results()
-        if data:
-            existing_titles = {(v.get("title") or "").strip().lower() for v in data.get("vulnerabilities", [])}
+        singleton_scan = _live_singleton_scan_id() if scan_id else ""
+        if scan_id and singleton_scan and singleton_scan != scan_id:
+            data = _empty_live_results()
+        else:
+            data = LiveDataRepo.get_results() or _empty_live_results()
+
+        existing_titles = {(v.get("title") or "").strip().lower() for v in data.get("vulnerabilities", [])}
+
+        if scan_id:
+            try:
+                db_vulns = VulnRepo.get_by_scan(scan_id)
+                for v in (db_vulns or []):
+                    vd = v if isinstance(v, dict) else (v.__dict__ if hasattr(v, '__dict__') else {})
+                    t = (vd.get("title") or "").strip().lower()
+                    if t and t not in existing_titles:
+                        data.setdefault("vulnerabilities", []).append(vd)
+                        existing_titles.add(t)
+            except Exception:
+                pass
+        else:
             try:
                 v2 = FindingV2Repo.list_confirmed()
                 for f in v2:
@@ -321,13 +367,9 @@ def get_live_results():
                         existing_titles.add(t)
             except Exception:
                 pass
-            return data
+        return data
     except Exception:
-        pass
-    return {
-        "recon": {"subdomains": [], "endpoints": [], "technologies": {}, "ports": [], "ips": []},
-        "vulnerabilities": [], "exploits": [], "captured_requests": [],
-    }
+        return _empty_live_results()
 
 
 @app.get("/api/scans/active")

@@ -65,10 +65,10 @@ KALI_TOOLS = {
     ),
     "dig": KaliTool(
         name="Dig",
-        command="dig {domain} +short",
+        command="for t in A AAAA MX NS TXT SOA CNAME SRV; do dig {domain} $t +noall +answer; done",
         category="target_discovery",
-        description="DNS lookup tool",
-        timeout=30,
+        description="DNS lookup tool (multi-record: A/AAAA/MX/NS/TXT/SOA/CNAME/SRV)",
+        timeout=60,
         risk_level="passive"
     ),
     

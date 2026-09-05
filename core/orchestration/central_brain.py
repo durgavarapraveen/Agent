@@ -121,6 +121,36 @@ from core.execution.executors.generic import (
     JWTExecutor, NoSQLiExecutor, FileUploadExecutor,
     PrototypePollutionExecutor, SSRFExecutor, XXEExecutor,
     CSRFExecutor, IDORExecutor, MassAssignmentExecutor,
+    # Tier 1
+    SSTIExecutor, CommandInjectionExecutor, OpenRedirectExecutor,
+    OAuthMisconfigExecutor, CAPTCHABypassExecutor, PasswordPolicyExecutor,
+    RateLimitExecutor, LogInjectionExecutor, BackupFileScannerExecutor,
+    # Tier 2
+    AdvancedSQLiExecutor, AdvancedXSSExecutor,
+    AdvancedJWTExecutor, AdvancedFileUploadExecutor,
+    # Tier 3
+    SCAExecutor, TyposquatDetector, WAFEvasionDetector,
+    # Tier 4
+    SecurityQuestionSolverExecutor, LLMPasswordDerivationExecutor,
+    LLMBusinessLogicExplorerExecutor,
+    # Tier 5
+    MFABypassExecutor, CryptoWeaknessDetector, LLMContentAnalyzerExecutor,
+    # Tier 6 — best-effort at the "unreachable" ceiling
+    SteganographyDetector, SubtitleXSSExecutor, NestedEncodingSolver,
+    BlockchainWeb3Detector, RaceConditionExploiter, HiddenResourceEnumerator,
+    GDPRAbuseDetector, ErrorMessageLeakDetector, EncodingMisconfigDetector,
+    # Tier 7 — remaining coverage gaps
+    HTTPRequestSmugglingExecutor, InsecureDeserializationDetector,
+    CloudBucketEnumerator, SubdomainTakeoverDetector, LDAPInjectionExecutor,
+    CSPBypassDetector, WebCachePoisoningExecutor, DOMXSSStaticAnalyzer,
+    SAMLFlawDetector, PromptInjectionTester, CICDExposureScanner,
+    BasicAuthBypassExecutor, HeaderRateLimitBypassExecutor,
+    # Tier 8 — credentialed + browser-runtime
+    AWSCredentialedEnumerator, AzureCredentialedEnumerator,
+    GCPCredentialedEnumerator, KubernetesRBACExecutor,
+    CIPipelineSecretExtractor,
+    LiveDOMXSSExecutor, LivePostMessageAbuseDetector,
+    LiveClickjackingDetector, LiveCSPBypassAttempt,
 )
 from core.tools.tool_portfolio import ToolPortfolio
 
@@ -927,6 +957,68 @@ class CentralBrain:
         self.csrf_executor = CSRFExecutor(timeout_seconds=30)
         self.idor_executor = IDORExecutor(timeout_seconds=30)
         self.mass_assign_executor = MassAssignmentExecutor(timeout_seconds=30)
+        # ── Tier 1 executors ──
+        self.ssti_executor = SSTIExecutor(timeout_seconds=30)
+        self.cmdi_executor = CommandInjectionExecutor(timeout_seconds=60)
+        self.openredirect_executor = OpenRedirectExecutor(timeout_seconds=20)
+        self.oauth_executor = OAuthMisconfigExecutor(timeout_seconds=30)
+        self.captcha_executor = CAPTCHABypassExecutor(timeout_seconds=20)
+        self.password_policy_executor = PasswordPolicyExecutor(timeout_seconds=30)
+        self.ratelimit_executor = RateLimitExecutor(timeout_seconds=60)
+        self.loginjection_executor = LogInjectionExecutor(timeout_seconds=30)
+        self.backup_scanner_executor = BackupFileScannerExecutor(timeout_seconds=60)
+        # ── Tier 2 executors ──
+        self.sqli_advanced_executor = AdvancedSQLiExecutor(timeout_seconds=60)
+        self.xss_advanced_executor = AdvancedXSSExecutor(timeout_seconds=45)
+        self.jwt_advanced_executor = AdvancedJWTExecutor(timeout_seconds=45)
+        self.upload_advanced_executor = AdvancedFileUploadExecutor(timeout_seconds=60)
+        # ── Tier 3 executors ──
+        self.sca_executor = SCAExecutor(timeout_seconds=90)
+        self.typosquat_executor = TyposquatDetector(timeout_seconds=45)
+        self.waf_evasion_executor = WAFEvasionDetector(timeout_seconds=60)
+        # ── Tier 4 executors (LLM-powered) ──
+        self.sec_question_executor = SecurityQuestionSolverExecutor(timeout_seconds=120)
+        self.llm_password_executor = LLMPasswordDerivationExecutor(timeout_seconds=120)
+        self.llm_bizlogic_executor = LLMBusinessLogicExplorerExecutor(timeout_seconds=120)
+        # ── Tier 5 executors ──
+        self.mfa_bypass_executor = MFABypassExecutor(timeout_seconds=60)
+        self.crypto_weakness_executor = CryptoWeaknessDetector(timeout_seconds=60)
+        self.llm_content_executor = LLMContentAnalyzerExecutor(timeout_seconds=120)
+        # ── Tier 6 executors ──
+        self.stego_executor = SteganographyDetector(timeout_seconds=90)
+        self.subtitle_xss_executor = SubtitleXSSExecutor(timeout_seconds=60)
+        self.nested_encoding_executor = NestedEncodingSolver(timeout_seconds=60)
+        self.web3_executor = BlockchainWeb3Detector(timeout_seconds=60)
+        self.race_executor = RaceConditionExploiter(timeout_seconds=60)
+        self.hidden_resource_executor = HiddenResourceEnumerator(timeout_seconds=60)
+        self.gdpr_abuse_executor = GDPRAbuseDetector(timeout_seconds=60)
+        self.error_leak_executor = ErrorMessageLeakDetector(timeout_seconds=60)
+        self.encoding_misconfig_executor = EncodingMisconfigDetector(timeout_seconds=45)
+        # ── Tier 7 executors ──
+        self.smuggling_executor = HTTPRequestSmugglingExecutor(timeout_seconds=30)
+        self.deser_executor = InsecureDeserializationDetector(timeout_seconds=45)
+        self.cloud_bucket_executor = CloudBucketEnumerator(timeout_seconds=60)
+        self.takeover_executor = SubdomainTakeoverDetector(timeout_seconds=60)
+        self.ldap_executor = LDAPInjectionExecutor(timeout_seconds=45)
+        self.csp_executor = CSPBypassDetector(timeout_seconds=30)
+        self.cache_poison_executor = WebCachePoisoningExecutor(timeout_seconds=45)
+        self.dom_xss_executor = DOMXSSStaticAnalyzer(timeout_seconds=45)
+        self.saml_executor = SAMLFlawDetector(timeout_seconds=45)
+        self.prompt_injection_executor = PromptInjectionTester(timeout_seconds=60)
+        self.cicd_executor = CICDExposureScanner(timeout_seconds=60)
+        self.basic_auth_executor = BasicAuthBypassExecutor(timeout_seconds=45)
+        self.header_ratelimit_executor = HeaderRateLimitBypassExecutor(timeout_seconds=60)
+        # ── Tier 8 credentialed ──
+        self.aws_creds_executor = AWSCredentialedEnumerator(timeout_seconds=60)
+        self.azure_creds_executor = AzureCredentialedEnumerator(timeout_seconds=45)
+        self.gcp_creds_executor = GCPCredentialedEnumerator(timeout_seconds=45)
+        self.k8s_creds_executor = KubernetesRBACExecutor(timeout_seconds=60)
+        self.ci_secrets_executor = CIPipelineSecretExtractor(timeout_seconds=60)
+        # ── Tier 8 browser-runtime ──
+        self.live_dom_xss_executor = LiveDOMXSSExecutor(timeout_seconds=120)
+        self.live_postmsg_executor = LivePostMessageAbuseDetector(timeout_seconds=120)
+        self.live_clickjacking_executor = LiveClickjackingDetector(timeout_seconds=90)
+        self.live_csp_executor = LiveCSPBypassAttempt(timeout_seconds=90)
         self.executor_registry = {
             "sqli": self.sqli_executor,
             "sqli_basic_01": self.sqli_executor,
@@ -1012,18 +1104,183 @@ class CentralBrain:
             "csrf_method_01": self.csrf_executor,
             "csrf_samesite_01": self.csrf_executor,
             "csrf_referer_01": self.csrf_executor,
-            # SSTI
-            "ssti_basic_01": self.info_disc_executor,
-            "ssti_sandbox_01": self.info_disc_executor,
-            # Command injection
-            "cmdi_basic_01": self.info_disc_executor,
-            "cmdi_blind_01": self.info_disc_executor,
+            # SSTI (Tier 1)
+            "ssti_basic_01": self.ssti_executor,
+            "ssti_sandbox_01": self.ssti_executor,
+            # Command injection (Tier 1)
+            "cmdi_basic_01": self.cmdi_executor,
+            "cmdi_blind_01": self.cmdi_executor,
             # Deserialization
             "deser_java_01": self.info_disc_executor,
             "deser_php_01": self.info_disc_executor,
-            # Open redirect
-            "redirect_basic_01": self.info_disc_executor,
-            "redirect_param_01": self.info_disc_executor,
+            # Open redirect (Tier 1)
+            "redirect_basic_01": self.openredirect_executor,
+            "redirect_param_01": self.openredirect_executor,
+            "redirect_allowlist_bypass_01": self.openredirect_executor,
+            # OAuth misconfig (Tier 1)
+            "oauth_redirect_01": self.oauth_executor,
+            "oauth_state_01": self.oauth_executor,
+            "oauth_token_leak_01": self.oauth_executor,
+            # CAPTCHA bypass (Tier 1)
+            "captcha_bypass_01": self.captcha_executor,
+            "captcha_reuse_01": self.captcha_executor,
+            # Password policy (Tier 1)
+            "password_policy_01": self.password_policy_executor,
+            "password_strength_01": self.password_policy_executor,
+            # Rate limiting (Tier 1)
+            "ratelimit_login_01": self.ratelimit_executor,
+            "ratelimit_registration_01": self.ratelimit_executor,
+            "ratelimit_api_01": self.ratelimit_executor,
+            # Log injection (Tier 1)
+            "log_injection_01": self.loginjection_executor,
+            "log_forging_01": self.loginjection_executor,
+            # Backup / sensitive file exposure (Tier 1)
+            "backup_file_01": self.backup_scanner_executor,
+            "backup_directory_01": self.backup_scanner_executor,
+            "hidden_file_01": self.backup_scanner_executor,
+            "git_exposure_01": self.backup_scanner_executor,
+            "env_exposure_01": self.backup_scanner_executor,
+            # ── Tier 2 ──
+            # Advanced SQLi
+            "sqli_union_advanced_01": self.sqli_advanced_executor,
+            "sqli_schema_leak_01": self.sqli_advanced_executor,
+            "sqli_insert_01": self.sqli_advanced_executor,
+            "sqli_time_blind_advanced_01": self.sqli_advanced_executor,
+            # Advanced XSS (stored, bypass, header)
+            "xss_stored_advanced_01": self.xss_advanced_executor,
+            "xss_bypass_01": self.xss_advanced_executor,
+            "xss_header_injection_01": self.xss_advanced_executor,
+            "xss_api_only_01": self.xss_advanced_executor,
+            # Advanced JWT (key confusion, jku/jwk, kid)
+            "jwt_rs256_hs256_01": self.jwt_advanced_executor,
+            "jwt_jku_injection_01": self.jwt_advanced_executor,
+            "jwt_jwk_header_01": self.jwt_advanced_executor,
+            "jwt_kid_injection_01": self.jwt_advanced_executor,
+            # Advanced upload / LFI-via-param / zip-slip / symlink
+            "upload_zip_slip_advanced_01": self.upload_advanced_executor,
+            "upload_symlink_archive_01": self.upload_advanced_executor,
+            "lfi_via_param_01": self.upload_advanced_executor,
+            # ── Tier 3 ──
+            # SCA / dependency CVE scanning via OSV.dev
+            "sca_npm_01": self.sca_executor,
+            "sca_pypi_01": self.sca_executor,
+            "sca_composer_01": self.sca_executor,
+            "sca_rubygems_01": self.sca_executor,
+            "sca_maven_01": self.sca_executor,
+            "sca_go_01": self.sca_executor,
+            "sca_cargo_01": self.sca_executor,
+            "sca_manifest_exposed_01": self.sca_executor,
+            "sca_outdated_01": self.sca_executor,
+            "sca_cve_01": self.sca_executor,
+            # Typosquat
+            "sca_typosquat_01": self.typosquat_executor,
+            "sca_typosquat_pypi_01": self.typosquat_executor,
+            # WAF detection + evasion
+            "waf_detect_01": self.waf_evasion_executor,
+            "waf_bypass_01": self.waf_evasion_executor,
+            "waf_monitoring_bypass_01": self.waf_evasion_executor,
+            # ── Tier 4 (LLM-powered) ──
+            "auth_security_question_01": self.sec_question_executor,
+            "auth_password_reset_llm_01": self.sec_question_executor,
+            "auth_password_guess_01": self.llm_password_executor,
+            "auth_osint_password_01": self.llm_password_executor,
+            "bizlogic_llm_01": self.llm_bizlogic_executor,
+            "bizlogic_workflow_llm_01": self.llm_bizlogic_executor,
+            "bizlogic_gdpr_01": self.llm_bizlogic_executor,
+            "bizlogic_coupon_llm_01": self.llm_bizlogic_executor,
+            "bizlogic_price_llm_01": self.llm_bizlogic_executor,
+            # ── Tier 5 ──
+            "mfa_bypass_01": self.mfa_bypass_executor,
+            "mfa_brute_01": self.mfa_bypass_executor,
+            "mfa_disable_01": self.mfa_bypass_executor,
+            "mfa_backup_reuse_01": self.mfa_bypass_executor,
+            "crypto_weak_hash_01": self.crypto_weakness_executor,
+            "crypto_encoding_01": self.crypto_weakness_executor,
+            "crypto_random_01": self.crypto_weakness_executor,
+            "crypto_client_side_01": self.crypto_weakness_executor,
+            "content_analysis_01": self.llm_content_executor,
+            "hidden_info_01": self.llm_content_executor,
+            "js_secrets_01": self.llm_content_executor,
+            "deprecated_interface_01": self.llm_content_executor,
+            # ── Tier 6 ──
+            "stego_lsb_01": self.stego_executor,
+            "stego_appended_01": self.stego_executor,
+            "stego_exif_01": self.stego_executor,
+            "video_subtitle_xss_01": self.subtitle_xss_executor,
+            "subtitle_upload_01": self.subtitle_xss_executor,
+            "nested_encoding_01": self.nested_encoding_executor,
+            "encoding_chain_01": self.nested_encoding_executor,
+            "web3_rpc_exposed_01": self.web3_executor,
+            "web3_privkey_leak_01": self.web3_executor,
+            "web3_mnemonic_leak_01": self.web3_executor,
+            "web3_abi_exposed_01": self.web3_executor,
+            "race_condition_parallel_01": self.race_executor,
+            "hidden_resource_enum_01": self.hidden_resource_executor,
+            "hidden_product_01": self.hidden_resource_executor,
+            "gdpr_no_auth_01": self.gdpr_abuse_executor,
+            "gdpr_cross_user_01": self.gdpr_abuse_executor,
+            "error_leak_stack_01": self.error_leak_executor,
+            "error_leak_path_01": self.error_leak_executor,
+            "error_leak_credential_01": self.error_leak_executor,
+            "error_leak_email_01": self.error_leak_executor,
+            "encoding_utf7_xss_01": self.encoding_misconfig_executor,
+            "encoding_double_url_01": self.encoding_misconfig_executor,
+            "encoding_overlong_utf8_01": self.encoding_misconfig_executor,
+            # ── Tier 7 ──
+            "smuggling_cl_te_01": self.smuggling_executor,
+            "smuggling_te_cl_01": self.smuggling_executor,
+            "smuggling_te_te_01": self.smuggling_executor,
+            "deser_java_advanced_01": self.deser_executor,
+            "deser_php_advanced_01": self.deser_executor,
+            "deser_python_pickle_01": self.deser_executor,
+            "deser_dotnet_01": self.deser_executor,
+            "cloud_s3_public_01": self.cloud_bucket_executor,
+            "cloud_azure_public_01": self.cloud_bucket_executor,
+            "cloud_gcs_public_01": self.cloud_bucket_executor,
+            "cloud_bucket_exists_01": self.cloud_bucket_executor,
+            "subdomain_takeover_01": self.takeover_executor,
+            "ldap_injection_01": self.ldap_executor,
+            "ldap_wildcard_bypass_01": self.ldap_executor,
+            "csp_missing_01": self.csp_executor,
+            "csp_unsafe_inline_01": self.csp_executor,
+            "csp_wildcard_01": self.csp_executor,
+            "csp_bypassable_cdn_01": self.csp_executor,
+            "cache_poison_unkeyed_header_01": self.cache_poison_executor,
+            "cache_poison_confirmed_01": self.cache_poison_executor,
+            "dom_xss_static_01": self.dom_xss_executor,
+            "saml_unsigned_01": self.saml_executor,
+            "saml_comment_injection_01": self.saml_executor,
+            "prompt_injection_01": self.prompt_injection_executor,
+            "cicd_exposed_01": self.cicd_executor,
+            "cicd_jenkins_01": self.cicd_executor,
+            "cicd_gitlab_01": self.cicd_executor,
+            "cicd_docker_registry_01": self.cicd_executor,
+            "basic_auth_bypass_01": self.basic_auth_executor,
+            "rate_limit_header_bypass_01": self.header_ratelimit_executor,
+            # ── Tier 8: credentialed cloud + K8s + CI ──
+            "aws_creds_enum_01": self.aws_creds_executor,
+            "aws_iam_readable_01": self.aws_creds_executor,
+            "aws_s3_full_list_01": self.aws_creds_executor,
+            "aws_lambda_readable_01": self.aws_creds_executor,
+            "azure_creds_enum_01": self.azure_creds_executor,
+            "azure_graph_users_01": self.azure_creds_executor,
+            "azure_resource_groups_01": self.azure_creds_executor,
+            "gcp_creds_enum_01": self.gcp_creds_executor,
+            "gcp_projects_list_01": self.gcp_creds_executor,
+            "gcp_buckets_list_01": self.gcp_creds_executor,
+            "k8s_rbac_audit_01": self.k8s_creds_executor,
+            "k8s_secrets_readable_01": self.k8s_creds_executor,
+            "k8s_pod_exec_01": self.k8s_creds_executor,
+            "k8s_cluster_admin_01": self.k8s_creds_executor,
+            "ci_secret_extract_01": self.ci_secrets_executor,
+            "jenkins_script_01": self.ci_secrets_executor,
+            "gitlab_secret_leak_01": self.ci_secrets_executor,
+            # ── Tier 8: browser-runtime ──
+            "dom_xss_live_01": self.live_dom_xss_executor,
+            "reflected_xss_live_01": self.live_dom_xss_executor,
+            "postmessage_abuse_01": self.live_postmsg_executor,
+            "clickjacking_live_01": self.live_clickjacking_executor,
+            "csp_live_bypass_01": self.live_csp_executor,
             # CRLF
             "crlf_basic_01": self.info_disc_executor,
             "crlf_header_01": self.info_disc_executor,
@@ -3465,6 +3722,34 @@ class CentralBrain:
             "proto_pollution": "MEDIUM", "ssrf": "HIGH", "xxe": "HIGH",
             "csrf": "MEDIUM", "idor": "HIGH", "mass_assignment": "HIGH",
             "bizlogic": "MEDIUM", "race_condition": "MEDIUM",
+            # Tier 1
+            "ssti": "CRITICAL", "cmdi": "CRITICAL", "redirect": "MEDIUM",
+            "oauth": "HIGH", "captcha": "MEDIUM", "password": "MEDIUM",
+            "ratelimit": "MEDIUM", "log": "MEDIUM", "backup": "HIGH",
+            "hidden": "HIGH", "git": "CRITICAL", "env": "CRITICAL",
+            # Tier 2 prefixes
+            "sqli": "CRITICAL", "xss": "HIGH", "lfi": "HIGH",
+            # Tier 3
+            "sca": "HIGH", "waf": "MEDIUM",
+            # Tier 5
+            "mfa": "CRITICAL", "crypto": "HIGH", "content": "MEDIUM",
+            # Tier 6
+            "stego": "MEDIUM", "video": "MEDIUM", "subtitle": "MEDIUM",
+            "nested": "MEDIUM", "web3": "CRITICAL", "race": "HIGH",
+            "hidden": "MEDIUM", "gdpr": "HIGH", "error": "MEDIUM",
+            "encoding": "HIGH",
+            # Tier 7
+            "smuggling": "CRITICAL", "deser": "CRITICAL", "cloud": "HIGH",
+            "subdomain": "HIGH", "ldap": "HIGH", "csp": "MEDIUM",
+            "cache": "HIGH", "dom": "MEDIUM", "saml": "CRITICAL",
+            "prompt": "HIGH", "cicd": "HIGH", "basic": "HIGH",
+            "rate": "MEDIUM",
+            # Tier 8
+            "aws": "CRITICAL", "azure": "CRITICAL", "gcp": "CRITICAL",
+            "k8s": "CRITICAL", "ci": "CRITICAL",
+            "jenkins": "CRITICAL", "gitlab": "HIGH",
+            "reflected": "HIGH", "postmessage": "HIGH",
+            "clickjacking": "MEDIUM",
         }
         test_prefix = test_id.split("_")[0] if "_" in test_id else test_id
         default_sev = SEVERITY_MAP.get(test_prefix, "MEDIUM")

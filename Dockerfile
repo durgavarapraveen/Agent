@@ -66,6 +66,7 @@ RUN apt-get update && \
     python3-dev \
     python3-venv \
     python3-setuptools \
+    python3-pkg-resources \
     build-essential \
     libffi-dev \
     libpq-dev \
@@ -135,7 +136,14 @@ RUN apt-get update && \
 # Python virtual environment
 # ============================================================
 RUN python3 -m venv /opt/venv
-RUN /opt/venv/bin/pip install --upgrade pip setuptools wheel
+# Pin setuptools<81: setuptools 81+ removed the `pkg_resources` module, which
+# dirsearch (installed via apt but running under the venv python) still imports
+# and errors out with `ModuleNotFoundError: No module named 'pkg_resources'`.
+RUN /opt/venv/bin/pip install --upgrade pip wheel && \
+    /opt/venv/bin/pip install --no-cache-dir 'setuptools<81'
+
+# Runtime sanity check — fail the build if pkg_resources cannot be imported.
+RUN /opt/venv/bin/python3 -c "import pkg_resources; print('pkg_resources OK')"
 # CFLAGS=-std=gnu17: Kali ships Python 3.14 + a C23-default GCC, under which the
 # legacy reportlab<4.0 C extension fails to compile (it uses `bool` as an
 # identifier). Forcing C17 lets it build.

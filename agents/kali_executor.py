@@ -402,6 +402,25 @@ class KaliDockerExecutor:
                 return {"status": "timeout", "returncode": r.returncode,
                         "error": f"Command exceeded {timeout}s (killed in-container)",
                         "stdout": r.stdout, "stderr": r.stderr}
+            if r.returncode != 0 and "ModuleNotFoundError" in (r.stderr or "") and "pkg_resources" in (r.stderr or ""):
+                # dirsearch (and a few other apt-installed Python tools) need
+                # `pkg_resources`, which recent Kali/Debian split out. Self-heal
+                # the running container so this scan continues without a rebuild.
+                logger.warning(f"[Kali] pkg_resources missing in {container} — installing setuptools and retrying")
+                # Pin <81 because setuptools 81 removed the pkg_resources module.
+                fix_cmd = (
+                    f'docker exec {container} bash -c '
+                    f'"/opt/venv/bin/pip install --no-cache-dir \'setuptools<81\' >/dev/null 2>&1 '
+                    f'|| pip3 install --break-system-packages --no-cache-dir \'setuptools<81\' >/dev/null 2>&1 '
+                    f'|| true"'
+                )
+                try:
+                    subprocess.run(fix_cmd, shell=True, capture_output=True, timeout=90)
+                except Exception:
+                    pass
+                r = subprocess.run(
+                    full, shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=grace
+                )
             if r.returncode != 0:
                 logger.info(f"[Kali] rc={r.returncode} cmd={command} stderr={r.stderr}")
             return {

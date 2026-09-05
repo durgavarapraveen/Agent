@@ -135,8 +135,8 @@ function LiveScanDetail({ jobId }) {
     // Initial fetch via REST
     const fetchAll = () => {
       api.getScanJob(jobId).then(setJob).catch(() => {});
-      api.getLiveProgress().then(setProgress).catch(() => {});
-      api.getLiveResults().then(setResults).catch(() => {});
+      api.getLiveProgress(jobId).then(setProgress).catch(() => {});
+      api.getLiveResults(jobId).then(setResults).catch(() => {});
       api.getScanLogs(jobId, 300).then(setLogs).catch(() => {});
     };
     fetchAll();

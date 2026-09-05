@@ -134,8 +134,8 @@ export const api = {
   getCampaigns: () => request("/api/campaigns"),
   runCampaign: (data) => post("/api/campaigns/run", data),
   getCampaignProgress: () => request("/api/campaigns/progress"),
-  getLiveProgress: () => request("/api/scans/live-progress").catch(() => ({})),
-  getLiveResults: () => request("/api/scans/live-results").catch(() => ({
+  getLiveProgress: (scanId) => request(`/api/scans/live-progress${scanId ? `?scan_id=${encodeURIComponent(scanId)}` : ""}`).catch(() => ({})),
+  getLiveResults: (scanId) => request(`/api/scans/live-results${scanId ? `?scan_id=${encodeURIComponent(scanId)}` : ""}`).catch(() => ({
     recon: { subdomains: [], endpoints: [], technologies: {}, ports: [], ips: [] },
     vulnerabilities: [], exploits: [], captured_requests: [],
   })),
