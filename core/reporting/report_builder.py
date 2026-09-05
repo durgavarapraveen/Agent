@@ -263,7 +263,11 @@ class CustomReportBuilder:
 
     def export_pdf(self, scan_id: str, target: str, vulnerabilities: List[Dict[str, Any]], mask_sensitive: bool = True, output_path: str = None) -> str:
         """Generate professional PDF report using ReportLab platypus with logo injection."""
-        out_file = Path(output_path) if output_path else Path(f"reports/{scan_id}/report.pdf")
+        if output_path:
+            out_file = Path(output_path)
+        else:
+            from core.common.reports_config import reports_dir as _rd
+            out_file = _rd() / scan_id / "report.pdf"
         out_file.parent.mkdir(parents=True, exist_ok=True)
         masked_target = mask_sensitive_data(target, mask_sensitive)
 

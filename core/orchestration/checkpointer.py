@@ -10,7 +10,11 @@ logger = logging.getLogger(__name__)
 class Checkpointer:
     """Handles saving and restoring the autonomous pentest state."""
 
-    def __init__(self, checkpoints_dir: str = "reports/checkpoints"):
+    def __init__(self, checkpoints_dir: str = None):
+        from core.common.reports_config import reports_enabled, reports_dir
+        self._reports_enabled = reports_enabled()
+        if checkpoints_dir is None:
+            checkpoints_dir = str(reports_dir() / "checkpoints")
         self.checkpoints_dir = Path(checkpoints_dir)
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
 

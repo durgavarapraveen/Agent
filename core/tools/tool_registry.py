@@ -432,6 +432,7 @@ class ToolRegistry:
             ("masscan", "Fast port scanning"),
             ("subfinder", "Passive subdomain discovery"),
             ("assetfinder", "Asset discovery"),
+            ("amass", "In-depth attack surface + subdomain enumeration"),
             ("dnsenum", "DNS enumeration"),
             ("fierce", "DNS reconnaissance"),
             ("dig", "DNS queries"),

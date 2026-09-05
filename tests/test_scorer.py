@@ -6,7 +6,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from vuln_intel.scorer import (compute_score, score_cve, severity_from_score,
+from core.intelligence.vuln_intel.scorer import (compute_score, score_cve, severity_from_score,
                               score_security_header_severity,
                               W_CVSS, W_EPSS, W_KEV)
 

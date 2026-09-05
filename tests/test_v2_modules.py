@@ -410,7 +410,7 @@ class TestFeedbackLoopEngine:
 # ---------------------------------------------------------------------------
 # 6. ConvergenceEngine v2
 # ---------------------------------------------------------------------------
-from core.coverage.convergence_engine_v2 import ConvergenceEngine, ConvergenceStatus
+from core.coverage.convergence_engine import ConvergenceEngine, ConvergenceStatus
 
 
 class TestConvergenceEngine:

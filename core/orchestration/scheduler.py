@@ -15,7 +15,9 @@ from dataclasses import dataclass, field, asdict
 
 logger = logging.getLogger(__name__)
 
-SCHEDULES_FILE = Path("reports/scan_schedules.json")
+# Path is resolved at scheduler runtime via reports_config.
+from core.common.reports_config import reports_dir as _rd
+SCHEDULES_FILE = _rd() / "scan_schedules.json"
 
 
 @dataclass
@@ -179,7 +181,8 @@ class ScanScheduler:
             await brain.run_main_loop(phases=schedule.phases)
 
             # Find the latest report
-            report_dir = Path("reports")
+            from core.common.reports_config import reports_dir as _rd2
+            report_dir = _rd2()
             reports = sorted(
                 report_dir.glob("pentest_*.json"),
                 key=lambda p: p.stat().st_mtime, reverse=True

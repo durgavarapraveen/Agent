@@ -3,6 +3,8 @@ import { useNavigate } from "react-router-dom";
 import { api, createScanSocket } from "../api";
 import ActivityLog from "../components/ActivityLog";
 import ReconPanel from "../components/ReconPanel";
+import AccessGainedPanel from "../components/AccessGainedPanel";
+import ArtifactsPanel from "../components/ArtifactsPanel";
 import { methodColor, fmtDate } from "../components/utils";
 
 const PHASES = ["RECON", "ACTIVE_SCANNING", "EXPLOITATION", "REPORTING"];
@@ -207,7 +209,9 @@ function LiveScanDetail({ jobId }) {
     { id: "overview", label: "Overview" },
     { id: "recon", label: `Recon (${recon.subdomains.length + recon.endpoints.length})` },
     { id: "vulns", label: `Vulnerabilities (${vulns.length})` },
+    { id: "access", label: "Access Gained" },
     { id: "exploits", label: `Exploits (${exploits.length})` },
+    { id: "artifacts", label: "Artifacts / PoC" },
     { id: "activity", label: "Agent Activity" },
     { id: "requests", label: `Requests (${requests.length})` },
     { id: "logs", label: `Logs (${logs.total})` },
@@ -270,8 +274,10 @@ function LiveScanDetail({ jobId }) {
       {tab === "overview" && <OverviewSection recon={recon} vulns={vulns} exploits={exploits} progress={progress} />}
       {tab === "recon" && <ReconPanel context={recon} scanId={jobId} />}
       {tab === "vulns" && <VulnsSection vulns={vulns} />}
+      {tab === "access" && <AccessGainedPanel scanId={jobId} poll />}
       {tab === "exploits" && <ExploitsSection exploits={exploits} />}
       {tab === "activity" && <ActivityLog scanId={jobId} poll />}
+      {tab === "artifacts" && <ArtifactsPanel scanId={jobId} poll />}
       {tab === "requests" && <RequestsSection requests={requests} />}
       {tab === "logs" && <LogsSection logs={logs} logRef={logRef} jobId={jobId} />}
     </div>

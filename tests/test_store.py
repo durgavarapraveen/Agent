@@ -2,7 +2,7 @@ import pytest
 import tempfile
 from pathlib import Path
 
-from knowledge.store import KnowledgeStore
+from core.knowledge.persistent_store import KnowledgeStore
 
 @pytest.fixture
 def temp_db():

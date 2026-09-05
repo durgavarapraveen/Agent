@@ -18,7 +18,7 @@ import json
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
 
-from core.domain.experiment_v2 import SecurityExperiment
+from core.domain.experiment import SecurityExperiment
 from core.execution.executors.base import ExecutionResult, ExecutionStatus, ExecutorBase
 
 logger = logging.getLogger(__name__)
@@ -136,9 +136,25 @@ class GenericHTTPExecutor(ExecutorBase):
     def _auth_headers(self, experiment: SecurityExperiment) -> Dict[str, str]:
         headers = {"User-Agent": "AntiGravity-V2/1.0"}
         token = experiment.input_parameters.get("auth_token") or experiment.input_parameters.get("token")
+        cookie = experiment.input_parameters.get("cookie")
+        # Fallback: pull JWT/cookies captured mid-scan by AgenticExecutor from the
+        # shared-context registry populated by CentralBrain. Without this, every
+        # executor probes authenticated endpoints unauthenticated even when we
+        # already hold an admin JWT.
+        if not token or not cookie:
+            try:
+                from core.execution.executors.auth_registry import get_active_auth
+                active = get_active_auth() or {}
+                if not token:
+                    auth_hdr = (active.get("headers") or {}).get("Authorization", "")
+                    if auth_hdr.startswith("Bearer "):
+                        token = auth_hdr[len("Bearer "):]
+                if not cookie and active.get("cookies"):
+                    cookie = "; ".join(f"{k}={v}" for k, v in active["cookies"].items())
+            except Exception:
+                pass
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        cookie = experiment.input_parameters.get("cookie")
         if cookie:
             headers["Cookie"] = cookie
         return headers

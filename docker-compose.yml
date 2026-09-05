@@ -21,6 +21,14 @@ services:
       POSTGRES_PASSWORD: pentesting_password
       DATABASE_URL: postgresql://pentesting_user:pentesting_password@postgres:5432/pentesting_db
       KALI_CONTAINER: kali-pentesting
+      API_PORT: "8900"
+      API_HOST: "0.0.0.0"
+
+    # Pass LLM / integration API keys through to the container.
+    # File missing → all vars default to blank; startup continues.
+    env_file:
+      - path: .env
+        required: false
 
     ports:
       - "8900:8900"
@@ -79,6 +87,11 @@ services:
       POSTGRES_PASSWORD: pentesting_password
 
       DATABASE_URL: postgresql://pentesting_user:pentesting_password@postgres:5432/pentesting_db
+
+    # LLM / integration keys propagated in; missing file is not fatal.
+    env_file:
+      - path: .env
+        required: false
 
     volumes:
       # Project source

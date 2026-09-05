@@ -3,4 +3,4 @@ from core.coverage.payload_catalog import PayloadCatalog, Payload, build_default
 from core.coverage.hypothesis_engine import HypothesisEngine
 from core.coverage.identity_coverage import IdentityCoverageEngine
 from core.coverage.feedback_loop import FeedbackLoopEngine, ResponseClassifier, ErrorMiner, PayloadAdapter
-from core.coverage.convergence_engine_v2 import ConvergenceEngine
+from core.coverage.convergence_engine import ConvergenceEngine

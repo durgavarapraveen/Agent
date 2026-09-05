@@ -48,4 +48,6 @@ RUN mkdir -p reports data/db loot .audit_logs .antigravity
 
 EXPOSE 8900
 
-CMD ["uvicorn", "ui.api.server:app", "--host", "0.0.0.0", "--port", "8900"]
+# API_PORT / API_HOST honored by ui/api/server.py's __main__ block; the CMD
+# below just launches uvicorn directly (compose sets API_PORT=8900 for parity).
+CMD ["sh", "-c", "uvicorn ui.api.server:app --host ${API_HOST:-0.0.0.0} --port ${API_PORT:-8900}"]

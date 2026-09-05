@@ -1,6 +1,6 @@
 import unittest
 from core.attack_surface.route_normalizer import RouteNormalizer
-from core.attack_surface.endpoint_inventory_v2 import EndpointInventoryV2
+from core.attack_surface.endpoint_inventory import EndpointInventoryV2
 from core.attack_surface.graph import AttackSurfaceGraph
 from core.domain.endpoint import Endpoint
 from core.domain.request import CapturedRequest

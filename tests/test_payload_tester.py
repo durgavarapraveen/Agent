@@ -5,7 +5,7 @@ Unit tests for core/payload_tester.py defensive vulnerability verification modul
 import unittest
 from unittest.mock import patch, MagicMock
 from core.exploitation.payload_tester import PayloadTester
-from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
+from core.memory.shared_context import SharedContextV2 as SharedContext
 
 
 

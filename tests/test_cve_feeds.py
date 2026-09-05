@@ -6,8 +6,8 @@ import json
 import unittest
 from unittest.mock import patch, MagicMock
 
-from vuln_intel.feeds import CVEDatabase
-from vuln_intel.scorer import enrich_finding_with_cve
+from core.intelligence.vuln_intel.feeds import CVEDatabase
+from core.intelligence.vuln_intel.scorer import enrich_finding_with_cve
 
 
 class TestCVEFeeds(unittest.TestCase):

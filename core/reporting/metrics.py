@@ -25,12 +25,17 @@ logger = logging.getLogger(__name__)
 class MetricsTracker:
     """Collects counters/timers and renders a live dashboard."""
 
-    def __init__(self, target: str = "", out_dir: str = "reports",
+    def __init__(self, target: str = "", out_dir: str = None,  # noqa: ARG002 — kept for API compat
                  clock: Callable[[], float] = time.time,
                  alert_cb: Optional[Callable[[str, Dict], None]] = None):
         self.target = target
+        from core.common.reports_config import reports_enabled, reports_dir
+        self._reports_enabled = reports_enabled()
+        if out_dir is None:
+            out_dir = str(reports_dir())
         self.out_dir = Path(out_dir)
-        self.out_dir.mkdir(exist_ok=True)
+        if self._reports_enabled:
+            self.out_dir.mkdir(parents=True, exist_ok=True)
         self._clock = clock
         self._alert_cb = alert_cb
         self._lock = threading.Lock()
@@ -120,6 +125,8 @@ class MetricsTracker:
     # ── outputs ──
 
     def write_json(self, name: str = "dashboard.json") -> str:
+        if not self._reports_enabled:
+            return ""
         path = self.out_dir / name
         path.write_text(json.dumps(self.snapshot(), indent=2, default=str),
                         encoding="utf-8")
@@ -168,6 +175,8 @@ class MetricsTracker:
 </main></body></html>""")
 
     def _write(self, name: str, content: str) -> str:
+        if not self._reports_enabled:
+            return ""
         path = self.out_dir / name
         path.write_text(content, encoding="utf-8")
         return str(path)

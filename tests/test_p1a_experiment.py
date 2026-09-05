@@ -1,9 +1,9 @@
 import unittest
 import uuid
 
-from core.domain.experiment_v2 import SecurityExperiment, ExperimentState
+from core.domain.experiment import SecurityExperiment, ExperimentState
 from core.domain.task_state_machine import TaskStateMachine, TaskState
-from core.scheduling.experiment_scheduler_v2 import ExperimentScheduler
+from core.scheduling.experiment_scheduler import ExperimentScheduler
 from core.scheduling.duplicate_detector import DuplicateDetector
 
 

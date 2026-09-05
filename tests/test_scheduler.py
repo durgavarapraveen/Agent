@@ -1,7 +1,7 @@
 import pytest
 from core.common.schemas import TaskSpec, CapabilityType, TaskStatus
 from core.orchestration.task_manager import TaskManager
-from orchestrator.scheduler import Scheduler
+from core.orchestration.legacy_scheduler import Scheduler
 
 @pytest.fixture
 def task_manager():

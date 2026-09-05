@@ -6,9 +6,9 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from compliance.mapper import ComplianceMapper
-from compliance.reporter import ComplianceReporter
-from compliance.frameworks import category_for_cwe, available_frameworks
+from core.compliance.mapper import ComplianceMapper
+from core.compliance.reporter import ComplianceReporter
+from core.compliance.frameworks import category_for_cwe, available_frameworks
 
 
 class TestCWECategory(unittest.TestCase):

@@ -7,17 +7,17 @@ from core.security.capability_registry import CapabilityRegistry, CapabilityDefi
 from core.coverage.security_test_catalog import build_default_catalog
 from core.coverage.applicability_engine import ApplicabilityEngine
 from core.coverage.coverage_matrix import CoverageMatrix, CoverageState
-from core.coverage.convergence_engine_v2 import ConvergenceEngine
-from core.domain.experiment_v2 import SecurityExperiment
+from core.coverage.convergence_engine import ConvergenceEngine
+from core.domain.experiment import SecurityExperiment
 from core.execution.executors.base import ExecutionResult, ExecutionStatus, ExecutorBase
-from core.execution.execution_pipeline_v2 import ExecutionPipelineV2
+from core.execution.execution_pipeline import ExecutionPipelineV2
 from core.findings.finding import Finding, FindingState
 from core.findings.finding_store import FindingStore
 from core.tools.tool_portfolio import ToolPortfolio
 from core.reasoning.hypothesis_engine import HypothesisEngine
 from core.reporting.coverage_report import CoverageReport
 from core.knowledge.knowledge_graph import KnowledgeGraph
-from core.attack_surface.endpoint_inventory_v2 import EndpointInventoryV2
+from core.attack_surface.endpoint_inventory import EndpointInventoryV2
 
 
 JUICE_SHOP_ENDPOINTS = [
@@ -239,7 +239,7 @@ class TestEdgeCases(unittest.TestCase):
         self.assertTrue(result.success)
 
     def test_duplicate_experiment_scheduler(self):
-        from core.scheduling.experiment_scheduler_v2 import ExperimentScheduler
+        from core.scheduling.experiment_scheduler import ExperimentScheduler
         sched = ExperimentScheduler()
         exp1 = SecurityExperiment(hypothesis_id="h1", endpoint_id="ep1", capability="sqli", identity_id="admin")
         exp2 = SecurityExperiment(hypothesis_id="h1", endpoint_id="ep1", capability="sqli", identity_id="admin")

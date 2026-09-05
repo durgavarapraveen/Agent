@@ -569,14 +569,29 @@ class DeepSeekProvider(LLMProvider):
         if not self.session:
             self.session = httpx.AsyncClient(timeout=self.timeout)
 
-        return await self.session.post(
-            f"{self.base_url}{endpoint}",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-        )
+        # Retry transient network failures (DNS glitches, connection resets).
+        # DeepSeek's endpoint occasionally fails getaddrinfo on Windows during
+        # long scans — one immediate retry after a short backoff resolves it.
+        import asyncio as _aio
+        last_exc = None
+        for attempt in range(3):
+            try:
+                return await self.session.post(
+                    f"{self.base_url}{endpoint}",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+            except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError,
+                    httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+                last_exc = e
+                if attempt < 2:
+                    await _aio.sleep(0.5 * (2 ** attempt))  # 0.5s, 1s
+                    continue
+                raise
+        raise last_exc  # unreachable, keeps type checker happy
 
     async def generate_response(
         self, prompt: str, system: Optional[str] = None, max_tokens: int = 1024,
@@ -1185,7 +1200,7 @@ async def demo():
         primary_provider=ProviderType.DEEPSEEK,
         fallback_providers=[ProviderType.GROQ, ProviderType.OLLAMA],
         max_budget_usd=50.0,
-        deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", "sk-..."),
+        deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", ""),
         groq_api_key=os.getenv("GROQ_API_KEY", ""),
     )
     

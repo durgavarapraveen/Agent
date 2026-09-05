@@ -1,7 +1,7 @@
 import logging
 from core.common.llm_schemas import LLMDecision, LLMHypothesis
-from core.intelligence.decision_guard import DecisionGuard
-from core.memory.shared_context_v2 import SharedContextV2
+from core.decisions.decision_guard import DecisionGuardV2 as DecisionGuard
+from core.memory.shared_context import SharedContextV2
 from core.memory.failure_store import FailureStore
 from core.memory.strategy_store import StrategyStore
 from core.intelligence.llm_context_builder import LLMContextBuilder

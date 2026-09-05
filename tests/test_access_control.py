@@ -4,7 +4,7 @@ import io
 
 from core.access_control.matrix_engine import MatrixEngine
 from core.identity.identity_manager import Identity
-from core.memory.shared_context_v2 import SharedContextV2
+from core.memory.shared_context import SharedContextV2
 
 class MockRequestReplayer:
     def replay(self, request_node, identity_id=None):

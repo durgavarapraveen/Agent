@@ -1,1 +1,1 @@
-from core.execution.execution_pipeline_v2 import ExecutionPipelineV2 as ExecutionPipeline, PipelineResult as ExecutionResult, PipelineStage
+from core.execution.execution_pipeline import ExecutionPipelineV2 as ExecutionPipeline, PipelineResult as ExecutionResult, PipelineStage

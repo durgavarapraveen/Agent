@@ -1,5 +1,5 @@
 from core.domain.base import DomainModel
-from pydantic import Field, validator
+from pydantic import Field, field_validator
 from datetime import datetime
 from typing import Optional, Dict
 
@@ -15,7 +15,8 @@ class Session(DomainModel):
     valid: bool = Field(default=True)
     validation_method: str = Field(default="unknown")
 
-    @validator('identity_id')
+    @field_validator('identity_id')
+    @classmethod
     def validate_identity_id(cls, v):
         if not v or not isinstance(v, str):
             raise ValueError("Session identity_id must be a valid string")

@@ -6,7 +6,7 @@ import os
 
 from core.coverage.coverage_engine import CoverageEngine
 from core.domain.coverage import TestState
-from core.memory.shared_context_v2 import SharedContextV2
+from core.memory.shared_context import SharedContextV2
 
 logging.basicConfig(level=logging.INFO)
 

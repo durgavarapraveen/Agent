@@ -85,6 +85,14 @@ def _normalize_location(loc: str) -> str:
     return loc
 
 
+def _host_only(loc: str) -> str:
+    """Strip URL down to host — used when the finding's category makes it a
+    site-level fact ('ftp_listing on demo.owasp-juice.shop') and the path
+    variance ('/ftp/' vs '/ftp') should not create false-negative dedup."""
+    loc = _normalize_location(loc)
+    return loc.split("/")[0] if loc else ""
+
+
 def finding_uid(scan_id: str, v: Dict[str, Any]) -> str:
     """
     Deterministic finding id, ALWAYS namespaced by the run's scan_id.
@@ -99,12 +107,15 @@ def finding_uid(scan_id: str, v: Dict[str, Any]) -> str:
     cve = str(v.get("cve_id") or "").upper()
 
     category = _vuln_category(title_raw)
-    norm_loc = _normalize_location(loc_raw)
 
     if category:
-        content = "|".join([vtype, category, norm_loc, cve])
+        # Category-matched findings are site-level facts — collapse path
+        # variance and drop the free-form `type` field so different pipelines
+        # ("INFORMATION_DISCLOSURE" vs "ENDPOINT") for the same finding don't
+        # produce distinct hashes.
+        content = "|".join([category, _host_only(loc_raw), cve])
     else:
-        content = "|".join([vtype, title_raw, norm_loc, cve])
+        content = "|".join([vtype, title_raw, _normalize_location(loc_raw), cve])
     h = hashlib.sha1(content.encode("utf-8", "ignore")).hexdigest()[:16]
     return f"{scan_id}::{h}"
 
@@ -529,8 +540,134 @@ def _init_schema():
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     PRIMARY KEY (scan_id, key)
                 );
+
+                CREATE TABLE IF NOT EXISTS scan_artifacts (
+                    id SERIAL PRIMARY KEY,
+                    scan_id TEXT REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL,
+                    name TEXT DEFAULT '',
+                    mime_type TEXT DEFAULT 'application/octet-stream',
+                    content BYTEA NOT NULL,
+                    size_bytes INT NOT NULL DEFAULT 0,
+                    metadata JSONB DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_scan_artifacts_scan ON scan_artifacts(scan_id);
+                CREATE INDEX IF NOT EXISTS idx_scan_artifacts_kind ON scan_artifacts(scan_id, kind);
+
+                CREATE TABLE IF NOT EXISTS auth_bypasses (
+                    id SERIAL PRIMARY KEY,
+                    scan_id TEXT REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    host TEXT NOT NULL,
+                    method TEXT NOT NULL,
+                    login_url TEXT NOT NULL,
+                    technique TEXT NOT NULL,        -- 'sqli_bypass' | 'mass_assign' | 'default_creds' | 'credential_replay' | 'sqlmap_dump' | 'hash_crack'
+                    username TEXT DEFAULT '',
+                    password TEXT DEFAULT '',
+                    payload TEXT DEFAULT '',        -- the exact request body / payload that worked
+                    token TEXT DEFAULT '',          -- captured JWT / session token (may be long)
+                    response_status INT DEFAULT 0,
+                    response_snippet TEXT DEFAULT '',  -- proof of entry (JWT header + role)
+                    role TEXT DEFAULT '',           -- decoded role if JWT
+                    severity TEXT DEFAULT 'critical',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    dedup_key TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_auth_bypass_scan ON auth_bypasses(scan_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_auth_bypass_dedup ON auth_bypasses(scan_id, dedup_key);
             """)
             conn.commit()
+
+            # ── One-shot dedupe migration ─────────────────────────────
+            # post_exploit_data and captured_requests were being INSERTed
+            # every time the live_results singleton was refreshed, so a
+            # single scan's credentials/requests could appear 100+ times.
+            # Delete dupes (keep MIN(id)), then add unique indexes so
+            # ON CONFLICT DO NOTHING can prevent future dupes.
+            try:
+                cur.execute("""
+                    DELETE FROM post_exploit_data a
+                    USING post_exploit_data b
+                    WHERE a.id > b.id
+                      AND a.scan_id  = b.scan_id
+                      AND a.data_type= b.data_type
+                      AND a.title    = b.title
+                      AND md5(a.details::text) = md5(b.details::text);
+                """)
+                cur.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS ux_post_exploit_dedup
+                    ON post_exploit_data(scan_id, data_type, title, md5(details::text));
+                """)
+                cur.execute("""
+                    DELETE FROM captured_requests a
+                    USING captured_requests b
+                    WHERE a.id > b.id
+                      AND a.scan_id = b.scan_id
+                      AND a.method  = b.method
+                      AND a.url     = b.url
+                      AND a.status  = b.status
+                      AND COALESCE(a.post_data,'') = COALESCE(b.post_data,'');
+                """)
+                cur.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS ux_captured_requests_dedup
+                    ON captured_requests(scan_id, method, url, status,
+                                          md5(COALESCE(post_data, '')));
+                """)
+                # tool_outputs — same (tool, target, stdout) inserted repeatedly
+                cur.execute("""
+                    DELETE FROM tool_outputs a
+                    USING tool_outputs b
+                    WHERE a.id > b.id
+                      AND a.scan_id   = b.scan_id
+                      AND a.tool_name = b.tool_name
+                      AND a.target    = b.target
+                      AND md5(COALESCE(a.stdout, '')) = md5(COALESCE(b.stdout, ''));
+                """)
+                cur.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS ux_tool_outputs_dedup
+                    ON tool_outputs(scan_id, tool_name, target,
+                                     md5(COALESCE(stdout, '')));
+                """)
+                # tool_executions — same (tool, command, target) inserted repeatedly
+                cur.execute("""
+                    DELETE FROM tool_executions a
+                    USING tool_executions b
+                    WHERE a.id > b.id
+                      AND a.scan_id = b.scan_id
+                      AND a.tool    = b.tool
+                      AND a.command = b.command
+                      AND COALESCE(a.target, '') = COALESCE(b.target, '');
+                """)
+                cur.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS ux_tool_executions_dedup
+                    ON tool_executions(scan_id, tool, command, COALESCE(target, ''));
+                """)
+                # vulnerabilities — case-variant / path-variant duplicates of
+                # site-level findings ("FTP directory listing exposed —
+                # demo.owasp-juice.shop" with type=INFORMATION_DISCLOSURE vs
+                # information_disclosure vs ENDPOINT). Collapse by lower-title +
+                # host (strip scheme+port+path).
+                cur.execute("""
+                    WITH ranked AS (
+                        SELECT id,
+                               LEAST(id, MIN(id) OVER (
+                                 PARTITION BY scan_id,
+                                              LOWER(title),
+                                              regexp_replace(
+                                                LOWER(COALESCE(location, target, '')),
+                                                '^https?://([^/:?#]+).*$', '\\1')
+                               )) AS keep_id
+                        FROM vulnerabilities
+                    )
+                    DELETE FROM vulnerabilities v
+                    USING ranked r
+                    WHERE v.id = r.id AND v.id <> r.keep_id;
+                """)
+                conn.commit()
+            except Exception as _e:
+                logger.warning(f"[PGStore] dedupe migration warning (non-fatal): {_e}")
+                conn.rollback()
+
     logger.info("[PGStore] Schema initialized")
 
 
@@ -1092,6 +1229,8 @@ class ToolOutputRepo:
                         (scan_id, tool_name, operation, target, command,
                          stdout, stderr, exit_code, duration_s)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT ON CONSTRAINT ux_tool_outputs_dedup
+                        DO NOTHING
                     """, (scan_id, tool_name, operation, target,
                           command[:2000], stdout[:50000], stderr[:10000],
                           exit_code, duration_s))
@@ -1141,27 +1280,41 @@ class CapturedRequestRepo:
 
     @staticmethod
     def save_batch(scan_id: str, requests: list) -> int:
+        """Persist captured requests, deduplicated by
+        (scan_id, method, url, status, md5(post_data)) — see
+        ux_captured_requests_dedup unique index."""
         saved = 0
+        seen = set()  # in-batch dedupe as well
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cur:
                     for r in requests:
                         if not isinstance(r, dict) or not r.get("url"):
                             continue
+                        method = r.get("method", "GET")
+                        url = r.get("url", "")[:2000]
+                        status = r.get("status", 0)
+                        post_data = (r.get("post_data", "") or "")[:4000]
+                        key = (method, url, status, hashlib.md5(post_data.encode("utf-8", "ignore")).hexdigest())
+                        if key in seen:
+                            continue
+                        seen.add(key)
                         cur.execute("""
                             INSERT INTO captured_requests
                             (scan_id, method, url, resource_type, status,
                              is_preflight, headers, post_data, source)
                             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                        """, (scan_id, r.get("method", "GET"),
-                              r.get("url", "")[:2000],
+                            ON CONFLICT ON CONSTRAINT ux_captured_requests_dedup
+                            DO NOTHING
+                        """, (scan_id, method, url,
                               r.get("resource_type", ""),
-                              r.get("status", 0),
+                              status,
                               r.get("is_preflight", False),
                               json.dumps(r.get("headers", {})),
-                              (r.get("post_data", "") or "")[:4000],
+                              post_data,
                               r.get("source", "playwright")))
-                        saved += 1
+                        if cur.rowcount:
+                            saved += 1
                     conn.commit()
         except Exception:
             pass
@@ -1198,6 +1351,8 @@ class ToolExecutionRepo:
                         (scan_id, tool, command, target, capability,
                          success, stdout_bytes, duration_s)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT ON CONSTRAINT ux_tool_executions_dedup
+                        DO NOTHING
                     """, (scan_id, tool, command[:2000], target,
                           capability, success, stdout_bytes, duration_s))
                     conn.commit()
@@ -1218,6 +1373,8 @@ class ToolExecutionRepo:
                             (scan_id, tool, command, target, capability,
                              success, stdout_bytes, duration_s)
                             VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                            ON CONFLICT ON CONSTRAINT ux_tool_executions_dedup
+                            DO NOTHING
                         """, (scan_id,
                               e.get("tool", ""),
                               (e.get("command", "") or "")[:2000],
@@ -1226,7 +1383,8 @@ class ToolExecutionRepo:
                               e.get("success", True),
                               e.get("stdout_bytes", 0),
                               e.get("duration_s", 0)))
-                        saved += 1
+                        if cur.rowcount:
+                            saved += 1
                     conn.commit()
         except Exception:
             pass
@@ -1448,12 +1606,17 @@ class PostExploitRepo:
 
     @staticmethod
     def bulk_upsert(scan_id: str, data_type: str, items):
+        """Insert post-exploit findings deduped by
+        (scan_id, data_type, title, md5(details)) so repeat writes of the
+        same live_results singleton don't multiply rows — see
+        ux_post_exploit_dedup unique index."""
         if not items:
             return
         if isinstance(items, dict):
             items = [items]
         if not isinstance(items, list):
             return
+        seen = set()  # in-batch dedupe
         with DatabaseManager.get_connection() as conn:
             with conn.cursor() as cur:
                 for item in items:
@@ -1463,10 +1626,17 @@ class PostExploitRepo:
                     else:
                         title = str(item)[:200]
                         item = {"value": str(item)}
+                    details_json = json.dumps(item, default=str)
+                    key = (title, hashlib.md5(details_json.encode("utf-8", "ignore")).hexdigest())
+                    if key in seen:
+                        continue
+                    seen.add(key)
                     cur.execute("""
                         INSERT INTO post_exploit_data (scan_id, data_type, title, details)
                         VALUES (%s, %s, %s, %s)
-                    """, (scan_id, data_type, title, json.dumps(item, default=str)))
+                        ON CONFLICT ON CONSTRAINT ux_post_exploit_dedup
+                        DO NOTHING
+                    """, (scan_id, data_type, title, details_json))
                 conn.commit()
 
     @staticmethod
@@ -1512,3 +1682,146 @@ class ScanMetadataRepo:
             with conn.cursor() as cur:
                 cur.execute("SELECT key, value FROM scan_metadata WHERE scan_id = %s", (scan_id,))
                 return {r[0]: r[1] for r in cur.fetchall()}
+
+
+class ScanArtifactRepo:
+    """Per-scan file-like artefacts kept in Postgres so the UI can show them
+    without needing a `reports/` folder on disk.
+
+    `kind` is a short label: 'poc_python' / 'poc_bash' / 'poc_markdown' /
+    'screenshot' / 'nuclei_template' / 'sarif' / 'canonical_summary' /
+    'coverage_tracker' / 'exploit_report_md' / etc.
+    """
+
+    @staticmethod
+    def insert(scan_id: str, kind: str, name: str, content,
+                mime_type: str = "application/octet-stream",
+                metadata: dict = None) -> int:
+        if content is None:
+            return 0
+        if isinstance(content, str):
+            content_bytes = content.encode("utf-8")
+        elif isinstance(content, (bytes, bytearray)):
+            content_bytes = bytes(content)
+        else:
+            content_bytes = str(content).encode("utf-8")
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO scan_artifacts
+                            (scan_id, kind, name, mime_type, content, size_bytes, metadata)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                    """, (scan_id, kind, name or "", mime_type,
+                          psycopg2.Binary(content_bytes), len(content_bytes),
+                          json.dumps(metadata or {}, default=str)))
+                    aid = cur.fetchone()[0]
+                    conn.commit()
+                    return aid
+        except Exception as e:
+            logger.warning(f"[ScanArtifactRepo] insert failed ({kind}/{name}): {e}")
+            return 0
+
+    @staticmethod
+    def list_by_scan(scan_id: str, kind: str = None) -> List[Dict]:
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                if kind:
+                    cur.execute("""
+                        SELECT id, scan_id, kind, name, mime_type, size_bytes,
+                               metadata, created_at
+                        FROM scan_artifacts WHERE scan_id = %s AND kind = %s
+                        ORDER BY created_at DESC
+                    """, (scan_id, kind))
+                else:
+                    cur.execute("""
+                        SELECT id, scan_id, kind, name, mime_type, size_bytes,
+                               metadata, created_at
+                        FROM scan_artifacts WHERE scan_id = %s
+                        ORDER BY kind, created_at DESC
+                    """, (scan_id,))
+                return [dict(r) for r in cur.fetchall()]
+
+    @staticmethod
+    def get(artifact_id: int) -> Optional[Dict]:
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT id, scan_id, kind, name, mime_type, size_bytes,
+                           metadata, content, created_at
+                    FROM scan_artifacts WHERE id = %s
+                """, (artifact_id,))
+                row = cur.fetchone()
+                if row and row.get("content") is not None:
+                    row["content"] = bytes(row["content"])
+                return dict(row) if row else None
+
+    @staticmethod
+    def counts_by_kind(scan_id: str) -> Dict[str, int]:
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT kind, COUNT(*), COALESCE(SUM(size_bytes), 0)
+                    FROM scan_artifacts WHERE scan_id = %s GROUP BY kind
+                """, (scan_id,))
+                return {r[0]: {"count": r[1], "total_bytes": int(r[2])}
+                        for r in cur.fetchall()}
+
+
+class AuthBypassRepo:
+    """Successful auth bypasses / logins captured during a scan.
+
+    Every row is a 'we entered the site' event — the payload that worked, the
+    resulting token, and a proof-of-entry snippet. Rendered in the UI as
+    'Access Gained' so operators can see at a glance whether the scan actually
+    got inside the app and with what technique.
+    """
+
+    @staticmethod
+    def insert(scan_id: str, host: str, technique: str, login_url: str, *,
+               method: str = "POST", username: str = "", password: str = "",
+               payload: str = "", token: str = "",
+               response_status: int = 0, response_snippet: str = "",
+               role: str = "", severity: str = "critical") -> Optional[int]:
+        dk_raw = f"{scan_id}|{host}|{technique}|{username}|{login_url}"
+        dk = hashlib.sha1(dk_raw.encode("utf-8", "ignore")).hexdigest()[:32]
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO auth_bypasses
+                          (scan_id, host, method, login_url, technique, username, password,
+                           payload, token, response_status, response_snippet, role, severity, dedup_key)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT ON CONSTRAINT ux_auth_bypass_dedup DO NOTHING
+                        RETURNING id
+                    """, (scan_id, host, method, login_url, technique, username, password,
+                          (payload or "")[:4000], (token or "")[:4000],
+                          int(response_status or 0), (response_snippet or "")[:2000],
+                          role, severity, dk))
+                    row = cur.fetchone()
+                    conn.commit()
+                    return row[0] if row else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def get_by_scan(scan_id: str) -> List[Dict[str, Any]]:
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT id, host, method, login_url, technique, username, password,
+                           payload, token, response_status, response_snippet, role, severity,
+                           created_at
+                    FROM auth_bypasses WHERE scan_id = %s
+                    ORDER BY created_at ASC
+                """, (scan_id,))
+                return [dict(r) for r in cur.fetchall()]
+
+    @staticmethod
+    def count_by_scan(scan_id: str) -> int:
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM auth_bypasses WHERE scan_id = %s", (scan_id,))
+                return int(cur.fetchone()[0] or 0)

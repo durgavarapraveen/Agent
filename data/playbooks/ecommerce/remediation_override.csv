@@ -1,4 +1,0 @@
-vulnerability_type,override_recommendation
-DEFAULT,Apply OWASP Top 10 remediations - prioritize API security and authentication.
-SQLI,Sanitize checkout parameters and employ database connection pooling with restricted rights.
-XSS,Implement DOM sanitization and secure HTTP-Only cookie flags on cart session identifiers.

@@ -4,7 +4,7 @@ Unit tests for core/fp_filter.py false positive filtering module.
 
 import unittest
 from core.reporting.fp_filter import FalsePositiveFilter
-from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
+from core.memory.shared_context import SharedContextV2 as SharedContext
 
 
 class TestFalsePositiveFilter(unittest.TestCase):

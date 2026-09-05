@@ -11,7 +11,7 @@ from core.common.schemas import (
     SuccessCriterionType
 )
 from core.orchestration.task_manager import TaskManager, Task, TaskStateTransitionError
-from orchestrator.scheduler import Scheduler
+from core.orchestration.legacy_scheduler import Scheduler
 from core.tools.tool_definitions import CapabilityRegistry
 from core.common.error_classifier import ErrorClassifier
 from core.common.result_normalizers import NormalizerFactory
@@ -699,7 +699,7 @@ class TestP0Reliability:
 
     # TEST 7: Task dependency prevents premature execution.
     def test_7_task_dependency_prevents_premature_execution(self):
-        from orchestrator.scheduler import Scheduler
+        from core.orchestration.legacy_scheduler import Scheduler
         from core.security.authorization import TargetScopeValidator
         TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
 
@@ -812,7 +812,7 @@ class TestP0Reliability:
     async def test_12_max_steps_does_not_mark_task_successful(self):
         from core.orchestration.dynamic_agent import DynamicAgent
         from core.tools.tool_registry import ToolRegistry
-        from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
+        from core.memory.shared_context import SharedContextV2 as SharedContext
         from unittest.mock import AsyncMock, patch
 
         ctx = SharedContext("example.com")
@@ -895,7 +895,7 @@ class TestPhaseArchitectureRefinements:
         from core.orchestration.capability_worker import CapabilityWorker
         from core.common.schemas import CapabilityType
         from core.tools.tool_registry import ToolRegistry
-        from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
+        from core.memory.shared_context import SharedContextV2 as SharedContext
         from unittest.mock import AsyncMock, patch
 
         ctx = SharedContext("example.com")
@@ -947,7 +947,7 @@ class TestPhaseArchitectureRefinements:
     # TEST 4: Scheduler blocks dependent task (A depends on B, B incomplete: A cannot start).
     def test_4_scheduler_blocks_dependent_task(self):
         from core.orchestration.task_manager import TaskManager
-        from orchestrator.scheduler import Scheduler
+        from core.orchestration.legacy_scheduler import Scheduler
         from core.common.schemas import TaskSpec, CapabilityType
         from core.security.authorization import TargetScopeValidator
         TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
@@ -968,7 +968,7 @@ class TestPhaseArchitectureRefinements:
     # TEST 5: After B succeeds: A becomes READY.
     def test_5_after_b_succeeds_a_becomes_ready(self):
         from core.orchestration.task_manager import TaskManager
-        from orchestrator.scheduler import Scheduler
+        from core.orchestration.legacy_scheduler import Scheduler
         from core.common.schemas import TaskSpec, CapabilityType
         from core.security.authorization import TargetScopeValidator
         TargetScopeValidator.set(TargetScopeValidator(["example.com"]))
@@ -1193,7 +1193,7 @@ class TestDynamicToolIntelligencePlatform:
     async def test_7_dynamic_agent_works_without_hardcoded_tools(self):
         from core.orchestration.dynamic_agent import ControlledDynamicAgent
         from core.tools.tool_registry import ToolRegistry
-        from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
+        from core.memory.shared_context import SharedContextV2 as SharedContext
         from core.security.authorization import TargetScopeValidator
         from unittest.mock import AsyncMock, patch
 

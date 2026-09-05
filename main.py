@@ -25,8 +25,12 @@ if sys.platform.startswith("win"):
     except Exception:
         pass
 
-# Ensure standard storage directories exist
-for _dir in ("data/db", "reports", "loot", ".audit_logs"):
+# Ensure standard storage directories exist. reports/ is opt-in via
+# REPORTS_ENABLED — see core/common/reports_config.py.
+_standard_dirs = ["data/db", "loot", ".audit_logs"]
+if os.getenv("REPORTS_ENABLED", "0").lower() in ("1", "true", "yes", "on"):
+    _standard_dirs.append(os.getenv("REPORTS_DIR", "reports"))
+for _dir in _standard_dirs:
     os.makedirs(_dir, exist_ok=True)
 
 from core.common.config import load_config
@@ -177,7 +181,7 @@ Examples:
     config.config["MAX_EXPLOITATION_TIER"] = args.tier
 
     # Active compliance frameworks (validated against the compliance module)
-    from compliance import available_frameworks
+    from core.compliance import available_frameworks
     if args.frameworks.strip():
         requested = [f.strip().lower() for f in args.frameworks.split(",") if f.strip()]
         valid = [f for f in requested if f in available_frameworks()]

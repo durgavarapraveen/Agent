@@ -141,6 +141,20 @@ export const api = {
   })),
   getToolOutputs: (id) => request(`/api/scans/${id}/tool-outputs`),
   getActivity: (id) => request(`/api/scans/${id}/activity`),
+  // ── Scan artifacts (PoC, screenshots, SARIF, nuclei templates, canonical) ──
+  listScanArtifacts: (scanId, kind = "") =>
+    request(`/api/scans/${scanId}/artifacts${kind ? `?kind=${encodeURIComponent(kind)}` : ""}`)
+      .catch(() => ({ scan_id: scanId, count: 0, counts_by_kind: {}, artifacts: [] })),
+  getScanPocs: (scanId) =>
+    request(`/api/scans/${scanId}/pocs`).catch(() => ({ scan_id: scanId, pocs: {} })),
+  listScanScreenshots: (scanId) =>
+    request(`/api/scans/${scanId}/screenshots`).catch(() => ({ scan_id: scanId, count: 0, screenshots: [] })),
+  scanArtifactUrl: (scanId, artifactId, download = false) =>
+    `/api/scans/${scanId}/artifacts/${artifactId}${download ? "?download=true" : ""}`,
+  // Auth bypasses — "Access Gained" — every successful login/bypass with payload + proof
+  getAuthBypasses: (scanId) =>
+    request(`/api/scans/${scanId}/auth-bypasses`)
+      .catch(() => ({ scan_id: scanId, count: 0, bypasses: [] })),
   getReviewQueue: () => request("/api/review-queue"),
   getReviewSuccesses: () => request("/api/review-queue/successes"),
   getReviewManual: () => request("/api/review-queue/manual"),

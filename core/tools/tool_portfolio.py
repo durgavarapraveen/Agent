@@ -17,3 +17,19 @@ class ToolPortfolio:
 
     def get_tools(self, capability: str) -> List[str]:
         return list(self._chains.get(capability, []))
+
+
+_GLOBAL_PORTFOLIO: ToolPortfolio | None = None
+
+
+def get_global_portfolio() -> ToolPortfolio:
+    global _GLOBAL_PORTFOLIO
+    if _GLOBAL_PORTFOLIO is None:
+        _GLOBAL_PORTFOLIO = ToolPortfolio()
+    return _GLOBAL_PORTFOLIO
+
+
+def get_fallback_chain(capability: str) -> List[str]:
+    """Module-level accessor used by core.common.tool_retry so downstream
+    modules don't need to hold a Portfolio reference."""
+    return get_global_portfolio().get_tools(capability)

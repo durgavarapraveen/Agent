@@ -1,6 +1,6 @@
 from core.domain.base import DomainModel
 from core.domain.endpoint import Endpoint
-from pydantic import Field, validator
+from pydantic import Field, field_validator
 from typing import List, Dict, Any, Callable
 
 class ApplicabilityRule(DomainModel):
@@ -25,7 +25,8 @@ class SecurityTestDefinition(DomainModel):
     oracle: str = Field(...)
     risk_level: str = Field(default="medium")
 
-    @validator('category')
+    @field_validator('category')
+    @classmethod
     def validate_category(cls, v):
         valid_categories = {
             "authentication", "authorization", "session", "identity", "access_control",
@@ -39,7 +40,8 @@ class SecurityTestDefinition(DomainModel):
             raise ValueError(f"Category '{v}' is not in the recognized categories list.")
         return v
     
-    @validator('risk_level')
+    @field_validator('risk_level')
+    @classmethod
     def validate_risk(cls, v):
         if v not in {"critical", "high", "medium", "low"}:
             raise ValueError(f"Risk level '{v}' is invalid.")
