@@ -6,10 +6,10 @@ import os
 import tempfile
 import unittest
 
-from defensive.network_audit import NetworkAuditor
-from defensive.credential_hardening import CredentialHardeningAuditor, SecretScanner
-from defensive.persistence_monitor import PersistenceMonitor
-from defensive.manager import DefensiveRiskAssessor
+from core.defensive.network_audit import NetworkAuditor
+from core.defensive.credential_hardening import CredentialHardeningAuditor, SecretScanner
+from core.defensive.persistence_monitor import PersistenceMonitor
+from core.defensive.manager import DefensiveRiskAssessor
 
 
 class TestDefensiveSuite(unittest.TestCase):

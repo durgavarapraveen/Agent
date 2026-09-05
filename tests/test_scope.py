@@ -1,5 +1,5 @@
 import pytest
-from scope.manager import ScopeManager
+from core.scope.manager import ScopeManager
 from core.common.exceptions import ScopeViolationException
 
 @pytest.fixture

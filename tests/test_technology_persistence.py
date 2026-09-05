@@ -1,4 +1,4 @@
-from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
+from core.memory.shared_context import SharedContextV2 as SharedContext
 from core.exploitation.request_capture import RequestCapturer, CaptureResult, CapturedRequest
 from core.orchestration.capability_worker import CapabilityWorker
 from core.tools.tool_registry import ToolRegistry

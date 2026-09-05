@@ -6,7 +6,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from validation.confidence import (assess, assess_finding, gate,
+from core.validation.confidence import (assess, assess_finding, gate,
                                     HIGH, MEDIUM, LOW,
                                     W_VERSION_MATCH, W_REACHABLE, W_EPSS, W_KEV)
 

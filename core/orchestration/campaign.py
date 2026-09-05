@@ -36,7 +36,11 @@ class CampaignManager:
     def __init__(self, targets: List[str], tier: str = "POC",
                  max_parallel: int = 3, auth_file: str = None,
                  phases: list = None, credentials: dict = None,
-                 report_dir: str = "reports"):
+                 report_dir: str = None):
+        from core.common.reports_config import reports_enabled, reports_dir as _rd
+        self._reports_enabled = reports_enabled()
+        if report_dir is None:
+            report_dir = str(_rd())
         self.targets = [t.strip() for t in targets if t.strip()]
         self.tier = tier
         self.max_parallel = max_parallel

@@ -1,7 +1,8 @@
-# Environment
+# Environment (any .env file, including bare .env — matches via *.env)
+*.env
 .env.example
 .env.local
-*.env
+.env.*.local
 
 # Python
 __pycache__/
@@ -29,36 +30,58 @@ wheels/
 venv/
 env/
 ENV/
+.venv/
 
-# IDE
+# IDE / OS
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 .DS_Store
+Thumbs.db
 
-# Project
+# Runtime output / mounted volumes
 workspace/
 reports/
+data/
+loot/
+archives/
+runtime/
+
+# Databases
 *.db
 *.sqlite
 *.sqlite3
 
-# Logs
+# Logs / audit
 *.log
 logs/
+.audit_logs/
 
 # Testing
 .pytest_cache/
-
 htmlcov/
 .tox/
+.coverage
+coverage.xml
+*.coverage
 
 # Temporary
 temp/
 tmp/
 *.tmp
+*.bak
+*.orig
 
+# Vendored / downloaded models
+deepseek_v4_tokenizer/
+
+# Claude Code / agent scratch
 .claude
-*.sqlite
+.antigravity/
+
+# Node (UI)
+node_modules/
+ui/web/dist/
+ui/web/build/

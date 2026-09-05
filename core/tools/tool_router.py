@@ -99,7 +99,11 @@ class ToolRouter:
                     elif tname == "httpx":
                         invocation.params["command"] = f"httpx-toolkit -u {target} -silent -title -tech-detect -status-code"
                     elif tname == "nuclei":
-                        invocation.params["command"] = f"nuclei -u {target} -tags cve,misconfig,exposure -jsonl -silent -severity low,medium,high,critical"
+                        invocation.params["command"] = (
+                            f"nuclei -u {target} "
+                            f"-tags cve,misconfig,exposure,tech,default-login,takeover "
+                            f"-severity info,low,medium,high,critical -jsonl -silent"
+                        )
                     elif tname == "nmap":
                         ea = invocation.params.get("extra_args", "") or ""
                         use_fast = "-F" if "-p" not in ea and "--top-ports" not in ea else ""

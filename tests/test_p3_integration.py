@@ -3,13 +3,13 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock
 
-from core.domain.experiment_v2 import SecurityExperiment
+from core.domain.experiment import SecurityExperiment
 from core.execution.executors.base import ExecutionResult, ExecutionStatus, ExecutorBase
-from core.execution.execution_pipeline_v2 import ExecutionPipelineV2, PipelineStage
+from core.execution.execution_pipeline import ExecutionPipelineV2, PipelineStage
 from core.evidence.evidence import Evidence
 from core.evidence.validator import EvidenceValidator, ValidationResult
 from core.coverage.coverage_matrix import CoverageMatrix, CoverageState
-from core.coverage.convergence_engine_v2 import ConvergenceEngine
+from core.coverage.convergence_engine import ConvergenceEngine
 from core.coverage.security_test_catalog import build_default_catalog
 from core.findings.finding import Finding, FindingState
 from core.findings.finding_store import FindingStore

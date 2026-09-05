@@ -53,7 +53,7 @@ def log_startup_diagnostics() -> None:
     ]
 
     critical_classes = {
-        "SharedContextV2": "core.memory.shared_context_v2",
+        "SharedContextV2": "core.memory.shared_context",
         "CentralBrain": "core.orchestration.central_brain",
         "TaskManager": "core.orchestration.task_manager",
         "TaskStateMachine": "core.domain.task_state_machine",

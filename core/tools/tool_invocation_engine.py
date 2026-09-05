@@ -71,8 +71,13 @@ class ToolInvocationEngine:
         )
 
         try:
-            # Both paths converge here at ToolGateway for security, caching, audit trail
-            result = await self.gateway.execute(invocation, context.auth_context)
+            # Expert mode: escalate timeout, then walk the portfolio fallback
+            # chain before declaring failure.
+            from core.common.tool_retry import execute_with_expert_retry
+            result = await execute_with_expert_retry(
+                self.gateway, invocation, context.auth_context,
+                base_timeout=getattr(invocation, "timeout_seconds", None) or 60,
+            )
             
             if not result.success:
                 self._handle_tool_failure(invocation, result)

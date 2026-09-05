@@ -41,8 +41,6 @@ class ExecutionConfig:
         self.claude_api_key = os.getenv("CLAUDE_API_KEY")
         self.claude_model = os.getenv("CLAUDE_MODEL")
         
-        self.enable_mcp_server = os.getenv("ENABLE_MCP_SERVER", "false").lower() == "true"
-        self.mcp_server_port = os.getenv("MCP_SERVER_PORT")
         self.fallback_on_error = os.getenv("FALLBACK_ON_ERROR", "false").lower() == "true"
 
         self._validate()

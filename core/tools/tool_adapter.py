@@ -231,14 +231,16 @@ class NucleiAdapter:
     def scan(target: str, params: Dict[str, Any], profile=None) -> Dict[str, Any]:
         flags = [f"-u {target}"]
 
+        # Expert mode: cover every severity (low+info flag chain-attacks and
+        # information disclosure the LLM can pivot on) and every relevant tag
+        # group so nothing is skipped for speed.
+        severity = params.get("severity", "info,low,medium,high,critical")
+        flags.append(f"--severity {severity}")
+
         if profile:
             from core.intelligence.target_profiler import TechnologyStack
-            # Severity filter
-            severity = params.get("severity", "critical,high")
-            flags.append(f"--severity {severity}")
-
-            # Technology-specific templates (HexStrike pattern)
-            tags = []
+            # Broad default tag set (never miss default-login/misconfig/exposure)
+            tags = ["cve", "misconfig", "exposure", "tech", "default-login", "takeover"]
             if profile.has_wordpress:
                 tags.append("wordpress")
             if profile.is_api:
@@ -255,22 +257,19 @@ class NucleiAdapter:
             custom_tags = params.get("tags", "")
             if custom_tags:
                 tags.extend(custom_tags.split(","))
+            flags.append(f"--tags {','.join(sorted(set(tags)))}")
 
-            if tags:
-                flags.append(f"--tags {','.join(set(tags))}")
-
-            # Rate limiting and bypass if WAF detected
+            # WAF bypass — throttle but never skip
             if profile.waf_detected:
                 flags.append("--rate-limit 5")
                 flags.append("--bulk-size 5")
                 flags.append("-H 'X-Forwarded-For: 127.0.0.1'")
         else:
-            severity = params.get("severity")
-            if severity:
-                flags.append(f"--severity {severity}")
-            tags = params.get("tags")
-            if tags:
-                flags.append(f"--tags {tags}")
+            tags = params.get("tags", "cve,misconfig,exposure,tech,default-login,takeover")
+            flags.append(f"--tags {tags}")
+
+        # Structured output so the parser can extract every match.
+        flags.append("-jsonl -silent")
 
         return {"command": f"nuclei {' '.join(flags)}"}
 
@@ -293,8 +292,18 @@ class SqlmapAdapter:
             elif profile.has_python_web:
                 flags.append("--dbms=postgresql")
 
-            level = params.get("level", 2)
+            # Expert defaults: maximum coverage. Expert would rather burn 10 min
+            # per URL than miss a blind time-based SQLi. All techniques (BEUSTQ),
+            # highest level (5) and risk (3), random UA to defeat trivial rate
+            # limits, small delay to be polite.
+            level = params.get("level", 5)
+            risk = params.get("risk", 3)
+            technique = params.get("technique", "BEUSTQ")
             flags.append(f"--level {level}")
+            flags.append(f"--risk {risk}")
+            flags.append(f"--technique={technique}")
+            flags.append("--random-agent")
+            flags.append("--threads=4")
 
             crawl = params.get("crawl")
             if crawl:
@@ -304,8 +313,10 @@ class SqlmapAdapter:
             if profile.waf_detected:
                 tampers = WAFEvasionManager.get_sqlmap_tamper_scripts()
                 flags.append(f"--tamper={tampers}")
-                flags.append("--random-agent")
                 flags.append("--delay=1")
+        else:
+            flags.extend(["--level 5", "--risk 3", "--technique=BEUSTQ",
+                          "--random-agent", "--threads=4"])
         return {"command": f"sqlmap {' '.join(flags)}"}
 
 
@@ -621,7 +632,11 @@ class ToolAdapter:
         elif tool == "theharvester":
             if not target:
                 raise ToolValidationError("theHarvester requires a valid 'target' parameter")
-            return {"command": f"theharvester -d {target}"}
+            # -b: only reliable free sources (skip ones requiring API keys or that hang)
+            # -l: result cap so it terminates in reasonable time
+            sources = params.get("sources") or "crtsh,duckduckgo,bing,otx,anubis,hackertarget,rapiddns,urlscan"
+            limit = int(params.get("limit", 200))
+            return {"command": f"theharvester -d {target} -b {sources} -l {limit}"}
 
         # Built-in Python tools map directly to Python tool kwargs
         elif tool == "http_request":

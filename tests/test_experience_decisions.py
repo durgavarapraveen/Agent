@@ -269,7 +269,7 @@ class TestDecisionGuardV2:
         assert alt == "commix"
 
     def test_works_with_domain_objects(self):
-        from core.domain.experiment_v2 import SecurityExperiment
+        from core.domain.experiment import SecurityExperiment
 
         engine, _ = _make_engine()
         learner = ExperienceLearner()

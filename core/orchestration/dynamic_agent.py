@@ -9,7 +9,7 @@ from typing import Dict, List, Optional
 
 from agents.llm_client import LLMClient
 from core.tools.tool_registry import ToolRegistry
-from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
+from core.memory.shared_context import SharedContextV2 as SharedContext
 
 logger = logging.getLogger(__name__)
 

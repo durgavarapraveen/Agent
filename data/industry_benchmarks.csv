@@ -1,8 +1,0 @@
-industry,critical_avg,high_avg,medium_avg,low_avg
-finance,12.0,45.0,30.0,15.0
-healthcare,8.0,35.0,25.0,10.0
-e-commerce,10.0,40.0,28.0,12.0
-technology,6.0,25.0,20.0,8.0
-energy,14.0,50.0,35.0,18.0
-retail,9.0,38.0,26.0,11.0
-default,8.0,30.0,20.0,10.0

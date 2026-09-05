@@ -1,13 +1,13 @@
 import pytest
 from datetime import datetime, timedelta
-from core.scheduling.experiment_scheduler_v2 import ExperimentScheduler
-from core.execution.execution_pipeline_v2 import (
+from core.scheduling.experiment_scheduler import ExperimentScheduler
+from core.execution.execution_pipeline import (
     ExecutionPipelineV2 as ExecutionPipeline, ExecutionResult, ExecutionStatus, PipelineStage
 )
 from core.coverage.coverage_engine import CoverageEngine
 from core.coverage.catalog import SecurityTestCatalog
 from core.coverage.test_definition import SecurityTestDefinition, ApplicabilityRule
-from core.domain.experiment_v2 import SecurityExperiment
+from core.domain.experiment import SecurityExperiment
 from core.domain.endpoint import Endpoint
 from core.domain.parameter import Parameter, ParameterType
 from core.domain.coverage import TestState

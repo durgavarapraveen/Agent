@@ -24,14 +24,26 @@ class ScreenshotResult:
     success: bool = False
     error: str = ""
     timestamp: float = field(default_factory=time.time)
+    artifact_id: int = 0   # scan_artifacts.id when persisted to Postgres
 
 
 class ScreenshotCapture:
     """Captures screenshots of vulnerable pages as evidence."""
 
-    def __init__(self, output_dir: str = "reports/evidence"):
+    def __init__(self, output_dir: str = None, scan_id: str = None):
+        from core.common.reports_config import reports_enabled, reports_dir
+        self._reports_enabled = reports_enabled()
+        self.scan_id = scan_id  # when set, captured PNGs are persisted to Postgres
+        if output_dir is None:
+            output_dir = str(reports_dir() / "evidence")
         self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        # Only touch disk if reports/ is enabled; otherwise use a tempdir for the
+        # in-flight docker→host copy.
+        if self._reports_enabled:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            import tempfile
+            self.output_dir = Path(tempfile.mkdtemp(prefix="ag_screenshot_"))
         self.results: List[ScreenshotResult] = []
         self._browser_available: Optional[bool] = None
 
@@ -180,6 +192,20 @@ class ScreenshotCapture:
                     data = f.read()
                     if len(data) < 5_000_000:
                         result.base64_data = base64.b64encode(data).decode("ascii")
+                # Persist to Postgres so the UI can show it.
+                if self.scan_id and data:
+                    try:
+                        from core.database.pg_store import ScanArtifactRepo
+                        ext = result.screenshot_path.rsplit(".", 1)[-1].lower()
+                        mime = "image/png" if ext == "png" else (
+                            "text/html" if ext == "html" else "application/octet-stream")
+                        aid = ScanArtifactRepo.insert(
+                            self.scan_id, "screenshot", filename, data,
+                            mime_type=mime,
+                            metadata={"url": url, "finding_title": finding_title})
+                        result.artifact_id = aid
+                    except Exception as e:
+                        logger.debug(f"[Screenshot] DB persist failed: {e}")
             except Exception:
                 pass
 

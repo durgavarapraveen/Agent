@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from core.security.authorization import TargetScopeValidator
-from validation.confidence import ConfidenceCalibrator
+from core.validation.confidence import ConfidenceCalibrator
 from core.reporting.quality_gate import QualityGate
 
 

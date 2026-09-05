@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 import io
 
-from core.domain.experiment_v2 import SecurityExperiment
+from core.domain.experiment import SecurityExperiment
 from core.execution.executors.base import ExecutorBase, ExecutionResult, ExecutionStatus
 from core.execution.executors.authentication import AuthenticationExecutor
 from core.execution.executors.authorization import AuthorizationExecutor

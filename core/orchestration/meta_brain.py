@@ -34,7 +34,8 @@ class MetaBrain:
         config = get_config()
         self.max_parallel = config.get_int("MAX_PARALLEL_TARGETS", 3)
         self.results: Dict[str, Dict] = {}
-        self.report_dir = Path("reports")
+        from core.common.reports_config import reports_dir as _rd
+        self.report_dir = _rd()
         self.report_dir.mkdir(exist_ok=True)
         self.start_time = datetime.now()
 

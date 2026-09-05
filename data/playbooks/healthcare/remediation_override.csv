@@ -1,4 +1,0 @@
-vulnerability_type,override_recommendation
-DEFAULT,Ensure PHI is not exposed - apply additional encryption and audit logging.
-SQLI,Ensure PHI in database tables is encrypted at rest and implement strict HIPAA access control logging for SQL queries.
-XSS,Enforce HIPAA compliant session timeout and sanitize user inputs on all patient portal endpoints.

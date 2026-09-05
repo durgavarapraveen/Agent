@@ -232,6 +232,13 @@ class AgenticExecutor:
         self.auth_context = auth_context
         self.result = AgenticResult()
         self._available_tools = None
+        # Per-host captured JWTs, auto-injected on subsequent same-host requests
+        # so the loop can actually test authenticated endpoints once login succeeds.
+        # Keyed by netloc (host[:port]). Populated by _capture_auth_from_response.
+        self._captured_tokens: dict = {}
+        # Scan id — used by _persist_auth_bypass to link rows to the running scan
+        # in the auth_bypasses table.
+        self.scan_id = getattr(shared_context, "scan_id", None) or getattr(shared_context, "_scan_id", "")
 
     async def execute(
         self,
@@ -254,6 +261,19 @@ class AgenticExecutor:
         known_subdomains = ", ".join(self.ctx.subdomains[:10]) if self.ctx.subdomains else "none"
         known_endpoints = str(len(self.ctx.endpoints)) + " endpoints"
         known_techs = json.dumps(self.ctx.technologies, default=str)[:500] if self.ctx.technologies else "unknown"
+        # Surface active auth so the LLM knows it holds live sessions and can
+        # target authenticated attacks (basket, admin panels, IDOR across roles).
+        _sessions = getattr(self.ctx, "auth_sessions", {}) or {}
+        _has_bearer = bool((getattr(self.ctx, "auth_headers", {}) or {}).get("Authorization"))
+        _tokens_here = list(getattr(self, "_captured_tokens", {}).keys())
+        auth_state_lines = []
+        if _has_bearer:
+            auth_state_lines.append("- Active Bearer token loaded (auto-attached to same-host requests)")
+        if _tokens_here:
+            auth_state_lines.append(f"- Captured JWTs for hosts: {', '.join(_tokens_here)}")
+        if _sessions:
+            auth_state_lines.append(f"- Multi-role sessions available: {', '.join(sorted(_sessions.keys()))}")
+        auth_state = "\n".join(auth_state_lines) if auth_state_lines else "- No authenticated session yet"
 
         vuln_summary = self._build_known_vulns_summary()
 
@@ -264,7 +284,8 @@ class AgenticExecutor:
             f"## Current Knowledge\n"
             f"- Subdomains: {known_subdomains}\n"
             f"- Endpoints: {known_endpoints}\n"
-            f"- Technologies: {known_techs}\n\n"
+            f"- Technologies: {known_techs}\n"
+            f"## Authentication State\n{auth_state}\n\n"
         )
         if vuln_summary:
             user_message += f"## Already Found Vulnerabilities (DO NOT re-test these)\n{vuln_summary}\n\n"
@@ -305,8 +326,45 @@ class AgenticExecutor:
             max_tokens=4096,
         )
 
-        self.result.total_cost = response.cost_usd
-        self.result.summary = response.content or ""
+        # Expert-mode persistence: if the LLM stopped without calling more
+        # tools, re-prompt up to REPROMPT_ROUNDS times asking it to enumerate
+        # attack vectors it hasn't tried. An expert never says "I'm done" —
+        # they always try more angles.
+        REPROMPT_ROUNDS = 3
+        for i in range(REPROMPT_ROUNDS):
+            steps_before = self.result.steps_taken
+            reprompt_messages = list(messages)
+            reprompt_messages.append({"role": "assistant", "content": response.content or ""})
+            reprompt_messages.append({
+                "role": "user",
+                "content": (
+                    "You stopped calling tools. Before you finish, an expert pentester with "
+                    "20 years of experience would still try more angles. Enumerate 5 concrete "
+                    "attack vectors you have NOT yet tried on this target — think about auth "
+                    "bypass, IDOR, business logic, injection on newly discovered params, "
+                    "misconfigurations, cache poisoning, prototype pollution, JWT algorithm "
+                    "confusion, request smuggling, timing side-channels — and then EXECUTE "
+                    "them using the tools. Do not summarize; act. If a probe fails, adapt "
+                    "and try a variant."
+                ),
+            })
+            follow = await self.llm.generate_with_tools(
+                messages=reprompt_messages,
+                tools=PENTESTING_TOOLS,
+                tool_executor=self._execute_tool_call,
+                max_rounds=max(6, max_rounds // 3),
+                max_tokens=4096,
+            )
+            self.result.total_cost += follow.cost_usd
+            if follow.content:
+                self.result.summary = (self.result.summary or "") + "\n\n" + follow.content
+            new_steps = self.result.steps_taken - steps_before
+            logger.info(f"[AgenticExecutor] Re-prompt {i+1}/{REPROMPT_ROUNDS} triggered {new_steps} extra tool call(s)")
+            if new_steps == 0:
+                break   # LLM truly has nothing more; stop re-prompting
+            response = follow
+
+        self.result.total_cost = self.result.total_cost or response.cost_usd
 
         logger.info(
             f"[AgenticExecutor] Completed: steps={self.result.steps_taken} "
@@ -831,7 +889,22 @@ class AgenticExecutor:
             logger.info(f"[AgenticExecutor] Regex fallback extracted {len(all_ports)} ports from {tool_id}")
 
     async def _llm_extract_recon(self, tool_id: str, stdout: str, target_base: str):
-        """Send tool output to LLM for clean per-subdomain data extraction."""
+        """Send tool output to LLM for clean per-subdomain data extraction.
+
+        Skip LLM entirely for tools where regex is authoritative (httpx, nmap, subfinder,
+        assetfinder) — they emit line-oriented output the regex path parses correctly and
+        the LLM call just burns tokens. Also skip on empty/tiny output.
+        """
+        import re as _re
+        REGEX_AUTHORITATIVE = {"httpx", "nmap", "masscan", "subfinder", "assetfinder", "dig", "amass"}
+        if tool_id in REGEX_AUTHORITATIVE:
+            self._regex_extract_recon(tool_id, stdout, target_base, _re)
+            return
+        if not stdout or len(stdout.strip()) < 40:
+            return
+        # Expert mode: send the full 6000-char window so the LLM sees enough of
+        # the output to catch every fingerprint / port / subtle vuln signal
+        # (nuclei/nikto/whatweb produce dense output where later lines matter).
         truncated = stdout[:6000] if len(stdout) > 6000 else stdout
 
         prompt = f"""Analyze this {tool_id} security tool output. Extract ONLY real, useful recon data per subdomain. Return JSON.
@@ -958,7 +1031,29 @@ RULES:
         follow = args.get("follow_redirects", True)
 
         self.result.tools_used.append(f"http_{method}")
-        logger.info(f"[AgenticExecutor] HTTP {method} {url}")
+        # Log the request body (truncated) for POST/PUT so we can diagnose failing
+        # auth flows (register 201 → login 401 mismatches, missing Content-Type, …).
+        if method.upper() in ("POST", "PUT", "PATCH") and body:
+            body_preview = (body if isinstance(body, str) else str(body))[:400]
+            logger.info(f"[AgenticExecutor] HTTP {method} {url} body={body_preview}")
+        else:
+            logger.info(f"[AgenticExecutor] HTTP {method} {url}")
+
+        # Auto-inject a captured JWT for this host if the LLM didn't set one itself.
+        # Once /rest/user/login (or similar) hands us a Bearer token we keep using it
+        # for every subsequent request to the same netloc so authenticated endpoints
+        # (basket, admin, IDOR targets) actually get tested.
+        try:
+            from urllib.parse import urlparse as _up
+            _netloc = _up(url).netloc.lower()
+            _has_auth = any(k.lower() == "authorization" for k in (headers or {}).keys())
+            _tok = self._captured_tokens.get(_netloc)
+            if _tok and not _has_auth:
+                headers = dict(headers or {})
+                headers["Authorization"] = f"Bearer {_tok}"
+                logger.info(f"[AgenticExecutor] Auto-attached captured Bearer to {method} {url}")
+        except Exception:
+            pass
 
         try:
             import httpx as httpx_lib
@@ -981,11 +1076,266 @@ RULES:
                 ]
 
                 self._auto_detect_vulns(method, url, body, resp.status_code, resp.text)
+                self._capture_auth_from_response(url, resp, req_method=method, req_body=body)
+                self._harvest_emails_and_hashes(url, resp.text)
+                # Chain: if a POST to /api/Users (or similar registration endpoint)
+                # succeeded and the response echoes "role":"admin", immediately try
+                # to log in as the new user and capture the admin JWT.
+                try:
+                    if (method.upper() == "POST" and resp.status_code in (200, 201)
+                            and body and 'role' in (body if isinstance(body, str) else str(body)).lower()
+                            and '"role":"admin"' in resp.text.replace(" ", "")):
+                        await self._chain_login_after_mass_assign(url, body, resp)
+                except Exception:
+                    pass
 
                 return "\n".join(output_parts)
 
         except Exception as e:
             return f"[ERROR] HTTP request failed: {e}"
+
+    async def _chain_login_after_mass_assign(self, register_url: str, register_body, register_resp) -> None:
+        """After a successful admin-role self-register, log in with those creds
+        so the captured JWT is a fresh admin session usable by downstream tests."""
+        try:
+            import json as _json, re as _re
+            from urllib.parse import urlparse as _up
+            body_str = register_body if isinstance(register_body, str) else str(register_body)
+            try:
+                creds = _json.loads(body_str)
+            except Exception:
+                em = _re.search(r'"email"\s*:\s*"([^"]+)"', body_str)
+                pw = _re.search(r'"password"\s*:\s*"([^"]+)"', body_str)
+                creds = {"email": em.group(1) if em else "", "password": pw.group(1) if pw else ""}
+            email = creds.get("email") or creds.get("username")
+            password = creds.get("password")
+            if not (email and password):
+                return
+            pu = _up(register_url)
+            login_url = f"{pu.scheme}://{pu.netloc}/rest/user/login"
+            import httpx as _httpx
+            async with _httpx.AsyncClient(follow_redirects=True, timeout=20, verify=False) as client:
+                r = await client.post(login_url, json={"email": email, "password": password})
+                logger.info(f"[AgenticExecutor] Chain-login as new admin {email} -> HTTP {r.status_code}")
+                if r.status_code == 200:
+                    self._capture_auth_from_response(
+                        login_url, r, req_method="POST",
+                        req_body=_json.dumps({"email": email, "password": password}))
+        except Exception as _e:
+            logger.debug(f"[AgenticExecutor] chain-login failed: {_e}")
+
+    def _harvest_emails_and_hashes(self, url: str, resp_text: str) -> None:
+        """Scan HTTP response bodies for emails and password hashes.
+
+        Fills the gap where the crawler fetches /rest/memories, /api/Users,
+        /api/Feedbacks (which leak emails + MD5/bcrypt hashes) but only
+        theHarvester/whois stdout was ever regex-scanned. CredentialSpray reads
+        ctx.discovered_employees and ctx.leaked_credentials so seeding them
+        from live responses expands its attack surface.
+        """
+        if not resp_text:
+            return
+        try:
+            import re as _re
+            text = resp_text[:200_000]  # cap for perf
+            # Emails
+            email_re = _re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b')
+            emails = set()
+            for m in email_re.finditer(text):
+                e = m.group(0).lower()
+                if not e.endswith(('.png', '.jpg', '.gif', '.svg', '.webp')):
+                    emails.add(e)
+            if emails:
+                existing = list(getattr(self.ctx, "discovered_employees", []) or [])
+                existing_set = {(e.get("email") or "").lower() for e in existing if isinstance(e, dict)}
+                for e in emails:
+                    if e not in existing_set:
+                        local = e.split("@")[0].replace(".", " ").replace("_", " ")
+                        existing.append({"email": e, "name": local.title(),
+                                         "source": f"response:{url[:80]}"})
+                self.ctx.discovered_employees = existing
+                logger.info(f"[AgenticExecutor] Harvested {len(emails)} emails from response body")
+            # Password hashes: md5(32 hex), sha1(40 hex), bcrypt ($2[aby]$…), sha256(64 hex)
+            hash_patterns = [
+                (r'"password"\s*:\s*"([a-f0-9]{32})"', "md5"),
+                (r'"password"\s*:\s*"([a-f0-9]{40})"', "sha1"),
+                (r'"password"\s*:\s*"([a-f0-9]{64})"', "sha256"),
+                (r'"password"\s*:\s*"(\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53})"', "bcrypt"),
+                (r'"passwordHash"\s*:\s*"([a-f0-9]{32,128}|\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53})"', "unknown"),
+            ]
+            leaked = list(getattr(self.ctx, "leaked_credentials", []) or [])
+            existing_hashes = {(c.get("hash") or c.get("password") or "") for c in leaked if isinstance(c, dict)}
+            for pat, algo in hash_patterns:
+                for m in _re.finditer(pat, text):
+                    h = m.group(1)
+                    if h in existing_hashes:
+                        continue
+                    existing_hashes.add(h)
+                    # Correlate with nearest email in the same JSON object
+                    window = text[max(0, m.start() - 300):m.end() + 100]
+                    ee = email_re.search(window)
+                    leaked.append({
+                        "username": ee.group(0).lower() if ee else "",
+                        "email": ee.group(0).lower() if ee else "",
+                        "password": "",           # hashed only
+                        "hash": h, "algo": algo,
+                        "source": f"response:{url[:80]}",
+                        "type": "password_hash",
+                    })
+            if len(leaked) > (len(getattr(self.ctx, "leaked_credentials", []) or [])):
+                self.ctx.leaked_credentials = leaked
+                logger.info(f"[AgenticExecutor] Harvested {len(leaked)} password hashes from response body")
+        except Exception:
+            pass
+
+    def _persist_auth_bypass(self, *, host: str, login_url: str, technique: str,
+                              payload: str = "", token: str = "",
+                              response_status: int = 0, response_snippet: str = "",
+                              username: str = "", password: str = "",
+                              role: str = "") -> None:
+        """Record a successful auth bypass / login into the auth_bypasses table so
+        the UI can show 'Access Gained' with the exact payload and proof-of-entry."""
+        try:
+            scan_id = getattr(self, "scan_id", None) or getattr(self.ctx, "scan_id", None) or ""
+            if not scan_id:
+                return
+            from core.database.pg_store import AuthBypassRepo
+            AuthBypassRepo.insert(
+                scan_id, host, technique, login_url,
+                method="POST", username=username, password=password,
+                payload=payload, token=token,
+                response_status=response_status,
+                response_snippet=response_snippet, role=role,
+            )
+            logger.info(f"[AuthBypass] Persisted {technique} on {host} (user={username or '-'}, role={role or '-'})")
+        except Exception as _e:
+            logger.debug(f"[AuthBypass] persist failed: {_e}")
+
+    def _capture_auth_from_response(self, url: str, resp, req_method: str = "POST",
+                                     req_body: str = "") -> None:
+        """Extract a JWT/bearer from a successful auth response and cache it per host.
+
+        Recognises Juice-Shop-style {"authentication":{"token":"..."}} and generic
+        {"access_token":"..."} / {"token":"..."} / Set-Cookie: token=<jwt>. The
+        first bearer found for a host is kept for the rest of the scan so any
+        subsequent request to that host is authenticated automatically.
+
+        When a token IS captured, also persists a proof-of-entry row into the
+        auth_bypasses table so the UI can display 'Access Gained' with the exact
+        payload/technique.
+        """
+        try:
+            from urllib.parse import urlparse as _up
+            netloc = _up(url).netloc.lower()
+            if netloc in self._captured_tokens:
+                return  # already have one
+            token = None
+            # Response body JSON
+            try:
+                import json as _json
+                data = _json.loads(resp.text or "")
+                if isinstance(data, dict):
+                    auth = data.get("authentication") or {}
+                    token = (auth.get("token") if isinstance(auth, dict) else None) \
+                        or data.get("access_token") or data.get("token") or data.get("id_token")
+            except Exception:
+                pass
+            # Set-Cookie: token=<jwt>
+            if not token:
+                import re as _re
+                for _c in resp.headers.get_list("set-cookie") if hasattr(resp.headers, "get_list") else [resp.headers.get("set-cookie", "")]:
+                    m = _re.search(r'(?:token|jwt|access_token|session|auth)=([A-Za-z0-9._\-]+)', _c or "")
+                    if m and m.group(1).startswith("eyJ"):
+                        token = m.group(1)
+                        break
+            if token and isinstance(token, str) and token.count(".") >= 2 and token.startswith("eyJ"):
+                self._captured_tokens[netloc] = token
+                logger.info(f"[AgenticExecutor] Captured JWT for {netloc} (len={len(token)}) — will auto-inject on future requests")
+                # Also expose to the shared context so downstream scanners
+                # (IDOR/access-control/JWT-forge/Tier-4-8) that read
+                # ctx.auth_headers reuse this session automatically.
+                try:
+                    hdrs = dict(getattr(self.ctx, "auth_headers", {}) or {})
+                    if "Authorization" not in hdrs:
+                        hdrs["Authorization"] = f"Bearer {token}"
+                        self.ctx.auth_headers = hdrs
+                        # Push to the executor auth registry so downstream
+                        # V2 executors (generic.py, authz, IDOR, JWT, mass-assign)
+                        # pick up the new session immediately.
+                        try:
+                            from core.execution.executors.auth_registry import set_active_auth
+                            set_active_auth(
+                                headers=hdrs,
+                                cookies=getattr(self.ctx, "auth_cookies", {}) or {},
+                                sessions=getattr(self.ctx, "auth_sessions", {}) or {},
+                            )
+                        except Exception:
+                            pass
+                    # Record the credential source so _setup_auth_session on the
+                    # next phase can rebuild a full role session if needed.
+                    hc = list(getattr(self.ctx, "harvested_creds", []) or [])
+                    hc.append({
+                        "source": "agentic_capture",
+                        "netloc": netloc,
+                        "token": token,
+                        "type": "jwt_bearer",
+                        "acquired_via": "http_response",
+                    })
+                    self.ctx.harvested_creds = hc[-100:]
+                except Exception:
+                    pass
+                # Persist proof-of-entry: infer technique from the request body,
+                # decode JWT to extract user/role/email, snapshot response body.
+                try:
+                    import json as _json, base64 as _b64, re as _re
+                    body_s = req_body if isinstance(req_body, str) else str(req_body or "")
+                    # Classify the technique from the payload
+                    technique = "credential_replay"
+                    if _re.search(r"'\s*(or|OR)\s+['\"]?1['\"]?\s*=\s*['\"]?1|--\s*$|/\*", body_s):
+                        technique = "sqli_bypass"
+                    elif '"role"' in body_s.replace(" ", "") and 'admin' in body_s.lower():
+                        technique = "mass_assign_admin"
+                    elif "/api/users" in url.lower() or "/register" in url.lower() or "/signup" in url.lower():
+                        technique = "self_register"
+                    elif "/login" in url.lower() or "/signin" in url.lower() or "/token" in url.lower():
+                        technique = "credential_replay"
+                    # Decode username/role from JWT payload
+                    username, role = "", ""
+                    try:
+                        payload_b64 = token.split(".")[1]
+                        payload_b64 += "=" * (-len(payload_b64) % 4)
+                        jwt_payload = _json.loads(_b64.urlsafe_b64decode(payload_b64).decode("utf-8", "ignore"))
+                        data = jwt_payload.get("data") or jwt_payload
+                        if isinstance(data, dict):
+                            username = data.get("email") or data.get("username") or data.get("sub") or ""
+                            role = data.get("role") or ""
+                    except Exception:
+                        pass
+                    # Pull username/password from body if we didn't get it from JWT
+                    if not username and body_s:
+                        try:
+                            b = _json.loads(body_s)
+                            username = b.get("email") or b.get("username") or b.get("user") or username
+                        except Exception:
+                            pass
+                    password = ""
+                    if body_s:
+                        try:
+                            b = _json.loads(body_s)
+                            password = b.get("password") or ""
+                        except Exception:
+                            pass
+                    self._persist_auth_bypass(
+                        host=netloc, login_url=url, technique=technique,
+                        payload=body_s, token=token,
+                        response_status=getattr(resp, "status_code", 200),
+                        response_snippet=(getattr(resp, "text", "") or "")[:600],
+                        username=username, password=password, role=role,
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _auto_detect_vulns(self, method: str, url: str, req_body: str, status: int, resp_text: str):
         import re as _re

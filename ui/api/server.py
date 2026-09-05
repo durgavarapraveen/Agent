@@ -13,12 +13,43 @@ from typing import Optional
 
 logger = logging.getLogger("antigravity.api")
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 app = FastAPI(title="AntiGravity Dashboard API", version="1.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# CORS — configurable via CORS_ORIGINS (comma-separated). Defaults to "*" for
+# development. In production, set e.g. CORS_ORIGINS=https://ui.example.com
+_cors_origins_env = os.getenv("CORS_ORIGINS", "*").strip()
+_cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()] or ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=(_cors_origins != ["*"]),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Optional API-key auth — set API_KEY env var to require X-API-Key on every
+# non-health endpoint. Empty = auth disabled (dev-friendly default).
+_API_KEY = os.getenv("API_KEY", "").strip()
+_AUTH_EXEMPT_PATHS = {"/", "/docs", "/openapi.json", "/redoc",
+                       "/api/health", "/favicon.ico"}
+
+
+@app.middleware("http")
+async def _require_api_key(request: Request, call_next):
+    if not _API_KEY:
+        return await call_next(request)
+    path = request.url.path or ""
+    if path in _AUTH_EXEMPT_PATHS or path.startswith(("/assets/", "/static/")):
+        return await call_next(request)
+    provided = request.headers.get("x-api-key") or request.query_params.get("api_key")
+    if provided != _API_KEY:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return await call_next(request)
 
 # Serve built frontend in production
 _FRONTEND_DIR = Path(__file__).resolve().parent.parent / "web" / "dist"
@@ -33,14 +64,75 @@ if _FRONTEND_DIR.exists():
     # Mount after all API routes are registered (see bottom of file)
 
 BASE = Path(__file__).resolve().parent.parent.parent
-REPORTS_DIR = BASE / "reports"
+sys.path.insert(0, str(BASE))
+# reports/ is opt-in via REPORTS_ENABLED. When disabled, this directory is
+# a placeholder — scan-log endpoints degrade gracefully (return "").
+from core.common.reports_config import reports_enabled as _reports_enabled, reports_dir as _reports_dir
+REPORTS_DIR = BASE / _reports_dir()
+# Scan logs: subprocess writes to logs/scans/*.txt during the run (needs a real
+# file handle), then on scan completion we flush the full log to `scan_artifacts`
+# (kind='scan_log') and delete the tempfile. Log endpoints read DB first, fall
+# back to the live tempfile while a scan is running.
+SCAN_LOGS_DIR = BASE / "logs" / "scans"
+SCAN_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _scan_log_path(job_id: str) -> Path:
+    return SCAN_LOGS_DIR / f"scan_log_{job_id}.txt"
+
+
+def _flush_scan_log_to_db(job_id: str) -> int:
+    """Upload the runtime scan-log tempfile to scan_artifacts and delete it.
+    Called on scan completion/cancel/kill. Idempotent: no-op if file missing."""
+    try:
+        p = _scan_log_path(job_id)
+        if not p.exists() or not p.is_file():
+            return 0
+        content = p.read_bytes()
+        if not content:
+            return 0
+        from core.database.pg_store import ScanArtifactRepo
+        # Delete any previous log artefact for this scan so we replace it
+        existing = ScanArtifactRepo.list_by_scan(job_id, kind="scan_log")
+        aid = ScanArtifactRepo.insert(
+            job_id, "scan_log", "scan_log.txt", content,
+            mime_type="text/plain",
+            metadata={"lines": content.count(b"\n"), "size_bytes": len(content),
+                      "replaces_ids": [r["id"] for r in existing]})
+        try:
+            p.unlink()
+        except Exception:
+            pass
+        return aid
+    except Exception:
+        return 0
+
+
+def _read_scan_log(job_id: str) -> bytes:
+    """DB-first, then live tempfile fallback."""
+    try:
+        from core.database.pg_store import ScanArtifactRepo
+        rows = ScanArtifactRepo.list_by_scan(job_id, kind="scan_log")
+        if rows:
+            full = ScanArtifactRepo.get(rows[0]["id"])
+            if full and full.get("content"):
+                return bytes(full["content"])
+    except Exception:
+        pass
+    p = _scan_log_path(job_id)
+    if p.exists() and p.is_file():
+        try:
+            return p.read_bytes()
+        except Exception:
+            pass
+    return b""
 
 # ── PostgreSQL initialization ──────────────────────────────────────────────
 sys.path.insert(0, str(BASE))
 from core.database.pg_store import (
     _init_schema, TargetRepo, ScanRepo, VulnRepo, LiveDataRepo,
     FindingV2Repo, DedupRepo, AuditRepo, ScheduleRepo, CampaignRepo,
-    ExploitResultRepo, make_run_id,
+    ExploitResultRepo, ScanArtifactRepo, AuthBypassRepo, make_run_id,
 )
 try:
     _init_schema()
@@ -122,7 +214,7 @@ def _load_scan_state():
                 "status": status, "started_at": str(scan.get("started_at", "")),
                 "finished_at": str(scan.get("finished_at", "")), "pid": pid,
                 "exit_code": scan.get("exit_code"), "error": scan.get("error", ""),
-                "log_file": scan.get("log_file") or str(REPORTS_DIR / f"scan_log_{sid}.txt"),
+                "log_file": scan.get("log_file") or str(_scan_log_path(sid)),
                 "command": scan.get("command", ""),
             }
     except Exception:
@@ -137,7 +229,7 @@ def _run_scan_process(job_id: str, target: str, tier: str,
                       resume: bool = False, phases: list = None,
                       credentials: dict = None):
     """Runs main.py as a subprocess in a background thread."""
-    log_file = REPORTS_DIR / f"scan_log_{job_id}.txt"
+    log_file = _scan_log_path(job_id)
     cmd = [sys.executable, str(BASE / "main.py"), "--target", target, "--tier", tier]
     if auto_approve:
         cmd.append("--auto-approve")
@@ -189,6 +281,13 @@ def _run_scan_process(job_id: str, target: str, tier: str,
 
     _active_scans[job_id]["finished_at"] = datetime.utcnow().isoformat()
     _persist_scan_state()
+
+    # Flush the runtime scan-log to Postgres (scan_artifacts.kind='scan_log')
+    # so the Execution Log tab has data even after the tempfile is cleaned up.
+    try:
+        _flush_scan_log_to_db(job_id)
+    except Exception:
+        pass
 
     # Update last_scanned on the target
     try:
@@ -443,24 +542,45 @@ def _normalize_technologies(techs: dict) -> dict:
 
 
 def _enrich_subdomains(subs: list, status_map: dict) -> list:
-    """Convert plain subdomain strings into structured objects with live/dead status."""
+    """Convert subdomain entries into structured objects with live/dead status.
+
+    Preserves live/status/status_code already present on the input dict —
+    the classifier writes those fields directly onto each subdomain record
+    (see central_brain._classify_subdomains), and the external status_map
+    is only a fallback when the caller hasn't classified yet."""
     if not subs:
         return []
     status_map = status_map or {}
     out = []
     seen = set()
     for s in subs:
-        name = s if isinstance(s, str) else (s.get("name") if isinstance(s, dict) else str(s))
+        if isinstance(s, dict):
+            name = s.get("name") or s.get("host") or ""
+            inline_live = s.get("live")
+            inline_status = s.get("status")
+            inline_code = s.get("status_code", 0)
+            inline_note = s.get("note", "")
+        else:
+            name = str(s)
+            inline_live = None
+            inline_status = None
+            inline_code = 0
+            inline_note = ""
         host = str(name).replace("https://", "").replace("http://", "").rstrip("/").lower()
-        if host in seen:
+        if not host or host in seen:
             continue
         seen.add(host)
         st = status_map.get(host, {})
+        # Prefer inline fields (from _classify_subdomains) over status_map fallback.
+        is_live = inline_live if inline_live is not None else bool(st.get("live"))
+        status = inline_status or ("live" if is_live else ("dead" if st else "unknown"))
+        code = inline_code or st.get("status_code", 0)
         out.append({
             "name": host,
-            "live": bool(st.get("live")),
-            "status": "live" if st.get("live") else ("dead" if st else "unknown"),
-            "status_code": st.get("status_code", 0),
+            "live": bool(is_live),
+            "status": status,
+            "status_code": code,
+            "note": inline_note,
         })
     return out
 
@@ -639,12 +759,124 @@ def _get_exploits(scan_id: str, report: dict) -> list:
 
 @app.get("/api/scans/{scan_id}/recon")
 def get_recon(scan_id: str):
-    """Full recon intelligence collected for a scan (live during recon, and after)."""
+    """Full recon intelligence collected for a scan (live during recon, and after).
+
+    Applies the same shaping (`_normalize_technologies`, `_enrich_subdomains`,
+    `_normalize_ports`) as `/api/scans/{scan_id}.context` so the two payloads
+    stay identical — same source (`recon_data`), same transforms."""
     try:
         from core.database.pg_store import ReconRepo
-        return ReconRepo.get(scan_id)
+        recon = ReconRepo.get(scan_id) or {}
+        if not recon:
+            return {}
+        # Shape identically to /api/scans/{scan_id}.context so callers can rely on
+        # a single format regardless of which endpoint they hit.
+        recon["subdomains"] = _enrich_subdomains(recon.get("subdomains", []),
+                                                  recon.get("subdomain_status", {}))
+        recon["technologies"] = _normalize_technologies(recon.get("technologies", {}))
+        recon["ports"] = _normalize_ports(recon.get("ports", []))
+        return recon
     except Exception as e:
         raise HTTPException(500, f"recon data unavailable: {e}")
+
+
+# ── AUTH BYPASSES / "Access Gained" (SQLi bypass, mass-assign, cred replay) ──
+@app.get("/api/scans/{scan_id}/auth-bypasses")
+def list_auth_bypasses(scan_id: str):
+    """Every successful auth bypass / login during this scan — the payload
+    that worked, the captured token, and a proof-of-entry response snippet.
+    Rendered as the 'Access Gained' panel in the UI."""
+    try:
+        rows = AuthBypassRepo.get_by_scan(scan_id) or []
+        # Never return the raw token in full to the browser — only preview.
+        for r in rows:
+            tok = r.get("token") or ""
+            if tok:
+                r["token_preview"] = tok[:24] + ("…" if len(tok) > 24 else "")
+                r["token_len"] = len(tok)
+                r["token"] = tok[:120] + ("…[truncated]" if len(tok) > 120 else "")
+        return {"scan_id": scan_id, "count": len(rows), "bypasses": rows}
+    except Exception as e:
+        raise HTTPException(500, f"auth-bypasses unavailable: {e}")
+
+
+# ── SCAN ARTIFACTS (PoC, screenshots, SARIF, nuclei templates, canonical) ──
+@app.get("/api/scans/{scan_id}/artifacts")
+def list_scan_artifacts(scan_id: str, kind: str = ""):
+    """List every artifact captured for a scan (metadata only, no content).
+
+    Optionally filter by `kind` (e.g. `poc_python`, `screenshot`, `sarif`,
+    `nuclei_template`, `canonical_summary`, `canonical_markdown`)."""
+    try:
+        rows = ScanArtifactRepo.list_by_scan(scan_id, kind=kind or None)
+        # Strip binary; the content endpoint serves it
+        return {"scan_id": scan_id, "count": len(rows),
+                "counts_by_kind": ScanArtifactRepo.counts_by_kind(scan_id),
+                "artifacts": rows}
+    except Exception as e:
+        raise HTTPException(500, f"artifacts unavailable: {e}")
+
+
+@app.get("/api/scans/{scan_id}/artifacts/{artifact_id}")
+def get_scan_artifact(scan_id: str, artifact_id: int, download: bool = False):
+    """Return one artifact's raw content with the right MIME type.
+
+    Text artefacts (poc_*, sarif, canonical_*, nuclei_template) are returned
+    as UTF-8. Binary (screenshots) are returned as bytes with their mime.
+    Pass `?download=true` to get a Content-Disposition attachment header."""
+    from fastapi.responses import Response
+    try:
+        row = ScanArtifactRepo.get(artifact_id)
+        if not row or row.get("scan_id") != scan_id:
+            raise HTTPException(404, "artifact not found")
+        mime = row.get("mime_type") or "application/octet-stream"
+        content = row.get("content") or b""
+        headers = {}
+        if download:
+            headers["Content-Disposition"] = f'attachment; filename="{row.get("name", "artifact.bin")}"'
+        return Response(content=content, media_type=mime, headers=headers)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"artifact unavailable: {e}")
+
+
+@app.get("/api/scans/{scan_id}/pocs")
+def get_scan_pocs(scan_id: str):
+    """Return all PoC artefacts (Python + Bash + Markdown) inline as strings
+    so the UI can render them without a second fetch."""
+    try:
+        rows = ScanArtifactRepo.list_by_scan(scan_id)
+        pocs = {}
+        for r in rows:
+            if not str(r.get("kind", "")).startswith("poc_"):
+                continue
+            full = ScanArtifactRepo.get(r["id"])
+            if not full:
+                continue
+            try:
+                text = (full.get("content") or b"").decode("utf-8", errors="replace")
+            except Exception:
+                text = ""
+            pocs[r["kind"]] = {
+                "id": r["id"], "name": r.get("name", ""),
+                "mime_type": r.get("mime_type", "text/plain"),
+                "size_bytes": r.get("size_bytes", 0),
+                "content": text,
+            }
+        return {"scan_id": scan_id, "pocs": pocs}
+    except Exception as e:
+        raise HTTPException(500, f"pocs unavailable: {e}")
+
+
+@app.get("/api/scans/{scan_id}/screenshots")
+def list_scan_screenshots(scan_id: str):
+    """List screenshot artefacts. Use `/artifacts/{id}` to fetch the PNG bytes."""
+    try:
+        rows = ScanArtifactRepo.list_by_scan(scan_id, kind="screenshot")
+        return {"scan_id": scan_id, "count": len(rows), "screenshots": rows}
+    except Exception as e:
+        raise HTTPException(500, f"screenshots unavailable: {e}")
 
 
 @app.get("/api/scans/{scan_id}/tool-outputs")
@@ -837,13 +1069,13 @@ def run_scan(body: ScanRequest):
         "pid": None,
         "exit_code": None,
         "error": None,
-        "log_file": str(REPORTS_DIR / f"scan_log_{job_id}.txt"),
+        "log_file": str(_scan_log_path(job_id)),
     }
 
     _active_scans[job_id]["phases"] = body.phases or ["RECON", "ACTIVE_SCANNING", "EXPLOITATION", "REPORTING"]
     try:
         ScanRepo.create(job_id, body.target, body.tier,
-                        log_file=str(REPORTS_DIR / f"scan_log_{job_id}.txt"))
+                        log_file=str(_scan_log_path(job_id)))
     except Exception:
         pass
     _persist_scan_state()
@@ -872,7 +1104,7 @@ def _resolve_log_file(job_id: str) -> Path:
         raw = _active_scans[job_id].get("log_file", "")
         if raw:
             return Path(raw)
-    default = REPORTS_DIR / f"scan_log_{job_id}.txt"
+    default = _scan_log_path(job_id)
     if default.is_file():
         return default
     try:
@@ -888,15 +1120,17 @@ def _resolve_log_file(job_id: str) -> Path:
 
 @app.get("/api/scans/job/{job_id}/logs")
 def get_scan_logs(job_id: str, tail: int = 100):
+    """Return the tail of a scan's execution log.
+    Reads from Postgres (`scan_artifacts.kind='scan_log'`) first — the log is
+    flushed there at scan-end — falling back to the live tempfile while the
+    scan is still running."""
     try:
-        log_file = _resolve_log_file(job_id)
-
-        if not log_file.is_file():
+        raw = _read_scan_log(job_id)
+        if not raw:
             return {"lines": [], "total": 0}
-        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
-            all_lines = f.readlines()
-        stripped = [line.rstrip("\r\n") for line in all_lines[-tail:]]
-        return {"lines": stripped, "total": len(all_lines)}
+        text = raw.decode("utf-8", errors="replace")
+        all_lines = text.splitlines()
+        return {"lines": all_lines[-tail:], "total": len(all_lines)}
     except Exception as e:
         import traceback
         logger.error(f"get_scan_logs error: {traceback.format_exc()}")
@@ -927,10 +1161,33 @@ def stop_scan(job_id: str):
 
 @app.post("/api/scans/job/{job_id}/cancel")
 def cancel_scan(job_id: str):
-    """Cancel and dismiss a scan — removes it from active list and cleans up state files."""
+    """Cancel and dismiss a scan — kills the process, flushes partial log to DB, cleans up."""
     if job_id in _active_scans:
         job = _active_scans[job_id]
         target = job.get("target", "")
+        pid = job.get("pid")
+        # Kill the subprocess if still alive so it stops writing to the log tempfile
+        if pid and _is_pid_alive(pid):
+            try:
+                import signal
+                os.kill(pid, signal.SIGTERM)
+            except Exception:
+                pass
+            # Give it a moment to exit cleanly
+            import time as _t
+            for _ in range(20):
+                if not _is_pid_alive(pid):
+                    break
+                _t.sleep(0.1)
+            if _is_pid_alive(pid):
+                try:
+                    os.kill(pid, signal.SIGKILL if hasattr(signal, "SIGKILL") else signal.SIGTERM)
+                except Exception:
+                    pass
+        try:
+            ScanRepo.update_status(job_id, "cancelled")
+        except Exception:
+            pass
         del _active_scans[job_id]
         _persist_scan_state()
     else:
@@ -942,6 +1199,18 @@ def cancel_scan(job_id: str):
         stop_file = BASE / ".antigravity" / f"stop_{slug}.signal"
         if stop_file.exists():
             stop_file.unlink()
+
+    # Flush partial log to DB AFTER process is dead so tempfile is complete
+    try:
+        _flush_scan_log_to_db(job_id)
+    except Exception:
+        pass
+    # Sweep per-scan temp files (kali container + host scratch)
+    try:
+        from core.common.scan_cleanup import cleanup_after_scan
+        cleanup_after_scan(scan_id=job_id)
+    except Exception:
+        pass
 
     return {"status": "cancelled", "job_id": job_id}
 
@@ -967,6 +1236,16 @@ def kill_all_scans():
         job["status"] = "cancelled"
         ScanRepo.update_status(job_id, "cancelled")
         killed.append(job_id)
+        # Flush partial log to DB, then sweep this scan's temp files
+        try:
+            _flush_scan_log_to_db(job_id)
+        except Exception:
+            pass
+        try:
+            from core.common.scan_cleanup import cleanup_after_scan
+            cleanup_after_scan(scan_id=job_id)
+        except Exception:
+            pass
     _active_scans.clear()
     _persist_scan_state()
     return {"status": "all_killed", "killed": killed, "count": len(killed)}
@@ -1003,7 +1282,7 @@ def resume_scan(body: ResumeRequest):
         "pid": None,
         "exit_code": None,
         "error": None,
-        "log_file": str(REPORTS_DIR / f"scan_log_{job_id}.txt"),
+        "log_file": str(_scan_log_path(job_id)),
         "resumed_from": cp_path,
     }
     _persist_scan_state()
@@ -1020,23 +1299,27 @@ def resume_scan(body: ResumeRequest):
 
 @app.get("/api/scans/job/{job_id}/logs-full")
 def get_scan_logs_full(job_id: str):
-    """Return the complete scan log file."""
-    log_file = _resolve_log_file(job_id)
-    if not log_file.is_file():
+    """Return the complete scan log (from Postgres — falls back to tempfile
+    if the scan is still running and hasn't flushed yet)."""
+    raw = _read_scan_log(job_id)
+    if not raw:
         return {"lines": [], "total": 0}
-    with open(log_file, "r", encoding="utf-8", errors="replace") as f:
-        all_lines = f.readlines()
+    text = raw.decode("utf-8", errors="replace")
+    all_lines = text.splitlines(keepends=True)
     return {"lines": all_lines, "total": len(all_lines)}
 
 
 @app.get("/api/scans/job/{job_id}/logs-download")
 def download_scan_logs(job_id: str):
-    """Download the complete scan log as a file."""
-    from fastapi.responses import FileResponse
-    log_file = _resolve_log_file(job_id)
-    if not log_file.is_file():
-        raise HTTPException(404, "Log file not found")
-    return FileResponse(str(log_file), filename=f"scan_{job_id}_logs.txt", media_type="text/plain")
+    """Download the complete scan log as a file. Served straight from Postgres."""
+    from fastapi.responses import Response
+    raw = _read_scan_log(job_id)
+    if not raw:
+        raise HTTPException(404, "Log not found (scan may still be initialising)")
+    return Response(
+        content=raw, media_type="text/plain",
+        headers={"Content-Disposition": f'attachment; filename="scan_{job_id}_logs.txt"'},
+    )
 
 
 # ── WebSocket Live Feed ────────────────────────────────────────────────────
@@ -1915,4 +2198,6 @@ if _FRONTEND_DIR.exists():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8903)
+    _api_port = int(os.getenv("API_PORT", "8903"))
+    _api_host = os.getenv("API_HOST", "0.0.0.0")
+    uvicorn.run(app, host=_api_host, port=_api_port)

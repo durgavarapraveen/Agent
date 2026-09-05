@@ -5,7 +5,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from core.domain.experiment_v2 import SecurityExperiment
+from core.domain.experiment import SecurityExperiment
 from core.execution.executors.base import ExecutionResult, ExecutionStatus, ExecutorBase
 
 logger = logging.getLogger(__name__)

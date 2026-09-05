@@ -3,6 +3,8 @@ import { useParams, Link } from "react-router-dom";
 import { api } from "../api";
 import ActivityLog from "../components/ActivityLog";
 import ReconPanel from "../components/ReconPanel";
+import ArtifactsPanel from "../components/ArtifactsPanel";
+import AccessGainedPanel from "../components/AccessGainedPanel";
 import { methodColor } from "../components/utils";
 
 export default function ScanDetail() {
@@ -27,13 +29,15 @@ export default function ScanDetail() {
   const tabs = [
     { id: "overview", label: "Overview" },
     { id: "vulns", label: `Vulnerabilities (${vulnerabilities.length})` },
+    { id: "access", label: "Access Gained" },
     { id: "exploits", label: `Exploits (${exploits.length})` },
+    { id: "artifacts", label: "Artifacts / PoC" },
     { id: "chains", label: "Attack Chains" },
     { id: "post-exploit", label: "Post-Exploit" },
     { id: "recon", label: "Recon Data" },
     { id: "tool-outputs", label: "Tool Outputs" },
     { id: "activity", label: "Agent Activity" },
-    { id: "requests", label: `Requests (${(context.captured_requests?.http_requests?.length || 0) + (context.captured_requests?.tool_executions?.length || 0)})` },
+    { id: "requests", label: `HTTP Requests (${context.captured_requests?.http_requests?.length || 0})` },
     { id: "coverage", label: "Coverage" },
     { id: "collected", label: "Collected Data" },
     { id: "logs", label: "Execution Log" },
@@ -70,7 +74,9 @@ export default function ScanDetail() {
 
       {tab === "overview" && <OverviewTab metadata={metadata} severity_counts={severity_counts} test_results={test_results} scope={scope} context={context} vulns={vulnerabilities} executive_summary={executive_summary} />}
       {tab === "vulns" && <VulnsTab vulns={vulnerabilities} expanded={expandedVuln} setExpanded={setExpandedVuln} />}
+      {tab === "access" && <AccessGainedPanel scanId={scanId} />}
       {tab === "exploits" && <ExploitsTab exploits={exploits} scanId={scanId} />}
+      {tab === "artifacts" && <ArtifactsPanel scanId={scanId} />}
       {tab === "chains" && <AttackChainsTab scanId={scanId} />}
       {tab === "post-exploit" && <PostExploitTab scanId={scanId} />}
       {tab === "recon" && <ReconPanel context={context} scanId={scanId} />}
@@ -874,46 +880,34 @@ const preBoxSD = { background: "var(--surface-2, #0e0e12)", padding: 10, borderR
 
 /* ── Requests ────────────────────────────────────────────────────────────── */
 function RequestsTab({ capturedData }) {
+  // Tool executions live in the "Tool Outputs" tab — keeping them here would
+  // duplicate the same rows across two tabs. This tab now shows only real
+  // HTTP requests captured by Playwright/Chromium.
   const [expanded, setExpanded] = useState(null);
   const [methodFilter, setMethodFilter] = useState("ALL");
-  const [section, setSection] = useState("http");
 
   const httpReqs = capturedData.http_requests || [];
-  const toolExecs = capturedData.tool_executions || [];
 
   const methods = [...new Set(httpReqs.map(r => (r.method || "").toUpperCase()).filter(Boolean))];
   const filtered = methodFilter === "ALL" ? httpReqs : httpReqs.filter(r => (r.method || "").toUpperCase() === methodFilter);
 
-  const toolNames = [...new Set(toolExecs.map(r => (r.tool || r.method || "").toUpperCase()).filter(Boolean))];
-  const [toolFilter, setToolFilter] = useState("ALL");
-  const filteredTools = toolFilter === "ALL" ? toolExecs : toolExecs.filter(r => (r.tool || r.method || "").toUpperCase() === toolFilter);
-
-  if (httpReqs.length === 0 && toolExecs.length === 0) return <div className="empty">No captured requests.</div>;
+  if (httpReqs.length === 0) {
+    return (
+      <div className="empty" style={{ padding: 24 }}>
+        <p style={{ marginBottom: 8 }}>No browser HTTP requests captured.</p>
+        <p style={{ fontSize: 12, color: "var(--text-dim)" }}>
+          HTTP requests are captured when Playwright/Chromium crawls the target during scanning.
+          This happens during the preflight and reconnaissance phases.
+          If the target was unreachable during scanning, no requests will appear here.
+          For tool commands, see the <strong>Tool Outputs</strong> tab.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <>
-      <div className="tabs" style={{ marginBottom: 16 }}>
-        <button className={`tab ${section === "http" ? "active" : ""}`} onClick={() => { setSection("http"); setExpanded(null); }}>
-          HTTP Requests ({httpReqs.length})
-        </button>
-        <button className={`tab ${section === "tools" ? "active" : ""}`} onClick={() => { setSection("tools"); setExpanded(null); }}>
-          Tool Executions ({toolExecs.length})
-        </button>
-      </div>
-
-      {section === "http" && (
-        httpReqs.length === 0 ? (
-          <div className="empty" style={{ padding: 24 }}>
-            <p style={{ marginBottom: 8 }}>No browser HTTP requests captured.</p>
-            <p style={{ fontSize: 12, color: "var(--text-dim)" }}>
-              HTTP requests are captured when Playwright/Chromium crawls the target during scanning.
-              This happens during the preflight and reconnaissance phases.
-              If the target was unreachable during scanning, no requests will appear here.
-            </p>
-          </div>
-        ) : (
-          <>
-            <div className="filter-bar" style={{ marginBottom: 12 }}>
+      <div className="filter-bar" style={{ marginBottom: 12 }}>
               <FilterSelect label="Method" value={methodFilter} onChange={setMethodFilter}
                 options={["ALL", ...methods]} />
               <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{filtered.length} requests</span>
@@ -966,61 +960,6 @@ function RequestsTab({ capturedData }) {
                 </tbody>
               </table>
             </div>
-          </>
-        )
-      )}
-
-      {section === "tools" && (
-        <>
-          <div className="filter-bar" style={{ marginBottom: 12 }}>
-            <FilterSelect label="Tool" value={toolFilter} onChange={setToolFilter}
-              options={["ALL", ...toolNames]} />
-            <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{filteredTools.length} executions</span>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Tool</th>
-                  <th>Command</th>
-                  <th>Status</th>
-                  <th>Output</th>
-                  <th>Duration</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredTools.map((r, i) => {
-                  const bytes = r.stdout_bytes || 0;
-                  const sizeStr = bytes > 1024 ? `${(bytes / 1024).toFixed(1)} KB` : bytes > 0 ? `${bytes} B` : "—";
-                  const dur = r.duration_s ? `${r.duration_s.toFixed(1)}s` : "-";
-                  return (
-                  <tr key={i}>
-                    <td>
-                      <span className="badge" style={{ background: "var(--purple)22", color: "var(--purple)", textTransform: "uppercase", fontWeight: 600 }}>
-                        {r.tool || r.method || "-"}
-                      </span>
-                    </td>
-                    <td style={{ fontFamily: "var(--mono)", fontSize: 11, maxWidth: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {r.command || r.url || "-"}
-                    </td>
-                    <td>
-                      {r.success === true && bytes > 0 ? <span style={{ color: "var(--green)" }}>OK</span>
-                        : r.success === true && bytes === 0 ? <span style={{ color: "var(--yellow)" }}>No Output</span>
-                        : r.success === false ? <span style={{ color: "var(--red)" }}>Failed</span>
-                        : "-"}
-                    </td>
-                    <td style={{ fontSize: 12, color: bytes > 0 ? "var(--green)" : "var(--text-dim)" }}>
-                      {sizeStr}
-                    </td>
-                    <td style={{ fontSize: 12 }}>{dur}</td>
-                  </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </>
-      )}
     </>
   );
 }

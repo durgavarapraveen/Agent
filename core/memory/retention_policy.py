@@ -28,10 +28,15 @@ GRACE_PERIOD_DAYS = 30
 class RetentionPolicy:
     """Manages automated data retention, encrypted archiving, and GDPR cascade deletion."""
 
-    def __init__(self, reports_dir: str = "reports", archives_dir: str = "archives",
+    def __init__(self, reports_dir: str = None, archives_dir: str = "archives",  # noqa: ARG002
                  db_path: str = None, audit_log_path: str = "data/audit.log"):
+        from core.common.reports_config import reports_enabled, reports_dir as _rd
+        self._reports_enabled = reports_enabled()
+        if reports_dir is None:
+            reports_dir = str(_rd())
         self.reports_dir = Path(reports_dir)
-        self.reports_dir.mkdir(parents=True, exist_ok=True)
+        if self._reports_enabled:
+            self.reports_dir.mkdir(parents=True, exist_ok=True)
         self.archives_dir = Path(archives_dir)
         self.archives_dir.mkdir(parents=True, exist_ok=True)
         self.audit_logger = AuditLogger(log_path=audit_log_path)

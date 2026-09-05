@@ -24,7 +24,11 @@ logger = logging.getLogger(__name__)
 class ReportingEngine:
     """Master Phase 5 Reporting Engine."""
 
-    def __init__(self, output_dir: str = "reports"):
+    def __init__(self, output_dir: str = None):
+        from core.common.reports_config import reports_enabled, reports_dir
+        self._reports_enabled = reports_enabled()
+        if output_dir is None:
+            output_dir = str(reports_dir())
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 

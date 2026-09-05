@@ -4,8 +4,10 @@ boto3
 botocore
 cryptography
 dnspython
+psycopg2-binary
 python-docx
 python-dotenv
+playwright
 fastmcp
 httpx
 impacket

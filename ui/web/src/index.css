@@ -1,47 +1,76 @@
-/* ── AntiGravity v2 — dope.security Midnight Terminal ─────────────────────── */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+/* ── AntiGravity v3 — Cyberpunk Terminal (Matrix-green primary) ───────────── */
+@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 :root {
-  --bg:          #090909;
-  --bg-card:     #090909;
-  --bg-card-hover: #111111;
-  --bg-sidebar:  #090909;
-  --bg-surface:  #111111;
-  --border:      rgba(247, 249, 250, 0.12);
-  --border-glow: rgba(175, 80, 255, 0.15);
-  --text:        #828384;
-  --text-dim:    #6b6b6b;
-  --text-h:      #f7f9fa;
-  --accent:      #af50ff;
-  --accent-dim:  rgba(175, 80, 255, 0.08);
-  --accent-mid:  rgba(175, 80, 255, 0.15);
-  --accent-solid: #af50ff;
-  --cyan:        #af50ff;
-  --cyan-dim:    rgba(175, 80, 255, 0.08);
-  --green:       #16a34a;
-  --green-dim:   rgba(22, 163, 74, 0.12);
-  --red:         #e7000b;
-  --red-dim:     rgba(231, 0, 11, 0.1);
-  --orange:      #ea580c;
-  --orange-dim:  rgba(234, 88, 12, 0.1);
-  --yellow:      #ca8a04;
-  --yellow-dim:  rgba(202, 138, 4, 0.1);
-  --blue:        #2563eb;
-  --blue-dim:    rgba(37, 99, 235, 0.1);
-  --purple:      #7c3aed;
-  --purple-dim:  rgba(124, 58, 237, 0.1);
-  --mono:        "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  --sans:        "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --radius:      19.2px;
-  --radius-sm:   8px;
-  --radius-lg:   19.2px;
-  --radius-nested: 6px;
+  /* Surfaces — near-black with hair-thin tinted borders */
+  --bg:          #050706;
+  --bg-alt:      #0a0d0b;
+  --bg-card:     #080b09;
+  --bg-card-hover: #10140f;
+  --bg-sidebar:  #050706;
+  --bg-surface:  #10140f;
+  --bg-elev:     #12181a;
+  --border:      rgba(0, 255, 65, 0.08);
+  --border-strong: rgba(0, 255, 65, 0.20);
+  --border-glow: rgba(0, 255, 65, 0.35);
+
+  /* Text — cool white, dimmed by intent */
+  --text:        #b7c7c0;
+  --text-dim:    #6a7c72;
+  --text-h:      #e6ffee;
+  --text-mute:   #55605b;
+
+  /* Primary — matrix / phosphor green */
+  --accent:      #00ff9a;      /* softer than pure #00FF41 for long viewing */
+  --accent-dim:  rgba(0, 255, 154, 0.08);
+  --accent-mid:  rgba(0, 255, 154, 0.18);
+  --accent-solid: #00ff9a;
+  --accent-hot:  #00ff41;      /* pure matrix — used sparingly (focus/glow) */
+  --accent-on:   #05100b;      /* text on --accent surfaces */
+
+  /* Alias tokens kept for existing components (hue-shifted to green so
+     the same variable names produce a coherent Cyberpunk look) */
+  --accent-purple: var(--accent);
+  --purple:      #22ffb4;
+  --purple-dim:  rgba(34, 255, 180, 0.10);
+  --cyan:        #22e6ff;
+  --cyan-dim:    rgba(34, 230, 255, 0.10);
+
+  /* Severity — high-contrast against near-black */
+  --green:       #22ffb4;
+  --green-dim:   rgba(34, 255, 180, 0.12);
+  --red:         #ff3355;       /* alert red — Cyberpunk destructive */
+  --red-dim:     rgba(255, 51, 85, 0.14);
+  --orange:      #ff9130;
+  --orange-dim:  rgba(255, 145, 48, 0.12);
+  --yellow:      #ffe14a;
+  --yellow-dim:  rgba(255, 225, 74, 0.12);
+  --blue:        #38b6ff;
+  --blue-dim:    rgba(56, 182, 255, 0.12);
+
+  /* Type — Fira Code / Fira Sans (Cyberpunk-style pairing) with
+     JetBrains + Inter as fallbacks so nothing shifts if fonts fail. */
+  --mono:        "Fira Code", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans:        "Fira Sans", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  /* Radius — tighter, more technical */
+  --radius:      10px;
+  --radius-sm:   6px;
+  --radius-lg:   14px;
+  --radius-nested: 4px;
+
+  /* Effects — subtle neon glow, no bold drop-shadows */
   --shadow:      none;
   --shadow-lg:   none;
-  --glow-accent: 0 0 20px rgba(175, 80, 255, 0.15);
+  --glow-accent: 0 0 22px rgba(0, 255, 154, 0.22);
+  --glow-hot:    0 0 12px rgba(0, 255, 65, 0.55);
+  --glow-red:    0 0 18px rgba(255, 51, 85, 0.35);
+  --scanline:    rgba(255, 255, 255, 0.018);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { color-scheme: dark; }
 
 body {
   font-family: var(--sans);
@@ -51,17 +80,106 @@ body {
   -moz-osx-font-smoothing: grayscale;
   font-size: 14px;
   line-height: 1.5;
+  position: relative;
+  min-height: 100vh;
 }
 
+/* Subtle scanline overlay (pure decoration, non-interactive) */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent 2px,
+      var(--scanline) 2px,
+      var(--scanline) 3px
+    );
+  z-index: 1000;
+  mix-blend-mode: overlay;
+  opacity: 0.7;
+}
+
+/* Radial vignette to focus attention centrally, terminal-style */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse at center,
+    transparent 0%,
+    transparent 60%,
+    rgba(0, 0, 0, 0.35) 100%
+  );
+  z-index: 999;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body::before, body::after { display: none; }
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* Selection = matrix green */
 ::selection {
   background: var(--accent-mid);
   color: var(--text-h);
+  text-shadow: 0 0 6px var(--accent);
 }
 
-::-webkit-scrollbar { width: 5px; height: 5px; }
+/* Slim, tinted scrollbars */
+::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(247,249,250,0.1); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(247,249,250,0.2); }
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-glow);
+  box-shadow: 0 0 4px var(--accent);
+}
+
+/* Neon focus ring — accessible, keyboard-only */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--accent-dim);
+  border-radius: var(--radius-sm);
+}
+button:focus-visible, a:focus-visible {
+  outline-color: var(--accent-hot);
+  box-shadow: 0 0 0 3px var(--accent-mid), 0 0 12px var(--accent-dim);
+}
+
+/* Monospace treatment for scan IDs, hashes, targets, code */
+code, kbd, samp, pre, .mono, [data-mono] {
+  font-family: var(--mono);
+  font-feature-settings: "calt" 1, "liga" 1, "zero" 1, "ss01" 1;
+}
+
+/* Small "TERMINAL" marker used above section titles */
+.term-marker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+.term-marker::before {
+  content: ">_";
+  color: var(--accent-hot);
+  text-shadow: 0 0 6px var(--accent-hot);
+}
 
 /* ── Layout ──────────────────────────────────────────────────────────────── */
 .app {
@@ -104,9 +222,27 @@ body {
   align-items: center;
   justify-content: center;
   font-size: 14px;
-  color: #f7f9fa;
+  color: var(--accent-on);
   font-weight: 700;
   letter-spacing: -0.5px;
+  font-family: var(--mono);
+  box-shadow: var(--glow-hot);
+  position: relative;
+}
+/* Ring pulse (subtle, reduced-motion respected globally) */
+.sidebar .logo-icon::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border: 1px solid var(--accent-hot);
+  border-radius: calc(var(--radius-nested) + 3px);
+  opacity: 0.4;
+  animation: agPulse 2.4s ease-out infinite;
+}
+@keyframes agPulse {
+  0%   { opacity: 0.4; transform: scale(1); }
+  70%  { opacity: 0; transform: scale(1.25); }
+  100% { opacity: 0; transform: scale(1.25); }
 }
 
 .sidebar .logo-text {
@@ -235,20 +371,32 @@ body {
 }
 
 h1 {
-  font-size: 24px;
-  font-weight: 300;
+  font-size: 22px;
+  font-weight: 500;
   color: var(--text-h);
   margin-bottom: 24px;
-  letter-spacing: -0.6px;
+  letter-spacing: -0.4px;
   line-height: 1.2;
+  font-family: var(--sans);
+}
+/* h1 accented lead-in slash — subtle terminal cue */
+h1::before {
+  content: "// ";
+  color: var(--accent);
+  font-family: var(--mono);
+  font-weight: 400;
+  font-size: 0.9em;
+  opacity: 0.7;
+  margin-right: 2px;
 }
 
 h2 {
-  font-size: 16px;
-  font-weight: 500;
+  font-size: 15px;
+  font-weight: 600;
   color: var(--text-h);
   margin-bottom: 16px;
-  letter-spacing: -0.2px;
+  letter-spacing: 0.02em;
+  font-family: var(--sans);
 }
 
 h3 {
@@ -263,19 +411,35 @@ h3 {
 
 /* ── Cards ────────────────────────────────────────────────────────────────── */
 .card {
-  background: var(--bg-card);
+  background:
+    linear-gradient(180deg, rgba(0, 255, 154, 0.015) 0%, transparent 60%),
+    var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 20px;
   margin-bottom: 16px;
   box-shadow: none;
-  transition: border-color 0.2s;
+  transition: border-color 0.2s, box-shadow 0.2s;
   overflow: visible;
+  position: relative;
 }
-
+/* Hair-thin top edge that lights up on hover — terminal window feel */
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent-mid), transparent);
+  opacity: 0;
+  transition: opacity 0.25s;
+  border-radius: var(--radius) var(--radius) 0 0;
+  pointer-events: none;
+}
 .card:hover {
-  border-color: rgba(247, 249, 250, 0.2);
+  border-color: var(--border-strong);
+  box-shadow: 0 0 24px rgba(0, 255, 154, 0.05);
 }
+.card:hover::before { opacity: 1; }
 
 .card-grid {
   display: grid;
@@ -351,16 +515,16 @@ h3 {
   white-space: nowrap;
 }
 
-.badge.critical { background: var(--red-dim); color: var(--red); border: 1px solid rgba(231, 0, 11, 0.2); }
-.badge.high     { background: var(--orange-dim); color: var(--orange); border: 1px solid rgba(234, 88, 12, 0.2); }
-.badge.medium   { background: var(--yellow-dim); color: var(--yellow); border: 1px solid rgba(202, 138, 4, 0.2); }
-.badge.low      { background: var(--blue-dim); color: var(--blue); border: 1px solid rgba(37, 99, 235, 0.2); }
-.badge.info     { background: var(--purple-dim); color: var(--purple); border: 1px solid rgba(124, 58, 237, 0.2); }
-.badge.confirmed   { background: var(--green-dim); color: var(--green); border: 1px solid rgba(22, 163, 74, 0.2); }
-.badge.rejected    { background: var(--red-dim); color: var(--red); border: 1px solid rgba(231, 0, 11, 0.2); }
-.badge.unconfirmed { background: var(--orange-dim); color: var(--orange); border: 1px solid rgba(234, 88, 12, 0.2); }
-.badge.scope-ok       { background: var(--green-dim); color: var(--green); border: 1px solid rgba(22, 163, 74, 0.2); }
-.badge.scope-violation { background: var(--red-dim); color: var(--red); border: 1px solid rgba(231, 0, 11, 0.2); }
+.badge.critical { background: var(--red-dim); color: var(--red); border: 1px solid rgba(255, 51, 85, 0.35); text-shadow: 0 0 6px rgba(255, 51, 85, 0.4); }
+.badge.high     { background: var(--orange-dim); color: var(--orange); border: 1px solid rgba(255, 145, 48, 0.35); }
+.badge.medium   { background: var(--yellow-dim); color: var(--yellow); border: 1px solid rgba(255, 225, 74, 0.30); }
+.badge.low      { background: var(--blue-dim); color: var(--blue); border: 1px solid rgba(56, 182, 255, 0.30); }
+.badge.info     { background: var(--purple-dim); color: var(--purple); border: 1px solid rgba(34, 255, 180, 0.30); }
+.badge.confirmed   { background: var(--green-dim); color: var(--green); border: 1px solid rgba(34, 255, 180, 0.35); }
+.badge.rejected    { background: var(--red-dim); color: var(--red); border: 1px solid rgba(255, 51, 85, 0.35); }
+.badge.unconfirmed { background: var(--orange-dim); color: var(--orange); border: 1px solid rgba(255, 145, 48, 0.30); }
+.badge.scope-ok       { background: var(--green-dim); color: var(--green); border: 1px solid rgba(34, 255, 180, 0.35); }
+.badge.scope-violation { background: var(--red-dim); color: var(--red); border: 1px solid rgba(255, 51, 85, 0.35); }
 
 /* ── Active scan badge ───────────────────────────────────────────────────── */
 .badge.running {
@@ -438,24 +602,42 @@ tbody tr:hover { background: rgba(247, 249, 250, 0.03); }
   white-space: nowrap;
 }
 
-.btn:hover { background: rgba(247, 249, 250, 0.06); border-color: rgba(247,249,250,0.2); }
+.btn:hover {
+  background: var(--accent-dim);
+  border-color: var(--accent-mid);
+  color: var(--text-h);
+}
 .btn:active { transform: scale(0.98); }
 .btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
 .btn-primary {
   background: var(--accent);
-  border-color: var(--accent);
-  color: #f7f9fa;
-  font-weight: 500;
+  border-color: var(--accent-hot);
+  color: var(--accent-on);
+  font-weight: 600;
+  text-shadow: 0 0 6px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--glow-accent);
 }
-.btn-primary:hover { opacity: 0.85; background: var(--accent); border-color: var(--accent); }
+.btn-primary:hover {
+  background: var(--accent-hot);
+  border-color: var(--accent-hot);
+  box-shadow: var(--glow-hot), var(--glow-accent);
+}
 
-.btn-danger { border-color: rgba(231, 0, 11, 0.3); color: var(--red); }
-.btn-danger:hover { background: var(--red-dim); border-color: var(--red); }
+.btn-danger {
+  border-color: rgba(255, 51, 85, 0.35);
+  color: var(--red);
+  background: transparent;
+}
+.btn-danger:hover {
+  background: var(--red-dim);
+  border-color: var(--red);
+  box-shadow: var(--glow-red);
+}
 
-.btn-sm { padding: 0px 10px; height: 30px; font-size: 13px; }
+.btn-sm { padding: 0px 10px; height: 28px; font-size: 12px; font-family: var(--mono); letter-spacing: 0.02em; }
 .btn-ghost { border-color: transparent; background: transparent; }
-.btn-ghost:hover { background: rgba(247, 249, 250, 0.04); }
+.btn-ghost:hover { background: var(--accent-dim); color: var(--text-h); }
 
 /* ── Forms ────────────────────────────────────────────────────────────────── */
 .form-row {
@@ -518,27 +700,35 @@ tbody tr:hover { background: rgba(247, 249, 250, 0.03); }
 
 .tab {
   padding: 8px 14px;
-  font-size: 13px;
-  font-weight: 400;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--text-dim);
   cursor: pointer;
   border-bottom: 2px solid transparent;
-  transition: all 0.15s;
+  transition: color 0.15s, border-color 0.15s, text-shadow 0.15s;
   background: none;
   border-top: none;
   border-left: none;
   border-right: none;
-  font-family: var(--sans);
+  font-family: var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   white-space: nowrap;
 }
 
 .tab:hover { color: var(--text-h); }
-.tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 500; }
+.tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent-hot);
+  text-shadow: 0 0 8px var(--accent-dim);
+}
 
-/* ── Code block ───────────────────────────────────────────────────────────── */
+/* ── Code block — terminal window aesthetic ─────────────────────────────── */
 .code-block {
-  background: rgba(247, 249, 250, 0.03);
-  border: 1px solid var(--border);
+  background:
+    linear-gradient(180deg, rgba(0, 255, 154, 0.02), transparent 70%),
+    var(--bg-alt);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-nested);
   padding: 16px;
   font-family: var(--mono);
@@ -548,6 +738,7 @@ tbody tr:hover { background: rgba(247, 249, 250, 0.03); }
   white-space: pre-wrap;
   word-break: break-all;
   color: var(--text-h);
+  position: relative;
   max-height: 400px;
   overflow-y: auto;
 }

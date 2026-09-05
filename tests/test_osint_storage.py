@@ -9,7 +9,7 @@ from core.intelligence.osint_engine import OSINTDatabase, Employee, LeakedCreden
 from core.intelligence.threat_intel import ThreatIntelDatabase, ThreatIndicator, ReputationScore
 from core.intelligence.subdomain_enum import SubdomainDatabase, Subdomain, VirtualHost, CloudStorageBucket
 from core.reporting import EnterpriseReporter
-from core.memory.shared_context_v2 import SharedContextV2 as SharedContext
+from core.memory.shared_context import SharedContextV2 as SharedContext
 from core.common.schemas import CapabilityType
 
 

@@ -373,17 +373,22 @@ class ExecutiveSummaryGenerator:
 class EnterpriseReporter:
     """Builds enterprise-grade HTML/PDF reports from a SharedContext."""
 
-    def __init__(self, ctx, report_dir: str = "reports",
+    def __init__(self, ctx, report_dir: str = None,
                  active_frameworks=None):
         self.ctx = ctx
+        from core.common.reports_config import reports_enabled, reports_dir
+        self._reports_enabled = reports_enabled()
+        if report_dir is None:
+            report_dir = str(reports_dir())
         self.report_dir = Path(report_dir)
-        self.report_dir.mkdir(exist_ok=True)
+        if self._reports_enabled:
+            self.report_dir.mkdir(parents=True, exist_ok=True)
         self.active_frameworks = active_frameworks
 
     def _compliance_html(self) -> str:
         """Per-framework compliance table (uses the compliance module)."""
         try:
-            from compliance import ComplianceReporter
+            from core.compliance import ComplianceReporter
         except Exception:       # noqa: BLE001
             return "<p class='muted'>Compliance module unavailable.</p>"
         summary = ComplianceReporter(self.active_frameworks).build(
@@ -658,10 +663,14 @@ class EnterpriseReporter:
         return self.add_osint_findings(full_html)
 
     def generate(self, executive_summary: str = "", stem: str = "") -> Dict[str, str]:
-        """Write HTML (and PDF if a renderer is available). Returns paths."""
+        """Write HTML (and PDF if a renderer is available). Returns paths.
+        When REPORTS_ENABLED=false, only the in-memory HTML is generated and
+        returned (no disk writes)."""
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         stem = stem or f"report_{ts}"
         html_str = self.build_html(executive_summary)
+        if not self._reports_enabled:
+            return {"html_str": html_str}
         html_path = self.report_dir / f"{stem}.html"
         html_path.write_text(html_str, encoding="utf-8")
         logger.info(f"[Report] HTML report written: {html_path}")

@@ -1,5 +1,0 @@
-[
-  {"port": 22, "reason": "management SSH"},
-  {"port": 80, "reason": "standard HTTP web server"},
-  {"url": "https://example.com/health", "reason": "health check endpoint"}
-]

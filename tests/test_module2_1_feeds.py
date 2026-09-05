@@ -6,7 +6,7 @@ import os
 import tempfile
 import unittest
 
-from vuln_intel.feeds import VulnerabilityDatabase, FeedClient, ServiceMatcher
+from core.intelligence.vuln_intel.feeds import VulnerabilityDatabase, FeedClient, ServiceMatcher
 
 
 class TestModule21Feeds(unittest.TestCase):

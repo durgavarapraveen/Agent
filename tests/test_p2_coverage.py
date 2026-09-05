@@ -6,8 +6,8 @@ import unittest
 from core.coverage.security_test_catalog import SecurityTest, SecurityTestCatalog, build_default_catalog
 from core.coverage.applicability_engine import ApplicabilityEngine
 from core.coverage.coverage_matrix import CoverageMatrix, CoverageState
-from core.coverage.convergence_engine_v2 import ConvergenceEngine
-from core.attack_surface.endpoint_inventory_v2 import EndpointInventoryV2
+from core.coverage.convergence_engine import ConvergenceEngine
+from core.attack_surface.endpoint_inventory import EndpointInventoryV2
 
 
 class TestSecurityTestCatalog(unittest.TestCase):

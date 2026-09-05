@@ -131,13 +131,35 @@ class CanonicalReporter:
             return self._convergence.summary()
         return {}
 
-    def save_json(self, path: str = "reports/canonical_summary.json") -> str:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+    def save_json(self, path: str = None, scan_id: str = None) -> str:
+        """Persist the canonical report.
+
+        When REPORTS_ENABLED=1 → writes JSON to disk and returns the path.
+        Otherwise, if `scan_id` is provided, persists into `scan_artifacts`
+        under kind=`canonical_summary` and returns `db:scan_artifacts:<id>`.
+        Returns "" when neither path is available."""
+        from core.common.reports_config import reports_enabled, reports_dir
         summary = self.generate_summary()
-        with open(path, "w") as f:
-            json.dump(summary, f, indent=2, default=str)
-        logger.info(f"CANONICAL_REPORT saved to {path}")
-        return path
+        body = json.dumps(summary, indent=2, default=str)
+        if reports_enabled():
+            if path is None:
+                path = str(reports_dir() / "canonical_summary.json")
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w") as f:
+                f.write(body)
+            logger.info(f"CANONICAL_REPORT saved to {path}")
+            return path
+        if scan_id:
+            try:
+                from core.database.pg_store import ScanArtifactRepo
+                aid = ScanArtifactRepo.insert(
+                    scan_id, "canonical_summary", "canonical_summary.json",
+                    body, mime_type="application/json")
+                logger.info(f"CANONICAL_REPORT persisted to DB (artifact_id={aid})")
+                return f"db:scan_artifacts:{aid}"
+            except Exception as e:
+                logger.warning(f"[CanonicalReporter] DB persist failed: {e}")
+        return ""
 
     def generate_markdown(self) -> str:
         s = self.generate_summary()

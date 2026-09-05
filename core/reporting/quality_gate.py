@@ -10,7 +10,7 @@ from typing import Dict, List, Any
 from core.reporting.fp_filter import FalsePositiveFilter
 from core.reporting.retest_engine import RetestEngine
 from core.reporting.baseline import BaselineManager
-from validation.confidence import ConfidenceCalibrator
+from core.validation.confidence import ConfidenceCalibrator
 
 logger = logging.getLogger(__name__)
 

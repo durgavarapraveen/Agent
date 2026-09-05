@@ -18,9 +18,15 @@ logger = logging.getLogger(__name__)
 class NucleiTemplateGenerator:
     """Generates custom nuclei YAML templates from discovered findings."""
 
-    def __init__(self, output_dir: str = "reports/custom_templates"):
+    def __init__(self, output_dir: str = None, scan_id: str = None):
+        from core.common.reports_config import reports_enabled, reports_dir
+        self._reports_enabled = reports_enabled()
+        self.scan_id = scan_id  # when set, templates are persisted to Postgres
+        if output_dir is None:
+            output_dir = str(reports_dir() / "custom_templates")
         self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        if self._reports_enabled:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
         self.generated: List[str] = []
 
     def _safe_id(self, text: str) -> str:
@@ -323,14 +329,26 @@ http:
             seen_ids.add(template_id)
 
             filename = f"{template_id}.yaml"
-            filepath = self.output_dir / filename
-
-            try:
-                filepath.write_text(template_content, encoding="utf-8")
-                generated_paths.append(str(filepath))
-                count += 1
-            except Exception as e:
-                logger.warning(f"[TemplateGen] Failed to write {filename}: {e}")
+            # DB path (default when reports/ is disabled)
+            if not self._reports_enabled and self.scan_id:
+                try:
+                    from core.database.pg_store import ScanArtifactRepo
+                    aid = ScanArtifactRepo.insert(
+                        self.scan_id, "nuclei_template", filename,
+                        template_content, mime_type="application/yaml",
+                        metadata={"template_id": template_id})
+                    generated_paths.append(f"db:scan_artifacts:{aid}")
+                    count += 1
+                except Exception as e:
+                    logger.warning(f"[TemplateGen] DB persist failed for {filename}: {e}")
+            elif self._reports_enabled:
+                filepath = self.output_dir / filename
+                try:
+                    filepath.write_text(template_content, encoding="utf-8")
+                    generated_paths.append(str(filepath))
+                    count += 1
+                except Exception as e:
+                    logger.warning(f"[TemplateGen] Failed to write {filename}: {e}")
 
         self.generated = generated_paths
         logger.info(f"[TemplateGen] Generated {len(generated_paths)} custom nuclei templates in {self.output_dir}")
