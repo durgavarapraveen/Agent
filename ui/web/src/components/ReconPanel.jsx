@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 
 /* ── Recon sub-nav sections ─────────────────────────────────────────────── */
 const SECTIONS = [
@@ -6,10 +6,12 @@ const SECTIONS = [
   { key: "subdomains", label: "Subdomains" },
   { key: "endpoints", label: "Endpoints" },
   { key: "ports", label: "Ports" },
+  { key: "dns", label: "DNS Records" },
   { key: "osint", label: "OSINT" },
   { key: "infra", label: "Infrastructure" },
   { key: "secrets", label: "Secrets" },
   { key: "requests", label: "Requests" },
+  { key: "tools", label: "Tool Results" },
 ];
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
@@ -97,7 +99,8 @@ function OverviewSection({ context }) {
         <StatBox label="Subdomains" value={count(context.subdomains)} accent="purple" />
         <StatBox label="Endpoints" value={count(context.endpoints)} accent="blue" />
         <StatBox label="Open Ports" value={count(context.ports)} accent="green" />
-        <StatBox label="Directories" value={count(context.directories)} accent="cyan" />
+        <StatBox label="DNS Records" value={count(context.dns_records)} accent="cyan" />
+        <StatBox label="Directories" value={count(context.directories)} accent="yellow" />
         <StatBox label="Secrets" value={count(context.secrets)} accent="red" />
         <StatBox label="Technologies" value={count(context.technologies)} accent="orange" />
       </div>
@@ -417,6 +420,41 @@ function OsintSection({ osint }) {
   );
 }
 
+/* ── DNS Records Section ────────────────────────────────────────────────── */
+function DnsSection({ records }) {
+  const [typeFilter, setTypeFilter] = useState("all");
+  if (!records?.length) return <EmptyState message="No DNS records captured" />;
+
+  const types = [...new Set(records.map(r => r.type).filter(Boolean))].sort();
+  const filtered = typeFilter === "all" ? records : records.filter(r => r.type === typeFilter);
+  const typeColors = { A: "var(--green)", AAAA: "var(--blue)", CNAME: "var(--cyan)", MX: "var(--orange)", NS: "var(--purple)", SOA: "var(--yellow)", TXT: "var(--text-dim)", SRV: "var(--accent)", PTR: "var(--red)" };
+
+  return (
+    <>
+      <div style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "center", flexWrap: "wrap" }}>
+        <button className={`btn btn-sm ${typeFilter === "all" ? "btn-primary" : ""}`}
+          onClick={() => setTypeFilter("all")}>All ({records.length})</button>
+        {types.map(t => (
+          <button key={t} className={`btn btn-sm ${typeFilter === t ? "btn-primary" : ""}`}
+            onClick={() => setTypeFilter(t)}>{t} ({records.filter(r => r.type === t).length})</button>
+        ))}
+      </div>
+      <DataTable
+        maxHeight={500}
+        columns={[
+          { key: "type", label: "Type", style: { width: 70 }, render: (r) => (
+            <span style={{ fontFamily: "var(--mono)", fontWeight: 700, fontSize: 11, color: typeColors[r.type] || "var(--text)" }}>{r.type}</span>
+          )},
+          { key: "name", label: "Name", tdStyle: { fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-h)" }, render: (r) => r.name || "-" },
+          { key: "value", label: "Value", tdStyle: { fontFamily: "var(--mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }, render: (r) => r.value || "-" },
+          { key: "ttl", label: "TTL", style: { width: 80 }, tdStyle: { fontFamily: "var(--mono)", fontSize: 11, color: "var(--text-dim)", textAlign: "right" }, render: (r) => r.ttl || "-" },
+        ]}
+        rows={filtered}
+      />
+    </>
+  );
+}
+
 /* ── Infrastructure Section (Tech + SSL + Headers) ───────────────────────── */
 function InfraSection({ technologies, ssl_info, headers }) {
   const hasTech = technologies && Object.keys(technologies).length > 0;
@@ -577,8 +615,126 @@ function RequestsSection({ requests }) {
   );
 }
 
+/* ── Tool Results Section ────────────────────────────────────────────────── */
+const TOOL_COLORS = {
+  subfinder: "var(--cyan)", assetfinder: "var(--cyan)", amass: "var(--cyan)",
+  httpx: "var(--green)", whatweb: "var(--orange)", wafw00f: "var(--red)",
+  nmap: "var(--purple)", masscan: "var(--purple)", nuclei: "var(--red)",
+  dig: "var(--blue)", nikto: "var(--yellow)", sslscan: "var(--accent)",
+  katana: "var(--green)", ffuf: "var(--orange)", curl: "var(--text-dim)",
+  dnsenum: "var(--blue)", fierce: "var(--blue)", whois: "var(--blue)",
+};
+
+function ToolResultsSection({ scanId, toolExecutions }) {
+  const [expanded, setExpanded] = useState({});
+  const [expandedTargets, setExpandedTargets] = useState({});
+  const [toolOutputs, setToolOutputs] = useState(null);
+  const execs = toolExecutions || [];
+
+  useEffect(() => {
+    if (!scanId) return;
+    fetch(`/api/scans/${scanId}/tool-outputs?grouped=true`)
+      .then(r => r.json())
+      .then(setToolOutputs)
+      .catch(() => setToolOutputs([]));
+  }, [scanId]);
+
+  const toolStats = {};
+  execs.forEach(e => {
+    if (!e?.tool) return;
+    if (!toolStats[e.tool]) toolStats[e.tool] = { runs: 0, success: 0, targets: new Set() };
+    toolStats[e.tool].runs++;
+    if (e.success) toolStats[e.tool].success++;
+    if (e.target) toolStats[e.tool].targets.add(e.target);
+  });
+
+  if (toolOutputs === null) return <div style={{ fontSize: 13, color: "var(--text-dim)" }}>Loading tool outputs...</div>;
+  if (!toolOutputs.length && !Object.keys(toolStats).length) return <EmptyState message="No tool results yet. Tool results will appear here as each recon tool completes." />;
+
+  const toggleTool = (t) => setExpanded(prev => ({ ...prev, [t]: !prev[t] }));
+  const toggleTarget = (key) => setExpandedTargets(prev => ({ ...prev, [key]: !prev[key] }));
+
+  const totalTools = toolOutputs.length || Object.keys(toolStats).length;
+
+  return (
+    <>
+      <div style={{ marginBottom: 16, fontSize: 13, color: "var(--text-dim)" }}>
+        {totalTools} tools used &middot; {execs.length} total executions
+      </div>
+      {toolOutputs.map(({ tool, targets }) => {
+        const stats = toolStats[tool] || { runs: 0, success: 0, targets: new Set() };
+        const color = TOOL_COLORS[tool] || "var(--accent)";
+        const targetCount = Object.keys(targets || {}).length;
+        const isOpen = expanded[tool];
+
+        return (
+          <div key={tool} className="card" style={{ padding: 0, marginBottom: 12, overflow: "hidden" }}>
+            <div
+              onClick={() => toggleTool(tool)}
+              style={{
+                padding: "12px 16px", cursor: "pointer", display: "flex", alignItems: "center", gap: 12,
+                background: isOpen ? "rgba(255,255,255,0.03)" : "transparent",
+              }}
+            >
+              <span style={{ color, fontWeight: 700, fontFamily: "var(--mono)", fontSize: 14, minWidth: 100 }}>
+                {tool}
+              </span>
+              <span style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                {stats.runs} run{stats.runs !== 1 ? "s" : ""} &middot; {stats.success}/{stats.runs} success
+              </span>
+              <Pill>{targetCount} target{targetCount !== 1 ? "s" : ""}</Pill>
+              <span style={{ marginLeft: "auto", fontSize: 11, opacity: 0.4 }}>{isOpen ? "▲" : "▼"}</span>
+            </div>
+
+            {isOpen && targets && (
+              <div style={{ padding: "0 16px 16px", borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+                {Object.entries(targets).map(([target, runs]) => {
+                  const tKey = `${tool}:${target}`;
+                  const tOpen = expandedTargets[tKey];
+                  return (
+                    <div key={target} style={{ marginTop: 8, border: "1px solid rgba(255,255,255,0.06)", borderRadius: 6 }}>
+                      <div
+                        onClick={() => toggleTarget(tKey)}
+                        style={{
+                          padding: "8px 12px", cursor: "pointer", display: "flex", alignItems: "center", gap: 8,
+                          background: tOpen ? "rgba(255,255,255,0.02)" : "transparent",
+                        }}
+                      >
+                        <span style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--text)" }}>{target}</span>
+                        <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{runs.length} run{runs.length !== 1 ? "s" : ""}</span>
+                        <span style={{ marginLeft: "auto", fontSize: 11, opacity: 0.4 }}>{tOpen ? "▲" : "▼"}</span>
+                      </div>
+                      {tOpen && runs.map((run, i) => (
+                        <div key={i} style={{ padding: "8px 12px", borderTop: "1px solid rgba(255,255,255,0.04)" }}>
+                          <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4, fontFamily: "var(--mono)" }}>
+                            $ {run.command}
+                          </div>
+                          <pre style={{
+                            fontSize: 11, lineHeight: 1.5, color: "var(--text)", background: "rgba(0,0,0,0.3)",
+                            padding: 8, borderRadius: 4, overflow: "auto", maxHeight: 300, whiteSpace: "pre-wrap",
+                            wordBreak: "break-all", margin: 0,
+                          }}>
+                            {run.stdout || "(no output)"}
+                          </pre>
+                          {run.exit_code !== 0 && run.exit_code !== -1 && (
+                            <div style={{ fontSize: 11, color: "var(--red)", marginTop: 4 }}>Exit code: {run.exit_code}</div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 /* ── Main ReconPanel ─────────────────────────────────────────────────────── */
-export default function ReconPanel({ context }) {
+export default function ReconPanel({ context, scanId }) {
   const [section, setSection] = useState("overview");
 
   if (!context) return <div className="empty">No recon data collected yet</div>;
@@ -586,7 +742,8 @@ export default function ReconPanel({ context }) {
   const hasAnything = context.subdomains?.length || context.endpoints?.length || context.ports?.length ||
     (context.technologies && Object.keys(context.technologies).length) ||
     context.osint || context.ssl_info || context.headers ||
-    context.directories?.length || context.secrets?.length || context.captured_requests?.length;
+    context.directories?.length || context.secrets?.length || context.captured_requests?.length ||
+    context.dns_records?.length || context.tool_results || context.tool_executions?.length;
 
   if (!hasAnything) return <div className="empty">No recon data collected yet</div>;
 
@@ -594,10 +751,12 @@ export default function ReconPanel({ context }) {
     subdomains: count(context.subdomains),
     endpoints: count(context.endpoints),
     ports: count(context.ports),
+    dns: count(context.dns_records),
     osint: count(context.osint?.findings) + count(context.osint?.employees) + count(context.osint?.leaked_credentials),
     infra: count(context.technologies) + count(context.ssl_info) + count(context.headers),
     secrets: count(context.directories) + count(context.secrets),
     requests: count(context.captured_requests),
+    tools: count(context.tool_executions),
   };
 
   return (
@@ -615,10 +774,12 @@ export default function ReconPanel({ context }) {
       {section === "subdomains" && <SubdomainsSection subdomains={context.subdomains} summary={context.subdomain_summary} />}
       {section === "endpoints" && <EndpointsSection endpoints={context.endpoints} />}
       {section === "ports" && <PortsSection ports={context.ports} />}
+      {section === "dns" && <DnsSection records={context.dns_records} />}
       {section === "osint" && <OsintSection osint={context.osint} />}
       {section === "infra" && <InfraSection technologies={context.technologies} ssl_info={context.ssl_info} headers={context.headers} />}
       {section === "secrets" && <SecretsSection directories={context.directories} secrets={context.secrets} />}
       {section === "requests" && <RequestsSection requests={context.captured_requests} />}
+      {section === "tools" && <ToolResultsSection scanId={scanId} toolExecutions={context.tool_executions} />}
     </>
   );
 }

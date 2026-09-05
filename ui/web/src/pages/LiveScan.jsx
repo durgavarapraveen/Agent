@@ -135,8 +135,8 @@ function LiveScanDetail({ jobId }) {
     // Initial fetch via REST
     const fetchAll = () => {
       api.getScanJob(jobId).then(setJob).catch(() => {});
-      api.getLiveProgress().then(setProgress).catch(() => {});
-      api.getLiveResults().then(setResults).catch(() => {});
+      api.getLiveProgress(jobId).then(setProgress).catch(() => {});
+      api.getLiveResults(jobId).then(setResults).catch(() => {});
       api.getScanLogs(jobId, 300).then(setLogs).catch(() => {});
     };
     fetchAll();
@@ -198,7 +198,7 @@ function LiveScanDetail({ jobId }) {
     }
   };
 
-  const recon = results?.recon || { subdomains: [], endpoints: [], technologies: {}, ports: [], ips: [] };
+  const recon = results?.recon || { subdomains: [], endpoints: [], technologies: {}, ports: [], ips: [], dns_records: [], tool_results: {}, tool_executions: [] };
   const vulns = results?.vulnerabilities || [];
   const exploits = results?.exploits || [];
   const requests = results?.captured_requests || [];
@@ -257,6 +257,8 @@ function LiveScanDetail({ jobId }) {
         <MiniStat label="Requests" value={requests.length} color="var(--purple)" />
       </div>
 
+      {isRunning && <HealthIndicator />}
+
       <div className="tabs" style={{ marginTop: 16 }}>
         {tabs.map(t => (
           <button key={t.id} className={`tab ${tab === t.id ? "active" : ""}`} onClick={() => setTab(t.id)}>
@@ -266,7 +268,7 @@ function LiveScanDetail({ jobId }) {
       </div>
 
       {tab === "overview" && <OverviewSection recon={recon} vulns={vulns} exploits={exploits} progress={progress} />}
-      {tab === "recon" && <ReconPanel context={recon} />}
+      {tab === "recon" && <ReconPanel context={recon} scanId={jobId} />}
       {tab === "vulns" && <VulnsSection vulns={vulns} />}
       {tab === "exploits" && <ExploitsSection exploits={exploits} />}
       {tab === "activity" && <ActivityLog scanId={jobId} poll />}
@@ -688,6 +690,48 @@ function LogsSection({ logs, logRef, jobId }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+
+function HealthIndicator() {
+  const [health, setHealth] = useState(null);
+
+  useEffect(() => {
+    const fetch = () => api.getCanonicalHealth().then(setHealth).catch(() => {});
+    fetch();
+    const iv = setInterval(fetch, 5000);
+    return () => clearInterval(iv);
+  }, []);
+
+  if (!health || health.status === "no_health_data") return null;
+
+  const stateColors = { HEALTHY: "#22c55e", DEGRADED: "#ea580c", THROTTLED: "#ef4444", PAUSED: "#6b7280" };
+  const color = stateColors[health.state] || "#6b7280";
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 14px", background: "var(--bg-surface)",
+                  border: `1px solid ${color}33`, borderRadius: "var(--radius-sm)", marginTop: 8, fontSize: 12 }}>
+      <span style={{ width: 8, height: 8, borderRadius: "50%", background: color, flexShrink: 0 }} />
+      <span style={{ fontWeight: 600, color, textTransform: "uppercase", letterSpacing: "0.5px", fontSize: 10 }}>
+        Target: {health.state || "UNKNOWN"}
+      </span>
+      {health.avg_latency_ms && (
+        <span style={{ color: "var(--text-dim)", fontFamily: "var(--mono)" }}>
+          {Math.round(health.avg_latency_ms)}ms avg
+        </span>
+      )}
+      {health.error_5xx_count > 0 && (
+        <span style={{ color: "var(--red)", fontFamily: "var(--mono)" }}>
+          {health.error_5xx_count} 5xx
+        </span>
+      )}
+      {health.waf_block_count > 0 && (
+        <span style={{ color: "var(--orange)", fontFamily: "var(--mono)" }}>
+          {health.waf_block_count} WAF blocks
+        </span>
+      )}
     </div>
   );
 }

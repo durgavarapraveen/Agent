@@ -88,7 +88,7 @@ class Actuators:
                 for k, v in r.cookies.items():
                     cur = self.session_headers.get("Cookie", "")
                     self.session_headers["Cookie"] = (cur + f"; {k}={v}").strip("; ")
-                obs = {"status": r.status_code, "len": len(body), "body": body[:1500],
+                obs = {"status": r.status_code, "len": len(body), "body": body[:4000],
                        "headers": dict(r.headers)}
                 self.last_responses.append(obs)
                 return obs
@@ -160,7 +160,7 @@ class Actuators:
             async with httpx.AsyncClient(timeout=self.timeout, verify=False) as c:
                 files = {field: (filename, content.encode(), content_type)}
                 r = await c.post(url, files=files, headers=self.session_headers)
-                return {"status": r.status_code, "body": r.text[:1000]}
+                return {"status": r.status_code, "body": r.text[:4000]}
         except Exception as e:
             return {"error": str(e)}
 

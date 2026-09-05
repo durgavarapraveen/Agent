@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 def _finding(ftype, title, severity, location, proof, source, extra=None):
     f = {
         "type": ftype, "title": title, "severity": severity, "location": location,
-        "proof": str(proof)[:1200], "tool": source, "source": source,
+        "proof": str(proof), "tool": source, "source": source,
         "confidence_score": 0.85,
     }
     if extra:

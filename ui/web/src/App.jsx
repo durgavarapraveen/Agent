@@ -8,6 +8,8 @@ import AuditTrail from "./pages/AuditTrail";
 import ReviewQueue from "./pages/ReviewQueue";
 import Compare from "./pages/Compare";
 import Settings from "./pages/Settings";
+import Analytics from "./pages/Analytics";
+import KnowledgeBase from "./pages/KnowledgeBase";
 
 const DashIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -46,6 +48,16 @@ const ReviewIcon = () => (
     <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
   </svg>
 );
+const AnalyticsIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="18" y1="20" x2="18" y2="10" /><line x1="12" y1="20" x2="12" y2="4" /><line x1="6" y1="20" x2="6" y2="14" />
+  </svg>
+);
+const KnowledgeIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z" /><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z" />
+  </svg>
+);
 const SettingsIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <circle cx="12" cy="12" r="3" />
@@ -78,7 +90,13 @@ export default function App() {
             <span className="nav-label">Analysis</span>
             <NavLink to="/review"><ReviewIcon /> Review Queue</NavLink>
             <NavLink to="/compare"><CompareIcon /> Compare</NavLink>
+            <NavLink to="/analytics"><AnalyticsIcon /> Analytics</NavLink>
             <NavLink to="/audit"><AuditIcon /> Audit Trail</NavLink>
+          </div>
+
+          <div className="nav-section">
+            <span className="nav-label">Intelligence</span>
+            <NavLink to="/knowledge"><KnowledgeIcon /> Knowledge Base</NavLink>
           </div>
 
           <div className="nav-section">
@@ -102,8 +120,10 @@ export default function App() {
             <Route path="/scans/:scanId" element={<ScanDetail />} />
             <Route path="/review" element={<ReviewQueue />} />
             <Route path="/compare" element={<Compare />} />
+            <Route path="/analytics" element={<Analytics />} />
             <Route path="/audit" element={<AuditTrail />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/knowledge" element={<KnowledgeBase />} />
           </Routes>
         </main>
       </div>

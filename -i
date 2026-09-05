@@ -1,0 +1,14 @@
+HTTP/2 200 
+allow: OPTIONS,HEAD,GET,POST
+content-length: 0
+content-type: text/html
+date: Sat, 05 Sep 2026 05:12:42 GMT
+server: Apache/2.4.68 (Unix)
+
+HTTP/2 200 
+allow: OPTIONS,HEAD,GET,POST
+content-length: 0
+content-type: text/html
+date: Sat, 05 Sep 2026 05:12:42 GMT
+server: Apache/2.4.68 (Unix)
+

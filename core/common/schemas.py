@@ -75,6 +75,13 @@ class ErrorType(str, Enum):
     NO_PROGRESS = "NO_PROGRESS"
 
 
+class TaskTier(str, Enum):
+    """Canonical task complexity tier — controls model selection and budgets."""
+    SMALL = "small"
+    MEDIUM = "medium"
+    LARGE = "large"
+
+
 class BrainDecisionAction(str, Enum):
     SPAWN_AGENTS = "spawn_agents"
     SPAWN_TASKS = "spawn_tasks"
@@ -146,6 +153,11 @@ class ToolExecutionStatus(str, Enum):
     PARTIAL_SUCCESS = "PARTIAL_SUCCESS"
     FAILED = "FAILED"
     TIMEOUT = "TIMEOUT"
+    BLOCKED = "BLOCKED"
+    SCOPE_DENIED = "SCOPE_DENIED"
+    INVALID_INVOCATION = "INVALID_INVOCATION"
+    EMPTY_RESULT = "EMPTY_RESULT"
+    PARTIAL = "PARTIAL"
 
 
 class RetryDecisionType(str, Enum):
@@ -155,19 +167,27 @@ class RetryDecisionType(str, Enum):
 
 
 class ToolResult(BaseModel):
-    """Standard result from tool execution"""
+    """Standard result from tool execution (Phase 12 contract)."""
     tool: str
     capability: str
-    status: Union[ToolExecutionStatus, Literal["success", "failed", "timeout", "partial_success", "SUCCESS", "PARTIAL_SUCCESS", "FAILED", "TIMEOUT"]]
+    status: Union[ToolExecutionStatus, Literal[
+        "success", "failed", "timeout", "partial_success",
+        "SUCCESS", "PARTIAL_SUCCESS", "FAILED", "TIMEOUT",
+        "BLOCKED", "SCOPE_DENIED", "INVALID_INVOCATION", "EMPTY_RESULT", "PARTIAL",
+    ]]
     stdout: str = ""
     stderr: str = ""
     exit_code: Optional[int] = None
+    command: str = ""
     duration_seconds: float = 0.0
     started_at: datetime = Field(default_factory=datetime.now)
     finished_at: Optional[datetime] = None
     target: Optional[str] = None
     error: Optional[ErrorInfo] = None
-    evidence_id: Optional[str] = None  # Reference to Evidence store
+    error_type: Optional[str] = None
+    evidence_id: Optional[str] = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    normalized_result: Dict[str, Any] = Field(default_factory=dict)
     data: Dict[str, Any] = Field(default_factory=dict)
     warnings: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
@@ -176,7 +196,14 @@ class ToolResult(BaseModel):
     @property
     def success(self) -> bool:
         val = self.status.value if hasattr(self.status, "value") else str(self.status)
-        return str(val).upper() in ("SUCCESS", "PARTIAL_SUCCESS")
+        return str(val).upper() in ("SUCCESS", "PARTIAL_SUCCESS", "PARTIAL")
+
+    @property
+    def is_semantic_success(self) -> bool:
+        """Exit code 0 is not enough — output must contain meaningful data."""
+        if not self.success:
+            return False
+        return bool(self.stdout.strip() or self.normalized_result or self.data)
 
 
 

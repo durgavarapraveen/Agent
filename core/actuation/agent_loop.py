@@ -103,7 +103,7 @@ class ObjectiveAgentLoop:
                     "title": args.get("title", "Agent-reported finding"),
                     "location": self.target,
                     "evidence": args.get("evidence", ""),
-                    "proof": str(args.get("evidence", ""))[:1000],
+                    "proof": str(args.get("evidence", "")),
                     "tool": "objective_agent", "source": "objective_agent",
                     "exploited": True, "confidence_score": 0.8,
                 }
@@ -158,7 +158,7 @@ class ObjectiveAgentLoop:
                         target=self.target, title=f.get("title", objective),
                         status=STATUS_SUCCESS, category=category,
                         severity=f.get("severity", ""), steps=result.get("steps", 0),
-                        evidence=str(f.get("evidence", ""))[:2000], tried_summary=tried,
+                        evidence=str(f.get("evidence", "")), tried_summary=tried,
                         history=result.get("history", []), scan_id=scan_id,
                     )
             else:
@@ -202,8 +202,8 @@ class ObjectiveAgentLoop:
             obs = await self._dispatch(tool, args)
             # Truncate large observations to save LLM tokens.
             obs_s = json.dumps(obs, default=str)
-            if len(obs_s) > 1500:
-                obs = {"truncated": obs_s[:1400] + "…", "full_len": len(obs_s)}
+            if len(obs_s) > 4000:
+                obs = {"truncated": obs_s[:3900] + "…", "full_len": len(obs_s)}
             history.append({"tool": tool, "args": args, "obs": obs})
 
             # Pluggable success check (e.g. benchmark oracle).

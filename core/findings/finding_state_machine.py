@@ -1,15 +1,29 @@
+"""
+Finding state machine — enforces valid state transitions.
+"""
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Set
 
 from core.findings.finding import Finding, FindingState
 
 VALID_TRANSITIONS: Dict[FindingState, Set[FindingState]] = {
-    FindingState.DISCOVERED: {FindingState.VALIDATING},
-    FindingState.VALIDATING: {FindingState.CONFIRMED, FindingState.REJECTED, FindingState.INCONCLUSIVE},
-    FindingState.CONFIRMED: set(),
+    FindingState.DISCOVERED: {FindingState.NORMALIZED, FindingState.VALIDATING},
+    FindingState.NORMALIZED: {FindingState.DEDUPLICATED},
+    FindingState.DEDUPLICATED: {FindingState.VALIDATION_PENDING},
+    FindingState.VALIDATION_PENDING: {FindingState.VALIDATING},
+    FindingState.VALIDATING: {
+        FindingState.CONFIRMED,
+        FindingState.REJECTED,
+        FindingState.INCONCLUSIVE,
+        FindingState.FALSE_POSITIVE,
+    },
+    FindingState.CONFIRMED: {FindingState.REPORTABLE, FindingState.SUPPRESSED},
     FindingState.REJECTED: set(),
     FindingState.INCONCLUSIVE: {FindingState.VALIDATING},
+    FindingState.FALSE_POSITIVE: set(),
+    FindingState.REPORTABLE: {FindingState.SUPPRESSED},
+    FindingState.SUPPRESSED: set(),
 }
 
 
@@ -39,4 +53,15 @@ class FindingStateMachine:
 
     def mark_inconclusive(self, finding: Finding, reason: str) -> None:
         self._transition(finding, FindingState.INCONCLUSIVE)
+        finding.rejection_reason = reason
+
+    def mark_false_positive(self, finding: Finding, reason: str) -> None:
+        self._transition(finding, FindingState.FALSE_POSITIVE)
+        finding.rejection_reason = reason
+
+    def mark_reportable(self, finding: Finding) -> None:
+        self._transition(finding, FindingState.REPORTABLE)
+
+    def mark_suppressed(self, finding: Finding, reason: str) -> None:
+        self._transition(finding, FindingState.SUPPRESSED)
         finding.rejection_reason = reason

@@ -30,6 +30,7 @@ for _dir in ("data/db", "reports", "loot", ".audit_logs"):
     os.makedirs(_dir, exist_ok=True)
 
 from core.common.config import load_config
+from core.common.startup_diagnostics import log_startup_diagnostics
 from core.orchestration.central_brain import CentralBrain
 from core.orchestration.meta_brain import MetaBrain
 
@@ -193,6 +194,7 @@ Examples:
         from core.memory.dedup_tracker import DeduplicationTracker
         DeduplicationTracker().reset_all()
 
+    log_startup_diagnostics()
     logger.info("=" * 60)
     logger.info("AUTONOMOUS PENTESTING AGENT v2.0")
     logger.info("=" * 60)

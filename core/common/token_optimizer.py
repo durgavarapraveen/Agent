@@ -314,6 +314,8 @@ class TokenOptimizer:
         """Compress technology stack to key frameworks only."""
         tech_list = []
         for tech_list_per_domain in technologies.values():
+            if not isinstance(tech_list_per_domain, list):
+                continue
             for tech in tech_list_per_domain:
                 tech_clean = tech.split('/')[0].strip()
                 if tech_clean not in tech_list:

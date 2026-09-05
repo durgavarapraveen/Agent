@@ -132,6 +132,22 @@ class ScopeManager:
         
         return True
     
+    def validate_plan(self, target: str, tool_name: str = "") -> str:
+        """Planning-time scope validation (Phase 14).
+        Returns empty string if allowed, or a rejection reason.
+        An unauthorized target must never become an executable task.
+        """
+        if not target:
+            return "PLAN_REJECTED_SCOPE: empty target"
+        if target.startswith("http"):
+            if not self.validate_url(target):
+                return f"PLAN_REJECTED_SCOPE: URL {target} not in authorized scope"
+        else:
+            domain = target.lower().split(":")[0].split("/")[0]
+            if not self._is_domain_allowed(domain) and not self._is_ip_allowed(domain):
+                return f"PLAN_REJECTED_SCOPE: {target} not in authorized scope"
+        return ""
+
     def can_expand_scope(self, new_domain: str, new_ip: str = None) -> bool:
         """Determine if scope can be expanded (requires user approval)."""
         # The central agent may propose scope expansion

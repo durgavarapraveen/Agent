@@ -17,9 +17,12 @@ class DuplicateDetector:
         endpoint: str,
         identity: str,
         params: Dict[str, Any],
+        category: str = "",
+        strategy: str = "",
+        payload_family: str = "",
     ) -> str:
         sorted_params = json.dumps(params, sort_keys=True, default=str)
-        raw = f"{capability}|{target}|{endpoint}|{identity}|{sorted_params}"
+        raw = f"{capability}|{target}|{endpoint}|{identity}|{category}|{strategy}|{payload_family}|{sorted_params}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def is_duplicate(self, fp: str) -> bool:

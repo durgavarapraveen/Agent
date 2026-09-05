@@ -217,7 +217,7 @@ class PlannerResponseNormalizer:
         capability = cls._infer_capability(objective, data)
 
         # Log capability selection
-        logger.info(f"CAPABILITY_SELECTED: capability={capability.value} objective='{objective[:60]}'")
+        logger.info(f"CAPABILITY_SELECTED: capability={capability.value} objective='{objective}'")
 
         # Dependencies
         deps = data.get("dependencies") or data.get("depends_on") or []
@@ -303,54 +303,54 @@ class PlannerResponseNormalizer:
         # Check tool hints in data if provided
         tools_hint = [str(t).lower() for t in (data.get("tools") or [])]
         if any(t in ("nmap", "masscan", "port_check") for t in tools_hint):
-            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.PORT_SCANNING.value} via tools_hint")
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective}' matched_capability={CapabilityType.PORT_SCANNING.value} via tools_hint")
             return CapabilityType.PORT_SCANNING
         if any(t in ("subfinder", "amass", "dig", "assetfinder") for t in tools_hint):
-            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.DNS_ENUMERATION.value} via tools_hint")
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective}' matched_capability={CapabilityType.DNS_ENUMERATION.value} via tools_hint")
             return CapabilityType.DNS_ENUMERATION
         if any(t in ("gobuster", "feroxbuster", "ffuf") for t in tools_hint):
-            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.ENDPOINT_DISCOVERY.value} via tools_hint")
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective}' matched_capability={CapabilityType.ENDPOINT_DISCOVERY.value} via tools_hint")
             return CapabilityType.ENDPOINT_DISCOVERY
         if any(t in ("katana", "gau", "waybackurls") for t in tools_hint):
-            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.WEB_CRAWLING.value} via tools_hint")
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective}' matched_capability={CapabilityType.WEB_CRAWLING.value} via tools_hint")
             return CapabilityType.WEB_CRAWLING
         if any(t in ("whatweb", "wafw00f", "httpx") for t in tools_hint):
-            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.TECHNOLOGY_FINGERPRINTING.value} via tools_hint")
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective}' matched_capability={CapabilityType.TECHNOLOGY_FINGERPRINTING.value} via tools_hint")
             return CapabilityType.TECHNOLOGY_FINGERPRINTING
         if any(t in ("nuclei", "sqlmap", "nikto", "wpscan", "dalfox") for t in tools_hint):
-            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.VULNERABILITY_SCANNING.value} via tools_hint")
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective}' matched_capability={CapabilityType.VULNERABILITY_SCANNING.value} via tools_hint")
             return CapabilityType.VULNERABILITY_SCANNING
         if any(t in ("sslscan", "sslyze") for t in tools_hint):
-            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.TLS_ANALYSIS.value} via tools_hint")
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective}' matched_capability={CapabilityType.TLS_ANALYSIS.value} via tools_hint")
             return CapabilityType.TLS_ANALYSIS
         if any(t in ("hydra", "john", "hashcat") for t in tools_hint):
-            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.AUTHENTICATION_TESTING.value} via tools_hint")
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective}' matched_capability={CapabilityType.AUTHENTICATION_TESTING.value} via tools_hint")
             return CapabilityType.AUTHENTICATION_TESTING
 
         # Check tool keywords directly mentioned in objective text
         if re.search(r'\b(?:httpx|whatweb|wafw00f)\b', obj_text):
-            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.TECHNOLOGY_FINGERPRINTING.value} via tool_keyword")
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective}' matched_capability={CapabilityType.TECHNOLOGY_FINGERPRINTING.value} via tool_keyword")
             return CapabilityType.TECHNOLOGY_FINGERPRINTING
         if re.search(r'\b(?:nmap|masscan|rustscan)\b', obj_text):
-            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.PORT_SCANNING.value} via tool_keyword")
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective}' matched_capability={CapabilityType.PORT_SCANNING.value} via tool_keyword")
             return CapabilityType.PORT_SCANNING
         if re.search(r'\b(?:subfinder|amass|assetfinder|dnsenum|fierce)\b', obj_text):
-            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.DNS_ENUMERATION.value} via tool_keyword")
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective}' matched_capability={CapabilityType.DNS_ENUMERATION.value} via tool_keyword")
             return CapabilityType.DNS_ENUMERATION
         if re.search(r'\b(?:nuclei|nikto|sqlmap|wpscan|dalfox)\b', obj_text):
-            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.VULNERABILITY_SCANNING.value} via tool_keyword")
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective}' matched_capability={CapabilityType.VULNERABILITY_SCANNING.value} via tool_keyword")
             return CapabilityType.VULNERABILITY_SCANNING
         if re.search(r'\b(?:katana|gau|waybackurls)\b', obj_text):
-            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.WEB_CRAWLING.value} via tool_keyword")
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective}' matched_capability={CapabilityType.WEB_CRAWLING.value} via tool_keyword")
             return CapabilityType.WEB_CRAWLING
         if re.search(r'\b(?:gobuster|feroxbuster|ffuf|dirsearch|dirb)\b', obj_text):
-            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.ENDPOINT_DISCOVERY.value} via tool_keyword")
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective}' matched_capability={CapabilityType.ENDPOINT_DISCOVERY.value} via tool_keyword")
             return CapabilityType.ENDPOINT_DISCOVERY
         if re.search(r'\b(?:sslscan|sslyze)\b', obj_text):
-            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.TLS_ANALYSIS.value} via tool_keyword")
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective}' matched_capability={CapabilityType.TLS_ANALYSIS.value} via tool_keyword")
             return CapabilityType.TLS_ANALYSIS
         if re.search(r'\b(?:hydra|john|hashcat)\b', obj_text):
-            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={CapabilityType.AUTHENTICATION_TESTING.value} via tool_keyword")
+            logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective}' matched_capability={CapabilityType.AUTHENTICATION_TESTING.value} via tool_keyword")
             return CapabilityType.AUTHENTICATION_TESTING
 
         # Prioritized mappings with word boundary regex matching.
@@ -411,11 +411,11 @@ class PlannerResponseNormalizer:
 
         for pattern, cap, conf in mappings:
             if re.search(pattern, obj_text):
-                logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' matched_capability={cap.value} confidence={conf}")
+                logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective}' matched_capability={cap.value} confidence={conf}")
                 return cap
 
         # Fallback neutral capability
-        logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective[:60]}' fallback_capability={CapabilityType.TECHNOLOGY_FINGERPRINTING.value} confidence=0.75")
+        logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective}' fallback_capability={CapabilityType.TECHNOLOGY_FINGERPRINTING.value} confidence=0.75")
         return CapabilityType.TECHNOLOGY_FINGERPRINTING
 
     @classmethod

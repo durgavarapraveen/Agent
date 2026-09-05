@@ -379,7 +379,7 @@ class JSAnalyzer:
                 "target": f.source_url,
                 "location": f.source_url,
                 "details": f"Found in JS bundle: {f.value}\nContext: {f.context}",
-                "proof": f.context[:300] if f.context else f.value[:200],
+                "proof": f.context if f.context else f.value,
                 "remediation": (
                     "Remove hardcoded secrets from client-side JavaScript. "
                     "Use environment variables and server-side configuration. "

@@ -271,7 +271,7 @@ class CapabilityWorker:
 
         if has_error and not has_extracted:
             status = ToolExecutionStatus.FAILED
-            logger.warning(f"TOOL_FAILED: tool={tool_name} exit_code={exit_code} stderr='{stderr[:100]}'")
+            logger.warning(f"TOOL_FAILED: tool={tool_name} exit_code={exit_code} stderr='{stderr}'")
         elif has_error and has_extracted:
             status = ToolExecutionStatus.PARTIAL_SUCCESS
             logger.info(f"TOOL_PARTIAL_SUCCESS: tool={tool_name} exit_code={exit_code} extracted_data_found=True")

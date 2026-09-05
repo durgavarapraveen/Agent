@@ -33,7 +33,7 @@ class ExecutionPlanner:
         Logs EXECUTION_STRATEGY_CREATED and EXECUTION_PLAN_VALIDATED.
         """
         allowed_names = {p.name.lower().strip() for p in allowed_profiles}
-        logger.info(f"EXECUTION_STRATEGY_CREATED: steps={[s.get('tool') for s in strategy_steps]} objective='{task_spec.objective[:60]}'")
+        logger.info(f"EXECUTION_STRATEGY_CREATED: steps={[s.get('tool') for s in strategy_steps]} objective='{task_spec.objective}'")
 
         validated_invocations: List[ToolInvocation] = []
 

@@ -86,15 +86,15 @@ class TargetScopeValidator:
 
     def _host_in_scope(self, norm: str) -> bool:
         """True if a (non-IP) hostname matches an authorized domain or subdomain."""
+        norm_bare = norm[4:] if norm.startswith("www.") else norm
         for allowed in self.authorized_scope:
             allowed_norm = self._normalize_target(allowed)
-            if allowed == "*" or norm == allowed_norm:
+            if allowed == "*" or norm == allowed_norm or norm_bare == allowed_norm:
                 return True
             if allowed_norm.startswith("*."):
                 allowed_norm = allowed_norm[2:]
-            if allowed_norm.startswith("www."):
-                allowed_norm = allowed_norm[4:]
-            if norm == allowed_norm or norm.endswith("." + allowed_norm):
+            allowed_bare = allowed_norm[4:] if allowed_norm.startswith("www.") else allowed_norm
+            if norm_bare == allowed_bare or norm_bare.endswith("." + allowed_bare):
                 return True
         return False
 
@@ -139,6 +139,7 @@ class TargetScopeValidator:
             if self._host_in_scope(norm):
                 self.note_resolution(norm)
                 return True
+            logger.warning(f"[TargetScopeValidator] DENIED host={norm} scope={self.authorized_scope}")
             return False
 
         # Check if target is an IP address belonging to an in-scope domain.

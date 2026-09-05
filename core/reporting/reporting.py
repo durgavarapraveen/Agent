@@ -473,6 +473,10 @@ class EnterpriseReporter:
     def _attack_path_svg(self) -> str:
         """Render attack chains as a horizontal node-arrow SVG."""
         chains = self.ctx.attack_chains or []
+        if isinstance(chains, dict):
+            chains = list(chains.values()) if chains else []
+        if not isinstance(chains, list):
+            chains = []
         if not chains:
             return "<p class='muted'>No multi-step attack chains identified.</p>"
         svg_blocks = []
