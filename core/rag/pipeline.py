@@ -87,9 +87,14 @@ class SecurityRAGPipeline:
                     CREATE INDEX IF NOT EXISTS rag_documents_source_idx
                     ON rag_documents (source_type)
                 """)
+                # Unique index closes the SELECT-then-INSERT race in
+                # `_store_chunk`. Two concurrent ingests of the same content
+                # would previously both pass the existence check and both
+                # INSERT — the unique constraint now serializes them.
                 cur.execute("""
-                    CREATE INDEX IF NOT EXISTS rag_documents_hash_idx
+                    CREATE UNIQUE INDEX IF NOT EXISTS rag_documents_hash_uidx
                     ON rag_documents (content_hash)
+                    WHERE content_hash <> ''
                 """)
                 conn.commit()
         logger.info("[RAG] Schema initialized")
@@ -120,10 +125,17 @@ class SecurityRAGPipeline:
 
     async def _store_chunk(self, content: str, metadata: Dict[str, Any],
                            source_type: str, source_ref: str) -> str:
-        """Embed and store a single chunk, deduplicating by content hash."""
+        """Embed and store a single chunk, deduplicating by content hash.
+
+        Race-safe: relies on the unique index on `content_hash` (see schema).
+        We still short-circuit with a fast existence check to avoid running an
+        embedding call for content we already have; the actual dedup is
+        enforced at INSERT time via `ON CONFLICT (content_hash) DO NOTHING`.
+        """
         c_hash = content_hash(content)
 
-        # skip if identical content already stored
+        # Fast path: skip if identical content already stored. Race with a
+        # concurrent ingest is safe — the ON CONFLICT below is the real gate.
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cur:
@@ -136,15 +148,33 @@ class SecurityRAGPipeline:
         doc_id = f"rag_{uuid.uuid4().hex[:12]}"
         embedding = await self.embedder.embed(content)
 
+        # Refuse to persist the deterministic hash-bag fallback into the shared
+        # vector index — mixing them with real semantic embeddings degrades
+        # retrieval for every subsequent query. The embedder marks fallback
+        # vectors via `LOCAL_MARKER_VALUE`; the pipeline skips those and logs
+        # once so operators know to configure an embedding provider.
+        from core.rag.embedder import EmbeddingClient
+        if EmbeddingClient.is_local_embedding(embedding):
+            if not getattr(self, "_warned_local_embed", False):
+                logger.warning(
+                    "[RAG] Embedding provider unavailable — refusing to persist "
+                    "hash-bag fallback into vector index. Configure EMBEDDING_API_URL / "
+                    "EMBEDDING_API_KEY to enable semantic retrieval."
+                )
+                self._warned_local_embed = True
+            return ""
+
         with DatabaseManager.get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO rag_documents (doc_id, content, metadata, source_type, source_ref, content_hash, embedding)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (doc_id) DO NOTHING
+                    ON CONFLICT (content_hash) WHERE content_hash <> '' DO NOTHING
                 """, (doc_id, content, json.dumps(metadata), source_type, source_ref, c_hash, embedding))
                 conn.commit()
-        return doc_id
+                # If the ON CONFLICT branch fired we didn't insert; report as
+                # empty so callers can distinguish new from duplicate.
+                return doc_id if cur.rowcount else ""
 
     # ── Public ingestion methods ──
 

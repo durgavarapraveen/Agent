@@ -55,8 +55,23 @@ class AttackSurfaceGraph:
     def add_page_call(self, page_url: str, endpoint_id: str):
         if page_url not in self.pages:
             self.pages[page_url] = Page(url=page_url)
-        self.edges_count += 1 # PAGE -> CALLS -> ENDPOINT
-        
+        # Store the actual page→endpoint edge. Previously only the counter
+        # incremented, so `pages_calling_endpoint()` returned nothing useful
+        # even when the caller wired up dozens of edges (#145).
+        if not hasattr(self, "_page_endpoint_edges"):
+            self._page_endpoint_edges: Dict[str, set] = {}
+        self._page_endpoint_edges.setdefault(page_url, set()).add(endpoint_id)
+        self.edges_count += 1  # PAGE -> CALLS -> ENDPOINT
+
+    def pages_calling_endpoint(self, endpoint_id: str) -> List[str]:
+        """Return every page URL that called `endpoint_id`."""
+        edges = getattr(self, "_page_endpoint_edges", {}) or {}
+        return [page for page, eps in edges.items() if endpoint_id in eps]
+
+    def endpoints_called_by_page(self, page_url: str) -> List[str]:
+        edges = getattr(self, "_page_endpoint_edges", {}) or {}
+        return list(edges.get(page_url, set()))
+
     def build_graph(self):
         # Output summary metrics
         ep_list = list(self.endpoints.values())
@@ -64,11 +79,17 @@ class AttackSurfaceGraph:
         wf_list = list(self.workflows.workflows.values())
         param_map = self.parameters.by_type
         total_params = sum(len(plist) for plist in param_map.values())
-        
+
         api_requests = [r for r in req_list if hasattr(r, 'endpoint_id') and r.endpoint_id]
-        
-        logger.info(f"ATTACK_SURFACE_GRAPH_BUILT pages={len(self.pages)} requests={len(req_list)} api_requests={len(api_requests)} endpoints={len(ep_list)} parameters={total_params} workflows={len(wf_list)} graph_edges={self.edges_count}")
-        print(f"ATTACK_SURFACE_GRAPH_BUILT pages={len(self.pages)} requests={len(req_list)} api_requests={len(api_requests)} endpoints={len(ep_list)} parameters={total_params} workflows={len(wf_list)} graph_edges={self.edges_count}")
+
+        # Log-only — the parallel `print()` was noise duplicating what already
+        # went to the logger and broke JSON log ingest.
+        logger.info(
+            "ATTACK_SURFACE_GRAPH_BUILT pages=%d requests=%d api_requests=%d "
+            "endpoints=%d parameters=%d workflows=%d graph_edges=%d",
+            len(self.pages), len(req_list), len(api_requests),
+            len(ep_list), total_params, len(wf_list), self.edges_count,
+        )
         
     # --- Queries ---
     def endpoints_for_identity(self, identity_id: str) -> List[Endpoint]:
@@ -147,6 +168,21 @@ class AttackSurfaceGraph:
                     )
                     self.endpoints[ep_id] = ep
                     added += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Previously silently swallowed. Log the count of malformed
+                    # rows and a preview so operators can diagnose data-drift
+                    # between inventories rather than losing data invisibly.
+                    self._skipped_endpoint_syncs = getattr(
+                        self, "_skipped_endpoint_syncs", 0) + 1
+                    if self._skipped_endpoint_syncs <= 5:
+                        logger.warning(
+                            "sync_from_endpoint_inventory: malformed endpoint "
+                            "row skipped: %s (ep_id=%r)", e, ep_id,
+                        )
+        if getattr(self, "_skipped_endpoint_syncs", 0) > 5:
+            logger.warning(
+                "sync_from_endpoint_inventory: %d total malformed rows skipped "
+                "(further messages suppressed)",
+                self._skipped_endpoint_syncs,
+            )
         return added

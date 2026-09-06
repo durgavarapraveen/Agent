@@ -1,9 +1,12 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, createScanSocket } from "../api";
+import { api, createScanSocket, createPoller } from "../api";
 import ActivityLog from "../components/ActivityLog";
 import ReconPanel from "../components/ReconPanel";
+import { OsintSection } from "../components/ReconPanel";
 import AccessGainedPanel from "../components/AccessGainedPanel";
+import LiveAgentsPanel from "../components/LiveAgentsPanel";
+import ScanChatPanel from "../components/ScanChatPanel";
 import ArtifactsPanel from "../components/ArtifactsPanel";
 import { methodColor, fmtDate } from "../components/utils";
 
@@ -19,9 +22,9 @@ export default function LiveScan() {
   const autoSelected = useRef(false);
 
   useEffect(() => {
-    const fetchJobs = () => {
-      api.getActiveScans().then(j => {
-        // Only keep truly active scans (not completed/failed/cancelled)
+    const p = createPoller(
+      () => api.getActiveScans(),
+      (j) => {
         const active = Array.isArray(j) ? j.filter(s => !["completed", "failed", "cancelled"].includes(s.status)) : [];
         setJobs(active);
         if (!autoSelected.current && active.length > 0) {
@@ -29,11 +32,11 @@ export default function LiveScan() {
           setSelected((live || active[0]).job_id);
           autoSelected.current = true;
         }
-      }).catch(() => {}).finally(() => setLoading(false));
-    };
-    fetchJobs();
-    const iv = setInterval(fetchJobs, 4000);
-    return () => clearInterval(iv);
+        setLoading(false);
+      },
+      4000,
+    );
+    return () => p.stop();
   }, []);
 
   if (loading) return <div className="loading">Loading active scans</div>;
@@ -134,16 +137,9 @@ function LiveScanDetail({ jobId }) {
   useEffect(() => {
     setTab("overview");
 
-    // Initial fetch via REST
-    const fetchAll = () => {
-      api.getScanJob(jobId).then(setJob).catch(() => {});
-      api.getLiveProgress(jobId).then(setProgress).catch(() => {});
-      api.getLiveResults(jobId).then(setResults).catch(() => {});
-      api.getScanLogs(jobId, 300).then(setLogs).catch(() => {});
-    };
-    fetchAll();
-
-    // WebSocket for real-time updates
+    // WebSocket for real-time updates. When WS is connected we stop the REST
+    // fallback poll to avoid the WS-vs-REST race that could overwrite fresh WS
+    // payloads with stale REST responses (#087).
     const sock = createScanSocket(jobId, (msg) => {
       if (msg.type === "live_update") {
         setWsConnected(true);
@@ -156,7 +152,6 @@ function LiveScanDetail({ jobId }) {
             for (const line of msg.log_tail) {
               if (!combined.includes(line)) combined.push(line);
             }
-            // Keep last 500 lines
             const trimmed = combined.length > 500 ? combined.slice(-500) : combined;
             return { lines: trimmed, total: trimmed.length };
           });
@@ -164,12 +159,27 @@ function LiveScanDetail({ jobId }) {
       }
     });
 
-    // Fallback polling (slower) in case WS isn't supported
-    const iv = setInterval(fetchAll, 10000);
+    // REST fallback via createPoller. AbortController + generation counter
+    // prevent an older slow response from overwriting newer WS state.
+    const poller = createPoller(
+      () => Promise.all([
+        api.getScanJob(jobId).catch(() => null),
+        api.getLiveProgress(jobId).catch(() => ({})),
+        api.getLiveResults(jobId).catch(() => null),
+        api.getScanLogs(jobId, 300).catch(() => ({ lines: [], total: 0 })),
+      ]),
+      ([j, p, r, l]) => {
+        if (j) setJob(j);
+        if (p && Object.keys(p).length) setProgress(p);
+        if (r) setResults(r);
+        if (l) setLogs(l);
+      },
+      10000,
+    );
 
     return () => {
       sock.close();
-      clearInterval(iv);
+      poller.stop();
     };
   }, [jobId]);
 
@@ -206,12 +216,15 @@ function LiveScanDetail({ jobId }) {
   const requests = results?.captured_requests || [];
 
   const tabs = [
+    { id: "chat", label: "Ask (LLM)" },
     { id: "overview", label: "Overview" },
     { id: "recon", label: `Recon (${recon.subdomains.length + recon.endpoints.length})` },
+    { id: "osint", label: `OSINT (${recon.osint?.summary?.employees || 0}+${recon.osint?.summary?.leaked_credentials || 0})` },
     { id: "vulns", label: `Vulnerabilities (${vulns.length})` },
     { id: "access", label: "Access Gained" },
     { id: "exploits", label: `Exploits (${exploits.length})` },
     { id: "artifacts", label: "Artifacts / PoC" },
+    { id: "agents", label: "Parallel Agents" },
     { id: "activity", label: "Agent Activity" },
     { id: "requests", label: `Requests (${requests.length})` },
     { id: "logs", label: `Logs (${logs.total})` },
@@ -271,12 +284,15 @@ function LiveScanDetail({ jobId }) {
         ))}
       </div>
 
+      {tab === "chat" && <ScanChatPanel scanId={jobId} />}
       {tab === "overview" && <OverviewSection recon={recon} vulns={vulns} exploits={exploits} progress={progress} />}
       {tab === "recon" && <ReconPanel context={recon} scanId={jobId} />}
+      {tab === "osint" && <OsintSection osint={recon.osint || {}} />}
       {tab === "vulns" && <VulnsSection vulns={vulns} />}
       {tab === "access" && <AccessGainedPanel scanId={jobId} poll />}
       {tab === "exploits" && <ExploitsSection exploits={exploits} />}
       {tab === "activity" && <ActivityLog scanId={jobId} poll />}
+      {tab === "agents" && <LiveAgentsPanel scanId={jobId} poll />}
       {tab === "artifacts" && <ArtifactsPanel scanId={jobId} poll />}
       {tab === "requests" && <RequestsSection requests={requests} />}
       {tab === "logs" && <LogsSection logs={logs} logRef={logRef} jobId={jobId} />}
@@ -705,10 +721,8 @@ function HealthIndicator() {
   const [health, setHealth] = useState(null);
 
   useEffect(() => {
-    const fetch = () => api.getCanonicalHealth().then(setHealth).catch(() => {});
-    fetch();
-    const iv = setInterval(fetch, 5000);
-    return () => clearInterval(iv);
+    const p = createPoller(() => api.getCanonicalHealth(), setHealth, 5000);
+    return () => p.stop();
   }, []);
 
   if (!health || health.status === "no_health_data") return null;

@@ -52,7 +52,27 @@ class ReportingEngine:
         if not scan_id:
             scan_id = datetime.now().strftime("scan_%Y%m%d_%H%M%S")
 
-        target_dir = self.output_dir / scan_id
+        # Sanitize scan_id before using it as a filesystem component. An
+        # attacker-influenced (or hallucinated) `scan_id` like `../../etc`
+        # would escape `self.output_dir`. Whitelist: `[A-Za-z0-9._-]+`; empty
+        # or all-special names fall back to a timestamped id.
+        import re as _re_sid
+        safe_scan_id = _re_sid.sub(r"[^A-Za-z0-9._-]+", "_", str(scan_id))
+        safe_scan_id = safe_scan_id.strip("._") or datetime.now().strftime("scan_%Y%m%d_%H%M%S")
+        if safe_scan_id != scan_id:
+            logger.warning(
+                "[ReportingEngine] scan_id %r sanitized to %r for filesystem safety",
+                scan_id, safe_scan_id)
+            scan_id = safe_scan_id
+
+        # Resolve boundary — refuse to write outside self.output_dir.
+        _out_root = self.output_dir.resolve()
+        target_dir = (self.output_dir / scan_id).resolve()
+        try:
+            target_dir.relative_to(_out_root)
+        except ValueError:
+            raise ValueError(
+                f"scan_id {scan_id!r} resolves outside output_dir {self.output_dir}")
         target_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info(f"[ReportingEngine] Starting Phase 5 reporting for target '{target}' (Scan ID: {scan_id})")

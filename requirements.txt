@@ -19,14 +19,35 @@ psutil
 pydantic
 pypdf
 pytest
-reportlab<4.0
+# ReportLab 4.x has prebuilt wheels for Python 3.13 on Windows/mac/Linux.
+# 3.x (the old `<4.0` pin) had to build C extensions from source AND fetch
+# `libart 2.3.21` at install time from an external URL that now 403s, which
+# broke every fresh install on Python 3.13. `xhtml2pdf>=0.2.16` is compatible
+# with reportlab 4.x, so nothing downstream regresses.
+reportlab>=4.0,<5.0
+xhtml2pdf>=0.2.16
 scipy
 scikit-learn
+# Rate limiting for ui/api/server.py. Optional at import time (server logs a
+# warning and falls back to the built-in per-route limiter if missing) but
+# STRONGLY RECOMMENDED for production so the framework-level limiter is used.
+slowapi>=0.1.9
+
+# ── Observability (all optional; every module in core.observability has a
+# graceful no-op fallback) ──
+# Prometheus /api/metrics endpoint. Without it, /api/metrics returns 501.
+prometheus-client>=0.20
+
+# OpenTelemetry tracing. Import stubs no-op without these; install to enable
+# distributed tracing across API -> scan process -> executors.
+opentelemetry-api>=1.24
+opentelemetry-sdk>=1.24
+
 tiktoken
 tree_sitter
 weasyprint
 websockets
-xhtml2pdf
+# xhtml2pdf pinned above alongside reportlab
 fpdf2
 pdfkit
 PyYAML

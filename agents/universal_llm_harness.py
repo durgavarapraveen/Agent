@@ -569,14 +569,21 @@ class DeepSeekProvider(LLMProvider):
         if not self.session:
             self.session = httpx.AsyncClient(timeout=self.timeout)
 
-        # Retry transient network failures (DNS glitches, connection resets).
-        # DeepSeek's endpoint occasionally fails getaddrinfo on Windows during
-        # long scans — one immediate retry after a short backoff resolves it.
+        # Retry policy:
+        #   - Transient network errors (DNS glitches, connection resets, read
+        #     timeouts): exponential backoff, up to 5 attempts.
+        #   - HTTP 429 (rate limit) and 503 (service unavailable): honor
+        #     `Retry-After` header if present, otherwise exponential backoff.
+        #     Up to 5 attempts.
+        #   - Other HTTP status codes: return immediately; the caller decides.
         import asyncio as _aio
+        import random as _random
+
+        max_attempts = 5
         last_exc = None
-        for attempt in range(3):
+        for attempt in range(max_attempts):
             try:
-                return await self.session.post(
+                resp = await self.session.post(
                     f"{self.base_url}{endpoint}",
                     headers={
                         "Authorization": f"Bearer {self.api_key}",
@@ -584,14 +591,36 @@ class DeepSeekProvider(LLMProvider):
                     },
                     json=payload,
                 )
+                if resp.status_code in (429, 503) and attempt < max_attempts - 1:
+                    # Honor server-provided Retry-After when present. Cap at 30s
+                    # to avoid unbounded stalls in interactive sessions.
+                    ra_hdr = resp.headers.get("Retry-After", "")
+                    try:
+                        wait_s = float(ra_hdr) if ra_hdr else 0.0
+                    except ValueError:
+                        wait_s = 0.0
+                    if wait_s <= 0.0:
+                        # Full jitter exponential backoff: [0, base*2**attempt]
+                        wait_s = _random.uniform(0, min(30.0, 0.5 * (2 ** attempt)))
+                    logger.warning(
+                        "LLM provider returned %d; backing off %.2fs (attempt %d/%d)",
+                        resp.status_code, wait_s, attempt + 1, max_attempts,
+                    )
+                    await _aio.sleep(min(wait_s, 30.0))
+                    continue
+                return resp
             except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError,
                     httpx.ReadTimeout, httpx.ConnectTimeout) as e:
                 last_exc = e
-                if attempt < 2:
-                    await _aio.sleep(0.5 * (2 ** attempt))  # 0.5s, 1s
+                if attempt < max_attempts - 1:
+                    wait_s = _random.uniform(0, min(30.0, 0.5 * (2 ** attempt)))
+                    await _aio.sleep(wait_s)
                     continue
                 raise
-        raise last_exc  # unreachable, keeps type checker happy
+        # If we exited the loop from too many 429/503, bubble up the last response.
+        if last_exc:
+            raise last_exc
+        return resp  # type: ignore[return-value]
 
     async def generate_response(
         self, prompt: str, system: Optional[str] = None, max_tokens: int = 1024,
@@ -991,6 +1020,9 @@ class UniversalLLMHarness:
         logger.info(f"[HARNESS] Initializing {self.primary_provider.value}...")
         
         # Attach the budget governor (graded spend policy over the TokenBudget).
+        # A missing governor is surfaced at WARNING level — previously the
+        # silent debug-log made it look intentional; operators found out they
+        # had no cost cap only after burning through the budget.
         try:
             from core.economics.budget_governor import get_budget_governor
             self.governor = get_budget_governor(self.budget)
@@ -998,8 +1030,21 @@ class UniversalLLMHarness:
                 logger.info(f"[HARNESS] budget governor active "
                             f"(downgrade@{self.governor.downgrade_pct:.0%}, "
                             f"hard-stop@{self.governor.hard_stop_pct:.0%})")
+            else:
+                logger.warning(
+                    "[HARNESS] budget governor returned None — LLM spend is "
+                    "capped only by the raw TokenBudget hard limit.")
+                self.governor = None
+        except ImportError as e:
+            logger.warning(
+                "[HARNESS] budget governor module unavailable (%s); LLM spend "
+                "will not be graded — only the raw TokenBudget hard limit applies.", e)
+            self.governor = None
         except Exception as e:
-            logger.debug(f"[HARNESS] budget governor unavailable: {e}")
+            logger.warning(
+                "[HARNESS] budget governor init failed (%s); LLM spend "
+                "will not be graded — only the raw TokenBudget hard limit applies.", e)
+            self.governor = None
             self.governor = None
 
         # Try primary
@@ -1090,8 +1135,22 @@ class UniversalLLMHarness:
         return resp
 
     def _is_fatal_provider_error(self, error: str) -> bool:
-        fatal_indicators = ("402", "Insufficient Balance", "Payment Required", "HTTP 5")
-        return any(ind in str(error) for ind in fatal_indicators)
+        """Return True only for errors that indicate the primary provider is
+        unusable and we should permanently swap. Uses regex-anchored HTTP status
+        codes so message bodies containing the string 'HTTP 500' don't false-
+        trigger a swap. Transient (429/408/timeout/connection) errors are handled
+        via retry/backoff at the provider layer, not here."""
+        import re as _re
+        err = str(error or "")
+        # Payment / quota errors — permanent for this key
+        if "402" in err or "Insufficient Balance" in err or "Payment Required" in err:
+            return True
+        # Explicit HTTP 5xx status (as reported by our http client, not free text)
+        if _re.search(r'\bHTTP\s+5\d\d\b', err):
+            return True
+        if _re.search(r'\bstatus[_ ]?code[=:]\s*5\d\d\b', err, _re.IGNORECASE):
+            return True
+        return False
 
     async def _try_fallback_provider(self, original_error: str) -> bool:
         logger.warning(f"[HARNESS] Primary provider failed ({original_error}), attempting mid-session fallback...")

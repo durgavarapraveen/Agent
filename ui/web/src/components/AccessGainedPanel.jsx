@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, createPoller } from "../api";
 
 /**
  * Access Gained — every successful auth bypass / login captured during a scan.
@@ -14,19 +14,18 @@ export default function AccessGainedPanel({ scanId, poll = false }) {
 
   useEffect(() => {
     if (!scanId) return;
-    let cancelled = false;
-    const load = () => {
-      api.getAuthBypasses(scanId).then((r) => {
-        if (!cancelled) {
-          setRows(r.bypasses || []);
-          setLoading(false);
-        }
-      });
-    };
-    load();
-    if (!poll) return () => { cancelled = true; };
-    const iv = setInterval(load, 5000);
-    return () => { cancelled = true; clearInterval(iv); };
+    if (!poll) {
+      api.getAuthBypasses(scanId)
+        .then(r => { setRows(r.bypasses || []); setLoading(false); })
+        .catch(() => setLoading(false));
+      return;
+    }
+    const p = createPoller(
+      () => api.getAuthBypasses(scanId),
+      (r) => { setRows(r.bypasses || []); setLoading(false); },
+      5000,
+    );
+    return () => p.stop();
   }, [scanId, poll]);
 
   if (loading) return <div style={{ color: "var(--text-dim)", padding: 16 }}>Loading access events…</div>;

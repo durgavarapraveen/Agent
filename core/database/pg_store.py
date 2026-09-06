@@ -93,13 +93,36 @@ def _host_only(loc: str) -> str:
     return loc.split("/")[0] if loc else ""
 
 
+
+# Categories where each endpoint is a *distinct attack surface* — an SQLi at
+# /rest/user/login is a different finding from one at /rest/products/search,
+# a UNION dump is a different finding from a 500-based error probe. These MUST
+# keep the full URL path (and a short title hash) in the dedup key so the
+# per-endpoint proofs survive.
+_PER_ENDPOINT_CATEGORIES = {"sqli", "xss", "ssrf", "rce", "idor", "auth_bypass",
+                              "open_redirect", "csrf"}
+
+# Categories that describe a *host-level fact* — missing security headers, TLS
+# config, an FTP listing at any path, CORS wildcard on the origin. Collapse
+# path variance so ("/", "/foo", "/bar") don't triple-count.
+_HOST_LEVEL_CATEGORIES = {"cors", "ftp_listing", "directory_listing", "default_creds",
+                           "error_disclosure", "version_disclosure", "missing_header",
+                           "metrics_exposure", "info_leak", "clickjacking"}
+
+
 def finding_uid(scan_id: str, v: Dict[str, Any]) -> str:
     """
     Deterministic finding id, ALWAYS namespaced by the run's scan_id.
 
-    Uses a normalized vuln category + location so LLM title variations
-    ('Exposed /ftp directory' vs '/ftp listing exposed') produce the
-    same finding_id and merge via ON CONFLICT instead of creating duplicates.
+    Two dedup regimes:
+      - PER-ENDPOINT categories (SQLi/XSS/SSRF/RCE/IDOR/Auth-bypass/etc):
+        key = (category, full URL path, short-title hash, cve). This keeps
+        different endpoints AND different attack proofs (UNION dump vs error
+        probe vs auth-bypass) as separate rows.
+      - HOST-LEVEL categories (missing headers, CORS, FTP listing, TLS…):
+        key = (category, host, cve). Collapses path variance across probes.
+      - Uncategorized: full title + path — worst case is one extra row, but
+        no data loss.
     """
     title_raw = str(v.get("title") or "").lower().strip()
     loc_raw = str(v.get("location") or v.get("target") or v.get("affected_endpoint") or "")
@@ -108,12 +131,18 @@ def finding_uid(scan_id: str, v: Dict[str, Any]) -> str:
 
     category = _vuln_category(title_raw)
 
-    if category:
-        # Category-matched findings are site-level facts — collapse path
-        # variance and drop the free-form `type` field so different pipelines
-        # ("INFORMATION_DISCLOSURE" vs "ENDPOINT") for the same finding don't
-        # produce distinct hashes.
+    if category in _PER_ENDPOINT_CATEGORIES:
+        # A short hash of the title separates "UNION dump" from "auth bypass"
+        # from "error-based probe" on the same URL — all legitimately distinct.
+        title_key = hashlib.sha1(title_raw.encode("utf-8", "ignore")).hexdigest()[:8]
+        content = "|".join([category, _normalize_location(loc_raw), title_key, cve])
+    elif category in _HOST_LEVEL_CATEGORIES:
         content = "|".join([category, _host_only(loc_raw), cve])
+    elif category:
+        # Fallback for any category not explicitly classified above — treat as
+        # per-endpoint (safe default: prefer preserving distinct proofs).
+        title_key = hashlib.sha1(title_raw.encode("utf-8", "ignore")).hexdigest()[:8]
+        content = "|".join([category, _normalize_location(loc_raw), title_key, cve])
     else:
         content = "|".join([vtype, title_raw, _normalize_location(loc_raw), cve])
     h = hashlib.sha1(content.encode("utf-8", "ignore")).hexdigest()[:16]
@@ -186,8 +215,7 @@ def _init_schema():
                 );
 
                 CREATE TABLE IF NOT EXISTS live_progress (
-                    id INT PRIMARY KEY DEFAULT 1,
-                    scan_id TEXT DEFAULT '',
+                    scan_id TEXT PRIMARY KEY,
                     phase TEXT DEFAULT '',
                     progress REAL DEFAULT 0,
                     status TEXT DEFAULT '',
@@ -196,11 +224,37 @@ def _init_schema():
                 );
 
                 CREATE TABLE IF NOT EXISTS live_results (
-                    id INT PRIMARY KEY DEFAULT 1,
-                    scan_id TEXT DEFAULT '',
+                    scan_id TEXT PRIMARY KEY,
                     data JSONB DEFAULT '{}'::jsonb,
                     updated_at TIMESTAMPTZ DEFAULT NOW()
                 );
+
+                -- Migration for pre-fix deployments where these tables used a
+                -- singleton (id INT PRIMARY KEY DEFAULT 1) so concurrent scans
+                -- stomped one another. Drop the legacy id column and re-key on
+                -- scan_id. Safe: rows in these tables are ephemeral scan state.
+                DO $mig$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='live_progress' AND column_name='id'
+                    ) THEN
+                        DELETE FROM live_progress WHERE scan_id IS NULL OR scan_id = '';
+                        ALTER TABLE live_progress DROP CONSTRAINT IF EXISTS live_progress_pkey;
+                        ALTER TABLE live_progress DROP COLUMN id;
+                        ALTER TABLE live_progress ADD PRIMARY KEY (scan_id);
+                    END IF;
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='live_results' AND column_name='id'
+                    ) THEN
+                        DELETE FROM live_results WHERE scan_id IS NULL OR scan_id = '';
+                        ALTER TABLE live_results DROP CONSTRAINT IF EXISTS live_results_pkey;
+                        ALTER TABLE live_results DROP COLUMN id;
+                        ALTER TABLE live_results ADD PRIMARY KEY (scan_id);
+                    END IF;
+                END
+                $mig$;
 
                 CREATE TABLE IF NOT EXISTS findings_v2 (
                     finding_id TEXT PRIMARY KEY,
@@ -521,6 +575,12 @@ def _init_schema():
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
                 CREATE INDEX IF NOT EXISTS idx_attack_chains_scan ON attack_chains(scan_id);
+                -- Additive migration: needed by `bulk_upsert`'s `ON CONFLICT`
+                -- clause. Without this, the previous `ON CONFLICT DO NOTHING`
+                -- (no target) would raise on the actual conflict rather than
+                -- silently skip.
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_attack_chains_scan_chain
+                    ON attack_chains(scan_id, chain_id) WHERE chain_id <> '';
 
                 CREATE TABLE IF NOT EXISTS post_exploit_data (
                     id SERIAL PRIMARY KEY,
@@ -575,6 +635,123 @@ def _init_schema():
                 );
                 CREATE INDEX IF NOT EXISTS idx_auth_bypass_scan ON auth_bypasses(scan_id);
                 CREATE UNIQUE INDEX IF NOT EXISTS ux_auth_bypass_dedup ON auth_bypasses(scan_id, dedup_key);
+
+                CREATE TABLE IF NOT EXISTS live_agents (
+                    id SERIAL PRIMARY KEY,
+                    scan_id TEXT REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    agent_id TEXT NOT NULL,
+                    label TEXT NOT NULL DEFAULT '',
+                    phase TEXT DEFAULT '',
+                    target TEXT DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'queued',  -- queued|running|completed|failed
+                    current_tool TEXT DEFAULT '',
+                    current_step TEXT DEFAULT '',
+                    steps_taken INT NOT NULL DEFAULT 0,
+                    findings_count INT NOT NULL DEFAULT 0,
+                    cost_usd REAL NOT NULL DEFAULT 0,
+                    started_at TIMESTAMPTZ DEFAULT NULL,
+                    finished_at TIMESTAMPTZ DEFAULT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    metadata JSONB DEFAULT '{}'::jsonb
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_live_agents_scan_agent
+                    ON live_agents(scan_id, agent_id);
+                CREATE INDEX IF NOT EXISTS idx_live_agents_scan ON live_agents(scan_id);
+                CREATE INDEX IF NOT EXISTS idx_live_agents_status ON live_agents(scan_id, status);
+
+                CREATE TABLE IF NOT EXISTS scan_llm_memory (
+                    id SERIAL PRIMARY KEY,
+                    scan_id TEXT REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    phase TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL DEFAULT 'summary',  -- summary|decision|reasoning|reflection
+                    content TEXT NOT NULL DEFAULT '',
+                    tool TEXT DEFAULT '',
+                    target TEXT DEFAULT '',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_llm_memory_scan ON scan_llm_memory(scan_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_llm_memory_kind ON scan_llm_memory(scan_id, kind);
+
+                CREATE TABLE IF NOT EXISTS target_intel (
+                    target TEXT PRIMARY KEY,
+                    working_login_endpoints JSONB DEFAULT '[]'::jsonb,
+                    working_body_shapes JSONB DEFAULT '[]'::jsonb,
+                    waf_detected TEXT DEFAULT '',
+                    successful_payloads JSONB DEFAULT '{}'::jsonb,
+                    blocked_payloads JSONB DEFAULT '{}'::jsonb,
+                    known_endpoints JSONB DEFAULT '[]'::jsonb,
+                    known_subdomains JSONB DEFAULT '[]'::jsonb,
+                    known_tech JSONB DEFAULT '{}'::jsonb,
+                    prior_scan_ids JSONB DEFAULT '[]'::jsonb,
+                    metadata JSONB DEFAULT '{}'::jsonb,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+
+                CREATE TABLE IF NOT EXISTS agent_reasoning (
+                    id SERIAL PRIMARY KEY,
+                    scan_id TEXT REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    agent_id TEXT NOT NULL,
+                    step INT DEFAULT 0,
+                    thought TEXT NOT NULL DEFAULT '',
+                    tool_planned TEXT DEFAULT '',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_reasoning_scan ON agent_reasoning(scan_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_reasoning_agent ON agent_reasoning(scan_id, agent_id, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS learned_skills (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT DEFAULT '',
+                    method TEXT DEFAULT 'GET',
+                    url_template TEXT DEFAULT '',   -- {base} placeholder allowed
+                    headers JSONB DEFAULT '{}'::jsonb,
+                    body_template TEXT DEFAULT '',
+                    expected_signature TEXT DEFAULT '',   -- regex or literal in response body
+                    tech_shape JSONB DEFAULT '{}'::jsonb, -- {server:'nginx', has_php:true, ...}
+                    confirmed_count INT NOT NULL DEFAULT 0,
+                    last_confirmed_scan TEXT DEFAULT '',
+                    last_used_at TIMESTAMPTZ DEFAULT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_learned_skills_name ON learned_skills(name);
+
+                CREATE TABLE IF NOT EXISTS authored_tools (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT DEFAULT '',
+                    parameters_schema JSONB DEFAULT '{}'::jsonb,
+                    code TEXT NOT NULL DEFAULT '',
+                    review_status TEXT NOT NULL DEFAULT 'pending',   -- pending|approved|rejected
+                    review_notes TEXT DEFAULT '',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_authored_tools_name ON authored_tools(name);
+
+                -- (security_kb table removed — uses shared rag_documents via
+                -- SecurityRAGPipeline; see core/intel/security_kb.py)
+
+                -- ── Hot-path indexes surfaced by audit #112 ─────────────────
+                -- These are all `IF NOT EXISTS`, additive on existing DBs.
+                -- Every column below is used in an ORDER BY / filter on a
+                -- table that's already known to grow unbounded during long
+                -- deployments.
+                CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp
+                    ON audit_log(timestamp DESC);
+                CREATE INDEX IF NOT EXISTS idx_execution_audit_timestamp
+                    ON execution_audit(timestamp DESC);
+                CREATE INDEX IF NOT EXISTS idx_findings_dedup_last_seen
+                    ON findings_dedup(last_seen DESC);
+                CREATE INDEX IF NOT EXISTS idx_scans_started_at
+                    ON scans(started_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_experiences_test_type
+                    ON experiences(test_type);
+                CREATE INDEX IF NOT EXISTS idx_experiences_created_at
+                    ON experiences(created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_llm_failures_created_at
+                    ON llm_failures(created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_strategies_test_type
+                    ON strategies(test_type);
             """)
             conn.commit()
 
@@ -675,10 +852,14 @@ class TargetRepo:
     """CRUD for authorized scan targets."""
 
     @staticmethod
-    def list_all() -> List[Dict]:
+    def list_all(limit: int = 500, offset: int = 0) -> List[Dict]:
+        limit = max(1, min(int(limit or 500), 2000))
+        offset = max(0, int(offset or 0))
         with DatabaseManager.get_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("SELECT * FROM targets ORDER BY added_at DESC")
+                cur.execute(
+                    "SELECT * FROM targets ORDER BY added_at DESC LIMIT %s OFFSET %s",
+                    (limit, offset))
                 return [dict(r) for r in cur.fetchall()]
 
     @staticmethod
@@ -768,11 +949,77 @@ class ScanRepo:
                 return dict(row) if row else None
 
     @staticmethod
-    def list_all() -> List[Dict]:
+    def list_all(limit: int = 500, offset: int = 0) -> List[Dict]:
+        # Bounded pagination — previously an unbounded scan of `scans` that
+        # blew up on long-running deployments.
+        limit = max(1, min(int(limit or 500), 2000))
+        offset = max(0, int(offset or 0))
         with DatabaseManager.get_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("SELECT * FROM scans ORDER BY started_at DESC")
+                cur.execute(
+                    "SELECT * FROM scans ORDER BY started_at DESC LIMIT %s OFFSET %s",
+                    (limit, offset))
                 return [dict(r) for r in cur.fetchall()]
+
+    @staticmethod
+    def bootstrap_recover() -> int:
+        """Called at API startup. Marks any scan whose row still says
+        `running/starting/stopping` but whose child process is gone as
+        `failed` with a clear error message. Without this, a crash mid-scan
+        leaves the row in the running state forever, blocks new scans of the
+        same target, and shows a stuck progress bar in the UI.
+
+        Returns the number of scans reconciled. Best-effort — never raises.
+        """
+        recovered = 0
+        try:
+            import os
+            try:
+                import psutil
+            except ImportError:
+                psutil = None  # fall through to os.kill probe
+
+            def _alive(pid):
+                if not pid:
+                    return False
+                if psutil is not None:
+                    try:
+                        return psutil.pid_exists(int(pid))
+                    except Exception:
+                        return False
+                if os.name == "nt":
+                    return False  # can't probe safely without psutil
+                try:
+                    os.kill(int(pid), 0)
+                    return True
+                except (OSError, Exception):
+                    return False
+
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(
+                        "SELECT scan_id, pid, status FROM scans "
+                        "WHERE status IN ('running','starting','stopping')")
+                    rows = cur.fetchall()
+                for r in rows:
+                    if _alive(r.get("pid")):
+                        continue
+                    new_status = "stopped" if r.get("status") == "stopping" else "failed"
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE scans SET status = %s, finished_at = NOW(), "
+                            "error = COALESCE(NULLIF(error,''), %s) "
+                            "WHERE scan_id = %s",
+                            (new_status,
+                             "orphaned: process not alive at API startup",
+                             r["scan_id"]))
+                    recovered += 1
+                conn.commit()
+            if recovered:
+                logger.warning("bootstrap_recover: reconciled %d orphaned scans", recovered)
+        except Exception as e:
+            logger.exception("bootstrap_recover failed: %s", e)
+        return recovered
 
     @staticmethod
     def get_active() -> List[Dict]:
@@ -802,46 +1049,90 @@ class VulnRepo:
     def bulk_insert(scan_id: str, vulns: List[Dict]):
         if not vulns:
             return
+        # Build one tuple per vuln, then send them in a single round trip via
+        # psycopg2.extras.execute_values. Previously this loop performed N
+        # sequential INSERTs (one per finding), which was the dominant DB
+        # cost on any scan with many findings and amplified pool-poisoning
+        # cascades.
+        rows: List[tuple] = []
+        for v in vulns:
+            if v.get("finding_id"):
+                v.setdefault("orig_finding_id", v["finding_id"])
+            fid = finding_uid(scan_id, v)
+            rows.append((
+                scan_id, fid, v.get("title", ""), v.get("type", ""),
+                (v.get("severity") or "INFO").upper(),
+                (v.get("status") or "UNCONFIRMED").upper(),
+                v.get("target", ""), v.get("location", ""),
+                v.get("details", ""), str(v.get("proof", "")),
+                v.get("remediation", ""), v.get("tool", ""),
+                v.get("cwe_id", ""), v.get("cve_id", ""),
+                v.get("confidence_score", 0.5),
+                json.dumps({k: v.get(k) for k in v
+                            if k not in ("title", "type", "severity", "status",
+                                          "target", "location", "details", "proof",
+                                          "remediation", "tool", "cwe_id", "cve_id",
+                                          "confidence_score", "finding_id")},
+                            default=str),
+            ))
+        _upsert_sql = """
+            INSERT INTO vulnerabilities
+            (scan_id, finding_id, title, type, severity, status, target, location,
+             details, proof, remediation, tool, cwe_id, cve_id, confidence_score, extra)
+            VALUES %s
+            ON CONFLICT (finding_id) DO UPDATE SET
+                severity = CASE
+                    WHEN array_position(ARRAY['CRITICAL','HIGH','MEDIUM','LOW','INFO'], EXCLUDED.severity) IS NULL THEN vulnerabilities.severity
+                    WHEN array_position(ARRAY['CRITICAL','HIGH','MEDIUM','LOW','INFO'], vulnerabilities.severity) IS NULL THEN EXCLUDED.severity
+                    WHEN array_position(ARRAY['CRITICAL','HIGH','MEDIUM','LOW','INFO'], EXCLUDED.severity)
+                       < array_position(ARRAY['CRITICAL','HIGH','MEDIUM','LOW','INFO'], vulnerabilities.severity)
+                    THEN EXCLUDED.severity ELSE vulnerabilities.severity END,
+                status = CASE WHEN EXCLUDED.status = 'CONFIRMED' THEN EXCLUDED.status ELSE vulnerabilities.status END,
+                details = CASE WHEN length(EXCLUDED.details) > length(COALESCE(vulnerabilities.details, '')) THEN EXCLUDED.details ELSE vulnerabilities.details END,
+                proof = CASE WHEN length(EXCLUDED.proof) > length(COALESCE(vulnerabilities.proof, '')) THEN EXCLUDED.proof ELSE vulnerabilities.proof END,
+                location = COALESCE(NULLIF(EXCLUDED.location, ''), vulnerabilities.location),
+                tool = COALESCE(NULLIF(EXCLUDED.tool, ''), vulnerabilities.tool),
+                confidence_score = EXCLUDED.confidence_score, extra = EXCLUDED.extra
+        """
         with DatabaseManager.get_connection() as conn:
             with conn.cursor() as cur:
-                for v in vulns:
-                    # ALWAYS scan-scoped so two runs of the same URL never merge;
-                    # any upstream finding_id is preserved in `extra` for traceability.
-                    if v.get("finding_id"):
-                        v.setdefault("orig_finding_id", v["finding_id"])
-                    fid = finding_uid(scan_id, v)
-                    cur.execute("""
-                        INSERT INTO vulnerabilities
-                        (scan_id, finding_id, title, type, severity, status, target, location,
-                         details, proof, remediation, tool, cwe_id, cve_id, confidence_score, extra)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                        ON CONFLICT (finding_id) DO UPDATE SET
-                            severity = CASE
-                                WHEN array_position(ARRAY['CRITICAL','HIGH','MEDIUM','LOW','INFO'], EXCLUDED.severity) IS NULL THEN vulnerabilities.severity
-                                WHEN array_position(ARRAY['CRITICAL','HIGH','MEDIUM','LOW','INFO'], vulnerabilities.severity) IS NULL THEN EXCLUDED.severity
-                                WHEN array_position(ARRAY['CRITICAL','HIGH','MEDIUM','LOW','INFO'], EXCLUDED.severity)
-                                   < array_position(ARRAY['CRITICAL','HIGH','MEDIUM','LOW','INFO'], vulnerabilities.severity)
-                                THEN EXCLUDED.severity ELSE vulnerabilities.severity END,
-                            status = CASE WHEN EXCLUDED.status = 'CONFIRMED' THEN EXCLUDED.status ELSE vulnerabilities.status END,
-                            details = CASE WHEN length(EXCLUDED.details) > length(COALESCE(vulnerabilities.details, '')) THEN EXCLUDED.details ELSE vulnerabilities.details END,
-                            proof = CASE WHEN length(EXCLUDED.proof) > length(COALESCE(vulnerabilities.proof, '')) THEN EXCLUDED.proof ELSE vulnerabilities.proof END,
-                            location = COALESCE(NULLIF(EXCLUDED.location, ''), vulnerabilities.location),
-                            tool = COALESCE(NULLIF(EXCLUDED.tool, ''), vulnerabilities.tool),
-                            confidence_score = EXCLUDED.confidence_score, extra = EXCLUDED.extra
-                    """, (scan_id, fid, v.get("title", ""), v.get("type", ""),
-                          (v.get("severity") or "INFO").upper(), (v.get("status") or "UNCONFIRMED").upper(),
-                          v.get("target", ""), v.get("location", ""),
-                          v.get("details", ""), str(v.get("proof", "")),
-                          v.get("remediation", ""), v.get("tool", ""),
-                          v.get("cwe_id", ""), v.get("cve_id", ""),
-                          v.get("confidence_score", 0.5),
-                          json.dumps({k: v.get(k) for k in v
-                                      if k not in ("title", "type", "severity", "status",
-                                                    "target", "location", "details", "proof",
-                                                    "remediation", "tool", "cwe_id", "cve_id",
-                                                    "confidence_score", "finding_id")},
-                                     default=str)))
+                # Fast path — one round trip via execute_values.
+                try:
+                    psycopg2.extras.execute_values(
+                        cur, _upsert_sql, rows, page_size=200,
+                    )
+                    conn.commit()
+                    return
+                except Exception as batch_exc:
+                    # One row aborted the whole batch. Roll back and fall through
+                    # to a per-row path guarded by SAVEPOINTs so a single bad row
+                    # (e.g. oversized JSONB, encoding issue) can't lose everyone
+                    # else's findings.
+                    conn.rollback()
+                    logger.warning(
+                        "VulnRepo.bulk_insert: batch failed (%s); falling back "
+                        "to per-row inserts", batch_exc)
+
+                inserted = 0
+                dropped: List[Dict] = []
+                _one_sql = _upsert_sql.replace("VALUES %s", "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)")
+                for row in rows:
+                    try:
+                        cur.execute("SAVEPOINT sp_vuln")
+                        cur.execute(_one_sql, row)
+                        cur.execute("RELEASE SAVEPOINT sp_vuln")
+                        inserted += 1
+                    except Exception as row_exc:
+                        try:
+                            cur.execute("ROLLBACK TO SAVEPOINT sp_vuln")
+                        except Exception:
+                            pass
+                        dropped.append({"finding_id": row[1], "error": str(row_exc)[:200]})
                 conn.commit()
+                if dropped:
+                    logger.error(
+                        "VulnRepo.bulk_insert: %d row(s) dropped; kept %d. First few: %s",
+                        len(dropped), inserted, dropped[:3])
 
     @staticmethod
     def get_by_scan(scan_id: str) -> List[Dict]:
@@ -886,13 +1177,15 @@ class LiveDataRepo:
 
     @staticmethod
     def upsert_progress(scan_id: str, data: Dict):
+        if not scan_id:
+            raise ValueError("upsert_progress requires scan_id")
         with DatabaseManager.get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO live_progress (id, scan_id, phase, progress, status, data, updated_at)
-                    VALUES (1, %s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT (id) DO UPDATE SET
-                        scan_id = EXCLUDED.scan_id, phase = EXCLUDED.phase,
+                    INSERT INTO live_progress (scan_id, phase, progress, status, data, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (scan_id) DO UPDATE SET
+                        phase = EXCLUDED.phase,
                         progress = EXCLUDED.progress, status = EXCLUDED.status,
                         data = EXCLUDED.data, updated_at = NOW()
                 """, (scan_id,
@@ -901,10 +1194,16 @@ class LiveDataRepo:
                 conn.commit()
 
     @staticmethod
-    def get_progress() -> Dict:
+    def get_progress(scan_id: str = None) -> Dict:
+        """Fetch live progress for a scan. If scan_id is None, returns the most
+        recently updated row (best-effort backward compat for callers that
+        haven't been updated yet)."""
         with DatabaseManager.get_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("SELECT * FROM live_progress WHERE id = 1")
+                if scan_id:
+                    cur.execute("SELECT * FROM live_progress WHERE scan_id = %s", (scan_id,))
+                else:
+                    cur.execute("SELECT * FROM live_progress ORDER BY updated_at DESC LIMIT 1")
                 row = cur.fetchone()
                 if row:
                     d = dict(row)
@@ -913,28 +1212,34 @@ class LiveDataRepo:
 
     @staticmethod
     def upsert_results(scan_id: str, data: Dict):
+        if not scan_id:
+            raise ValueError("upsert_results requires scan_id")
         with DatabaseManager.get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO live_results (id, scan_id, data, updated_at)
-                    VALUES (1, %s, %s, NOW())
-                    ON CONFLICT (id) DO UPDATE SET
-                        scan_id = EXCLUDED.scan_id, data = EXCLUDED.data, updated_at = NOW()
+                    INSERT INTO live_results (scan_id, data, updated_at)
+                    VALUES (%s, %s, NOW())
+                    ON CONFLICT (scan_id) DO UPDATE SET
+                        data = EXCLUDED.data, updated_at = NOW()
                 """, (scan_id, json.dumps(data, default=str)))
                 conn.commit()
 
     @staticmethod
-    def get_results() -> Dict:
+    def get_results(scan_id: str = None) -> Dict:
+        empty = {
+            "recon": {"subdomains": [], "endpoints": [], "technologies": {}, "ports": [], "ips": []},
+            "vulnerabilities": [], "exploits": [], "captured_requests": [],
+        }
         with DatabaseManager.get_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("SELECT * FROM live_results WHERE id = 1")
+                if scan_id:
+                    cur.execute("SELECT * FROM live_results WHERE scan_id = %s", (scan_id,))
+                else:
+                    cur.execute("SELECT * FROM live_results ORDER BY updated_at DESC LIMIT 1")
                 row = cur.fetchone()
                 if row and isinstance(row.get("data"), dict):
                     return row["data"]
-                return {
-                    "recon": {"subdomains": [], "endpoints": [], "technologies": {}, "ports": [], "ips": []},
-                    "vulnerabilities": [], "exploits": [], "captured_requests": [],
-                }
+                return empty
 
 
 class ExploitResultRepo:
@@ -1027,10 +1332,14 @@ class FindingV2Repo:
                 conn.commit()
 
     @staticmethod
-    def list_all() -> List[Dict]:
+    def list_all(limit: int = 1000, offset: int = 0) -> List[Dict]:
+        limit = max(1, min(int(limit or 1000), 5000))
+        offset = max(0, int(offset or 0))
         with DatabaseManager.get_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("SELECT * FROM findings_v2 ORDER BY created_at DESC")
+                cur.execute(
+                    "SELECT * FROM findings_v2 ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                    (limit, offset))
                 return [dict(r) for r in cur.fetchall()]
 
     @staticmethod
@@ -1055,25 +1364,29 @@ class DedupRepo:
     @staticmethod
     def check_and_insert(signature: str, tool: str, finding_type: str,
                          data_repr: str, task_id: str = "") -> bool:
-        """Returns True if new (not duplicate), False if duplicate."""
+        """Returns True if new (not duplicate), False if duplicate.
+
+        Single atomic upsert avoids the SELECT-then-INSERT race that previously
+        surfaced as `IntegrityError` under concurrency (which then poisoned the
+        connection pool). `signature` is the PK — `ON CONFLICT` fires when two
+        workers race on the same signature.
+        """
         with DatabaseManager.get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT count FROM findings_dedup WHERE signature = %s", (signature,))
+                cur.execute("""
+                    INSERT INTO findings_dedup (signature, tool, finding_type, data_repr, task_id)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (signature) DO UPDATE SET
+                        last_seen = NOW(),
+                        count = findings_dedup.count + 1,
+                        task_id = EXCLUDED.task_id
+                    RETURNING (xmax = 0) AS inserted
+                """, (signature, tool, finding_type, data_repr, task_id))
                 row = cur.fetchone()
-                if row:
-                    cur.execute("""
-                        UPDATE findings_dedup SET last_seen = NOW(), count = count + 1, task_id = %s
-                        WHERE signature = %s
-                    """, (task_id, signature))
-                    conn.commit()
-                    return False
-                else:
-                    cur.execute("""
-                        INSERT INTO findings_dedup (signature, tool, finding_type, data_repr, task_id)
-                        VALUES (%s, %s, %s, %s, %s)
-                    """, (signature, tool, finding_type, data_repr, task_id))
-                    conn.commit()
-                    return True
+                conn.commit()
+                # `xmax = 0` on the returned row is True when the row was newly
+                # inserted, False when the ON CONFLICT UPDATE branch fired.
+                return bool(row and row[0])
 
     @staticmethod
     def list_all(limit: int = 500) -> List[Dict]:
@@ -1149,10 +1462,14 @@ class ScheduleRepo:
                 conn.commit()
 
     @staticmethod
-    def list_all() -> List[Dict]:
+    def list_all(limit: int = 500, offset: int = 0) -> List[Dict]:
+        limit = max(1, min(int(limit or 500), 2000))
+        offset = max(0, int(offset or 0))
         with DatabaseManager.get_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("SELECT * FROM scan_schedules ORDER BY created_at DESC")
+                cur.execute(
+                    "SELECT * FROM scan_schedules ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                    (limit, offset))
                 return [dict(r) for r in cur.fetchall()]
 
     @staticmethod
@@ -1229,7 +1546,7 @@ class ToolOutputRepo:
                         (scan_id, tool_name, operation, target, command,
                          stdout, stderr, exit_code, duration_s)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                        ON CONFLICT ON CONSTRAINT ux_tool_outputs_dedup
+                        ON CONFLICT (scan_id, tool_name, target, md5(COALESCE(stdout,'')))
                         DO NOTHING
                     """, (scan_id, tool_name, operation, target,
                           command[:2000], stdout[:50000], stderr[:10000],
@@ -1304,7 +1621,7 @@ class CapturedRequestRepo:
                             (scan_id, method, url, resource_type, status,
                              is_preflight, headers, post_data, source)
                             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                            ON CONFLICT ON CONSTRAINT ux_captured_requests_dedup
+                            ON CONFLICT (scan_id, method, url, status, md5(COALESCE(post_data,'')))
                             DO NOTHING
                         """, (scan_id, method, url,
                               r.get("resource_type", ""),
@@ -1351,7 +1668,7 @@ class ToolExecutionRepo:
                         (scan_id, tool, command, target, capability,
                          success, stdout_bytes, duration_s)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-                        ON CONFLICT ON CONSTRAINT ux_tool_executions_dedup
+                        ON CONFLICT (scan_id, tool, command, COALESCE(target,''))
                         DO NOTHING
                     """, (scan_id, tool, command[:2000], target,
                           capability, success, stdout_bytes, duration_s))
@@ -1373,7 +1690,7 @@ class ToolExecutionRepo:
                             (scan_id, tool, command, target, capability,
                              success, stdout_bytes, duration_s)
                             VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-                            ON CONFLICT ON CONSTRAINT ux_tool_executions_dedup
+                            ON CONFLICT (scan_id, tool, command, COALESCE(target,''))
                             DO NOTHING
                         """, (scan_id,
                               e.get("tool", ""),
@@ -1541,10 +1858,14 @@ class CampaignRepo:
                 conn.commit()
 
     @staticmethod
-    def list_all() -> List[Dict]:
+    def list_all(limit: int = 200, offset: int = 0) -> List[Dict]:
+        limit = max(1, min(int(limit or 200), 2000))
+        offset = max(0, int(offset or 0))
         with DatabaseManager.get_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("SELECT * FROM campaigns ORDER BY created_at DESC")
+                cur.execute(
+                    "SELECT * FROM campaigns ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                    (limit, offset))
                 return [dict(r) for r in cur.fetchall()]
 
     @staticmethod
@@ -1575,22 +1896,48 @@ class AttackChainRepo:
             chains = list(chains.values()) if chains else []
         if not isinstance(chains, list):
             return
+
+        rows = []
+        for c in chains:
+            if not isinstance(c, dict):
+                continue
+            chain_id = c.get("chain_id") or c.get("id") or ""
+            rows.append((
+                scan_id, chain_id,
+                c.get("description", ""),
+                float(c.get("score", 0)),
+                c.get("status", "detected"),
+                json.dumps(c.get("steps") or c.get("path") or [], default=str),
+                c.get("impact") or c.get("final_impact", ""),
+            ))
+
+        if not rows:
+            return
+
         with DatabaseManager.get_connection() as conn:
             with conn.cursor() as cur:
-                for c in chains:
-                    if not isinstance(c, dict):
-                        continue
-                    chain_id = c.get("chain_id") or c.get("id") or ""
-                    cur.execute("""
-                        INSERT INTO attack_chains (scan_id, chain_id, description, score, status, steps, impact)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT DO NOTHING
-                    """, (scan_id, chain_id,
-                          c.get("description", ""),
-                          float(c.get("score", 0)),
-                          c.get("status", "detected"),
-                          json.dumps(c.get("steps") or c.get("path") or [], default=str),
-                          c.get("impact") or c.get("final_impact", "")))
+                # `ON CONFLICT` needs an explicit target; the partial unique
+                # index `ux_attack_chains_scan_chain` covers (scan_id, chain_id)
+                # WHERE chain_id <> ''. Rows with an empty chain_id are not
+                # covered and will just insert as new rows — that's the
+                # correct behavior (no natural key to dedupe on).
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO attack_chains
+                        (scan_id, chain_id, description, score, status, steps, impact)
+                    VALUES %s
+                    ON CONFLICT (scan_id, chain_id) WHERE chain_id <> ''
+                        DO UPDATE SET
+                            description = EXCLUDED.description,
+                            score = EXCLUDED.score,
+                            status = EXCLUDED.status,
+                            steps = EXCLUDED.steps,
+                            impact = EXCLUDED.impact
+                    """,
+                    rows,
+                    page_size=100,
+                )
                 conn.commit()
 
     @staticmethod
@@ -1634,7 +1981,7 @@ class PostExploitRepo:
                     cur.execute("""
                         INSERT INTO post_exploit_data (scan_id, data_type, title, details)
                         VALUES (%s, %s, %s, %s)
-                        ON CONFLICT ON CONSTRAINT ux_post_exploit_dedup
+                        ON CONFLICT (scan_id, data_type, title, md5(details::text))
                         DO NOTHING
                     """, (scan_id, data_type, title, details_json))
                 conn.commit()
@@ -1769,6 +2116,36 @@ class ScanArtifactRepo:
                         for r in cur.fetchall()}
 
 
+def _encrypt_secret_field(value: str) -> Optional[str]:
+    """Encrypt a sensitive column value using AES-256-GCM, returning base64 or
+    None on empty input. Uses `core.security.encryption`. Failure to encrypt is
+    fatal (we refuse to write plaintext into columns that should be encrypted).
+    """
+    if value is None or value == "":
+        return None
+    import base64 as _b64
+    from core.security.encryption import encrypt
+    return _b64.b64encode(encrypt(value.encode("utf-8"))).decode("ascii")
+
+
+def _decrypt_secret_field(value: Optional[str]) -> str:
+    """Decrypt a column value written by `_encrypt_secret_field`. Returns "" on
+    empty input; returns the raw stored value if it doesn't look like our
+    ciphertext envelope (backwards compat for rows written before encryption
+    was added). NEVER returns a decryption error to the caller — audit logs
+    would otherwise be spammed with tool retries."""
+    if not value:
+        return ""
+    import base64 as _b64
+    from core.security.encryption import decrypt
+    try:
+        return decrypt(_b64.b64decode(value)).decode("utf-8", errors="replace")
+    except Exception:
+        # Legacy plaintext row (pre-fix) — return as-is. Operators should run
+        # the one-shot migration to re-encrypt legacy rows.
+        return str(value)
+
+
 class AuthBypassRepo:
     """Successful auth bypasses / logins captured during a scan.
 
@@ -1776,6 +2153,9 @@ class AuthBypassRepo:
     resulting token, and a proof-of-entry snippet. Rendered in the UI as
     'Access Gained' so operators can see at a glance whether the scan actually
     got inside the app and with what technique.
+
+    Sensitive fields (`password`, `token`) are encrypted at the column level
+    with AES-256-GCM (see `_encrypt_secret_field`). Reads transparently decrypt.
     """
 
     @staticmethod
@@ -1787,6 +2167,12 @@ class AuthBypassRepo:
         dk_raw = f"{scan_id}|{host}|{technique}|{username}|{login_url}"
         dk = hashlib.sha1(dk_raw.encode("utf-8", "ignore")).hexdigest()[:32]
         try:
+            enc_password = _encrypt_secret_field(password) or ""
+            enc_token = _encrypt_secret_field(token) or ""
+        except Exception as e:
+            logger.error(f"AuthBypassRepo.insert: encryption failed, refusing to store plaintext: {e}")
+            return None
+        try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
@@ -1794,10 +2180,10 @@ class AuthBypassRepo:
                           (scan_id, host, method, login_url, technique, username, password,
                            payload, token, response_status, response_snippet, role, severity, dedup_key)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                        ON CONFLICT ON CONSTRAINT ux_auth_bypass_dedup DO NOTHING
+                        ON CONFLICT (scan_id, dedup_key) DO NOTHING
                         RETURNING id
-                    """, (scan_id, host, method, login_url, technique, username, password,
-                          (payload or "")[:4000], (token or "")[:4000],
+                    """, (scan_id, host, method, login_url, technique, username, enc_password,
+                          (payload or "")[:4000], enc_token,
                           int(response_status or 0), (response_snippet or "")[:2000],
                           role, severity, dk))
                     row = cur.fetchone()
@@ -1807,7 +2193,12 @@ class AuthBypassRepo:
             return None
 
     @staticmethod
-    def get_by_scan(scan_id: str) -> List[Dict[str, Any]]:
+    def get_by_scan(scan_id: str, reveal_secrets: bool = False) -> List[Dict[str, Any]]:
+        """Return auth-bypass rows for a scan. By default password/token are
+        redacted; pass reveal_secrets=True (server-side only) to decrypt. Never
+        expose reveal_secrets=True to the UI without an operator confirmation
+        flow — plaintext credentials leaving the DB by default was the original
+        vulnerability."""
         with DatabaseManager.get_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("""
@@ -1817,7 +2208,16 @@ class AuthBypassRepo:
                     FROM auth_bypasses WHERE scan_id = %s
                     ORDER BY created_at ASC
                 """, (scan_id,))
-                return [dict(r) for r in cur.fetchall()]
+                rows = [dict(r) for r in cur.fetchall()]
+
+        for r in rows:
+            if reveal_secrets:
+                r["password"] = _decrypt_secret_field(r.get("password"))
+                r["token"] = _decrypt_secret_field(r.get("token"))
+            else:
+                r["password"] = "[REDACTED]" if r.get("password") else ""
+                r["token"] = "[REDACTED]" if r.get("token") else ""
+        return rows
 
     @staticmethod
     def count_by_scan(scan_id: str) -> int:
@@ -1825,3 +2225,135 @@ class AuthBypassRepo:
             with conn.cursor() as cur:
                 cur.execute("SELECT COUNT(*) FROM auth_bypasses WHERE scan_id = %s", (scan_id,))
                 return int(cur.fetchone()[0] or 0)
+
+
+class LiveAgentRepo:
+    """Per-agent live tracker rows — feeds the UI's parallel-agent panel.
+
+    Each parallel task (subdomain scan, OSINT sub-phase, expert probe, cred
+    chain executor) registers an agent_id at start and updates its row as it
+    progresses. The UI polls a single endpoint for a card-per-agent view.
+    """
+
+    @staticmethod
+    def upsert(scan_id: str, agent_id: str, *, label: str = "", phase: str = "",
+               target: str = "", status: str = "queued", current_tool: str = "",
+               current_step: str = "", steps_taken: Optional[int] = None,
+               findings_count: Optional[int] = None, cost_usd: Optional[float] = None,
+               started: bool = False, finished: bool = False,
+               metadata: Optional[Dict] = None) -> None:
+        sets = ["label = COALESCE(NULLIF(EXCLUDED.label,''), live_agents.label)",
+                "phase = COALESCE(NULLIF(EXCLUDED.phase,''), live_agents.phase)",
+                "target = COALESCE(NULLIF(EXCLUDED.target,''), live_agents.target)",
+                "status = EXCLUDED.status",
+                "current_tool = EXCLUDED.current_tool",
+                "current_step = EXCLUDED.current_step",
+                "updated_at = NOW()"]
+        if steps_taken is not None:
+            sets.append("steps_taken = EXCLUDED.steps_taken")
+        if findings_count is not None:
+            sets.append("findings_count = EXCLUDED.findings_count")
+        if cost_usd is not None:
+            sets.append("cost_usd = EXCLUDED.cost_usd")
+        if started:
+            sets.append("started_at = COALESCE(live_agents.started_at, NOW())")
+        if finished:
+            sets.append("finished_at = NOW()")
+        if metadata is not None:
+            sets.append("metadata = EXCLUDED.metadata")
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"""
+                        INSERT INTO live_agents
+                          (scan_id, agent_id, label, phase, target, status,
+                           current_tool, current_step, steps_taken, findings_count,
+                           cost_usd, started_at, finished_at, metadata)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                                CASE WHEN %s THEN NOW() ELSE NULL END,
+                                CASE WHEN %s THEN NOW() ELSE NULL END,
+                                %s)
+                        ON CONFLICT (scan_id, agent_id) DO UPDATE SET
+                          {', '.join(sets)}
+                    """, (scan_id, agent_id, label, phase, target, status,
+                          current_tool, current_step, steps_taken or 0,
+                          findings_count or 0, cost_usd or 0.0,
+                          started, finished, json.dumps(metadata or {})))
+                    conn.commit()
+        except Exception:
+            pass
+
+    @staticmethod
+    def list_by_scan(scan_id: str) -> List[Dict[str, Any]]:
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("""
+                        SELECT * FROM live_agents WHERE scan_id = %s
+                        ORDER BY
+                          CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1
+                                       WHEN 'failed' THEN 2 ELSE 3 END,
+                          COALESCE(started_at, updated_at) DESC
+                    """, (scan_id,))
+                    return [dict(r) for r in cur.fetchall()]
+        except Exception:
+            return []
+
+    @staticmethod
+    def counts_by_scan(scan_id: str) -> Dict[str, int]:
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT status, COUNT(*) FROM live_agents
+                        WHERE scan_id = %s GROUP BY status
+                    """, (scan_id,))
+                    return {r[0]: int(r[1]) for r in cur.fetchall()}
+        except Exception:
+            return {}
+
+
+class LLMMemoryRepo:
+    """Persists the LLM's OWN scan-time reasoning (phase summaries, decisions,
+    reflections). Reused by the chatbot so it doesn't need to re-derive
+    conclusions from raw DB rows — it reads what the scan-time LLM already
+    concluded (at cost)."""
+
+    @staticmethod
+    def append(scan_id: str, phase: str, content: str, *,
+                kind: str = "summary", tool: str = "", target: str = "") -> None:
+        if not content or not content.strip():
+            return
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO scan_llm_memory
+                          (scan_id, phase, kind, content, tool, target)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                    """, (scan_id, phase or "", kind, content[:16000], tool or "", target or ""))
+                    conn.commit()
+        except Exception:
+            pass
+
+    @staticmethod
+    def get_by_scan(scan_id: str, kind: Optional[str] = None,
+                     limit: int = 200) -> List[Dict[str, Any]]:
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    if kind:
+                        cur.execute("""
+                            SELECT * FROM scan_llm_memory
+                            WHERE scan_id = %s AND kind = %s
+                            ORDER BY created_at ASC LIMIT %s
+                        """, (scan_id, kind, limit))
+                    else:
+                        cur.execute("""
+                            SELECT * FROM scan_llm_memory
+                            WHERE scan_id = %s
+                            ORDER BY created_at ASC LIMIT %s
+                        """, (scan_id, limit))
+                    return [dict(r) for r in cur.fetchall()]
+        except Exception:
+            return []

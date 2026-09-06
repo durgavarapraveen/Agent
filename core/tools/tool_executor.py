@@ -71,7 +71,10 @@ class ToolExecutor:
             logger.info(f"Attempting capability '{capability}' with tool '{tool_name}'")
             attempt, findings = self.execute(tool_name, args)
             result.attempts.append(attempt)
-            print(f"DEBUG: tool={tool_name} returned status={attempt.status} with evidence={attempt.evidence}")
+            logger.debug(
+                "tool=%s returned status=%s with evidence=%s",
+                tool_name, attempt.status, attempt.evidence,
+            )
             
             if attempt.status == ExecutionStatus.COMPLETED or attempt.status == "success": # string matching for older fuzzer status
                 result.status = ExecutionStatus.COMPLETED

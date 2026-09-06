@@ -36,7 +36,11 @@ class FindingIngestionMixin:
             # Tier 6
             "stego": "MEDIUM", "video": "MEDIUM", "subtitle": "MEDIUM",
             "nested": "MEDIUM", "web3": "CRITICAL", "race": "HIGH",
-            "hidden": "MEDIUM", "gdpr": "HIGH", "error": "MEDIUM",
+            # NOTE: `hidden` is intentionally NOT re-declared here — Tier-1
+            # already maps it to HIGH above. A second entry silently overwrote
+            # to MEDIUM (Python dict literal semantics), which downgraded
+            # hidden-endpoint / hidden-parameter findings.
+            "gdpr": "HIGH", "error": "MEDIUM",
             "encoding": "HIGH",
             # Tier 7
             "smuggling": "CRITICAL", "deser": "CRITICAL", "cloud": "HIGH",

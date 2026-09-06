@@ -99,16 +99,36 @@ class Embedder:
             return [item["embedding"] for item in sorted(data["data"], key=lambda x: x["index"])]
         raise RuntimeError(f"Batch embedding API {r.status_code}: {r.text[:200]}")
 
+    # Purity marker prepended to any local (hash-bag) embedding so downstream
+    # consumers can tell them apart from real semantic embeddings and refuse
+    # to persist them into the shared vector index. See core/rag/pipeline.py.
+    LOCAL_MARKER_VALUE = -9.87654321  # implausible for any normalized vector
+
     def _local_embed(self, text: str) -> List[float]:
-        """Deterministic bag-of-words hash embedding (stable fallback)."""
-        vec = [0.0] * self.dimension
+        """Deterministic bag-of-words hash embedding (stable fallback).
+
+        The vector's LAST slot carries the `LOCAL_MARKER_VALUE` sentinel so
+        the pipeline can detect a local embedding at store time and either
+        skip persistence or route it to a separate collection. Semantic
+        retrieval against a mixed corpus of real + hash embeddings degrades
+        badly, so the marker exists to prevent silent quality collapse.
+        """
+        vec = [0.0] * (self.dimension - 1)
         for token in str(text).lower().split():
             h = int(hashlib.md5(token.encode("utf-8")).hexdigest(), 16)
-            idx = h % self.dimension
+            idx = h % (self.dimension - 1)
             sign = 1.0 if (h >> 128) % 2 == 0 else -1.0
             vec[idx] += sign
         norm = math.sqrt(sum(v * v for v in vec)) or 1.0
-        return [v / norm for v in vec]
+        normalized = [v / norm for v in vec]
+        normalized.append(self.LOCAL_MARKER_VALUE)
+        return normalized
+
+    @classmethod
+    def is_local_embedding(cls, vec: List[float]) -> bool:
+        if not vec:
+            return False
+        return abs(vec[-1] - cls.LOCAL_MARKER_VALUE) < 1e-6
 
     async def close(self):
         if self._client and not self._client.is_closed:

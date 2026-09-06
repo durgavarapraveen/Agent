@@ -122,8 +122,8 @@ class ToolGateway:
                 raise RuntimeError(msg)
                 
         except asyncio.TimeoutError:
-            logger.error(f"Timeout: {invocation.tool_id}")
-            result = await self._handle_timeout(invocation, auth_context)
+            logger.error(f"Timeout: {invocation.tool_id} after {timeout_val}s")
+            result = await self._handle_timeout(invocation, auth_context, timeout_seconds=timeout_val)
         except Exception as e:
             logger.error(f"Error: {invocation.tool_id}: {e}")
             result = await self._handle_error(invocation, auth_context, e)
@@ -172,14 +172,18 @@ class ToolGateway:
         return await self.router.route_and_execute(invocation, auth_context)
     
     async def _handle_timeout(self, invocation: ToolInvocation,
-                             auth_context: AuthContext) -> ToolResult:
-        """Handle tool execution timeout"""
+                             auth_context: AuthContext,
+                             timeout_seconds: int = 0) -> ToolResult:
+        """Handle tool execution timeout. Prefers the actual configured
+        timeout in the error message — previously this hardcoded "300s"
+        regardless of the real cap."""
         from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus, ErrorInfo, ErrorType
         from core.common.error_translator import ErrorTranslator
-        
+
         tool_id = invocation.tool_id or invocation.operation or "unknown"
         translation = ErrorTranslator.translate(tool_id, "timeout", exit_code=1, target=invocation.target)
-        
+
+        actual_timeout = timeout_seconds or int((invocation.params or {}).get("timeout", 900))
         return SchemaToolResult(
             tool=tool_id,
             capability=invocation.operation or "unknown",
@@ -188,7 +192,7 @@ class ToolGateway:
             data={"error_human": translation.get("formatted_report")},
             error=ErrorInfo(
                 error_type=ErrorType.TIMEOUT,
-                message=f"Tool {tool_id} timed out after 300s",
+                message=f"Tool {tool_id} timed out after {actual_timeout}s",
                 retryable=True,
                 tool=tool_id
             )

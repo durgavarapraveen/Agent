@@ -64,15 +64,41 @@ class DatabaseManager:
     @classmethod
     @contextmanager
     def get_connection(cls):
-        """Context manager for getting a connection from the pool."""
+        """
+        Context manager for getting a connection from the pool.
+
+        Fixes pool-poisoning bug: any exception inside the `with` block leaves the
+        connection in an aborted transaction state. Returning it to the pool without
+        rollback poisons the next borrower with `InFailedSqlTransaction`. We roll
+        back on exception, and also rollback (best-effort) on the happy path in case
+        the caller left an open transaction. The connection is returned to the pool
+        unless it's already broken, in which case we drop it so the pool refills.
+        """
         if cls._pool is None:
             cls.initialize()
 
         conn = cls._pool.getconn()
+        broken = False
         try:
             yield conn
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                broken = True
+            raise
         finally:
-            cls._pool.putconn(conn)
+            # Best-effort rollback on happy path so we never return a conn with an
+            # implicit open transaction.
+            if not broken:
+                try:
+                    conn.rollback()
+                except Exception:
+                    broken = True
+            try:
+                cls._pool.putconn(conn, close=broken)
+            except Exception as e:
+                logger.error(f"Failed to return connection to pool (dropping): {e}")
 
     @classmethod
     def close_all(cls):

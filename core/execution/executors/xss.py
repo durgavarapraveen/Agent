@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import html as _html
+import json as _json
 import logging
+import re as _re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -10,6 +13,100 @@ from core.execution.executors.base import ExecutionResult, ExecutionStatus, Exec
 logger = logging.getLogger(__name__)
 
 REQUIRED_INPUTS = ("injection_url", "injectable_param", "payloads")
+
+
+def _classify_reflection(body: str, payload: str) -> Dict[str, Any]:
+    """Context-aware XSS reflection analysis.
+
+    Naive `payload in body` (the previous implementation) missed real XSS in
+    HTML-attribute / JS-string / URL contexts where the payload is entity-
+    encoded but still executable, and false-positived on any page that echoed
+    the payload back in a safe context (e.g. inside `<textarea>` or a JSON
+    blob).
+
+    We now return a small dict describing WHERE and HOW the payload appeared:
+
+        {
+          "reflected": bool,          # any form of reflection
+          "raw":        bool,          # exact bytes reflected as-is
+          "html_encoded": bool,        # `<` → `&lt;` etc.
+          "js_string":  bool,          # inside a JS string literal
+          "attribute":  bool,          # inside an HTML attribute value
+          "textarea":   bool,          # inside a <textarea> (usually safe)
+          "json_only":  bool,          # only inside application/json content
+          "likely_exploitable": bool,  # heuristic — see below
+        }
+
+    `likely_exploitable` = raw reflection outside a safe container (textarea,
+    JSON, HTML comment), OR HTML-encoded reflection inside an unquoted
+    attribute (still exploitable via broken-out event handlers).
+    """
+    if not payload or not body:
+        return {"reflected": False, "raw": False, "html_encoded": False,
+                "js_string": False, "attribute": False, "textarea": False,
+                "json_only": False, "likely_exploitable": False}
+
+    raw = payload in body
+    encoded_variants = [
+        _html.escape(payload),
+        _html.escape(payload, quote=True),
+    ]
+    html_encoded = any(v in body for v in encoded_variants if v and v != payload)
+
+    # Extract quick containers to disambiguate context.
+    textarea_hits = _re.findall(r"<textarea[^>]*>(.*?)</textarea>", body,
+                                 flags=_re.IGNORECASE | _re.DOTALL)
+    inside_textarea = raw and any(payload in t for t in textarea_hits)
+
+    comment_hits = _re.findall(r"<!--(.*?)-->", body, flags=_re.DOTALL)
+    inside_comment = raw and any(payload in c for c in comment_hits)
+
+    # Inside a JS string literal — a payload like `');alert(1);//` would
+    # break out; naive raw reflection is only exploitable if not already
+    # sanitized.
+    js_string = False
+    for m in _re.finditer(r"<script[^>]*>([\s\S]*?)</script>", body,
+                           flags=_re.IGNORECASE):
+        if payload in m.group(1):
+            js_string = True
+            break
+
+    # Inside an HTML attribute value.
+    attribute = bool(_re.search(
+        rf'\s\w+\s*=\s*["\'][^"\']*{_re.escape(payload)}[^"\']*["\']',
+        body,
+    ))
+
+    # JSON-only reflection: response looked like JSON and the payload only
+    # appears inside a JSON string (indicated by preceding "). Weak signal —
+    # if the response's declared CT was application/json this is very likely
+    # not exploitable in a browser context.
+    json_only = False
+    try:
+        # If body is a valid JSON document that contains the payload, treat
+        # reflection as JSON-only unless there's also a raw HTML tag around.
+        _json.loads(body)
+        if raw and "<html" not in body.lower() and "<body" not in body.lower():
+            json_only = True
+    except Exception:
+        pass
+
+    reflected = raw or html_encoded
+
+    likely_exploitable = False
+    if raw and not (inside_textarea or inside_comment or json_only):
+        likely_exploitable = True
+    if html_encoded and attribute and not raw:
+        # Encoded reflection inside an attribute — still risky via
+        # broken-out event handlers if the value is unquoted.
+        likely_exploitable = True
+
+    return {
+        "reflected": reflected, "raw": raw, "html_encoded": html_encoded,
+        "js_string": js_string, "attribute": attribute,
+        "textarea": inside_textarea, "json_only": json_only,
+        "likely_exploitable": likely_exploitable,
+    }
 
 
 class XSSExecutor(ExecutorBase):
@@ -63,12 +160,14 @@ class XSSExecutor(ExecutorBase):
                         status_code = e.code
                         body = e.read().decode("utf-8", errors="replace")[:8192]
 
-                    reflection_detected = payload in body
+                    ctx = _classify_reflection(body, payload)
                     evidence_list.append({
                         "payload": payload,
                         "status_code": status_code,
                         "response_body": body,
-                        "reflection_detected": reflection_detected,
+                        "reflection_detected": ctx["reflected"],
+                        "reflection_context": ctx,
+                        "likely_exploitable": ctx["likely_exploitable"],
                     })
                 except Exception as payload_exc:
                     logger.warning("Payload failed: %s — %s", payload, payload_exc)

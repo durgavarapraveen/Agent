@@ -28,7 +28,20 @@ class AgenticResult:
 
 
 # Tool definitions the LLM can call
-PENTESTING_TOOLS = [
+from core.exploitation.custom_probe import (
+    CUSTOM_PROBE_TOOL_SCHEMAS as _CUSTOM_TOOLS,
+    run_custom_probe as _run_custom_probe,
+    run_custom_python as _run_custom_python,
+)
+from core.intel.skill_library import SKILL_TOOL_SCHEMAS as _SKILL_TOOLS
+from core.intel.security_kb import KB_TOOL_SCHEMA as _KB_TOOL
+from core.intel.tool_authoring import (
+    AUTHOR_TOOL_SCHEMA as _AUTHOR_TOOL,
+    RUN_AUTHORED_TOOL_SCHEMA as _RUN_AUTHORED_TOOL,
+    run_authored_tool as _run_authored_tool,
+)
+
+PENTESTING_TOOLS = _CUSTOM_TOOLS + _SKILL_TOOLS + [_KB_TOOL, _AUTHOR_TOOL, _RUN_AUTHORED_TOOL] + [
     {
         "type": "function",
         "function": {
@@ -239,6 +252,9 @@ class AgenticExecutor:
         # Scan id — used by _persist_auth_bypass to link rows to the running scan
         # in the auth_bypasses table.
         self.scan_id = getattr(shared_context, "scan_id", None) or getattr(shared_context, "_scan_id", "")
+        # Live-agent tracker (nullable — set by execute() so parallel launcher
+        # can pass an id in from outside).
+        self._tracker = None
 
     async def execute(
         self,
@@ -277,6 +293,33 @@ class AgenticExecutor:
 
         vuln_summary = self._build_known_vulns_summary()
 
+        # Feed prior phase summaries (this scan) so this phase builds on
+        # earlier discoveries instead of starting blind.
+        prior_phases_ctx = ""
+        try:
+            if self.scan_id:
+                from core.database.pg_store import LLMMemoryRepo
+                prior = LLMMemoryRepo.get_by_scan(self.scan_id, kind="summary", limit=8)
+                if prior:
+                    prior_phases_ctx = "## What earlier phases learned (build on this)\n" + \
+                        "\n".join(f"- **{p.get('phase','phase')}**: {(p.get('content') or '')[:400]}"
+                                    for p in prior) + "\n\n"
+        except Exception:
+            pass
+
+        # Novel-attack directive — pushes LLM beyond the standard catalog.
+        novel_attack_directive = (
+            "## Beyond the standard catalog\n"
+            "You are NOT limited to a fixed vulnerability catalog. After the standard "
+            "coverage, propose and EXECUTE 2-3 NOVEL attacks tailored to what you've "
+            "discovered about THIS specific target's stack, framework, and behaviours. "
+            "Chain findings — if you confirm a weakness, immediately test what it "
+            "unlocks (data exfil, session pivot, admin access, secondary injection). "
+            "Use `run_custom_probe` to craft arbitrary HTTP tests when the standard "
+            "tools don't cover an angle. When you confirm a vulnerability, reflect "
+            "for one round: what related weakness would the same class of bug enable?\n\n"
+        )
+
         user_message = (
             f"## Objective\n{objective}\n\n"
             f"## Phase\n{phase}\n\n"
@@ -286,6 +329,8 @@ class AgenticExecutor:
             f"- Endpoints: {known_endpoints}\n"
             f"- Technologies: {known_techs}\n"
             f"## Authentication State\n{auth_state}\n\n"
+            f"{prior_phases_ctx}"
+            f"{novel_attack_directive}"
         )
         if vuln_summary:
             user_message += f"## Already Found Vulnerabilities (DO NOT re-test these)\n{vuln_summary}\n\n"
@@ -317,6 +362,18 @@ class AgenticExecutor:
         ]
 
         logger.info(f"[AgenticExecutor] Starting: objective='{objective}' phase={phase} max_rounds={max_rounds}")
+
+        # Register a live-agent card so the UI can show what this phase is doing.
+        try:
+            from core.orchestration.parallel_agents import AgentTracker
+            if self._tracker is None:
+                self._tracker = AgentTracker(
+                    self.scan_id, agent_id=f"{phase}",
+                    label=phase, phase=phase,
+                    target=self.ctx.target)
+            self._tracker.start(current_step=objective[:120])
+        except Exception:
+            pass
 
         response = await self.llm.generate_with_tools(
             messages=messages,
@@ -372,7 +429,62 @@ class AgenticExecutor:
             f"cost=${self.result.total_cost:.4f}"
         )
 
+        # Post-finding reflection loop — for each pending HIGH/CRITICAL finding,
+        # ask the LLM to enumerate + execute 3-5 follow-up probes chasing what
+        # this weakness might unlock (session pivot, secondary injection,
+        # blind time-based confirm, WAF bypass variants, related endpoints).
+        pending = getattr(self, "_pending_reflections", []) or []
+        for i, finding in enumerate(pending[:3]):
+            try:
+                reflect_prompt = (
+                    f"You just confirmed a HIGH/CRITICAL vulnerability. Reflect: what does "
+                    f"THIS specific finding UNLOCK on this target? Propose and EXECUTE 3-5 "
+                    f"follow-up probes chasing implications (session pivot, secondary/blind "
+                    f"variants, related endpoints with the same weakness class, data exfil "
+                    f"escalation, WAF-bypass tampers). Use `run_custom_probe` or "
+                    f"`query_security_kb` to find angles you haven't tried.\n\n"
+                    f"CONFIRMED FINDING:\n"
+                    f"- Title: {finding.get('title','')}\n"
+                    f"- Type: {finding.get('type','')}\n"
+                    f"- Target: {finding.get('target','')}\n"
+                    f"- Details: {(finding.get('details') or '')[:600]}\n"
+                    f"- Evidence: {(finding.get('evidence') or '')[:400]}\n"
+                )
+                reflect_msgs = list(messages)
+                reflect_msgs.append({"role": "user", "content": reflect_prompt})
+                follow = await self.llm.generate_with_tools(
+                    messages=reflect_msgs,
+                    tools=PENTESTING_TOOLS,
+                    tool_executor=self._execute_tool_call,
+                    max_rounds=6,
+                    max_tokens=2048,
+                )
+                self.result.total_cost += (follow.cost_usd or 0)
+                logger.info(f"[Reflection] {i+1}/{len(pending[:3])} finished after {follow.cost_usd:.4f} USD")
+            except Exception as e:
+                logger.warning(f"[Reflection] failed for finding {i}: {e}")
+        self._pending_reflections = []
+
         self._ingest_to_shared_context()
+        # Persist the LLM's own scan-time reasoning so the chatbot can reuse
+        # it later instead of re-deriving conclusions from raw DB rows.
+        try:
+            from core.database.pg_store import LLMMemoryRepo
+            sid = getattr(self, "scan_id", "") or ""
+            if sid and (self.result.summary or "").strip():
+                LLMMemoryRepo.append(sid, phase=phase, kind="summary",
+                                       content=self.result.summary,
+                                       target=getattr(self.ctx, "target", ""))
+        except Exception:
+            pass
+        try:
+            if self._tracker:
+                self._tracker.finish(
+                    status="completed",
+                    findings=self.result.findings,
+                    cost_usd=self.result.total_cost)
+        except Exception:
+            pass
         return self.result
 
     async def _execute_tool_call(self, fn_name: str, fn_args: Dict[str, Any]) -> str:
@@ -381,11 +493,81 @@ class AgenticExecutor:
         Returns the result as a string the LLM can read.
         """
         self.result.steps_taken += 1
+        # Per-agent heartbeat — feeds the UI's live agent panel.
+        try:
+            if self._tracker:
+                tool_id = fn_args.get("tool_id") or fn_args.get("tool") or fn_name
+                target = fn_args.get("target") or fn_args.get("url") or self.ctx.target
+                self._tracker.heartbeat(
+                    tool=tool_id,
+                    step=f"{fn_name}({str(target)[:70]})",
+                    steps_taken=self.result.steps_taken,
+                    findings_count=len(self.result.findings),
+                    cost_usd=self.result.total_cost,
+                )
+        except Exception:
+            pass
+        # Live chain-of-thought — persist the LLM's rationale for THIS tool
+        # call so the UI can stream it as a "thought bubble" per agent.
+        #
+        # Delegated to a background thread so a slow DB commit never blocks
+        # the LLM planning loop. Failure is swallowed at the caller (see the
+        # bare `except`) — reasoning rows are best-effort telemetry, not
+        # audit-critical.
+        try:
+            if self.scan_id and self._tracker:
+                thought = fn_args.get("rationale") or fn_args.get("reasoning") \
+                            or fn_args.get("why") or ""
+                if not thought:
+                    thought = f"call {fn_name} on {fn_args.get('target') or fn_args.get('url') or ''}"
+                tool_planned = str(fn_args.get("tool_id") or fn_args.get("tool") or fn_name)[:60]
+
+                def _write_reasoning_row(sid, aid, step, thg, tp):
+                    from core.database.pg_store import DatabaseManager
+                    with DatabaseManager.get_connection() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                INSERT INTO agent_reasoning
+                                  (scan_id, agent_id, step, thought, tool_planned)
+                                VALUES (%s, %s, %s, %s, %s)
+                            """, (sid, aid, step, thg, tp))
+                            conn.commit()
+
+                import asyncio as _aio
+                _aio.get_event_loop().create_task(
+                    _aio.to_thread(_write_reasoning_row,
+                                    self.scan_id, self._tracker.agent_id,
+                                    self.result.steps_taken, str(thought)[:800],
+                                    tool_planned)
+                )
+        except Exception:
+            pass
 
         if fn_name == "run_tool":
             return await self._run_security_tool(fn_args)
         elif fn_name == "http_request":
             return await self._run_http_request(fn_args)
+        elif fn_name == "run_custom_probe":
+            from core.orchestration.adversarial_critic import critique_and_run, enabled as _crit_on
+            if _crit_on():
+                return await critique_and_run(fn_args, self.ctx, self._tracker)
+            return await _run_custom_probe(fn_args, self.ctx, self._tracker)
+        elif fn_name == "run_custom_python":
+            return await _run_custom_python(fn_args, self.ctx, self._tracker)
+        elif fn_name == "run_skill":
+            from core.intel.skill_library import run_skill as _rs
+            return await _rs(fn_args, self.ctx, self._tracker)
+        elif fn_name == "list_skills":
+            from core.intel.skill_library import list_skills as _ls
+            return _ls(self.ctx)
+        elif fn_name == "query_security_kb":
+            from core.intel.security_kb import query_kb_async
+            return await query_kb_async(fn_args.get("topic",""), fn_args.get("tech_stack",""))
+        elif fn_name == "author_tool":
+            from core.intel.tool_authoring import author_tool
+            return await author_tool(fn_args, self.ctx)
+        elif fn_name == "run_authored_tool":
+            return await _run_authored_tool(fn_args, self.ctx, self._tracker)
         elif fn_name == "analyze_results":
             return self._record_finding(fn_args)
         elif fn_name == "filter_endpoints":
@@ -670,23 +852,75 @@ class AgenticExecutor:
                         seen.add(key)
                 self.ctx.dns_records = existing_dns
                 logger.info(f"[AgenticExecutor] Extracted {len(dns_records)} DNS records from {tool_id}")
-            # Extract IPs from theharvester/whois output
+            # Extract IPs / hosts / ASNs / URLs / LinkedIn from
+            # theharvester's section-based stdout format:
+            #   [*] SECTION found: N
+            #   --------------------
+            #   line
+            #   line
+            #   \n
             if tool_id in ("theharvester", "whois"):
-                ips = set()
-                for line in stdout.splitlines():
-                    stripped = line.strip()
-                    ip_match = re.match(r'^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$', stripped)
-                    if ip_match:
-                        ips.add(ip_match.group(1))
-                    host_ip = re.match(r'^[\w\.\-]+:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$', stripped)
-                    if host_ip:
-                        ips.add(host_ip.group(1))
+                sections = self._parse_theharvester_sections(stdout)
+                # IPs
+                ips = set(sections.get("IPs", set()))
+                for h in sections.get("Hosts", []):
+                    if ":" in h:
+                        left, right = h.rsplit(":", 1)
+                        if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', right):
+                            ips.add(right)
                 if ips and hasattr(self.ctx, "ips"):
                     existing = set(self.ctx.ips or [])
                     new_ips = ips - existing
                     if new_ips:
                         self.ctx.ips = list(existing | ips)
                         logger.info(f"[AgenticExecutor] Extracted {len(new_ips)} IPs from {tool_id}")
+                # Hosts / subdomains
+                harv_subs = set()
+                for h in sections.get("Hosts", []):
+                    hostname = h.split(":", 1)[0].lstrip("*.").strip()
+                    if hostname and "." in hostname and target_base in hostname:
+                        harv_subs.add(hostname.lower())
+                if harv_subs and hasattr(self.ctx, "subdomains"):
+                    existing = set(self.ctx.subdomains or [])
+                    new_subs = harv_subs - existing
+                    if new_subs:
+                        self.ctx.subdomains = sorted(existing | harv_subs)
+                        logger.info(f"[AgenticExecutor] Extracted {len(new_subs)} subdomains from theharvester")
+                # ASNs → osint.domain_intelligence.asns
+                asns = sections.get("ASNS", [])
+                interesting_urls = sections.get("Interesting Urls", [])
+                linkedin_links = sections.get("LinkedIn Links", []) + sections.get("LinkedIn users", [])
+                if asns or interesting_urls or linkedin_links:
+                    osint = dict(self.ctx.get("osint", {}) or {}) if hasattr(self.ctx, "get") else {}
+                    if asns:
+                        di = dict(osint.get("domain_intelligence", {}) or {})
+                        existing = set(di.get("asns", []) or [])
+                        di["asns"] = sorted(existing | set(asns))
+                        osint["domain_intelligence"] = di
+                    if interesting_urls:
+                        other = dict(osint.get("other", {}) or {})
+                        existing = set(other.get("interesting_urls", []) or [])
+                        other["interesting_urls"] = sorted(existing | set(interesting_urls))
+                        osint["other"] = other
+                        # Also drop them into endpoints so the crawler sees them
+                        if hasattr(self.ctx, "add_endpoints"):
+                            self.ctx.add_endpoints(
+                                [{"url": u, "status": 0} for u in interesting_urls],
+                                source="theharvester")
+                    if linkedin_links:
+                        other = dict(osint.get("other", {}) or {})
+                        existing = set(other.get("linkedin_links", []) or [])
+                        other["linkedin_links"] = sorted(existing | set(linkedin_links))
+                        osint["other"] = other
+                    # Recompute summary counts so the UI badge shows something
+                    summary = dict(osint.get("summary", {}) or {})
+                    if asns: summary["asns"] = len(osint["domain_intelligence"]["asns"])
+                    if interesting_urls: summary["interesting_urls"] = len(osint["other"]["interesting_urls"])
+                    if linkedin_links: summary["linkedin_links"] = len(osint["other"]["linkedin_links"])
+                    osint["summary"] = summary
+                    if hasattr(self.ctx, "update"):
+                        self.ctx.update("osint", osint)
+                    logger.info(f"[AgenticExecutor] theharvester → ASNs={len(asns)} urls={len(interesting_urls)} linkedin={len(linkedin_links)}")
 
         if tool_id in (tech_tools | port_tools) and hasattr(self.ctx, "update"):
             try:
@@ -858,6 +1092,51 @@ class AgenticExecutor:
                     except Exception:
                         pass
 
+    def _parse_theharvester_sections(self, stdout: str) -> dict:
+        """Parse theHarvester's section-based stdout format.
+
+        Sections look like:
+            [*] SECTION_NAME found: N
+            --------------------
+            <line>
+            <line>
+            <blank line ends section>
+
+        Returns dict of {section_name: [values]}. Handles: Hosts, IPs,
+        ASNS, Interesting Urls, LinkedIn Links, LinkedIn users, Emails,
+        People, Sub-domains.
+        """
+        import re as _re
+        sections = {}
+        current = None
+        buf = []
+        HEADER_RE = _re.compile(r'^\[\*\]\s+([A-Za-z][A-Za-z /\-]*?)\s+found[:]?\s*(\d+)?\s*$')
+        for raw in stdout.splitlines():
+            line = raw.rstrip()
+            m = HEADER_RE.match(line)
+            if m:
+                if current and buf:
+                    sections.setdefault(current, []).extend(buf)
+                current = m.group(1).strip()
+                buf = []
+                continue
+            if current is None:
+                continue
+            stripped = line.strip()
+            if not stripped or stripped.startswith("-"):
+                if not stripped and buf:
+                    sections.setdefault(current, []).extend(buf)
+                    current = None
+                    buf = []
+                continue
+            # Skip auxiliary "No X found." / "[*] Performing ..." lines
+            if stripped.startswith("[*]") or stripped.startswith("[!]"):
+                continue
+            buf.append(stripped)
+        if current and buf:
+            sections.setdefault(current, []).extend(buf)
+        return sections
+
     def _regex_extract_recon(self, tool_id, stdout, target_base, re):
         """Fallback regex-based extraction if LLM call fails."""
         techs = {}
@@ -907,13 +1186,18 @@ class AgenticExecutor:
         # (nuclei/nikto/whatweb produce dense output where later lines matter).
         truncated = stdout[:6000] if len(stdout) > 6000 else stdout
 
+        # Tool stdout is untrusted (contains attacker-controlled response bodies
+        # captured by scanners like nikto/nuclei). Fence it so a crafted target
+        # response can't inject planner directives.
+        from core.llm.prompt_safety import fence_untrusted
+        _fenced_output = fence_untrusted(truncated, label=f"tool_output_{tool_id}", max_chars=6100)
         prompt = f"""Analyze this {tool_id} security tool output. Extract ONLY real, useful recon data per subdomain. Return JSON.
 
 TOOL: {tool_id}
 TARGET: {target_base}
 
 OUTPUT:
-{truncated}
+{_fenced_output}
 
 Return JSON:
 {{
@@ -1111,11 +1395,23 @@ RULES:
             password = creds.get("password")
             if not (email and password):
                 return
+            # Generic login discovery — first try the same host's discovered
+            # login endpoints, fall back to standard paths on the registration
+            # URL's host if none were seen.
+            from core.common.endpoint_hints import discover_endpoints
             pu = _up(register_url)
-            login_url = f"{pu.scheme}://{pu.netloc}/rest/user/login"
+            login_candidates = [u for u in discover_endpoints(self.ctx, "login", max_results=8)
+                                 if _up(u).netloc == pu.netloc]
+            if not login_candidates:
+                login_candidates = [f"{pu.scheme}://{pu.netloc}{p}"
+                                     for p in ("/login", "/api/login", "/signin",
+                                                "/oauth/token", "/session")]
             import httpx as _httpx
             async with _httpx.AsyncClient(follow_redirects=True, timeout=20, verify=False) as client:
-                r = await client.post(login_url, json={"email": email, "password": password})
+                for login_url in login_candidates:
+                    r = await client.post(login_url, json={"email": email, "password": password})
+                    if r.status_code in (200, 201) and "token" in (r.text or "").lower():
+                        break
                 logger.info(f"[AgenticExecutor] Chain-login as new admin {email} -> HTTP {r.status_code}")
                 if r.status_code == 200:
                     self._capture_auth_from_response(
@@ -2124,6 +2420,35 @@ RULES:
         if confirmed_by_tool:
             finding["confirmed"] = True
         self.result.findings.append(finding)
+        # Post-finding reflection: for HIGH/CRITICAL confirmed findings, queue a
+        # reflection turn asking the LLM "what does this UNLOCK?" and execute
+        # 3-5 follow-up probes. Bounded per phase to avoid runaway.
+        sev = (finding.get("severity") or "info").upper()
+        if sev in ("HIGH", "CRITICAL") and confirmed_by_tool:
+            if not hasattr(self, "_pending_reflections"):
+                self._pending_reflections = []
+            if len(self._pending_reflections) < 3:  # cap per phase
+                self._pending_reflections.append(finding)
+        # Auto-extract as a skill so future scans can reuse the exact probe.
+        try:
+            if sev in ("HIGH", "CRITICAL") and confirmed_by_tool and \
+               finding.get("tool") == "custom_probe":
+                from core.intel.skill_library import save_skill
+                current = getattr(self.ctx, "technologies", {}) or {}
+                tags = sorted({t for vs in current.values()
+                                for t in (vs if isinstance(vs, list) else [vs])
+                                if isinstance(t, str)})[:10]
+                save_skill(
+                    name=(finding.get("title","")[:60]),
+                    description=finding.get("details","")[:400],
+                    method="POST" if "post" in (finding.get("details","") or "").lower() else "GET",
+                    url_template=finding.get("target") or self.ctx.target,
+                    expected_signature=(finding.get("evidence","") or "")[:120],
+                    tech_shape={"tags": tags},
+                    scan_id=self.scan_id or "",
+                )
+        except Exception:
+            pass
         logger.info(f"[AgenticExecutor] Finding: [{finding['severity']}] {finding['title']}"
                     f" | target={finding.get('target', '')} | details={finding.get('details', '')}"
                     f"{(' | evidence=' + finding.get('evidence', '')) if finding.get('evidence') else ''}"
@@ -2289,14 +2614,20 @@ RULES:
                     "target": finding.get("target", ""),
                 })
 
-            elif ftype not in ("info", "note", "recon", ""):
+            else:
+                # Everything else — includes findings with ftype == "info",
+                # "note", "recon", "" that used to be dropped. Preserve them
+                # as INFO-severity vulns so the UI can show fingerprint /
+                # negative-result / API-surface notes the LLM emitted.
                 sev = (finding.get("severity") or "info").upper()
-                if sev in ("LOW", "MEDIUM", "HIGH", "CRITICAL"):
-                    _tool2 = finding.get("tool", "")
-                    _conf2 = bool(finding.get("confirmed"))
+                if sev not in ("INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"):
+                    sev = "INFO"
+                _tool2 = finding.get("tool", "")
+                _conf2 = bool(finding.get("confirmed"))
+                if True:
                     self.ctx.add_vulnerability({
                         "title": finding["title"],
-                        "type": ftype.upper(),
+                        "type": (ftype or "info").upper(),
                         "severity": sev,
                         "details": finding.get("details", ""),
                         "evidence": finding.get("evidence", ""),

@@ -79,15 +79,20 @@ class KaliTool(Tool):
         status = r.get("status", "error")
         # Many security tools return non-zero for normal results (nikto=1 when
         # findings exist, nuclei=1 when no matches, feroxbuster for various).
-        # Treat as success if: exit 0, OR tool produced stdout, OR tool is in
-        # the lenient set and didn't hard-crash (signal kill / timeout).
+        # New tightened rules:
+        #   - rc==0 or explicit `status="success"` → success.
+        #   - timeout → always failure.
+        #   - lenient tools with rc<128 AND non-empty stdout → success. The
+        #     previous heuristic accepted non-empty stdout unconditionally, so
+        #     a tool that printed a usage banner and crashed was flagged
+        #     successful. Requiring rc<128 excludes signal-kills; requiring
+        #     stdout excludes tools that printed only a warning to stderr.
+        #   - Everything else → failure, with rc + stderr surfaced.
         if rc == 0 or status == "success":
             success = True
         elif status == "timeout":
             success = False
-        elif stdout.strip():
-            success = True
-        elif self.name in self._LENIENT_RC_TOOLS and rc is not None and rc < 128:
+        elif self.name in self._LENIENT_RC_TOOLS and rc is not None and rc < 128 and stdout.strip():
             success = True
         else:
             success = False
@@ -115,9 +120,15 @@ class PythonHTTPTool(Tool):
     def run(self, url: str, method: str = "GET", headers: Dict = None,
             data: str = None, timeout: int = 10, follow: bool = True) -> ToolResult:
         import asyncio
+        import os as _os_thr
+        # Blanket `verify=False` is appropriate for pentesting against self-
+        # signed targets, but it's an anti-pattern when the tool is used for
+        # OSINT / clean-target lookups. Env `HTTP_TOOL_VERIFY_TLS=1` enables
+        # verification.
+        _verify_tls = _os_thr.environ.get("HTTP_TOOL_VERIFY_TLS", "").strip() == "1"
         try:
             async def _fetch():
-                async with httpx.AsyncClient(timeout=timeout, verify=False,
+                async with httpx.AsyncClient(timeout=timeout, verify=_verify_tls,
                                               follow_redirects=follow) as client:
                     if method.upper() == "GET":
                         r = await client.get(url, headers=headers)
@@ -269,26 +280,116 @@ class HeadlessBrowserTool(Tool):
             "exploit"
         )
 
+    # Static Playwright driver scripts. User-controlled arguments are supplied
+    # as a base64-encoded JSON blob, decoded and consumed as a dict at runtime.
+    # Previously each script interpolated `url`, `code`, and form `data` directly
+    # into a Python source string via f-strings executed as `python3 -c "..."`
+    # inside the Kali container. Any quote-breaking / backslash-breaking string
+    # would achieve Python code execution in the container. This rewrite makes
+    # such injection impossible because base64 output is [A-Za-z0-9+/=] only.
+    _DRIVER_NAVIGATE = (
+        "import base64,json,sys;"
+        "a=json.loads(base64.b64decode(sys.argv[1]).decode());"
+        "from playwright.sync_api import sync_playwright;"
+        "p=sync_playwright().start();"
+        "b=p.chromium.launch(headless=True);"
+        "page=b.new_page();"
+        "page.goto(a['url'],timeout=15000);"
+        "print(page.content()[:8000]);"
+        "b.close();p.stop()"
+    )
+    _DRIVER_JS = (
+        "import base64,json,sys;"
+        "a=json.loads(base64.b64decode(sys.argv[1]).decode());"
+        "from playwright.sync_api import sync_playwright;"
+        "p=sync_playwright().start();"
+        "b=p.chromium.launch(headless=True);"
+        "page=b.new_page();"
+        "r=page.evaluate(a['code']);"
+        "print(r);"
+        "b.close();p.stop()"
+    )
+    _DRIVER_SCREENSHOT = (
+        "import base64,json,sys;"
+        "a=json.loads(base64.b64decode(sys.argv[1]).decode());"
+        "from playwright.sync_api import sync_playwright;"
+        "p=sync_playwright().start();"
+        "b=p.chromium.launch(headless=True);"
+        "page=b.new_page();"
+        "page.goto(a['url'],timeout=15000);"
+        "page.screenshot(path='/tmp/screenshot.png');"
+        "print('Screenshot saved: /tmp/screenshot.png');"
+        "print('Title: '+page.title());"
+        "b.close();p.stop()"
+    )
+    _DRIVER_COOKIES = (
+        "import base64,json,sys;"
+        "a=json.loads(base64.b64decode(sys.argv[1]).decode());"
+        "from playwright.sync_api import sync_playwright;"
+        "p=sync_playwright().start();"
+        "b=p.chromium.launch(headless=True);"
+        "ctx=b.new_context();"
+        "page=ctx.new_page();"
+        "page.goto(a['url'],timeout=15000);"
+        "cookies=ctx.cookies();"
+        "import json as _j;print(_j.dumps(cookies,indent=2));"
+        "b.close();p.stop()"
+    )
+    _DRIVER_FORM = (
+        "import base64,json,sys;"
+        "a=json.loads(base64.b64decode(sys.argv[1]).decode());"
+        "from playwright.sync_api import sync_playwright;"
+        "p=sync_playwright().start();"
+        "b=p.chromium.launch(headless=True);"
+        "page=b.new_page();"
+        "page.goto(a['url'],timeout=15000);"
+        "data=a.get('data') or {};"
+        "assert isinstance(data,dict),'data must be object';"
+        "for sel,val in data.items():"
+        "    page.fill(sel,val);"
+        "page.click('button[type=submit],input[type=submit]');"
+        "page.wait_for_load_state('networkidle',timeout=10000);"
+        "print(page.url);"
+        "print(page.content()[:5000]);"
+        "b.close();p.stop()"
+    )
+
     def run(self, command: str, timeout: int = 30) -> ToolResult:
         """
         Dispatch browser commands to Playwright in Docker.
         command format: "<action> <args>"
         """
+        import base64 as _b64
+        import json as _json
+
         parts = command.strip().split(None, 1)
         action = parts[0].lower() if parts else ""
         args = parts[1] if len(parts) > 1 else ""
 
-        # Build playwright script based on action
         if action == "navigate":
-            script = self._script_navigate(args)
+            payload = {"url": args}
+            driver = self._DRIVER_NAVIGATE
         elif action == "js":
-            script = self._script_js(args)
+            payload = {"code": args}
+            driver = self._DRIVER_JS
         elif action == "screenshot":
-            script = self._script_screenshot(args)
+            payload = {"url": args}
+            driver = self._DRIVER_SCREENSHOT
         elif action == "cookies":
-            script = self._script_cookies(args)
+            payload = {"url": args}
+            driver = self._DRIVER_COOKIES
         elif action == "form":
-            script = self._script_form(args)
+            # args = "<url> <json>"
+            sp = args.split(None, 1)
+            url = sp[0] if sp else ""
+            try:
+                data = _json.loads(sp[1]) if len(sp) > 1 else {}
+            except Exception:
+                return ToolResult(success=False, error="form action requires valid JSON data")
+            if not isinstance(data, dict):
+                return ToolResult(success=False, error="form action data must be a JSON object")
+            payload = {"url": url, "data": data}
+            driver = self._DRIVER_FORM
         else:
             return ToolResult(
                 success=False,
@@ -296,85 +397,18 @@ class HeadlessBrowserTool(Tool):
                       f"Use: navigate|js|screenshot|cookies|form"
             )
 
-        # Run via Kali Docker with playwright installed
-        full_cmd = (
-            f"python3 -c \"{script}\""
-        )
+        # Encode user-supplied args as base64 — safe against shell + Python
+        # string-literal injection because the alphabet is [A-Za-z0-9+/=] only.
+        b64_arg = _b64.b64encode(_json.dumps(payload).encode("utf-8")).decode("ascii")
+        # Assemble: `python3 -c "<driver>" <base64arg>`. `driver` is a static
+        # source constant defined above; only the base64 argv token varies.
+        full_cmd = f'python3 -c "{driver}" {b64_arg}'
+
         r = KaliDockerExecutor.run(full_cmd, timeout=timeout, auto_install=True)
         return ToolResult(
             success=r["status"] == "success",
             output=r.get("stdout", ""),
             error=r.get("stderr", "") or r.get("error", ""),
-        )
-
-    def _script_navigate(self, url: str) -> str:
-        return (
-            "from playwright.sync_api import sync_playwright;"
-            "p=sync_playwright().start();"
-            "b=p.chromium.launch(headless=True);"
-            "page=b.new_page();"
-            f"page.goto('{url}',timeout=15000);"
-            "print(page.content()[:8000]);"
-            "b.close();p.stop()"
-        )
-
-    def _script_js(self, code: str) -> str:
-        safe_code = code.replace("'", "\\'").replace('"', '\\"')
-        return (
-            "from playwright.sync_api import sync_playwright;"
-            "p=sync_playwright().start();"
-            "b=p.chromium.launch(headless=True);"
-            "page=b.new_page();"
-            f"r=page.evaluate('{safe_code}');"
-            "print(r);"
-            "b.close();p.stop()"
-        )
-
-    def _script_screenshot(self, url: str) -> str:
-        return (
-            "from playwright.sync_api import sync_playwright;"
-            "p=sync_playwright().start();"
-            "b=p.chromium.launch(headless=True);"
-            "page=b.new_page();"
-            f"page.goto('{url}',timeout=15000);"
-            "page.screenshot(path='/tmp/screenshot.png');"
-            "print('Screenshot saved: /tmp/screenshot.png');"
-            "print('Title: '+page.title());"
-            "b.close();p.stop()"
-        )
-
-    def _script_cookies(self, url: str) -> str:
-        return (
-            "import json;from playwright.sync_api import sync_playwright;"
-            "p=sync_playwright().start();"
-            "b=p.chromium.launch(headless=True);"
-            "ctx=b.new_context();"
-            "page=ctx.new_page();"
-            f"page.goto('{url}',timeout=15000);"
-            "cookies=ctx.cookies();"
-            "print(json.dumps(cookies,indent=2));"
-            "b.close();p.stop()"
-        )
-
-    def _script_form(self, args: str) -> str:
-        # args = "https://target.com/login {\"user\":\"admin\",\"pass\":\"test\"}"
-        parts = args.split(None, 1)
-        url = parts[0] if parts else ""
-        data = parts[1] if len(parts) > 1 else "{}"
-        return (
-            "import json;from playwright.sync_api import sync_playwright;"
-            "p=sync_playwright().start();"
-            "b=p.chromium.launch(headless=True);"
-            "page=b.new_page();"
-            f"page.goto('{url}',timeout=15000);"
-            f"data={data};"
-            "for sel,val in data.items():"
-            "  page.fill(sel,val);"
-            "page.click('button[type=submit],input[type=submit]');"
-            "page.wait_for_load_state('networkidle',timeout=10000);"
-            "print(page.url);"
-            "print(page.content()[:5000]);"
-            "b.close();p.stop()"
         )
         
     def execute(self, tool_name: str, params: Dict = None) -> Dict:

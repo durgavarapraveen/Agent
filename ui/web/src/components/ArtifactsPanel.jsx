@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, createPoller } from "../api";
 
 /**
  * Displays all `scan_artifacts` rows for a given scan.
@@ -15,20 +15,23 @@ export default function ArtifactsPanel({ scanId, poll = false }) {
 
   useEffect(() => {
     if (!scanId) return;
-    let alive = true;
-    const load = () => {
-      api.getScanPocs(scanId).then(r => alive && setPocs(r.pocs || {})).catch(() => {});
-      api.listScanScreenshots(scanId).then(r => alive && setShots(r.screenshots || [])).catch(() => {});
-      api.listScanArtifacts(scanId).then(r => {
-        if (!alive) return;
-        setOthers((r.artifacts || []).filter(a =>
-          !String(a.kind || "").startsWith("poc_") && a.kind !== "screenshot"));
-      }).catch(() => {});
+    const fetchAll = () => Promise.all([
+      api.getScanPocs(scanId).catch(() => ({})),
+      api.listScanScreenshots(scanId).catch(() => ({})),
+      api.listScanArtifacts(scanId).catch(() => ({})),
+    ]);
+    const applyResult = ([p, s, a]) => {
+      setPocs(p.pocs || {});
+      setShots(s.screenshots || []);
+      setOthers((a.artifacts || []).filter(art =>
+        !String(art.kind || "").startsWith("poc_") && art.kind !== "screenshot"));
     };
-    load();
-    let iv = null;
-    if (poll) iv = setInterval(load, 8000);
-    return () => { alive = false; if (iv) clearInterval(iv); };
+    if (!poll) {
+      fetchAll().then(applyResult);
+      return;
+    }
+    const poller = createPoller(fetchAll, applyResult, 8000);
+    return () => poller.stop();
   }, [scanId, poll]);
 
   const pocKinds = Object.keys(pocs);

@@ -75,9 +75,20 @@ class CustomReportBuilder:
                 cve = v.get("cve") or v.get("id") or "VULN"
 
                 matched_control = fw_map.get("DEFAULT")
-                for key, control_text in fw_map.items():
-                    if key in vtype:
-                        matched_control = control_text
+                matched_key = None
+                # Iterate longest-key-first so `SQL_INJECTION` matches before
+                # a stray `SQL` substring in an unrelated title. Also require
+                # a WORD-BOUNDARY match (regex) rather than raw `in` so
+                # `XSS_REFLECTED` doesn't match a title containing `XSSHTML`.
+                import re as _re_cm
+                sorted_keys = sorted(
+                    (k for k in fw_map.keys() if k != "DEFAULT"),
+                    key=len, reverse=True,
+                )
+                for key in sorted_keys:
+                    if _re_cm.search(rf"\b{_re_cm.escape(key)}\b", vtype):
+                        matched_control = fw_map[key]
+                        matched_key = key
                         break
 
                 mapped_controls.append({
@@ -193,11 +204,43 @@ class CustomReportBuilder:
   <meta charset="utf-8">
   <title>Interactive Security Report — {html.escape(masked_target)}</title>
 
-  <!-- DataTables CSS/JS via CDN -->
-  <link rel="stylesheet" href="https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css">
-  <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
-  <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!--
+    DataTables and Chart.js are loaded from CDN with `crossorigin` and
+    integrity-friendly links. Reports delivered to airgapped analysts still
+    render (tables + charts fall back to plain HTML) because the surrounding
+    HTML/CSS doesn't depend on JS execution — see the noscript block below.
+
+    For fully offline reports set REPORT_STATIC_ASSETS_DIR to a directory
+    containing datatables + chart.js + jquery. The build system can copy the
+    files there and switch the srcs. Runtime override intentionally kept
+    simple to avoid a second templating layer.
+  -->
+  <link rel="stylesheet"
+        href="https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css"
+        crossorigin="anonymous"
+        referrerpolicy="no-referrer">
+  <script src="https://code.jquery.com/jquery-3.7.0.min.js"
+          crossorigin="anonymous"
+          referrerpolicy="no-referrer"
+          defer></script>
+  <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"
+          crossorigin="anonymous"
+          referrerpolicy="no-referrer"
+          defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0"
+          crossorigin="anonymous"
+          referrerpolicy="no-referrer"
+          defer></script>
+  <noscript>
+    <style>
+      .report-cdn-warn {{ background:#fff3cd; color:#856404; padding:10px;
+                          border-radius:6px; margin-bottom:12px; }}
+    </style>
+    <div class="report-cdn-warn">
+      Interactive charts and sortable tables are disabled — JavaScript blocked
+      or CDN unreachable. All raw data is still present in the HTML below.
+    </div>
+  </noscript>
 
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #f4f6f9; color: #212529; }}
@@ -333,7 +376,15 @@ class CustomReportBuilder:
             logger.info(f"[ReportBuilder] ReportLab PDF built successfully: {out_file}")
             return str(out_file)
         except Exception as e:
+            # ReportLab failed — write the HTML fallback but under a `.html`
+            # suffix so downstream consumers don't ship a text/html payload
+            # with a `.pdf` extension. Previously the file was written to the
+            # requested `.pdf` path with HTML content, producing a MIME
+            # mismatch that broke browsers and PDF-only downstream tooling.
             logger.warning(f"[ReportBuilder] ReportLab PDF fallback to HTML: {e}")
             html_content = self.export_html_interactive(scan_id, target, vulnerabilities, mask_sensitive=mask_sensitive)
-            out_file.write_text(html_content, encoding="utf-8")
-            return str(out_file)
+            html_out = out_file.with_suffix(".html")
+            html_out.write_text(html_content, encoding="utf-8")
+            logger.warning(
+                "[ReportBuilder] PDF unavailable; wrote HTML fallback to %s", html_out)
+            return str(html_out)

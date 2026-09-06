@@ -13,14 +13,29 @@ import socket
 import time
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
 from core.security.authorization import TargetScopeValidator
 
 logger = logging.getLogger(__name__)
 
-BASELINE_FILE = "baseline_findings.json"
-REGRESSION_REPORT_FILE = "regression_report.md"
+# Anchor baseline/regression artefacts under a stable directory, not CWD.
+# Previously these were bare filenames — every caller's current working
+# directory (docker exec, cron worker, pytest) picked its own location, so
+# regression diffs were computed against different baselines each run.
+#
+# Override with `RETEST_ARTIFACT_DIR` env if you want them somewhere specific.
+_RETEST_DIR = Path(os.environ.get(
+    "RETEST_ARTIFACT_DIR",
+    str(Path(__file__).resolve().parents[2] / "data" / "retest"),
+))
+try:
+    _RETEST_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:
+    pass
+BASELINE_FILE = str(_RETEST_DIR / "baseline_findings.json")
+REGRESSION_REPORT_FILE = str(_RETEST_DIR / "regression_report.md")
 
 
 class RetestEngine:
@@ -76,14 +91,18 @@ class RetestEngine:
         """
         self.scope_validator.validate(url)
         self._rate_limit_delay()
+        # Return code:
+        #   -1  → network error / TLS failure — retest is INCONCLUSIVE
+        #    0  → other unexpected exception (still inconclusive)
+        #   >0  → real HTTP status code from the target
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "DefensiveRetest/1.0", "Range": "bytes=0-0"}, method="HEAD")
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 return (resp.status == expected_status or (resp.status < 400 and expected_status < 400)), resp.status
         except urllib.error.HTTPError as e:
             return (e.code == expected_status), e.code
-        except Exception:
-            return False, 0
+        except (urllib.error.URLError, socket.timeout, socket.gaierror, ConnectionError, OSError):
+            return False, -1
 
     def revalidate_banner_finding(self, target_ip: str, port: int, expected_banner: str = "") -> Tuple[bool, str]:
         """Banner-based findings: Grab service banner with 5s timeout to confirm version hasn't changed."""
@@ -98,8 +117,10 @@ class RetestEngine:
                 elif not expected_banner and banner:
                     return True, banner
                 return False, banner
-        except Exception:
-            return False, ""
+        except (socket.timeout, socket.gaierror, ConnectionError, OSError):
+            # NETWORK_ERROR sentinel — caller MUST distinguish this from
+            # "banner mismatch" so the finding isn't wrongly downgraded.
+            return False, "__NETWORK_ERROR__"
 
     def process_finding_retest(self, finding: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -132,7 +153,17 @@ class RetestEngine:
             if matched:
                 finding["confidence_score"] = min(0.95, round(conf_score + 0.05, 2))
                 finding["reproducibility_status"] = "REPRODUCIBLE"
+            elif got_code == -1:
+                # Network / TLS failure — retest INCONCLUSIVE. Do NOT downgrade
+                # confidence; the original finding stands until we can retest
+                # under working network conditions.
+                finding["reproducibility_status"] = "INCONCLUSIVE"
+                finding.setdefault("retest_notes", []).append(
+                    "Network error during retest — original evidence preserved."
+                )
             else:
+                # Real HTTP response that didn't match expected — treat as not
+                # reproducible.
                 finding["confidence_score"] = 0.30
                 finding["confidence_category"] = "LOW"
                 finding["reproducibility_status"] = "NOT REPRODUCIBLE"
@@ -146,6 +177,12 @@ class RetestEngine:
             if matched:
                 finding["confidence_score"] = min(0.95, round(conf_score + 0.05, 2))
                 finding["reproducibility_status"] = "REPRODUCIBLE"
+            elif got_banner == "__NETWORK_ERROR__":
+                # Network / socket error — inconclusive; keep original score.
+                finding["reproducibility_status"] = "INCONCLUSIVE"
+                finding.setdefault("retest_notes", []).append(
+                    "Network error during banner retest — original evidence preserved."
+                )
             elif got_banner and not matched:
                 finding["status"] = "PATCHED"
                 finding["reproducibility_status"] = "PATCHED"

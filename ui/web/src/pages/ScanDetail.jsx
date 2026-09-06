@@ -5,6 +5,11 @@ import ActivityLog from "../components/ActivityLog";
 import ReconPanel from "../components/ReconPanel";
 import ArtifactsPanel from "../components/ArtifactsPanel";
 import AccessGainedPanel from "../components/AccessGainedPanel";
+import LiveAgentsPanel from "../components/LiveAgentsPanel";
+import ScanChatPanel from "../components/ScanChatPanel";
+import AttackChainsPanel from "../components/AttackChainsPanel";
+import ScanDiffPanel from "../components/ScanDiffPanel";
+import { OsintSection } from "../components/ReconPanel";
 import { methodColor } from "../components/utils";
 
 export default function ScanDetail() {
@@ -27,12 +32,16 @@ export default function ScanDetail() {
   const { metadata, vulnerabilities, severity_counts, test_results, context, exploits, scope, executive_summary } = data;
 
   const tabs = [
+    { id: "chat", label: "Ask (LLM)" },
     { id: "overview", label: "Overview" },
     { id: "vulns", label: `Vulnerabilities (${vulnerabilities.length})` },
+    { id: "osint", label: `OSINT (${context.osint?.summary?.employees || 0}+${context.osint?.summary?.leaked_credentials || 0})` },
     { id: "access", label: "Access Gained" },
+    { id: "agents", label: "Parallel Agents" },
     { id: "exploits", label: `Exploits (${exploits.length})` },
     { id: "artifacts", label: "Artifacts / PoC" },
     { id: "chains", label: "Attack Chains" },
+    { id: "diff", label: "Diff vs baseline" },
     { id: "post-exploit", label: "Post-Exploit" },
     { id: "recon", label: "Recon Data" },
     { id: "tool-outputs", label: "Tool Outputs" },
@@ -72,12 +81,16 @@ export default function ScanDetail() {
         ))}
       </div>
 
+      {tab === "chat" && <ScanChatPanel scanId={scanId} />}
       {tab === "overview" && <OverviewTab metadata={metadata} severity_counts={severity_counts} test_results={test_results} scope={scope} context={context} vulns={vulnerabilities} executive_summary={executive_summary} />}
       {tab === "vulns" && <VulnsTab vulns={vulnerabilities} expanded={expandedVuln} setExpanded={setExpandedVuln} />}
+      {tab === "osint" && <OsintSection osint={context.osint || {}} />}
       {tab === "access" && <AccessGainedPanel scanId={scanId} />}
+      {tab === "agents" && <LiveAgentsPanel scanId={scanId} poll={false} />}
       {tab === "exploits" && <ExploitsTab exploits={exploits} scanId={scanId} />}
       {tab === "artifacts" && <ArtifactsPanel scanId={scanId} />}
-      {tab === "chains" && <AttackChainsTab scanId={scanId} />}
+      {tab === "chains" && <AttackChainsPanel scanId={scanId} />}
+      {tab === "diff" && <ScanDiffPanel scanId={scanId} />}
       {tab === "post-exploit" && <PostExploitTab scanId={scanId} />}
       {tab === "recon" && <ReconPanel context={context} scanId={scanId} />}
       {tab === "tool-outputs" && <ToolOutputsTab scanId={scanId} />}

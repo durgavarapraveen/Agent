@@ -57,10 +57,14 @@ class CensysClient:
         return bool(self.api_token and self.api_token != "xxxxx")
 
     def _get_headers(self) -> Dict[str, str]:
-        """Generate request headers with Bearer Token authentication."""
+        """Generate request headers with Bearer Token authentication.
+
+        Callers must gate on `is_configured` before invoking this. All public
+        `search_*`/`get_*` methods now return an empty result set instead of
+        raising, so this helper is only reached when a token is present.
+        """
         if not self.is_configured:
-            raise ValueError("Censys PAT not configured. Please set CENSYS_PAT in .env")
-        
+            raise RuntimeError("Censys PAT not configured; caller should short-circuit")
         return {
             "Authorization": f"Bearer {self.api_token}",
             "Accept": "application/json",
@@ -73,7 +77,11 @@ class CensysClient:
         Endpoint: GET /hosts/search
         """
         if not self.is_configured:
-            raise ValueError("Censys PAT not configured. Please set CENSYS_PAT in .env")
+            # Graceful degradation — OSINT is optional. Log at INFO once per
+            # call and return an empty result rather than exploding the whole
+            # recon phase because one provider isn't configured.
+            logger.info("[CensysClient] CENSYS_PAT not configured; returning empty result")
+            return {"result": {"hits": [], "total": 0}, "code": "unconfigured"}
 
         cache_key = f"hosts:{query}:{per_page}"
         if cache_key in self._cache:
@@ -84,15 +92,25 @@ class CensysClient:
         params = {"q": query, "per_page": min(per_page, 100)}
         headers = self._get_headers()
 
+        from core.intelligence._provider_gate import get_gate, ProviderCircuitOpen
+        _gate = get_gate("censys")
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                resp = await client.get(url, params=params, headers=headers)
-                result = self._handle_response(resp)
-                self._cache[cache_key] = result
-                return result
+            async with _gate.acquire():
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    resp = await client.get(url, params=params, headers=headers)
+                    if resp.status_code == 429:
+                        _gate.record_failure(reason="429")
+                    result = self._handle_response(resp)
+                    _gate.record_success()
+                    self._cache[cache_key] = result
+                    return result
+        except ProviderCircuitOpen as ce:
+            logger.warning("[CensysClient] %s — returning empty result", ce)
+            return {"result": {"hits": [], "total": 0}, "code": "circuit_open"}
         except (PermissionError, ValueError):
             raise
         except Exception as e:
+            _gate.record_failure(reason=type(e).__name__)
             sanitized_msg = _sanitize_string(str(e), self.api_token)
             logger.error(f"[CensysClient] Host search failed: {sanitized_msg}")
             raise RuntimeError(f"Censys host search error: {sanitized_msg}") from None
@@ -103,7 +121,11 @@ class CensysClient:
         Endpoint: GET /certificates/search
         """
         if not self.is_configured:
-            raise ValueError("Censys PAT not configured. Please set CENSYS_PAT in .env")
+            # Graceful degradation — OSINT is optional. Log at INFO once per
+            # call and return an empty result rather than exploding the whole
+            # recon phase because one provider isn't configured.
+            logger.info("[CensysClient] CENSYS_PAT not configured; returning empty result")
+            return {"result": {"hits": [], "total": 0}, "code": "unconfigured"}
 
         cache_key = f"certs:{query}:{per_page}"
         if cache_key in self._cache:
@@ -133,7 +155,11 @@ class CensysClient:
         Endpoint: GET /hosts/{ip}
         """
         if not self.is_configured:
-            raise ValueError("Censys PAT not configured. Please set CENSYS_PAT in .env")
+            # Graceful degradation — OSINT is optional. Log at INFO once per
+            # call and return an empty result rather than exploding the whole
+            # recon phase because one provider isn't configured.
+            logger.info("[CensysClient] CENSYS_PAT not configured; returning empty result")
+            return {"result": {"hits": [], "total": 0}, "code": "unconfigured"}
 
         url = f"{self.base_url}/hosts/{ip}"
         headers = self._get_headers()

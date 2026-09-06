@@ -11,28 +11,51 @@
 # ============================================================
 # Stage 1: Build modern Go-based security tools
 # ============================================================
-FROM golang:1.26-alpine AS go-builder
+# Go builder pinned to a specific patch version + Alpine 3.19 so reproducible
+# builds don't depend on whatever `golang:1.26-alpine` happens to alias when
+# the image is rebuilt.
+FROM golang:1.22.5-alpine3.19 AS go-builder
 
 ENV CGO_ENABLED=0 \
     GOPATH=/go
 
-RUN go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-RUN go install github.com/projectdiscovery/httpx/cmd/httpx@latest
-RUN go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
-RUN go install github.com/projectdiscovery/katana/cmd/katana@latest
-RUN go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-RUN go install github.com/ffuf/ffuf/v2@latest
-RUN go install github.com/tomnomnom/assetfinder@latest
-# Added — used by the code but previously missing from the image:
-RUN go install github.com/hahwul/dalfox/v2@latest
-RUN go install github.com/tomnomnom/waybackurls@latest
-RUN go install github.com/lc/gau/v2/cmd/gau@latest
+# Every Go tool is pinned to an explicit release tag. Bumping any of these is
+# an intentional, reviewable change — no longer `@latest` supply-chain roulette.
+ARG SUBFINDER_VERSION=v2.6.6
+ARG HTTPX_VERSION=v1.6.9
+ARG DNSX_VERSION=v1.2.1
+ARG KATANA_VERSION=v1.1.0
+ARG NUCLEI_VERSION=v3.3.4
+ARG FFUF_VERSION=v2.1.0
+ARG ASSETFINDER_VERSION=v0.1.1
+ARG DALFOX_VERSION=v2.9.4
+ARG WAYBACKURLS_VERSION=v0.1.1
+ARG GAU_VERSION=v2.2.4
+
+RUN set -eux; \
+    go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@${SUBFINDER_VERSION}; \
+    go install github.com/projectdiscovery/httpx/cmd/httpx@${HTTPX_VERSION}; \
+    go install github.com/projectdiscovery/dnsx/cmd/dnsx@${DNSX_VERSION}; \
+    go install github.com/projectdiscovery/katana/cmd/katana@${KATANA_VERSION}; \
+    go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@${NUCLEI_VERSION}; \
+    go install github.com/ffuf/ffuf/v2@${FFUF_VERSION}; \
+    go install github.com/tomnomnom/assetfinder@${ASSETFINDER_VERSION}; \
+    go install github.com/hahwul/dalfox/v2@${DALFOX_VERSION}; \
+    go install github.com/tomnomnom/waybackurls@${WAYBACKURLS_VERSION}; \
+    go install github.com/lc/gau/v2/cmd/gau@${GAU_VERSION}
 
 
 # ============================================================
 # Stage 2: Kali Rolling
 # ============================================================
-FROM kalilinux/kali-rolling
+# Pinned by digest so `docker build` is reproducible. Bump this SHA
+# intentionally (with a review), not implicitly on every rebuild.
+# The tag `kalilinux/kali-rolling` moves every week; the digest below is
+# the last verified snapshot. Update by running:
+#   docker pull kalilinux/kali-rolling
+#   docker inspect --format='{{index .RepoDigests 0}}' kalilinux/kali-rolling
+ARG KALI_ROLLING_DIGEST=kalilinux/kali-rolling
+FROM ${KALI_ROLLING_DIGEST}
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -160,7 +183,8 @@ RUN CFLAGS="-std=gnu17" /opt/venv/bin/pip install --no-cache-dir \
     psycopg2-binary \
     playwright \
     impacket \
-    paramspider
+    paramspider \
+    requests_ntlm
 
 # ============================================================
 # Playwright + Chromium (browser actuator)
@@ -243,5 +267,14 @@ RUN echo "===== Tool verification =====" && \
     for tool in nmap masscan rustscan subfinder assetfinder amass dnsx httpx katana nuclei ffuf dalfox waybackurls gau gobuster feroxbuster arjun sqlmap nikto sslscan wpscan commix hydra john hashcat responder crackmapexec tcpdump tshark; do \
     command -v "$tool" >/dev/null 2>&1 && echo "OK  $tool" || echo "MISSING  $tool"; \
     done
+
+# ============================================================
+# Drop root: create an unprivileged user for tool execution.
+# Container process (`docker exec` from the API) enters as `pentester` unless
+# the caller explicitly asks for root. The API side must not use `--user root`.
+# ============================================================
+RUN useradd --create-home --shell /bin/bash --uid 10001 pentester && \
+    chown -R pentester:pentester /pentesting
+USER pentester
 
 CMD ["tail", "-f", "/dev/null"]

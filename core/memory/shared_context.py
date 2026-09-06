@@ -1,4 +1,5 @@
 import json
+import threading
 from typing import Dict, List, Optional, Any
 import logging
 from core.domain.endpoint import Endpoint
@@ -14,8 +15,15 @@ class SharedContextV2:
     """
     Central memory and state orchestrator for Pentest V2.
     Single source of truth for all runtime state.
+
+    Concurrency: `add_vulnerability`, `add_subdomain`, `add_technology`,
+    `add_endpoint`, `add_captured_request`, and similar mutators run inside
+    `asyncio.gather(...)` in the exploitation phase. Each guards its
+    read-modify-write against `self._state_lock` (RLock, so a mutator can
+    call another mutator without deadlocking).
     """
     def __init__(self, target: str = None, scope: Dict = None):
+        self._state_lock = threading.RLock()
         self._dynamic_keys: set = set()
         self.target = target
         self.scope = scope or {}
@@ -87,68 +95,75 @@ class SharedContextV2:
         vtype = (vuln.get("type") or "").upper()
         location = (vuln.get("location") or vuln.get("target") or "").lower()
 
-        for existing in self.vulnerabilities:
-            e_title = (existing.get("title") or "").lower()
-            e_type = (existing.get("type") or "").upper()
-            e_loc = (existing.get("location") or existing.get("target") or "").lower()
-            if e_title == title and e_type == vtype and e_loc == location:
-                return
-
-        # Conflict resolution: don't add "Missing X header" if we already know the header is present
-        if vtype == "MISSING_HEADER" and "missing" in title:
-            header_name = title.replace("missing ", "").replace(" header", "").strip().lower()
+        with self._state_lock:
             for existing in self.vulnerabilities:
                 e_title = (existing.get("title") or "").lower()
-                if header_name in e_title and "present" in e_title:
+                e_type = (existing.get("type") or "").upper()
+                e_loc = (existing.get("location") or existing.get("target") or "").lower()
+                if e_title == title and e_type == vtype and e_loc == location:
                     return
 
-        self.vulnerabilities.append(vuln)
+            # Conflict resolution: don't add "Missing X header" if we already know the header is present
+            if vtype == "MISSING_HEADER" and "missing" in title:
+                header_name = title.replace("missing ", "").replace(" header", "").strip().lower()
+                for existing in self.vulnerabilities:
+                    e_title = (existing.get("title") or "").lower()
+                    if header_name in e_title and "present" in e_title:
+                        return
+
+            self.vulnerabilities.append(vuln)
 
     def add_subdomains(self, subs: List[str], source: str = None):
-        for s in subs:
-            if s not in self.subdomains:
-                self.subdomains.append(s)
+        with self._state_lock:
+            for s in subs:
+                if s not in self.subdomains:
+                    self.subdomains.append(s)
 
     def get_subdomains(self) -> List[str]:
-        return self.subdomains
+        with self._state_lock:
+            return list(self.subdomains)
 
     def add_endpoints(self, eps: List, source: str = None):
-        for ep in eps:
-            if isinstance(ep, str):
-                eid = ep
-            elif isinstance(ep, dict):
-                eid = f"{ep.get('method', 'GET')}:{ep.get('url', '')}"
-            else:
-                eid = getattr(ep, 'endpoint_id', str(ep))
-            if eid not in self.endpoints:
-                self.endpoints[eid] = ep
+        with self._state_lock:
+            for ep in eps:
+                if isinstance(ep, str):
+                    eid = ep
+                elif isinstance(ep, dict):
+                    eid = f"{ep.get('method', 'GET')}:{ep.get('url', '')}"
+                else:
+                    eid = getattr(ep, 'endpoint_id', str(ep))
+                if eid not in self.endpoints:
+                    self.endpoints[eid] = ep
 
     def get_endpoints(self) -> List:
-        return list(self.endpoints.values())
+        with self._state_lock:
+            return list(self.endpoints.values())
 
     def add_ports(self, host_or_ports, ports: List[Dict] = None, source: str = None):
         if ports is None:
             actual_ports = host_or_ports
         else:
             actual_ports = ports
-        for p in actual_ports:
-            if isinstance(p, dict) and "port" in p and isinstance(p.get("port"), int):
-                if p not in self.ports:
-                    self.ports.append(p)
+        with self._state_lock:
+            for p in actual_ports:
+                if isinstance(p, dict) and "port" in p and isinstance(p.get("port"), int):
+                    if p not in self.ports:
+                        self.ports.append(p)
 
     def add_technologies(self, host: str, techs: List[str]):
-        if host not in self.technologies:
-            self.technologies[host] = []
-        for t in techs:
-            if t not in self.technologies[host]:
-                self.technologies[host].append(t)
-        # Auto-register host as subdomain if it belongs to target apex
-        if host and hasattr(self, 'target') and self.target:
-            apex = self.target.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0].lower()
-            apex = apex[4:] if apex.startswith("www.") else apex
-            h = host.lower()
-            if (h == apex or h.endswith("." + apex)) and h not in self.subdomains:
-                self.subdomains.append(h)
+        with self._state_lock:
+            if host not in self.technologies:
+                self.technologies[host] = []
+            for t in techs:
+                if t not in self.technologies[host]:
+                    self.technologies[host].append(t)
+            # Auto-register host as subdomain if it belongs to target apex
+            if host and hasattr(self, 'target') and self.target:
+                apex = self.target.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0].lower()
+                apex = apex[4:] if apex.startswith("www.") else apex
+                h = host.lower()
+                if (h == apex or h.endswith("." + apex)) and h not in self.subdomains:
+                    self.subdomains.append(h)
 
     def get_technologies(self) -> Dict[str, Any]:
         return self.technologies

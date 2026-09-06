@@ -30,8 +30,16 @@ class WorkflowInventory:
 
         discovered: List[Workflow] = []
         for sid, reqs in by_session.items():
-            # Order chronologically when a timestamp is available.
-            reqs_sorted = sorted(reqs, key=lambda r: getattr(r, "timestamp", 0) or 0)
+            # Order chronologically. Requests missing a timestamp are appended
+            # in insertion order AFTER the sorted ones — previously
+            # `getattr(req, "timestamp", 0) or 0` collapsed them to 0 which
+            # silently placed them at the head of the workflow and misordered
+            # every downstream analysis (#144).
+            def _ts_key(r):
+                ts = getattr(r, "timestamp", None)
+                # Use +inf so missing timestamps sort last, preserving order.
+                return (0, ts) if ts not in (None, "") else (1, float("inf"))
+            reqs_sorted = sorted(reqs, key=_ts_key)
             if len(reqs_sorted) < 2:
                 continue  # a single request is not a workflow
             wf = Workflow(

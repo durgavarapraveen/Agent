@@ -3,13 +3,34 @@ LLM-Based Payload Generator
 Customizes exploit payloads for target environment
 """
 
+import asyncio
 import logging
-from typing import List
+from typing import List, Any
 from enum import Enum
 
 from agents.llm_client import LLMClient, TaskTier
 
 logger = logging.getLogger(__name__)
+
+# Global timeout for any single payload-generation LLM call. A slow provider
+# should not stall the whole exploitation phase; callers get the deterministic
+# fallback template instead.
+_PAYLOAD_LLM_TIMEOUT_S = 45.0
+
+
+async def _bounded_generate(client, prompt: str, **kwargs) -> Any:
+    """Wrap `client.generate` in `asyncio.wait_for`. Returns None on timeout."""
+    try:
+        return await asyncio.wait_for(
+            client.generate(prompt, **kwargs),
+            timeout=_PAYLOAD_LLM_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Payload generation LLM call timed out after %ss", _PAYLOAD_LLM_TIMEOUT_S)
+        return None
+    except Exception as e:
+        logger.debug("Payload generation LLM call failed: %s", e)
+        return None
 
 
 class PayloadType(Enum):
@@ -85,7 +106,7 @@ Common bypasses:
 - Quote → Unicode, Encoding
 - Comment → --, #, /**/"""
 
-        payload = await self.client.generate(
+        payload = await _bounded_generate(self.client, 
             prompt, tier=TaskTier.SMALL, max_tokens=200, temperature=0.2
         )
         return payload.strip() if payload else template
@@ -114,7 +135,7 @@ Base template: {template}
 Return ONLY the payload, no explanation.
 Be creative with encoding and obfuscation."""
 
-        payload = await self.client.generate(
+        payload = await _bounded_generate(self.client, 
             prompt, tier=TaskTier.SMALL, max_tokens=300, temperature=0.3
         )
         return payload.strip() if payload else template
@@ -145,7 +166,7 @@ Template: {template}
 Return ONLY the encoded payload, ready to execute.
 Ensure it connects back to {attacker_ip}:{port}"""
 
-        payload = await self.client.generate(
+        payload = await _bounded_generate(self.client, 
             prompt, tier=TaskTier.SMALL, max_tokens=400, temperature=0.1
         )
         return payload.strip() if payload else template
@@ -174,7 +195,7 @@ Template: {template}
 
 Return ONLY the payload with correct path traversal for {target_os}."""
 
-        payload = await self.client.generate(
+        payload = await _bounded_generate(self.client, 
             prompt, tier=TaskTier.SMALL, max_tokens=200, temperature=0.1
         )
         return payload.strip() if payload else template
@@ -200,7 +221,7 @@ Filters: {filters_str}
 
 Return payload that bypasses filters and executes 7*7."""
 
-        payload = await self.client.generate(
+        payload = await _bounded_generate(self.client, 
             prompt, tier=TaskTier.SMALL, max_tokens=200, temperature=0.2
         )
         return payload.strip() if payload else template
@@ -216,7 +237,7 @@ Original: {payload}
 
 Return ONLY the encoded version."""
 
-        encoded = await self.client.generate(
+        encoded = await _bounded_generate(self.client, 
             prompt, tier=TaskTier.SMALL, max_tokens=300, temperature=0.1
         )
         return encoded.strip() if encoded else payload

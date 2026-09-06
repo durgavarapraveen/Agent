@@ -43,6 +43,10 @@ class AttackSurfaceState:
         self.assets: Dict[str, Dict[str, Any]] = {}
         self.applications: Dict[str, Application] = {}
         self.endpoints: Dict[str, Endpoint] = {}
+        # Secondary index for O(1) endpoint dedupe by normalized key.
+        # Prior implementation scanned `endpoints.values()` on every add,
+        # giving O(n²) growth on large scans.
+        self._endpoint_key_index: Dict[str, str] = {}  # norm_key -> endpoint_id
         self.parameters: Dict[str, List[Parameter]] = {}
         self.technologies: Dict[str, List[Technology]] = {}
         self.identities: Dict[str, Identity] = {}
@@ -118,11 +122,18 @@ class AttackSurfaceState:
 
     def add_endpoint(self, endpoint: Endpoint,
                      source: str = "unknown") -> bool:
-        """Add endpoint with deduplication. Returns True if new."""
+        """Add endpoint with deduplication. Returns True if new.
+
+        O(1) via `_endpoint_key_index` — the previous O(n) linear scan
+        compounded to O(n²) over the course of a scan with thousands of
+        endpoints.
+        """
         norm_key = endpoint.normalized_key()
 
-        for existing in self.endpoints.values():
-            if existing.normalized_key() == norm_key:
+        existing_id = self._endpoint_key_index.get(norm_key)
+        if existing_id is not None:
+            existing = self.endpoints.get(existing_id)
+            if existing is not None:
                 existing.last_seen = datetime.utcnow().isoformat()
                 existing.evidence_ids.extend(endpoint.evidence_ids)
                 self._counts["endpoints_deduplicated"] += 1
@@ -133,6 +144,7 @@ class AttackSurfaceState:
             endpoint.first_seen = datetime.utcnow().isoformat()
         endpoint.last_seen = endpoint.first_seen
         self.endpoints[endpoint.endpoint_id] = endpoint
+        self._endpoint_key_index[norm_key] = endpoint.endpoint_id
         self._counts["endpoints_discovered"] += 1
         self._counts["endpoints_normalized"] += 1
         return True

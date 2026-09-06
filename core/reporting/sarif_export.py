@@ -47,13 +47,18 @@ class SARIFExporter:
         return vuln_type
 
     def _make_fingerprint(self, finding: Dict) -> str:
+        """Deterministic SARIF-partial fingerprint. Full SHA-256 hex is
+        returned (64 chars) — the 32-char truncation used previously invited
+        collisions on scans with thousands of findings and broke the
+        partial-fingerprint equality semantics SARIF consumers rely on for
+        result stability across runs."""
         parts = [
             finding.get("title", ""),
             finding.get("type", ""),
             finding.get("target", ""),
             finding.get("location", ""),
         ]
-        return hashlib.sha256("|".join(parts).encode()).hexdigest()[:32]
+        return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
     def _build_rules(self, findings: List[Dict]) -> List[Dict]:
         seen = {}

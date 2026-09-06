@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { api } from "../api";
+import { api, createPoller } from "../api";
 
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
@@ -10,22 +10,24 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
-  const fetchData = () => {
-    Promise.all([api.getStats(), api.getScans(), api.getActiveScan()])
-      .then(([s, sc, a]) => { setStats(s); setScans(sc); setActive(a); })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-    Promise.all([
-      api.getReviewQueue().catch(() => ({ summary: {} })),
-      api.getReviewManual().catch(() => ({ items: [] })),
-    ]).then(([q, m]) => setReview({ summary: q.summary || {}, manual: m.items || [] }))
-      .catch(() => {});
-  };
-
+  // Poll via the shared `createPoller` helper — AbortController + generation
+  // counter guarantees that a slow REST response can't overwrite fresher state
+  // and that unmount cancels any in-flight request (#087).
   useEffect(() => {
-    fetchData();
-    const iv = setInterval(fetchData, 8000);
-    return () => clearInterval(iv);
+    const p1 = createPoller(
+      () => Promise.all([api.getStats(), api.getScans(), api.getActiveScan()]),
+      ([s, sc, a]) => { setStats(s); setScans(sc); setActive(a); setLoading(false); },
+      8000,
+    );
+    const p2 = createPoller(
+      () => Promise.all([
+        api.getReviewQueue().catch(() => ({ summary: {} })),
+        api.getReviewManual().catch(() => ({ items: [] })),
+      ]),
+      ([q, m]) => setReview({ summary: q.summary || {}, manual: m.items || [] }),
+      8000,
+    );
+    return () => { p1.stop(); p2.stop(); };
   }, []);
 
   if (loading) return <div className="loading">Initializing</div>;
@@ -190,13 +192,15 @@ function ActiveScanCard({ scan }) {
 
   useEffect(() => {
     if (!scan?.scan_id) return;
-    const iv = setInterval(() => {
-      api.getScanLogs(scan.scan_id).then(l => {
-        setLogs(l.slice(-40));
+    const poll = createPoller(
+      () => api.getScanLogs(scan.scan_id),
+      (l) => {
+        setLogs((l || []).slice(-40));
         if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-      }).catch(() => {});
-    }, 2000);
-    return () => clearInterval(iv);
+      },
+      2000,
+    );
+    return () => poll.stop();
   }, [scan?.scan_id]);
 
   if (!scan || !scan.scan_id) return null;

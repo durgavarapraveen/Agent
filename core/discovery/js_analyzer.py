@@ -96,9 +96,11 @@ class JSAnalyzer:
         self.source_map_urls: List[str] = []
 
     def _fetch(self, url: str) -> str:
-        """Fetch URL content via curl."""
+        """Fetch URL content via curl. URL is shlex-quoted to prevent shell
+        injection through user-controlled URLs (was `"{url}"` interpolation)."""
+        import shlex
         from agents.kali_executor import KaliDockerExecutor
-        cmd = f'curl -s -L -k --max-time {self.timeout} "{url}"'
+        cmd = f'curl -s -L -k --max-time {int(self.timeout)} {shlex.quote(url)}'
         result = KaliDockerExecutor.run(cmd, timeout=self.timeout + 10)
         if result.get("status") == "success":
             return result.get("stdout", "")
@@ -162,7 +164,8 @@ class JSAnalyzer:
         if check.get("status") != "success" or not check.get("stdout", "").strip():
             return []
 
-        cmd = f'linkfinder -i "{js_url}" -o cli 2>/dev/null'
+        import shlex
+        cmd = f'linkfinder -i {shlex.quote(js_url)} -o cli 2>/dev/null'
         result = KaliDockerExecutor.run(cmd, timeout=self.timeout)
         if result.get("status") != "success":
             return []
@@ -182,17 +185,52 @@ class JSAnalyzer:
         if check.get("status") != "success" or not check.get("stdout", "").strip():
             return []
 
-        cmd = f'secretfinder -i "{js_url}" -o cli 2>/dev/null'
+        import shlex
+        cmd = f'secretfinder -i {shlex.quote(js_url)} -o cli 2>/dev/null'
         result = KaliDockerExecutor.run(cmd, timeout=self.timeout)
         if result.get("status") != "success":
             return []
 
+        # SecretFinder output shape (as of upstream v1.1.2):
+        #   [+] Reason: <label>
+        #   [+] Match: <value>
+        # Some builds also emit `<label> : <value>` on a single line. We
+        # accept the multi-line block first (correct + machine-readable),
+        # then fall back to the loose single-line split — but only when the
+        # colon appears AFTER a plausible label. The previous naive
+        # `":" in line` matched URLs and timestamps too, filling the secrets
+        # list with junk.
         secrets = []
-        for line in result.get("stdout", "").strip().split("\n"):
+        raw = result.get("stdout", "") or ""
+        lines = raw.strip().split("\n")
+
+        current_reason = None
+        for line in lines:
             line = line.strip()
-            if ":" in line and line:
-                parts = line.split(":", 1)
-                secrets.append((parts[0].strip(), parts[1].strip()))
+            if not line:
+                current_reason = None
+                continue
+            low = line.lower()
+            if low.startswith("[+] reason"):
+                current_reason = line.split(":", 1)[1].strip() if ":" in line else None
+                continue
+            if low.startswith("[+] match") and current_reason:
+                val = line.split(":", 1)[1].strip() if ":" in line else ""
+                if val:
+                    secrets.append((current_reason, val))
+                current_reason = None
+                continue
+
+            # Fallback: `Label : value` on one line — require the label to
+            # be short and word-like so URLs / stack traces don't match.
+            import re as _re_sf
+            m = _re_sf.match(r"^([A-Za-z][\w .()/-]{2,40}?)\s*:\s*(\S.*)$", line)
+            if m:
+                label, value = m.group(1).strip(), m.group(2).strip()
+                # Skip when the "value" is itself a URL suffix like `//example.com`.
+                if value and not value.startswith(("//", "/")):
+                    secrets.append((label, value))
+
         return secrets
 
     def _extract_source_maps(self, js_content: str, js_url: str) -> List[str]:
@@ -231,6 +269,31 @@ class JSAnalyzer:
             pass
         return ""
 
+    # Values that a broad regex will match but that are ALMOST NEVER real
+    # secrets — dev placeholders, obvious test values, and public constants.
+    # Filtered before recording a finding to cut down false positives from
+    # `SECRET_PATTERNS`.
+    _SECRET_PLACEHOLDERS = frozenset({
+        "test", "testing", "example", "changeme", "changethis", "password",
+        "yourpassword", "yourkey", "yourtoken", "yoursecret", "placeholder",
+        "xxxxxxxx", "0000000000", "1234567890", "abcdefghij",
+        "your-api-key", "your-secret-key", "your-access-token", "insertkey",
+        "null", "undefined", "nan", "none",
+    })
+
+    @staticmethod
+    def _looks_placeholder(value: str) -> bool:
+        low = value.lower().strip()
+        if low in JSAnalyzer._SECRET_PLACEHOLDERS:
+            return True
+        # Consecutive repeats like `AAAAAAAAA` or `xxxxxx`.
+        if len(low) >= 8 and len(set(low)) <= 2:
+            return True
+        # `sk-` / `key-` followed by only zeros or asterisks.
+        if any(low.endswith(s) for s in ("****", "0000", "____", "----")):
+            return True
+        return False
+
     def _regex_extract(self, content: str, source_url: str):
         """Run regex-based extraction for secrets and endpoints."""
         # Extract secrets
@@ -240,6 +303,8 @@ class JSAnalyzer:
                 if value in self._seen_values:
                     continue
                 if len(value) < 8 or len(value) > 500:
+                    continue
+                if self._looks_placeholder(value):
                     continue
                 self._seen_values.add(value)
 

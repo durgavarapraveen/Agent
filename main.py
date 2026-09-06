@@ -16,6 +16,23 @@ import logging
 import sys, os
 from pathlib import Path
 
+# ── Observability bootstrap ─────────────────────────────────────────────
+# Configure structured JSON logging + PII redaction BEFORE any other logger
+# instantiates. Inherit trace context from the parent API process via the
+# `TRACEPARENT` env var so scan spans link back to the launching HTTP request.
+try:
+    from core.observability import logging as _ag_logging
+    _ag_logging.configure_root(level=os.environ.get("LOG_LEVEL", "INFO"))
+    from core.observability import tracing as _tracing
+    _tracing.context_from_env(os.environ)
+except Exception as _obs_err:
+    # Observability must never block a scan; fall back to stdlib logging.
+    logging.basicConfig(
+        level=os.environ.get("LOG_LEVEL", "INFO"),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    logging.getLogger(__name__).warning("Observability bootstrap skipped: %s", _obs_err)
+
 
 # Force UTF-8 encoding for standard streams on Windows to prevent UnicodeEncodeErrors
 if sys.platform.startswith("win"):
@@ -147,7 +164,10 @@ Examples:
     parser.add_argument("--phases", default="",
                          help="Comma-separated phases to run (RECON,ACTIVE_SCANNING,EXPLOITATION,REPORTING). Default: all")
     parser.add_argument("--credentials", default="",
-                         help='JSON string with login creds: {"username":"x","password":"y","login_url":"https://..."}')
+                         help='DEPRECATED — leaks via /proc/<pid>/cmdline. Use --credentials-file instead.')
+    parser.add_argument("--credentials-file", default="",
+                         help='Path to a temporary JSON file containing login creds. '
+                              'File is unlinked after read. Recommended over --credentials.')
     parser.add_argument("--scan-id", default=None,
                          help="Canonical run id (from the UI); every DB row for this run uses it so runs never merge")
     parser.add_argument("--frameworks", default="",
@@ -211,7 +231,26 @@ Examples:
         logger.info("=" * 60)
         phases_list = [p.strip().upper() for p in args.phases.split(",") if p.strip()] if args.phases else None
         creds = None
-        if args.credentials:
+        creds_file_arg = getattr(args, "credentials_file", "")
+        if creds_file_arg:
+            import json as _json
+            from pathlib import Path as _Path
+            _p = _Path(creds_file_arg)
+            try:
+                creds = _json.loads(_p.read_text(encoding="utf-8"))
+            except (_json.JSONDecodeError, OSError) as e:
+                logger.error(f"Invalid --credentials-file: {e}")
+                sys.exit(1)
+            finally:
+                # Always unlink — the file is expected to be short-lived.
+                try:
+                    _p.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        elif args.credentials:
+            # Legacy path — logged as a warning so operators migrate away.
+            logger.warning("--credentials passed via argv (deprecated: leaks via /proc). "
+                           "Migrate to --credentials-file.")
             import json as _json
             try:
                 creds = _json.loads(args.credentials)

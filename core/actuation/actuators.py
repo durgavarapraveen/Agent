@@ -24,6 +24,39 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+# Common bearer-token key names captured across ~all auth APIs seen in
+# the wild. Matched case-insensitively. Order matters — `access_token`
+# is preferred over generic `token` when both appear.
+_TOKEN_KEYS = (
+    "access_token", "id_token", "jwt", "session_token", "sessionToken",
+    "authToken", "auth_token", "bearer", "token",
+)
+
+
+def _extract_token(payload) -> Optional[str]:
+    """Walk a small allowlist of common bearer-token key names at any depth."""
+    seen: list = []
+    def _walk(node):
+        if isinstance(node, dict):
+            for want in _TOKEN_KEYS:
+                for k, v in node.items():
+                    if isinstance(k, str) and k.lower() == want.lower() and isinstance(v, str) and len(v) >= 8:
+                        seen.append(v)
+                        return
+            for v in node.values():
+                if isinstance(v, (dict, list)):
+                    _walk(v)
+                    if seen:
+                        return
+        elif isinstance(node, list):
+            for v in node:
+                _walk(v)
+                if seen:
+                    return
+    _walk(payload)
+    return seen[0] if seen else None
+
+
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode().rstrip("=")
 
@@ -71,20 +104,28 @@ class Actuators:
         if not self._in_scope(url):
             return {"error": "target out of authorized scope", "blocked": True}
         merged = {**self.session_headers, **(headers or {})}
+        # `HTTP_ACTUATOR_VERIFY_TLS=1` restores TLS verification. Blanket
+        # `verify=False` is appropriate against self-signed pentesting targets
+        # but a foot-gun when the actuator is repurposed against production.
+        import os as _os_actu
+        _verify_tls = _os_actu.environ.get("HTTP_ACTUATOR_VERIFY_TLS", "").strip() == "1"
         try:
-            async with httpx.AsyncClient(timeout=self.timeout, verify=False, follow_redirects=True) as c:
+            async with httpx.AsyncClient(timeout=self.timeout, verify=_verify_tls, follow_redirects=True) as c:
                 r = await c.request(method.upper(), url, headers=merged, json=json_body,
                                     data=data, params=params)
                 body = r.text
-                low = body.lower()
-                if '"token"' in low:
-                    try:
-                        j = r.json()
-                        tok = (j.get("authentication", {}) or {}).get("token") or j.get("token")
-                        if tok:
-                            self.session_headers["Authorization"] = f"Bearer {tok}"
-                    except Exception:
-                        pass
+                # Structured token auto-capture — the previous
+                # `'"token"' in body.lower()` substring missed `access_token`,
+                # `id_token`, `jwt`, `sessionToken`, and nested paths. Parse
+                # JSON if the response is JSON, then walk a small allowlist
+                # of key names at any depth.
+                try:
+                    j = r.json()
+                    tok = _extract_token(j) if isinstance(j, (dict, list)) else None
+                    if tok:
+                        self.session_headers["Authorization"] = f"Bearer {tok}"
+                except Exception:
+                    pass
                 for k, v in r.cookies.items():
                     cur = self.session_headers.get("Cookie", "")
                     self.session_headers["Cookie"] = (cur + f"; {k}={v}").strip("; ")
@@ -156,8 +197,10 @@ class Actuators:
         url = path if path.startswith("http") else f"{self.base_url}/{path.lstrip('/')}"
         if not self._in_scope(url):
             return {"error": "target out of authorized scope", "blocked": True}
+        import os as _os_upl
+        _verify_tls_up = _os_upl.environ.get("HTTP_ACTUATOR_VERIFY_TLS", "").strip() == "1"
         try:
-            async with httpx.AsyncClient(timeout=self.timeout, verify=False) as c:
+            async with httpx.AsyncClient(timeout=self.timeout, verify=_verify_tls_up) as c:
                 files = {field: (filename, content.encode(), content_type)}
                 r = await c.post(url, files=files, headers=self.session_headers)
                 return {"status": r.status_code, "body": r.text[:4000]}
