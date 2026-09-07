@@ -1070,6 +1070,11 @@ class TestPhaseArchitectureRefinements:
             val.validate("attacker-domain.org")
 
 
+@pytest.mark.skipif(
+    True,
+    reason="Refers to modules (execution_planner, tool_discovery) that were removed; "
+           "kept for reference until the tests are rewritten against the current architecture.",
+)
 class TestDynamicToolIntelligencePlatform:
     """Explicit tests for Dynamic Agent + Tool Intelligence Platform (TEST 1 to TEST 8)"""
 
@@ -1272,6 +1277,7 @@ class TestPhaseTransitionsAndActiveScanning:
         brain.transition_phase(next_phase)
         assert brain.current_phase == ExecutionPhase.EXPLOITATION
 
+    @pytest.mark.skip(reason="core.orchestration.execution_planner was removed")
     def test_execution_planner_active_scan(self):
         from core.orchestration.execution_planner import ExecutionPlanner
 
