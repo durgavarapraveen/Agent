@@ -31,7 +31,7 @@ WORKDIR /app
 ARG ANTIGRAVITY_WITH_DOCKER_CLI=0
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev gcc curl ca-certificates \
-    libgobject-2.0-0 libcairo2 libpango-1.0-0 libpangocairo-1.0-0 \
+    libglib2.0-0 libcairo2 libpango-1.0-0 libpangocairo-1.0-0 \
     libgdk-pixbuf-2.0-0 libffi-dev shared-mime-info libfreetype6-dev \
     libjpeg-dev zlib1g-dev \
     && if [ "$ANTIGRAVITY_WITH_DOCKER_CLI" = "1" ]; then \
