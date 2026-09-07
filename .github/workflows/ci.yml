@@ -138,7 +138,7 @@ jobs:
           tags: antigravity-kali:ci
 
       - name: Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@0.28.0
         with:
           image-ref: antigravity-web:ci
           format: table
