@@ -11,6 +11,7 @@ from core.domain.experiment import SecurityExperiment
 from core.domain.endpoint import Endpoint
 from core.domain.parameter import Parameter, ParameterType
 from core.domain.coverage import TestState
+from core.common.schemas import ToolResult
 
 
 def _make_endpoint(idx: int) -> Endpoint:

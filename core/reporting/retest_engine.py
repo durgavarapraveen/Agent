@@ -227,6 +227,15 @@ class RetestEngine:
             logger.error(f"[RetestEngine] Saving new baseline failed: {e}")
 
         # Write regression_report.md
+        _nl = "\n"
+        _new_list = _nl.join(
+            f"- **{f.get('cve_id') or f.get('title')}** on `{f.get('url') or f.get('target')}`"
+            for f in new_vulns
+        ) if new_vulns else "None"
+        _rem_list = _nl.join(
+            f"- **{f.get('cve_id') or f.get('title')}** on `{f.get('url') or f.get('target')}` (Successfully Fixed)"
+            for f in remediated
+        ) if remediated else "None"
         report_md = f"""# Vulnerability Regression & Delta Report
 
 ## Summary Delta
@@ -235,10 +244,10 @@ class RetestEngine:
 - **Persistent Vulnerabilities**: {len(persistent)}
 
 ### New Vulnerabilities
-{"".join([f"- **{f.get('cve_id') or f.get('title')}** on `{f.get('url') or f.get('target')}`\n" for f in new_vulns]) if new_vulns else "None\n"}
+{_new_list}
 
 ### Remediated Vulnerabilities
-{"".join([f"- **{f.get('cve_id') or f.get('title')}** on `{f.get('url') or f.get('target')}` (Successfully Fixed)\n" for f in remediated]) if remediated else "None\n"}
+{_rem_list}
 """
         try:
             with open(REGRESSION_REPORT_FILE, "w", encoding="utf-8") as f:

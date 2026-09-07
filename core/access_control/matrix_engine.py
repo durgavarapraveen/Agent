@@ -85,7 +85,7 @@ class MatrixEngine:
         
         # Write to shared context
         if self.shared_context:
-            with self.shared_context._lock:
+            with self.shared_context._state_lock:
                 if not hasattr(self.shared_context, "authorization_coverage"):
                     self.shared_context.authorization_coverage = {}
                 self.shared_context.authorization_coverage[path] = {

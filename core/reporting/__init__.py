@@ -7,7 +7,7 @@ import importlib
 
 # Re-export primary module if present
 try:
-    from core.reporting.reporting import *
+    from core.reporting.reporting import *  # noqa: F401,F403
 except Exception:
     pass
 

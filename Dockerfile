@@ -54,7 +54,7 @@ RUN set -eux; \
 # the last verified snapshot. Update by running:
 #   docker pull kalilinux/kali-rolling
 #   docker inspect --format='{{index .RepoDigests 0}}' kalilinux/kali-rolling
-ARG KALI_ROLLING_DIGEST=kalilinux/kali-rolling
+ARG KALI_ROLLING_DIGEST=kalilinux/kali-rolling@sha256:c6d78f57ebfdd9fec428a8b04f74876e66fddd08dfd328c076224a552e7332a3
 FROM ${KALI_ROLLING_DIGEST}
 
 ENV DEBIAN_FRONTEND=noninteractive \

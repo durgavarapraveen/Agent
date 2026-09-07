@@ -5,7 +5,9 @@ Nodes = vulnerabilities, Edges = "leads to" relationships.
 """
 
 import logging
-from typing import Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Dict, List, Optional, Set
+if TYPE_CHECKING:
+    from core.memory.relationship_db import RelationshipDB  # noqa: F401
 from dataclasses import dataclass, field
 from collections import defaultdict
 
