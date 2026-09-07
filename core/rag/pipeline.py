@@ -85,6 +85,18 @@ class SecurityRAGPipeline:
     def _init_schema(self):
         with DatabaseManager.get_connection() as conn:
             with conn.cursor() as cur:
+                # RAG needs pgvector. Try to create it; if the server can't
+                # (no superuser or missing extension package) fail loudly
+                # with a clear message instead of a cryptic CREATE TABLE error.
+                try:
+                    cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                    conn.commit()
+                except Exception as e:
+                    raise RuntimeError(
+                        "pgvector extension unavailable on this Postgres server. "
+                        "Use the `pgvector/pgvector:pg15` image or `apt install "
+                        "postgresql-15-pgvector`, then re-run."
+                    ) from e
                 cur.execute(f"""
                     CREATE TABLE IF NOT EXISTS rag_documents (
                         doc_id TEXT PRIMARY KEY,

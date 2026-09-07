@@ -37,7 +37,9 @@ def _load_model():
             from sentence_transformers import SentenceTransformer
             logger.info(f"[LocalEmbedder] loading {_MODEL_NAME} (first call, ~80 MB)")
             _model = SentenceTransformer(_MODEL_NAME)
-            logger.info(f"[LocalEmbedder] model loaded, dim={_model.get_sentence_embedding_dimension()}")
+            _dim_fn = getattr(_model, "get_embedding_dimension",
+                              _model.get_sentence_embedding_dimension)
+            logger.info(f"[LocalEmbedder] model loaded, dim={_dim_fn()}")
         except Exception as e:
             _load_failed = True
             logger.warning(f"[LocalEmbedder] failed to load {_MODEL_NAME}: {e}. "

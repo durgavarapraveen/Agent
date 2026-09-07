@@ -45,7 +45,7 @@ def test_required_tables_exist() -> None:
 
     required = {
         "targets", "scans", "vulnerabilities", "findings_dedup",
-        "findings_history", "tool_output", "audit_log",
+        "findings_v2", "audit_log", "exploit_results",
     }
     with DatabaseManager.get_connection() as conn:
         with conn.cursor() as cur:
