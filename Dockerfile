@@ -93,7 +93,7 @@ RUN apt-get update && \
     build-essential \
     libffi-dev \
     libpq-dev \
-    libgobject-2.0-0 \
+    libglib2.0-0 \
     libcairo2 \
     libpango-1.0-0 \
     libpangocairo-1.0-0 \

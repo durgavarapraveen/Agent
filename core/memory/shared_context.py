@@ -194,6 +194,10 @@ class SharedContextV2:
         for r in reqs:
             if isinstance(r, dict):
                 self.captured_requests.append(r)
+            elif hasattr(r, "to_dict"):
+                self.captured_requests.append(r.to_dict())
+            elif hasattr(r, "__dict__"):
+                self.captured_requests.append(dict(r.__dict__))
 
     def add_tool_execution(self, exec_record: Dict):
         self.tool_executions.append(exec_record)
