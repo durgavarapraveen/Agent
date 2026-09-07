@@ -20,6 +20,7 @@ Docker helper (Phase 6.4):
 from __future__ import annotations
 
 import logging
+import os
 import re
 import socket
 from typing import Iterable, List, Optional, Set
@@ -39,9 +40,58 @@ class EgressBlocked(Exception):
 _LOOPBACK_PREFIXES = ("127.", "0.", "::1", "localhost")
 
 
+# Infrastructure allowlist — hosts the AGENT ITSELF needs to reach to
+# function, independent of whichever target it's scanning:
+#   - LLM providers (planner + reasoning calls)
+#   - Threat-intel / OSINT feeds
+#   - IP-lookup helpers (AnonGate)
+#   - Package registries (rare, but nuclei-templates auto-update etc.)
+# These are NOT scan targets; SSRF finding them wouldn't matter because
+# they don't accept anonymous auth from the scan. Extend via env var
+# EGRESS_INFRA_ALLOWLIST=host1.com,host2.com
+_INFRA_ALLOWLIST = {
+    # LLM providers
+    "api.deepseek.com", "api.groq.com", "api.openai.com",
+    "api.anthropic.com", "api.together.xyz", "api.mistral.ai",
+    "api.cohere.ai", "generativelanguage.googleapis.com",
+    "openrouter.ai", "api.openrouter.ai",
+    # Embedding providers (RAG)
+    "api.voyageai.com",
+    # OSINT / threat-intel feeds
+    "api.shodan.io", "api.censys.io", "search.censys.io",
+    "otx.alienvault.com", "urlscan.io", "www.virustotal.com",
+    "crt.sh", "www.hackerone.com", "hackertarget.com",
+    "api.hackertarget.com", "index.commoncrawl.org",
+    "web.archive.org", "cve.mitre.org", "services.nvd.nist.gov",
+    # IP lookup (AnonGate + WAN detection)
+    "api.ipify.org", "ifconfig.me", "ipinfo.io", "icanhazip.com",
+    # Nuclei / template updates
+    "raw.githubusercontent.com", "github.com", "api.github.com",
+    "codeload.github.com", "objects.githubusercontent.com",
+    # Public DNS (dig / OSINT resolvers)
+    "dns.google", "cloudflare-dns.com", "1.1.1.1", "8.8.8.8",
+    # DuckDuckGo search fallback in ingestion
+    "duckduckgo.com", "lite.duckduckgo.com",
+}
+
+
 def _is_loopback(host: str) -> bool:
     h = (host or "").strip().lower().strip("[]")
     return any(h.startswith(p) for p in _LOOPBACK_PREFIXES) or h in ("localhost",)
+
+
+def _is_infra(host: str) -> bool:
+    h = (host or "").strip().lower().strip("[]")
+    if h in _INFRA_ALLOWLIST:
+        return True
+    # Env-var extension
+    extra = (os.getenv("EGRESS_INFRA_ALLOWLIST") or "").strip()
+    if extra:
+        for entry in extra.split(","):
+            entry = entry.strip().lower()
+            if entry and (h == entry or h.endswith("." + entry)):
+                return True
+    return False
 
 
 def _extract_host(url_or_host: str) -> Optional[str]:
@@ -69,6 +119,8 @@ def assert_egress_allowed(url_or_host: str, purpose: str = "http") -> None:
     if not host:
         raise EgressBlocked(f"egress denied: no host in {url_or_host!r}")
     if _is_loopback(host):
+        return
+    if _is_infra(host):
         return
     try:
         from core.security.authorization import TargetScopeValidator

@@ -78,9 +78,6 @@ jobs:
           pip install -r requirements.txt
           pip install pytest pytest-asyncio pytest-cov slowapi prometheus-client
 
-      - name: Install sentence-transformers (RAG local embedder)
-        run: pip install sentence-transformers
-
       - name: Run pytest (smoke tests)
         run: |
           pytest -q --maxfail=5

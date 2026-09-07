@@ -228,6 +228,7 @@ export const api = {
   setApiKey,
   clearApiKey,
 
+  getSourceIp: () => request("/api/source-ip"),
   getTargets: () => request("/api/targets"),
   addTarget: (data) => post("/api/targets", data),
   deleteTarget: (id) => del(`/api/targets/${id}`),

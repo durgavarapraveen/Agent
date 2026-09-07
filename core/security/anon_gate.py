@@ -82,12 +82,52 @@ def check_exit_ip() -> Tuple[str, bool]:
     return exit_ip, is_tor
 
 
+def _fetch_direct_ip(timeout: float = 5.0) -> str:
+    """Best-effort: look up our WAN IP without going through any proxy.
+    Returns '' on failure — never raises. Used only for the startup log."""
+    try:
+        import httpx
+        with httpx.Client(timeout=timeout, proxy=None,
+                          trust_env=False) as c:
+            r = c.get("https://api.ipify.org")
+            return r.text.strip() if r.status_code == 200 else ""
+    except Exception:
+        return ""
+
+
+def _vpn_configured() -> bool:
+    """VPN mode is active only when a SOCKS proxy env var is set."""
+    proxy = (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+             or os.getenv("ALL_PROXY") or "").strip().lower()
+    return proxy.startswith("socks5")
+
+
 def enforce_or_die() -> None:
-    """Call at startup. Aborts the process if the chain is not up."""
+    """Call at startup. Auto-detects mode:
+      - VPN mode:    SOCKS proxy env is set  -> verify chain is up, abort if not
+      - Direct mode: no proxy configured     -> log and proceed (real IP)
+
+    ANON_GATE=0 force-skips verification even in VPN mode.
+    """
     if os.getenv("ANON_GATE", "1").strip().lower() in ("0", "false", "no", "off"):
-        logger.warning("[AnonGate] disabled via ANON_GATE=0 — traffic will "
-                        "leave from your real IP")
+        logger.warning("[AnonGate] disabled via ANON_GATE=0")
         return
+
+    if not _vpn_configured():
+        ip = _fetch_direct_ip()
+        logger.warning("[AnonGate] direct mode — no SOCKS proxy configured; "
+                        "scan will use your real IP: %s", ip or "unknown")
+        print(f"[AnonGate] direct mode  source IP: {ip or 'unknown'}")
+        return
+
+    # VPN mode — chain must be up and exit IP must differ from real IP.
+    logger.info("[AnonGate] VPN mode — verifying chain is up")
+    try:
+        exit_ip, is_tor = check_exit_ip()
+    except Exception as e:
+        logger.error("[AnonGate] STARTUP ABORTED — VPN chain not verified: %s", e)
+        raise SystemExit(2)
+    print(f"[AnonGate] OK — exit IP: {exit_ip}  tor: {is_tor}")
     try:
         exit_ip, is_tor = check_exit_ip()
     except Exception as e:

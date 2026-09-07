@@ -11,6 +11,7 @@ import Compare from "./pages/Compare";
 import Settings from "./pages/Settings";
 import Analytics from "./pages/Analytics";
 import KnowledgeBase from "./pages/KnowledgeBase";
+import SourceIpBadge from "./components/SourceIpBadge";
 import { getApiKey } from "./api";
 
 const DashIcon = () => (
@@ -153,6 +154,7 @@ export default function App() {
           </div>
 
           <div className="sidebar-footer">
+            <SourceIpBadge />
             <div className="sidebar-status">
               <span className="pulse" />
               <span>Engine Ready</span>

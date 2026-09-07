@@ -14,44 +14,16 @@
 ARG KALI_ROLLING_DIGEST=kalilinux/kali-rolling@sha256:c6d78f57ebfdd9fec428a8b04f74876e66fddd08dfd328c076224a552e7332a3
 
 # ============================================================
-# Stage 1: Build modern Go-based security tools
+# (Former Stage 1 removed) — the ProjectDiscovery Go tools that used
+# to be built from source here are now installed from Kali's apt repos
+# in the stage below. That eliminates the proxy.golang.org dependency
+# which was intermittently unreachable from Docker Desktop, and cuts
+# build time from ~15 min to ~3 min.
 # ============================================================
-# Go builder pinned to a specific patch version + Alpine 3.19 so reproducible
-# builds don't depend on whatever `golang:1.26-alpine` happens to alias when
-# the image is rebuilt.
-FROM golang:1.22.5-alpine3.19 AS go-builder
-
-ENV CGO_ENABLED=0 \
-    GOPATH=/go
-
-# Every Go tool is pinned to an explicit release tag. Bumping any of these is
-# an intentional, reviewable change — no longer `@latest` supply-chain roulette.
-ARG SUBFINDER_VERSION=v2.6.6
-ARG HTTPX_VERSION=v1.6.9
-ARG DNSX_VERSION=v1.2.1
-ARG KATANA_VERSION=v1.1.0
-ARG NUCLEI_VERSION=v3.3.4
-ARG FFUF_VERSION=v2.1.0
-ARG ASSETFINDER_VERSION=v0.1.1
-ARG DALFOX_VERSION=v2.9.4
-ARG WAYBACKURLS_VERSION=v0.1.1
-ARG GAU_VERSION=v2.2.4
-
-RUN set -eux; \
-    go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@${SUBFINDER_VERSION}; \
-    go install github.com/projectdiscovery/httpx/cmd/httpx@${HTTPX_VERSION}; \
-    go install github.com/projectdiscovery/dnsx/cmd/dnsx@${DNSX_VERSION}; \
-    go install github.com/projectdiscovery/katana/cmd/katana@${KATANA_VERSION}; \
-    go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@${NUCLEI_VERSION}; \
-    go install github.com/ffuf/ffuf/v2@${FFUF_VERSION}; \
-    go install github.com/tomnomnom/assetfinder@${ASSETFINDER_VERSION}; \
-    go install github.com/hahwul/dalfox/v2@${DALFOX_VERSION}; \
-    go install github.com/tomnomnom/waybackurls@${WAYBACKURLS_VERSION}; \
-    go install github.com/lc/gau/v2/cmd/gau@${GAU_VERSION}
 
 
 # ============================================================
-# Stage 2: Kali Rolling
+# Kali Rolling — sole build stage
 # ============================================================
 # Pinned by digest so `docker build` is reproducible. Bump this SHA
 # intentionally (with a review), not implicitly on every rebuild.
@@ -70,7 +42,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Base utilities + only the individual security tools the code invokes.
 # (No kali-tools-* metapackages.)
 # ------------------------------------------------------------
-RUN apt-get update && \
+RUN set -eux; \
+    n=0; \
+    until [ "$n" -ge 5 ]; do \
+        apt-get clean && apt-get update && break; \
+        n=$((n+1)); \
+        echo "apt-get update failed (attempt $n/5), retrying in 10s..."; \
+        sleep 10; \
+    done; \
     apt-get install -y --no-install-recommends \
     # --- core utilities ---
     ca-certificates \
@@ -117,6 +96,17 @@ RUN apt-get update && \
     theharvester \
     whatweb \
     wafw00f \
+    # --- ProjectDiscovery + Go tools (was Go-builder stage; Kali apt is faster
+    #     and doesn't depend on proxy.golang.org which is flaky from Docker
+    #     Desktop) ---
+    subfinder \
+    httpx-toolkit \
+    dnsx \
+    katana \
+    nuclei \
+    ffuf \
+    assetfinder \
+    dalfox \
     # --- content discovery ---
     gobuster \
     feroxbuster \
@@ -147,6 +137,30 @@ RUN apt-get update && \
     imagemagick \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# `waybackurls` and `gau` aren't in Kali apt. Grab the prebuilt Linux
+# binaries straight from the maintainer's GitHub release — tiny (~5 MB
+# each), no compilation, no proxy.golang.org involvement. Retry up to
+# 3× because GitHub can also hiccup.
+ARG WAYBACKURLS_VERSION=0.1.0
+ARG GAU_VERSION=2.2.4
+RUN set -eux; \
+    dl() { \
+    n=0; \
+    until [ "$n" -ge 3 ]; do \
+    curl -fsSL "$1" -o "$2" && return 0; \
+    n=$((n+1)); \
+    echo "curl $1 failed (attempt $n/3), retrying in 5s..."; \
+    sleep 5; \
+    done; \
+    echo "curl $1 FAILED after 3 attempts"; return 1; \
+    }; \
+    cd /tmp; \
+    dl "https://github.com/tomnomnom/waybackurls/releases/download/v${WAYBACKURLS_VERSION}/waybackurls-linux-amd64-${WAYBACKURLS_VERSION}.tgz" waybackurls.tgz; \
+    tar -xzf waybackurls.tgz && mv waybackurls /usr/local/bin/waybackurls && chmod +x /usr/local/bin/waybackurls; \
+    dl "https://github.com/lc/gau/releases/download/v${GAU_VERSION}/gau_${GAU_VERSION}_linux_amd64.tar.gz" gau.tgz; \
+    tar -xzf gau.tgz && mv gau /usr/local/bin/gau && chmod +x /usr/local/bin/gau; \
+    rm -f /tmp/waybackurls.tgz /tmp/gau.tgz /tmp/LICENSE* /tmp/README*
 
 # ------------------------------------------------------------
 # OPTIONAL heavy tools — NOT installed by default (each is 0.5–2 GB and only
@@ -195,20 +209,14 @@ RUN CFLAGS="-std=gnu17" /opt/venv/bin/pip install --no-cache-dir \
 # ============================================================
 RUN playwright install --with-deps chromium
 
-# ============================================================
-# Copy Go tools
-# ============================================================
-COPY --from=go-builder /go/bin/subfinder /usr/local/bin/subfinder
-COPY --from=go-builder /go/bin/httpx /usr/local/bin/httpx
-RUN ln -sf /usr/local/bin/httpx /usr/local/bin/httpx-toolkit
-COPY --from=go-builder /go/bin/dnsx /usr/local/bin/dnsx
-COPY --from=go-builder /go/bin/katana /usr/local/bin/katana
-COPY --from=go-builder /go/bin/nuclei /usr/local/bin/nuclei
-COPY --from=go-builder /go/bin/ffuf /usr/local/bin/ffuf
-COPY --from=go-builder /go/bin/assetfinder /usr/local/bin/assetfinder
-COPY --from=go-builder /go/bin/dalfox /usr/local/bin/dalfox
-COPY --from=go-builder /go/bin/waybackurls /usr/local/bin/waybackurls
-COPY --from=go-builder /go/bin/gau /usr/local/bin/gau
+# Kali's `httpx-toolkit` package installs the binary at
+# /usr/bin/httpx-toolkit. Alias it as `httpx` for code that shells out
+# by that name — but ONLY if the Python httpx isn't already occupying
+# the name (it isn't; the Python one lives inside /opt/venv, not on
+# $PATH's system directories).
+RUN if [ -x /usr/bin/httpx-toolkit ] && [ ! -e /usr/local/bin/httpx ]; then \
+    ln -sf /usr/bin/httpx-toolkit /usr/local/bin/httpx; \
+    fi
 
 # ============================================================
 # Workspace & wordlists
@@ -232,14 +240,14 @@ RUN if [ -f /usr/share/wordlists/rockyou.txt.gz ]; then \
 # into that path (with a minimal fallback so the tools never fail on a missing file).
 RUN mkdir -p /usr/share/wordlists/dirb && \
     if [ -d /usr/share/dirb/wordlists ]; then \
-        cp -rn /usr/share/dirb/wordlists/* /usr/share/wordlists/dirb/ 2>/dev/null || true; \
+    cp -rn /usr/share/dirb/wordlists/* /usr/share/wordlists/dirb/ 2>/dev/null || true; \
     fi && \
     if [ ! -f /usr/share/wordlists/dirb/common.txt ]; then \
-        printf '%s\n' admin login api rest robots.txt sitemap.xml .git .env \
-            backup config test dev administrator uploads images js css assets \
-            ftp user users account accounts dashboard portal private public \
-            index.html index.php home about contact search products \
-            > /usr/share/wordlists/dirb/common.txt; \
+    printf '%s\n' admin login api rest robots.txt sitemap.xml .git .env \
+    backup config test dev administrator uploads images js css assets \
+    ftp user users account accounts dashboard portal private public \
+    index.html index.php home about contact search products \
+    > /usr/share/wordlists/dirb/common.txt; \
     fi
 
 # The code (ffuf/gobuster/feroxbuster/dirsearch) expects /usr/share/wordlists/dirb/...
@@ -248,13 +256,13 @@ RUN mkdir -p /usr/share/wordlists/dirb && \
 # metapackage. Recreate just that symlink (no bloat), and provide a common.txt fallback.
 RUN mkdir -p /usr/share/wordlists && \
     if [ -d /usr/share/dirb/wordlists ] && [ ! -e /usr/share/wordlists/dirb ]; then \
-        ln -sf /usr/share/dirb/wordlists /usr/share/wordlists/dirb; \
+    ln -sf /usr/share/dirb/wordlists /usr/share/wordlists/dirb; \
     fi && \
     if [ ! -e /usr/share/wordlists/dirb/common.txt ]; then \
-        mkdir -p /usr/share/wordlists/dirb && \
-        printf '%s\n' admin login api robots.txt sitemap.xml .git .env config backup \
-            test dev uploads images js css assets rest graphql swagger openapi \
-            > /usr/share/wordlists/dirb/common.txt; \
+    mkdir -p /usr/share/wordlists/dirb && \
+    printf '%s\n' admin login api robots.txt sitemap.xml .git .env config backup \
+    test dev uploads images js css assets rest graphql swagger openapi \
+    > /usr/share/wordlists/dirb/common.txt; \
     fi
 
 WORKDIR /pentesting

@@ -606,6 +606,30 @@ def _kali_container_healthy() -> tuple[bool, str]:
         return False, f"probe_error:{e}"
 
 
+@app.get("/api/source-ip", include_in_schema=True)
+def source_ip():
+    """Report the IP the scanner will use — direct real IP, or VPN exit IP.
+
+    UI can call this at page load to show a badge like
+    "🌐 Direct  1.2.3.4"  vs  "🛡️ VPN  5.6.7.8 (Tor)".
+    """
+    import os
+    from core.security.anon_gate import _vpn_configured, _fetch_direct_ip
+    mode = "vpn" if _vpn_configured() else "direct"
+    if mode == "vpn":
+        try:
+            from core.security.anon_gate import check_exit_ip
+            ip, is_tor = check_exit_ip()
+            return {"mode": "vpn", "ip": ip, "is_tor": is_tor,
+                    "chain_up": True,
+                    "proxy": os.getenv("HTTPS_PROXY") or os.getenv("ALL_PROXY") or ""}
+        except Exception as e:
+            return {"mode": "vpn", "ip": None, "is_tor": False,
+                    "chain_up": False, "error": str(e)}
+    return {"mode": "direct", "ip": _fetch_direct_ip() or None,
+            "is_tor": False, "chain_up": True}
+
+
 @app.get("/api/health", include_in_schema=True)
 def health():
     """Deep health check for readiness probes.
@@ -670,6 +694,16 @@ def metrics_endpoint():
 
 @app.on_event("startup")
 async def _on_startup():
+    # Report which IP will be used (direct or VPN exit). Aborts the API
+    # process only when VPN mode is on and the chain isn't up.
+    try:
+        from core.security.anon_gate import enforce_or_die
+        enforce_or_die()
+    except SystemExit:
+        raise
+    except Exception as _e:
+        logger.warning(f"[AnonGate] skipped in API startup: {_e}")
+
     _metrics.SCAN_ACTIVE.set(len(_active_scans))
     logger.info("API startup complete", extra={
         "active_scans": len(_active_scans),

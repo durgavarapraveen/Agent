@@ -282,6 +282,47 @@ code, kbd, samp, pre, .mono, [data-mono] {
   color: var(--text-dim);
 }
 
+/* Source-IP badge — shows the IP the scanner exits from. */
+.source-ip-badge {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  border-radius: 6px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  cursor: default;
+}
+.source-ip-badge.source-ip-ok     { border-color: #1f6b3a; }
+.source-ip-badge.source-ip-warn   { border-color: #7a5a15; }
+.source-ip-badge.source-ip-danger { border-color: #7a1f1f; background: #2a0f0f; }
+.source-ip-badge.source-ip-error,
+.source-ip-badge.source-ip-loading { color: var(--text-dim); }
+
+.source-ip-icon { font-size: 16px; line-height: 1; }
+.source-ip-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.source-ip-mode {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+.source-ip-ip {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text-h);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 140px;
+}
+.source-ip-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--text-dim);
+}
+
 .sidebar-status .pulse {
   width: 8px;
   height: 8px;
