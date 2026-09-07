@@ -142,6 +142,18 @@ async def run_multi(targets: list, auth_file: str = None):
 
 
 def main():
+    # Anonymisation kill-switch — refuses to start if the VPN/Tor chain is
+    # down or if the exit IP == our real WAN IP. Disable with ANON_GATE=0
+    # (development only; leaks traffic from the real interface).
+    try:
+        from core.security.anon_gate import enforce_or_die
+        enforce_or_die()
+    except SystemExit:
+        raise
+    except Exception as _e:
+        # Missing httpx / etc. — soft-warn, do NOT silently proceed.
+        print(f"[AnonGate] skipped (import error): {_e}")
+
     parser = argparse.ArgumentParser(
         description="Autonomous Pentesting Agent",
         formatter_class=argparse.RawDescriptionHelpFormatter,
