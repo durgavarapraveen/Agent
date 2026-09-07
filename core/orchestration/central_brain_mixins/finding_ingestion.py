@@ -15,6 +15,99 @@ logger = logging.getLogger(__name__)
 
 
 class FindingIngestionMixin:
+    def _stamp_and_add_vuln(self, v: dict, source: str = "", parser: str = "regex") -> None:
+        """Enrich a vuln with confidence (P2-6), gate raw observations
+        (P0-3), attach a decision-provenance id (P3-3), and forward to
+        `SharedContext.add_vulnerability`.
+
+        Never raises — a failure in the confidence path must not block
+        finding ingestion.
+        """
+        try:
+            from core.evidence.confidence_model import compute, ConfidenceInputs, label
+            already = float(v.get("confidence_score") or 0.0)
+            if already <= 0:
+                inp = ConfidenceInputs(
+                    source=source or v.get("tool", "") or v.get("source", ""),
+                    parser=parser,
+                    validated=(str(v.get("status") or "").upper() == "CONFIRMED"),
+                    corroborations=int(v.get("corroborations", 0) or 0),
+                    age_seconds=0.0,
+                )
+                c = compute(inp)
+                v["confidence_score"] = round(c, 3)
+                v.setdefault("confidence_label", label(c))
+        except Exception:
+            pass
+        # P0-3: raw observations (missing headers, path discovered, http 200)
+        # must not enter as CONFIRMED unless the source is signed/validated.
+        try:
+            from core.findings.observation import is_confirmable_without_validation
+            src = (v.get("tool") or source or "").lower()
+            kind = (v.get("type") or "").lower()
+            if str(v.get("status") or "").upper() == "CONFIRMED" and not v.get("proof"):
+                if not is_confirmable_without_validation(f"{src}_confirmed") \
+                        and not is_confirmable_without_validation(kind):
+                    v["status"] = "UNCONFIRMED"
+                    v.setdefault("_downgraded_by", "observation_gate")
+        except Exception:
+            pass
+        # P3-3: decision provenance — every ingested finding is a decision.
+        try:
+            from core.decisions.provenance import get_decision_log
+            d = get_decision_log().new(
+                topic="finding.ingested",
+                reason=f"{source or v.get('tool','')} produced a finding",
+                selected_tool=source or v.get("tool", ""),
+                title=v.get("title", ""), type=v.get("type", ""),
+                severity=v.get("severity", ""), status=v.get("status", ""),
+            )
+            v.setdefault("decision_id", d.decision_id)
+        except Exception:
+            pass
+        try:
+            self.ctx.add_vulnerability(v)
+        except Exception as e:
+            logger.warning(f"add_vulnerability failed: {e}")
+        # P2-3: mark the endpoint as tested for this vuln class so the
+        # planner doesn't re-request the same probe next iteration.
+        try:
+            from core.orchestration.endpoint_coverage import get_coverage
+            loc = v.get("location") or v.get("affected_endpoint") or ""
+            vc = (v.get("type") or "").upper()
+            if loc and vc:
+                res = "positive" if str(v.get("status", "")).upper() == "CONFIRMED" else "inconclusive"
+                get_coverage().mark(loc, vc, res, confidence=float(v.get("confidence_score") or 0.5))
+        except Exception:
+            pass
+        # P2-7: takeover indicators must pass DNS validation before CONFIRMED.
+        try:
+            if (v.get("type") or "").upper() in ("SUBDOMAIN_TAKEOVER", "TAKEOVER"):
+                from core.intelligence.takeover_workflow import detect_indicator, validate, TakeoverStage
+                cand = detect_indicator(
+                    v.get("target") or v.get("location") or "",
+                    int(v.get("status_code") or 0),
+                    str(v.get("proof") or v.get("details") or ""),
+                )
+                if cand is None:
+                    v["status"] = "UNCONFIRMED"
+                    v.setdefault("_downgraded_by", "takeover_gate:no_indicator")
+                else:
+                    validated = validate(cand)
+                    if validated.stage != TakeoverStage.CONFIRMED:
+                        v["status"] = "UNCONFIRMED"
+                        v.setdefault("_downgraded_by",
+                                     f"takeover_gate:{validated.stage.value}:{validated.reason}")
+        except Exception:
+            pass
+        # Metrics
+        try:
+            from core.observability.scan_metrics import get_metrics
+            if str(v.get("status") or "").upper() == "CONFIRMED":
+                get_metrics().inc("confirmed_findings")
+        except Exception:
+            pass
+
     def _ingest_executor_findings(self, test_id: str, target: str, evidence: dict) -> None:
         """Convert V2 executor evidence into SharedContext vulnerability records."""
         SEVERITY_MAP = {
@@ -123,6 +216,32 @@ class FindingIngestionMixin:
                         self.persistent_knowledge_store.add_asset(self.target_id, "subdomain", sub)
                     except Exception:
                         pass
+            # P2-1: populate the attack-surface graph as subdomains land.
+            try:
+                from core.knowledge.attack_surface_graph import get_graph
+                g = get_graph()
+                for sub in discovered_subs:
+                    g.add_subdomain(sub)
+            except Exception:
+                pass
+            # P1-3: classify each subdomain with a lightweight heuristic
+            # profile so the orchestrator can route to the right workflow.
+            try:
+                from core.intelligence.asset_classifier import classify, AssetProfile, workflow_for
+                asset_map = getattr(self.ctx, "asset_classes", None) or {}
+                for sub in discovered_subs:
+                    prof = AssetProfile(host=sub, status_code=200, content_type="text/html",
+                                        body_sample="", title="", is_redirect=False,
+                                        is_api_shape=("api" in sub),
+                                        provider_indicators=[])
+                    cls = classify(prof)
+                    asset_map[sub] = cls.value
+                try:
+                    self.ctx.update("asset_classes", asset_map)
+                except Exception:
+                    setattr(self.ctx, "asset_classes", asset_map)
+            except Exception:
+                pass
         
         # 2. Ingest Technologies & HTTP status
         techs = data.get("technologies") or data.get("tech") or []
@@ -174,8 +293,36 @@ class FindingIngestionMixin:
                     if not re.search(r'\.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|map)(\?|$)', url, re.I):
                         endpoints.append({"url": url, "status": 0})
             if endpoints:
+                # P2-5: normalize before we ingest so /path, /path/, and
+                # /path?x=1 collapse to one canonical endpoint.
+                try:
+                    from core.common.endpoint_normalizer import EndpointDedupe
+                    from core.knowledge.attack_surface_graph import get_graph
+                    dedup = EndpointDedupe()
+                    for e in endpoints:
+                        dedup.add(e.get("url", ""))
+                    canonical = dedup.all()
+                    g = get_graph()
+                    for c in canonical:
+                        try:
+                            g.add_endpoint(c.host, c.base, method="GET",
+                                           parameters=c.parameters,
+                                           port=c.port or (443 if c.scheme == "https" else 80),
+                                           scheme=c.scheme)
+                        except Exception:
+                            pass
+                    logger.info(f"ENDPOINT_NORMALIZED: input={len(endpoints)} canonical={len(canonical)}")
+                except Exception:
+                    pass
                 self.ctx.add_endpoints(endpoints, source=getattr(result, "tool", capability))
                 logger.info(f"Ingested {len(endpoints)} endpoints from {getattr(result, 'tool', capability)}")
+                try:
+                    from core.observability.structured_logger import log_event
+                    log_event("endpoint.discovered", capability=capability,
+                              tool=getattr(result, "tool", ""),
+                              count=len(endpoints))
+                except Exception:
+                    pass
 
         # 4b. Ingest directories from ffuf/gobuster/dirb/feroxbuster
         if stdout and capability in ("directory_bruteforce", "endpoint_discovery", "web_crawling"):
@@ -274,7 +421,7 @@ class FindingIngestionMixin:
             if vulns:
                 for v in vulns:
                     if hasattr(self.ctx, 'add_vulnerability'):
-                        self.ctx.add_vulnerability(v)
+                        self._stamp_and_add_vuln(v, source=tool_name, parser="regex")
                 for v in vulns:
                     logger.info(f"  [VULN] [{v.get('severity','?')}] {v.get('title','')} | type={v.get('type','')} | location={v.get('location','')}")
                     self._log_activity("finding",
@@ -330,7 +477,7 @@ class FindingIngestionMixin:
                 })
             if tls_findings:
                 for v in tls_findings:
-                    self.ctx.add_vulnerability(v)
+                    self._stamp_and_add_vuln(v, source="sslscan", parser="regex")
                 logger.info(f"Ingested {len(tls_findings)} TLS findings from sslscan")
             if ssl_data["protocols"] or ssl_data["certificate"]:
                 self.ctx.add_ssl_info(target_host, ssl_data)

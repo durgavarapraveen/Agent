@@ -9,10 +9,90 @@ and filters noise — exactly like a human pentester would.
 
 import json
 import logging
+import re as _re
+import time as _time
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+
+# ── Helpers used by the reasoning-row writer ──────────────────────────────
+
+_SECRET_KEYS = frozenset({
+    "password", "passwd", "secret", "token", "api_key", "apikey", "authorization",
+    "auth", "cookie", "session", "session_id", "csrf", "private_key",
+    "aws_secret_access_key", "hf_token", "openai_api_key", "deepseek_api_key",
+})
+
+
+def _redact_args(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Shallow-copy args with obvious secret keys masked. The UI receives
+    this; the raw fn_args are not persisted."""
+    if not isinstance(args, dict):
+        return {"_repr": repr(args)[:400]}
+    out: Dict[str, Any] = {}
+    for k, v in args.items():
+        lk = str(k).lower()
+        if any(s in lk for s in _SECRET_KEYS):
+            out[k] = "[REDACTED]"
+            continue
+        # Cap giant values (a huge stdin blob would fill the DB row).
+        if isinstance(v, str) and len(v) > 4000:
+            out[k] = v[:4000] + f"...[+{len(v) - 4000} chars]"
+        elif isinstance(v, (list, tuple)) and len(v) > 40:
+            out[k] = list(v[:40]) + [f"...[+{len(v) - 40} more]"]
+        elif isinstance(v, dict) and len(v) > 60:
+            keys = list(v.keys())[:60]
+            out[k] = {kk: v[kk] for kk in keys}
+        else:
+            out[k] = v
+    return out
+
+
+def _preview_result(result: Any, max_chars: int = 4000) -> str:
+    """String preview of the tool return value for the UI. Strips the same
+    secret patterns that mask_sensitive_data covers so nothing leaks through."""
+    try:
+        if isinstance(result, (bytes, bytearray)):
+            s = result.decode("utf-8", errors="replace")
+        elif isinstance(result, str):
+            s = result
+        else:
+            s = json.dumps(result, default=str)[:max_chars * 2]
+    except Exception:
+        s = repr(result)[:max_chars]
+    if len(s) > max_chars:
+        s = s[:max_chars] + f"\n... [+{len(s) - max_chars} chars truncated]"
+    try:
+        from core.reporting.reporting import mask_sensitive_data
+        s = mask_sensitive_data(s)
+    except Exception:
+        pass
+    return s
+
+
+def _infer_status(result: Any) -> Optional[int]:
+    """Heuristic status code for the tool call:
+      - int found in result string → treat as HTTP status
+      - 'error' / 'failed' / 'traceback' in result → -1
+      - otherwise 0 (OK)
+    """
+    try:
+        s = result if isinstance(result, str) else json.dumps(result, default=str)
+    except Exception:
+        return 0
+    low = s.lower()
+    if any(k in low for k in ("traceback", "exception:", "unhandled",
+                              "tool execution failed", "[error]")):
+        return -1
+    m = _re.search(r"\bHTTP[/\s](\d{3})\b", s)
+    if m:
+        return int(m.group(1))
+    m = _re.search(r"\bstatus[:\s=]+(\d{3})\b", low)
+    if m:
+        return int(m.group(1))
+    return 0
 
 
 @dataclass
@@ -507,73 +587,83 @@ class AgenticExecutor:
                 )
         except Exception:
             pass
-        # Live chain-of-thought — persist the LLM's rationale for THIS tool
-        # call so the UI can stream it as a "thought bubble" per agent.
-        #
-        # Delegated to a background thread so a slow DB commit never blocks
-        # the LLM planning loop. Failure is swallowed at the caller (see the
-        # bare `except`) — reasoning rows are best-effort telemetry, not
-        # audit-critical.
+        # Compute the chain-of-thought fields now, then run the tool, then
+        # write the enriched row (with duration + result preview + status)
+        # in a background thread so the DB commit never blocks the LLM loop.
+        _thought = (fn_args.get("rationale") or fn_args.get("reasoning")
+                    or fn_args.get("why") or "")
+        if not _thought:
+            _thought = f"call {fn_name} on {fn_args.get('target') or fn_args.get('url') or ''}"
+        _tool_planned = str(fn_args.get("tool_id") or fn_args.get("tool") or fn_name)[:60]
+        _t_start = _time.monotonic()
+
+        if fn_name == "run_tool":
+            _result = await self._run_security_tool(fn_args)
+        elif fn_name == "http_request":
+            _result = await self._run_http_request(fn_args)
+        elif fn_name == "run_custom_probe":
+            from core.orchestration.adversarial_critic import critique_and_run, enabled as _crit_on
+            if _crit_on():
+                _result = await critique_and_run(fn_args, self.ctx, self._tracker)
+            else:
+                _result = await _run_custom_probe(fn_args, self.ctx, self._tracker)
+        elif fn_name == "run_custom_python":
+            _result = await _run_custom_python(fn_args, self.ctx, self._tracker)
+        elif fn_name == "run_skill":
+            from core.intel.skill_library import run_skill as _rs
+            _result = await _rs(fn_args, self.ctx, self._tracker)
+        elif fn_name == "list_skills":
+            from core.intel.skill_library import list_skills as _ls
+            _result = _ls(self.ctx)
+        elif fn_name == "query_security_kb":
+            from core.intel.security_kb import query_kb_async
+            _result = await query_kb_async(fn_args.get("topic",""), fn_args.get("tech_stack",""))
+        elif fn_name == "author_tool":
+            from core.intel.tool_authoring import author_tool
+            _result = await author_tool(fn_args, self.ctx)
+        elif fn_name == "run_authored_tool":
+            _result = await _run_authored_tool(fn_args, self.ctx, self._tracker)
+        elif fn_name == "analyze_results":
+            _result = self._record_finding(fn_args)
+        elif fn_name == "filter_endpoints":
+            _result = self._filter_endpoints(fn_args)
+        else:
+            _result = f"Unknown function: {fn_name}"
+
+        _duration_ms = int((_time.monotonic() - _t_start) * 1000)
         try:
             if self.scan_id and self._tracker:
-                thought = fn_args.get("rationale") or fn_args.get("reasoning") \
-                            or fn_args.get("why") or ""
-                if not thought:
-                    thought = f"call {fn_name} on {fn_args.get('target') or fn_args.get('url') or ''}"
-                tool_planned = str(fn_args.get("tool_id") or fn_args.get("tool") or fn_name)[:60]
+                # Redacted args snapshot for the UI. Strip common secret keys.
+                _args_view = _redact_args(fn_args)
+                # Result preview — first N chars of the tool's string return.
+                _preview = _preview_result(_result, max_chars=4000)
+                _status = _infer_status(_result)
 
-                def _write_reasoning_row(sid, aid, step, thg, tp):
+                def _write_reasoning_row(sid, aid, step, thg, tp, args, prev, st, dur):
                     from core.database.pg_store import DatabaseManager
+                    import json as _json
                     with DatabaseManager.get_connection() as conn:
                         with conn.cursor() as cur:
                             cur.execute("""
                                 INSERT INTO agent_reasoning
-                                  (scan_id, agent_id, step, thought, tool_planned)
-                                VALUES (%s, %s, %s, %s, %s)
-                            """, (sid, aid, step, thg, tp))
+                                  (scan_id, agent_id, step, thought, tool_planned,
+                                   tool_args, tool_result_preview, tool_status, duration_ms)
+                                VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
+                            """, (sid, aid, step, thg, tp, _json.dumps(args, default=str),
+                                  prev, st, dur))
                             conn.commit()
 
                 import asyncio as _aio
                 _aio.get_event_loop().create_task(
                     _aio.to_thread(_write_reasoning_row,
                                     self.scan_id, self._tracker.agent_id,
-                                    self.result.steps_taken, str(thought)[:800],
-                                    tool_planned)
+                                    self.result.steps_taken, str(_thought)[:800],
+                                    _tool_planned, _args_view, _preview,
+                                    _status, _duration_ms)
                 )
         except Exception:
             pass
-
-        if fn_name == "run_tool":
-            return await self._run_security_tool(fn_args)
-        elif fn_name == "http_request":
-            return await self._run_http_request(fn_args)
-        elif fn_name == "run_custom_probe":
-            from core.orchestration.adversarial_critic import critique_and_run, enabled as _crit_on
-            if _crit_on():
-                return await critique_and_run(fn_args, self.ctx, self._tracker)
-            return await _run_custom_probe(fn_args, self.ctx, self._tracker)
-        elif fn_name == "run_custom_python":
-            return await _run_custom_python(fn_args, self.ctx, self._tracker)
-        elif fn_name == "run_skill":
-            from core.intel.skill_library import run_skill as _rs
-            return await _rs(fn_args, self.ctx, self._tracker)
-        elif fn_name == "list_skills":
-            from core.intel.skill_library import list_skills as _ls
-            return _ls(self.ctx)
-        elif fn_name == "query_security_kb":
-            from core.intel.security_kb import query_kb_async
-            return await query_kb_async(fn_args.get("topic",""), fn_args.get("tech_stack",""))
-        elif fn_name == "author_tool":
-            from core.intel.tool_authoring import author_tool
-            return await author_tool(fn_args, self.ctx)
-        elif fn_name == "run_authored_tool":
-            return await _run_authored_tool(fn_args, self.ctx, self._tracker)
-        elif fn_name == "analyze_results":
-            return self._record_finding(fn_args)
-        elif fn_name == "filter_endpoints":
-            return self._filter_endpoints(fn_args)
-        else:
-            return f"Unknown function: {fn_name}"
+        return _result
 
     TOOL_TO_OPERATION = {
         "nmap": "port_scanning", "masscan": "port_scanning",
@@ -2029,21 +2119,24 @@ RULES:
                         f"HTTP {method} accepted on non-API path. URL: {url[:200]}")
                 logger.info(f"[AutoDetect] Unsafe method {method}: {url[:120]}")
 
-        # ── 22. SUBDOMAIN TAKEOVER INDICATORS ──
-        takeover_sigs = [
-            "there is no app configured at that hostname",
-            "nosuchchannel", "no such app", "herokucdn.com/error-pages",
-            "the thing you were looking for is no longer here",
-            "do you want to register", "domain is not configured",
-            "this domain is not connected", "project not found",
-            "repository not found", "this page is reserved",
-            "nosuchbucket", "the specified bucket does not exist",
-            "invalidbucketname", "bucket not found",
-        ]
-        if any(sig in resp_lower for sig in takeover_sigs):
-            _record("vulnerability", f"Subdomain Takeover Possible — {netloc}", "high",
-                    f"Unclaimed service indicator in response. URL: {url[:200]}")
-            logger.info(f"[AutoDetect] Subdomain takeover indicator: {netloc}")
+        # ── 22. SUBDOMAIN TAKEOVER — fingerprint + DNS CNAME (two-clause) ──
+        # Prior version fired on fingerprint alone which produced ~15 false
+        # positives per scan on Heroku "Application Error" (sleeping dyno)
+        # pages. The shared evaluator now requires a dangling CNAME into the
+        # same provider whose fingerprint matched.
+        try:
+            from core.intelligence.takeover_detector import evaluate as _eval_takeover
+            verdict = _eval_takeover(resp_text, netloc, status_code=status)
+            if verdict.is_takeover:
+                _record("vulnerability", f"Subdomain Takeover — {netloc}", "high",
+                        f"{verdict.as_finding_details()} URL: {url[:200]}")
+                logger.info(f"[AutoDetect] Subdomain takeover: {netloc} "
+                            f"(provider={verdict.provider}, cname={verdict.cname})")
+            elif verdict.reason and verdict.reason.startswith("fingerprint"):
+                # Suppressed match — record at DEBUG for triage, no finding.
+                logger.debug(f"[AutoDetect] Takeover suppressed on {netloc}: {verdict.reason}")
+        except Exception as _e:
+            logger.debug(f"[AutoDetect] takeover_detector error for {netloc}: {_e}")
 
         # ── 23. DEFAULT CREDENTIALS / WEAK AUTH ──
         weak_creds = [("admin", "admin"), ("admin", "password"), ("admin", "123456"),

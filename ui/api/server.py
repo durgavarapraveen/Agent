@@ -30,6 +30,14 @@ _ag_logging.configure_root(level=os.environ.get("LOG_LEVEL", "INFO"))
 from core.observability import metrics as _metrics
 from core.observability import tracing as _tracing
 
+# Phase 6.4 — install egress firewall guard on httpx so every outbound
+# request (from server or from any imported library) is scope-checked.
+try:
+    from core.security.egress_firewall import install_httpx_guard as _install_egress
+    _install_egress()
+except Exception:
+    pass
+
 logger = logging.getLogger("antigravity.api")
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -222,6 +230,30 @@ def _constant_time_eq(a: str, b: str) -> bool:
     return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 
+# Download-style GETs — the browser cannot set custom headers on a top-level
+# navigation (window.open / <a href>) so we accept `?api_key=` on this narrow
+# allowlist only. Everything else must use the X-API-Key header.
+_QUERY_AUTH_SUFFIXES = (
+    "/logs-download",
+    "/report",
+    "/sarif",
+    "/gitlab-dast",
+)
+_QUERY_AUTH_PREFIXES = (
+    "/api/evidence/",
+)
+
+
+def _accepts_query_auth(path: str, method: str) -> bool:
+    if method.upper() != "GET":
+        return False
+    if any(path.endswith(s) for s in _QUERY_AUTH_SUFFIXES):
+        return True
+    if any(path.startswith(p) for p in _QUERY_AUTH_PREFIXES):
+        return True
+    return False
+
+
 @app.middleware("http")
 async def _require_api_key(request: Request, call_next):
     path = request.url.path or ""
@@ -229,6 +261,11 @@ async def _require_api_key(request: Request, call_next):
         return await call_next(request)
     provided = request.headers.get("x-api-key") or ""
     if not _constant_time_eq(provided, _API_KEY):
+        # Allow `?api_key=` on download-style GETs only.
+        if _accepts_query_auth(path, request.method):
+            qp = request.query_params.get("api_key") or ""
+            if _constant_time_eq(qp, _API_KEY):
+                return await call_next(request)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return await call_next(request)
 

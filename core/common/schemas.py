@@ -196,7 +196,41 @@ class ToolResult(BaseModel):
     @property
     def success(self) -> bool:
         val = self.status.value if hasattr(self.status, "value") else str(self.status)
-        return str(val).upper() in ("SUCCESS", "PARTIAL_SUCCESS", "PARTIAL")
+        status_ok = str(val).upper() in ("SUCCESS", "PARTIAL_SUCCESS", "PARTIAL")
+        # P0-1: A non-zero exit code can never be SUCCESS. Only accept
+        # PARTIAL_SUCCESS/PARTIAL when the caller opted into partial semantics.
+        if status_ok and self.exit_code is not None and self.exit_code != 0:
+            return str(val).upper() in ("PARTIAL_SUCCESS", "PARTIAL")
+        return status_ok
+
+    @property
+    def is_partial(self) -> bool:
+        val = self.status.value if hasattr(self.status, "value") else str(self.status)
+        return str(val).upper() in ("PARTIAL_SUCCESS", "PARTIAL")
+
+    @classmethod
+    def derive_status(cls, exit_code: Optional[int], stdout: str = "", stderr: str = "",
+                      timed_out: bool = False, blocked: bool = False) -> "ToolExecutionStatus":
+        """P0-1: single source of truth for exit_code -> status mapping.
+
+        Rules (per doc P0-1):
+          rc == 0                              -> SUCCESS
+          rc != 0 + useful partial output      -> PARTIAL
+          rc != 0 + no trustworthy output      -> FAILED
+          timed_out                            -> TIMEOUT
+          blocked (scope/waf/policy)           -> BLOCKED
+        """
+        if blocked:
+            return ToolExecutionStatus.BLOCKED
+        if timed_out:
+            return ToolExecutionStatus.TIMEOUT
+        if exit_code is None:
+            # Legacy path: treat as success only if there is output.
+            return ToolExecutionStatus.SUCCESS if (stdout or "").strip() else ToolExecutionStatus.FAILED
+        if exit_code == 0:
+            return ToolExecutionStatus.SUCCESS
+        useful = bool((stdout or "").strip()) and len((stdout or "").strip()) > 32
+        return ToolExecutionStatus.PARTIAL if useful else ToolExecutionStatus.FAILED
 
     @property
     def is_semantic_success(self) -> bool:

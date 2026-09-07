@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { api, createPoller } from "../api";
 
 // Injected below AgentCard body — thoughts panel
@@ -187,15 +187,96 @@ function AgentCard({ agent }) {
             </div>
           )}
           {thoughts.map((t) => (
-            <div key={t.id} style={{ padding: "4px 0", borderBottom: "1px dashed var(--border)" }}>
-              <div style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--mono)" }}>
-                #{t.step} · {t.tool_planned || "?"}
-              </div>
-              <div style={{ fontSize: 12, color: "var(--text-h)", fontStyle: "italic" }}>
-                {t.thought}
-              </div>
-            </div>
+            <ThoughtRow key={t.id} t={t} />
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ThoughtRow({ t }) {
+  const [expanded, setExpanded] = React.useState(false);
+  const hasDetails = !!(t.tool_args || t.tool_result_preview);
+  const status = t.tool_status;
+  const statusColor = status == null
+    ? "var(--text-dim)"
+    : status === 0 ? "#22c55e"
+    : status === -1 ? "#ef4444"
+    : status >= 200 && status < 300 ? "#22c55e"
+    : status >= 300 && status < 400 ? "#eab308"
+    : status >= 400 ? "#ef4444"
+    : "var(--text-dim)";
+  const statusLabel = status == null ? ""
+    : status === 0 ? "OK"
+    : status === -1 ? "ERR"
+    : String(status);
+  return (
+    <div style={{ padding: "4px 0", borderBottom: "1px dashed var(--border)" }}>
+      <div onClick={() => hasDetails && setExpanded(!expanded)}
+        style={{ cursor: hasDetails ? "pointer" : "default",
+                 display: "flex", gap: 6, alignItems: "baseline" }}>
+        <div style={{ fontSize: 10, color: "var(--text-dim)",
+                      fontFamily: "var(--mono)", flex: 1 }}>
+          #{t.step} · {t.tool_planned || "?"}
+          {statusLabel && (
+            <span style={{ marginLeft: 8, color: statusColor,
+                           fontWeight: 600 }}>{statusLabel}</span>
+          )}
+          {t.duration_ms != null && (
+            <span style={{ marginLeft: 8, color: "var(--text-dim)" }}>
+              {t.duration_ms >= 1000
+                ? (t.duration_ms / 1000).toFixed(1) + "s"
+                : t.duration_ms + "ms"}
+            </span>
+          )}
+        </div>
+        {hasDetails && (
+          <span style={{ fontSize: 10, color: "var(--text-dim)" }}>
+            {expanded ? "▲" : "▼"}
+          </span>
+        )}
+      </div>
+      <div style={{ fontSize: 12, color: "var(--text-h)", fontStyle: "italic",
+                    wordBreak: "break-word" }}>
+        {t.thought}
+      </div>
+      {expanded && (
+        <div style={{ marginTop: 6, borderLeft: "2px solid var(--accent, #6366f1)",
+                       paddingLeft: 8, background: "var(--bg)" }}>
+          {t.tool_args && Object.keys(t.tool_args).length > 0 && (
+            <div style={{ marginBottom: 6 }}>
+              <div style={{ fontSize: 10, color: "var(--text-dim)",
+                            textTransform: "uppercase", letterSpacing: 0.5,
+                            marginBottom: 2 }}>args</div>
+              <pre style={{ fontSize: 11, margin: 0, padding: 6,
+                            background: "var(--surface-2, #0e0e12)",
+                            borderRadius: 4, overflow: "auto", maxHeight: 200,
+                            whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+                {JSON.stringify(t.tool_args, null, 2)}
+              </pre>
+            </div>
+          )}
+          {t.tool_result_preview && (
+            <div>
+              <div style={{ fontSize: 10, color: "var(--text-dim)",
+                            textTransform: "uppercase", letterSpacing: 0.5,
+                            marginBottom: 2 }}>
+                result preview
+                {t.tool_result_preview.length >= 4000 && (
+                  <span style={{ color: "#eab308", marginLeft: 6 }}>
+                    (truncated)
+                  </span>
+                )}
+              </div>
+              <pre style={{ fontSize: 11, margin: 0, padding: 6,
+                            background: "var(--surface-2, #0e0e12)",
+                            borderRadius: 4, overflow: "auto", maxHeight: 300,
+                            whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+                {t.tool_result_preview}
+              </pre>
+            </div>
+          )}
         </div>
       )}
     </div>

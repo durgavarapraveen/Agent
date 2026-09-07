@@ -55,6 +55,14 @@ from core.common.startup_diagnostics import log_startup_diagnostics
 from core.orchestration.central_brain import CentralBrain
 from core.orchestration.meta_brain import MetaBrain
 
+# Phase 6.4 — install egress firewall as early as possible so every HTTP
+# client (httpx everywhere) is guarded. Best-effort; missing httpx = no-op.
+try:
+    from core.security.egress_firewall import install_httpx_guard
+    install_httpx_guard()
+except Exception as _e:
+    logging.getLogger(__name__).debug(f"egress guard install skipped: {_e}")
+
 
 _LOG_FMT = '[%(asctime)s] %(name)s - %(levelname)s - %(message)s'
 

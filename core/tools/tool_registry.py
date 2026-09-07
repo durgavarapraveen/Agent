@@ -497,6 +497,15 @@ class ToolRegistry:
         for name, desc in kali_tools:
             self.register(KaliTool(name, desc, "recon"))
 
+        # P2-8: structured HTTP operations as first-class tools so the
+        # LLM can call `http_fetch` / `extract_api_routes` / `parse_html`
+        # / `compare_responses` etc. without asking for a shell pipeline.
+        try:
+            from core.tools.http_ops_tools import register_structured_http_tools
+            register_structured_http_tools(self)
+        except Exception as _e:
+            logger.debug(f"[StructuredHTTP] registration skipped: {_e}")
+
     def register(self, tool: Tool):
         self.tools[tool.name] = tool
 

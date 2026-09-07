@@ -115,3 +115,58 @@ class FindingStore:
                 cur.execute("SELECT * FROM findings_v2")
                 rows = cur.fetchall()
         return [self._row_to_finding(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Bulk (P0-2): dedupe before persistence
+    # ------------------------------------------------------------------
+
+    def bulk_store(self, findings: List[Finding]) -> Dict[str, int]:
+        """Deduplicate findings by canonical fingerprint BEFORE insertion.
+
+        Fixes the `ON CONFLICT DO UPDATE command cannot affect row a second
+        time` incident: the database is no longer the place semantic dedup
+        happens. Multiple observations of the same vuln collapse to one
+        finding whose `evidence_ids` union the inputs.
+        """
+        from core.validation.dedup import fingerprint
+        by_fp: Dict[str, Finding] = {}
+        for f in findings or []:
+            try:
+                fp = fingerprint(
+                    cve_id=(f.cve or ""),
+                    file_path=(f.affected_endpoint or f.affected_asset or ""),
+                    function_name=(f.parameter or ""),
+                    package_version="",
+                    target=(f.affected_asset or ""),
+                    title=(f.title or ""),
+                    vuln_type=(f.category or ""),
+                )
+            except Exception:
+                fp = f.finding_id
+            existing = by_fp.get(fp)
+            if existing is None:
+                by_fp[fp] = f
+                continue
+            # Merge: keep the higher-confidence record, union evidence.
+            keeper = existing if existing.confidence >= f.confidence else f
+            other = f if keeper is existing else existing
+            merged_ev = list(dict.fromkeys((keeper.evidence_ids or []) + (other.evidence_ids or [])))
+            keeper.evidence_ids = merged_ev
+            if not keeper.proof and other.proof:
+                keeper.proof = other.proof
+            keeper.metadata.setdefault("merged_from", []).append(other.finding_id)
+            by_fp[fp] = keeper
+
+        inserted = 0
+        for f in by_fp.values():
+            try:
+                self.store(f)
+                inserted += 1
+            except Exception as e:
+                logger.warning(f"bulk_store insert failed for {f.finding_id}: {e}")
+        return {
+            "input": len(findings or []),
+            "unique": len(by_fp),
+            "inserted": inserted,
+            "collapsed": len(findings or []) - len(by_fp),
+        }

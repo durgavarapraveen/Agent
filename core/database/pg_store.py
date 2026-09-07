@@ -694,8 +694,21 @@ def _init_schema():
                     step INT DEFAULT 0,
                     thought TEXT NOT NULL DEFAULT '',
                     tool_planned TEXT DEFAULT '',
+                    tool_args JSONB DEFAULT '{}'::jsonb,
+                    tool_result_preview TEXT DEFAULT '',
+                    tool_status INT DEFAULT NULL,
+                    duration_ms INT DEFAULT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
+                -- Additive migration for existing installs missing the new columns.
+                ALTER TABLE agent_reasoning
+                    ADD COLUMN IF NOT EXISTS tool_args JSONB DEFAULT '{}'::jsonb;
+                ALTER TABLE agent_reasoning
+                    ADD COLUMN IF NOT EXISTS tool_result_preview TEXT DEFAULT '';
+                ALTER TABLE agent_reasoning
+                    ADD COLUMN IF NOT EXISTS tool_status INT DEFAULT NULL;
+                ALTER TABLE agent_reasoning
+                    ADD COLUMN IF NOT EXISTS duration_ms INT DEFAULT NULL;
                 CREATE INDEX IF NOT EXISTS idx_reasoning_scan ON agent_reasoning(scan_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_reasoning_agent ON agent_reasoning(scan_id, agent_id, created_at DESC);
 
@@ -1049,17 +1062,67 @@ class VulnRepo:
     def bulk_insert(scan_id: str, vulns: List[Dict]):
         if not vulns:
             return
+        # P0-2: canonical fingerprint dedup BEFORE we hand the batch to
+        # Postgres. Two agents that discovered the same vuln collapse to
+        # one row here; the DB is no longer the deduper of last resort.
+        try:
+            from core.validation.dedup import fingerprint
+            collapsed: Dict[str, Dict] = {}
+            for v in vulns:
+                fp = fingerprint(
+                    cve_id=str(v.get("cve_id") or ""),
+                    file_path=str(v.get("location") or v.get("affected_endpoint") or ""),
+                    function_name=str(v.get("parameter") or ""),
+                    package_version="",
+                    target=str(v.get("target") or ""),
+                    title=str(v.get("title") or ""),
+                    vuln_type=str(v.get("type") or v.get("vuln_type") or ""),
+                )
+                existing = collapsed.get(fp)
+                if existing is None:
+                    collapsed[fp] = v
+                    continue
+                # Merge: keep longer proof/details; union evidence-ish fields.
+                for k in ("details", "proof", "remediation"):
+                    if len(str(v.get(k) or "")) > len(str(existing.get(k) or "")):
+                        existing[k] = v.get(k)
+                if (v.get("confidence_score") or 0) > (existing.get("confidence_score") or 0):
+                    existing["confidence_score"] = v["confidence_score"]
+                # Prefer CONFIRMED over any other status.
+                if str(v.get("status") or "").upper() == "CONFIRMED":
+                    existing["status"] = "CONFIRMED"
+            if len(collapsed) != len(vulns):
+                try:
+                    from core.observability.scan_metrics import get_metrics
+                    get_metrics().inc("duplicate_findings", by=(len(vulns) - len(collapsed)))
+                except Exception:
+                    pass
+                logger.info(
+                    "VulnRepo.bulk_insert: pre-persist dedup collapsed %d -> %d",
+                    len(vulns), len(collapsed))
+            vulns = list(collapsed.values())
+        except Exception as _e:
+            logger.debug(f"pre-persist dedup skipped: {_e}")
         # Build one tuple per vuln, then send them in a single round trip via
         # psycopg2.extras.execute_values. Previously this loop performed N
         # sequential INSERTs (one per finding), which was the dominant DB
         # cost on any scan with many findings and amplified pool-poisoning
         # cascades.
-        rows: List[tuple] = []
+        #
+        # Two vulns from the same phase can share a `finding_uid` — the
+        # deterministic id is derived from scan_id + title + type + location,
+        # and the LLM planner regularly proposes near-duplicate exploits
+        # against the same endpoint. Postgres refuses to touch the same row
+        # twice in one `INSERT ... ON CONFLICT DO UPDATE` statement, so we
+        # dedupe by `finding_id` WITHIN THE BATCH before handing it to
+        # `execute_values`. Later rows for the same fid win because "later"
+        # usually means more evidence.
+        by_fid: Dict[str, tuple] = {}
         for v in vulns:
             if v.get("finding_id"):
                 v.setdefault("orig_finding_id", v["finding_id"])
             fid = finding_uid(scan_id, v)
-            rows.append((
+            row = (
                 scan_id, fid, v.get("title", ""), v.get("type", ""),
                 (v.get("severity") or "INFO").upper(),
                 (v.get("status") or "UNCONFIRMED").upper(),
@@ -1074,7 +1137,22 @@ class VulnRepo:
                                           "remediation", "tool", "cwe_id", "cve_id",
                                           "confidence_score", "finding_id")},
                             default=str),
-            ))
+            )
+            # Prefer the row with the LONGER details/proof, since the
+            # ON CONFLICT DO UPDATE picks the longer of the two anyway.
+            existing = by_fid.get(fid)
+            if existing is None:
+                by_fid[fid] = row
+            else:
+                # Choose the row we'd prefer to KEEP if the DB were doing it.
+                existing_ev = len(existing[8] or "") + len(existing[9] or "")
+                new_ev = len(row[8] or "") + len(row[9] or "")
+                if new_ev >= existing_ev:
+                    by_fid[fid] = row
+
+        rows: List[tuple] = list(by_fid.values())
+        if not rows:
+            return
         _upsert_sql = """
             INSERT INTO vulnerabilities
             (scan_id, finding_id, title, type, severity, status, target, location,

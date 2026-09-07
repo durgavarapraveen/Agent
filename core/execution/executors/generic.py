@@ -4223,22 +4223,50 @@ class SubdomainTakeoverDetector(GenericHTTPExecutor):
         if not subs:
             return _no_endpoints_result("no subdomains to fingerprint")
 
+        # Delegate to the shared evaluator: fingerprint + DNS CNAME.
+        # A fingerprint-only match is not a finding anymore — the CNAME must
+        # dangle into the same provider, and known-false-positive markers
+        # (Heroku "Application Error", S3 AccessDenied, empty GitHub Pages)
+        # short-circuit the check.
+        try:
+            from core.intelligence.takeover_detector import evaluate as _eval_takeover
+        except Exception:
+            _eval_takeover = None
+
         for host in subs:
             for scheme in ("https", "http"):
                 url = f"{scheme}://{host}/"
                 status, body, _ = self._probe(url)
                 if not body:
                     continue
-                for provider, sigs in self.FINGERPRINTS:
-                    if any(sig in body for sig in sigs):
-                        findings.append({"test": "subdomain_takeover_candidate",
-                                         "host": host, "provider": provider,
-                                         "status": status,
-                                         "body_snippet": body[:256]})
-                        break
+                if _eval_takeover is None:
+                    # Fallback if the shared module cannot be imported — keep
+                    # the old behaviour so this executor is never silently
+                    # disabled. Should never happen in practice.
+                    for provider, sigs in self.FINGERPRINTS:
+                        if any(sig in body for sig in sigs):
+                            findings.append({"test": "subdomain_takeover_candidate",
+                                             "host": host, "provider": provider,
+                                             "status": status,
+                                             "body_snippet": body[:256],
+                                             "confidence": "low_fingerprint_only"})
+                            break
+                    else:
+                        continue
+                    break
+                verdict = _eval_takeover(body, host, status_code=status)
+                if verdict.is_takeover:
+                    findings.append({
+                        "test": "subdomain_takeover_confirmed",
+                        "host": host, "provider": verdict.provider,
+                        "cname": verdict.cname, "status": status,
+                        "details": verdict.as_finding_details(),
+                        "body_snippet": body[:256],
+                        "confidence": "high",
+                    })
+                    break
                 else:
                     continue
-                break
 
         evidence = self.collect_evidence({
             "takeover_findings": findings, "findings_count": len(findings),

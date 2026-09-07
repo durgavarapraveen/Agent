@@ -489,6 +489,20 @@ class ToolRouter:
             "github_scanning": ["http_request"],
             "dns_intelligence": ["dig", "whois", "dnsenum", "dns_lookup"],
             "threat_intelligence": ["http_request"],
+            # P2-8: structured HTTP operations. The LLM asks for a capability
+            # (e.g. `api_route_extraction`) and the router picks the
+            # matching adapter from core/tools/http_ops_tools.py.
+            "http_fetch":           ["http_fetch", "http_request", "httpx", "curl"],
+            "http_get":             ["http_fetch"],
+            "http_post":            ["http_fetch"],
+            "link_extraction":      ["extract_links"],
+            "api_route_extraction": ["extract_api_routes"],
+            "file_link_extraction": ["extract_file_links"],
+            "regex_extraction":     ["extract_regex"],
+            "html_parsing":         ["parse_html"],
+            "json_parsing":         ["parse_json"],
+            "response_diff":        ["compare_responses"],
+            "header_extraction":    ["extract_headers"],
         }
         
         tool_ids = op_map.get(operation, [])

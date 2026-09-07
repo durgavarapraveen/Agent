@@ -1,0 +1,160 @@
+"""Egress firewall — enforced BOTH at Docker network layer (Phase 6.4) AND
+in-process at every HTTP client we launch (defence in depth).
+
+Motivated by the OpenAI-HF incident: agents in a sandbox found a novel way
+(SSRF → Artifactory) to reach the public internet, then found HF credentials
+and reached HF. A Docker `--network internal` alone would not have caught
+this because Artifactory was in the same VPC. We enforce a second layer here:
+every outbound HTTP request from any of our tools passes through
+`assert_egress_allowed()` and dies if the destination isn't in
+`TargetScopeValidator`.
+
+Usage:
+    from core.security.egress_firewall import assert_egress_allowed
+    assert_egress_allowed(url)   # raises EgressBlocked if not allowed
+
+Docker helper (Phase 6.4):
+    render_docker_network_policy(target_hosts) -> shell snippet to create
+    an iptables-backed docker network that only reaches target IPs.
+"""
+from __future__ import annotations
+
+import logging
+import re
+import socket
+from typing import Iterable, List, Optional, Set
+from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
+
+
+class EgressBlocked(Exception):
+    """Raised when an outbound HTTP call would leave authorised scope."""
+
+
+# Loopback + link-local + RFC-1918 + carrier-grade NAT — never authoritative
+# even if scope somehow ends up empty. We ALLOW loopback (tools talk to their
+# own MCP servers) but NEVER let a request leave the box unless the target
+# is in the scope validator.
+_LOOPBACK_PREFIXES = ("127.", "0.", "::1", "localhost")
+
+
+def _is_loopback(host: str) -> bool:
+    h = (host or "").strip().lower().strip("[]")
+    return any(h.startswith(p) for p in _LOOPBACK_PREFIXES) or h in ("localhost",)
+
+
+def _extract_host(url_or_host: str) -> Optional[str]:
+    if not url_or_host:
+        return None
+    s = url_or_host.strip()
+    if "://" in s:
+        try:
+            return (urlparse(s).hostname or "").strip("[]").lower()
+        except Exception:
+            return None
+    # Bare host or host:port.
+    return s.split(":", 1)[0].strip("[]").lower()
+
+
+def assert_egress_allowed(url_or_host: str, purpose: str = "http") -> None:
+    """Fail-closed egress check. Raises `EgressBlocked` if:
+      - target has no host,
+      - target is neither loopback nor in TargetScopeValidator's scope.
+
+    Loopback is explicitly allowed so in-container helpers, MCP servers,
+    and preview_start dev-servers keep working.
+    """
+    host = _extract_host(url_or_host)
+    if not host:
+        raise EgressBlocked(f"egress denied: no host in {url_or_host!r}")
+    if _is_loopback(host):
+        return
+    try:
+        from core.security.authorization import TargetScopeValidator
+        scope = TargetScopeValidator.get()
+        if scope.is_authorized(host):
+            return
+    except Exception as e:
+        logger.error(f"[EgressFirewall] scope check failed: {e} — DENYING {host}")
+        raise EgressBlocked(f"egress denied ({purpose}): scope check failed for {host}")
+    logger.error(f"[EgressFirewall] BLOCKED egress to {host} (purpose={purpose})")
+    raise EgressBlocked(f"egress denied ({purpose}): {host} not in authorised scope")
+
+
+def resolve_target_ips(hosts: Iterable[str]) -> Set[str]:
+    """Return the union of every IP each host resolves to. Used to build the
+    iptables allowlist for the Docker network policy."""
+    ips: Set[str] = set()
+    for h in hosts or []:
+        h = (h or "").strip()
+        if not h:
+            continue
+        try:
+            for ai in socket.getaddrinfo(h, None):
+                ip = ai[4][0]
+                if ip and not ip.startswith("::"):
+                    ips.add(ip)
+        except Exception as e:
+            logger.debug(f"[EgressFirewall] resolve {h} failed: {e}")
+    return ips
+
+
+def render_docker_network_policy(target_hosts: List[str],
+                                 network_name: str = "antigravity_scan") -> str:
+    """Emit a shell snippet that, when run on the Docker host, creates a
+    custom network with an iptables egress policy that ONLY allows the
+    scan's authorised targets. Loopback + DNS + our internal Postgres /
+    Redis containers are always allowed.
+
+    Operator runs this once per scan on the host running docker.
+    """
+    ips = sorted(resolve_target_ips(target_hosts))
+    allowed = " ".join(sorted(set(ips + ["8.8.8.8", "1.1.1.1"])))  # DNS
+    hosts_joined = " ".join(target_hosts)
+    lines = [
+        f"# Phase 6.4 egress firewall for scan targets: {hosts_joined}",
+        f"# Resolved authorised IPs: {allowed}",
+        f"set -euo pipefail",
+        f"docker network rm {network_name} 2>/dev/null || true",
+        f"docker network create --driver bridge --subnet 172.31.0.0/24 \\",
+        f"    -o com.docker.network.bridge.name=br-antigrav-scan {network_name}",
+        f"# Default DROP for anything leaving br-antigrav-scan",
+        f"iptables -I DOCKER-USER 1 -i br-antigrav-scan -j DROP",
+        f"# Loopback + Docker-internal always OK",
+        f"iptables -I DOCKER-USER 1 -i br-antigrav-scan -d 127.0.0.0/8 -j RETURN",
+        f"iptables -I DOCKER-USER 1 -i br-antigrav-scan -d 172.16.0.0/12 -j RETURN",
+    ]
+    for ip in sorted(set(ips + ["8.8.8.8", "1.1.1.1"])):
+        lines.append(f"iptables -I DOCKER-USER 1 -i br-antigrav-scan -d {ip} -j RETURN")
+    lines.append(f"# Attach the Kali container to the restricted network:")
+    lines.append(f"#   docker network connect {network_name} kali-pentesting")
+    lines.append(f"#   docker network disconnect bridge kali-pentesting")
+    return "\n".join(lines) + "\n"
+
+
+def install_httpx_guard() -> None:
+    """Monkey-patch httpx.AsyncClient / httpx.Client to run every request
+    through `assert_egress_allowed`. Idempotent — safe to call at every
+    process start. Missing httpx = no-op."""
+    try:
+        import httpx
+    except Exception:
+        return
+    if getattr(httpx, "_antigravity_egress_guard_installed", False):
+        return
+    original_async_send = httpx.AsyncClient.send
+    original_sync_send = httpx.Client.send
+
+    async def _guarded_async_send(self, request, *args, **kwargs):
+        assert_egress_allowed(str(request.url), purpose="httpx.async")
+        return await original_async_send(self, request, *args, **kwargs)
+
+    def _guarded_sync_send(self, request, *args, **kwargs):
+        assert_egress_allowed(str(request.url), purpose="httpx.sync")
+        return original_sync_send(self, request, *args, **kwargs)
+
+    httpx.AsyncClient.send = _guarded_async_send
+    httpx.Client.send = _guarded_sync_send
+    httpx._antigravity_egress_guard_installed = True
+    logger.info("[EgressFirewall] httpx egress guard installed")
