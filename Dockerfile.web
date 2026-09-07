@@ -2,14 +2,21 @@
 # AntiGravity Web — API server + built frontend
 # ============================================================
 
-# Stage 1: Build the React frontend (pinned node major.minor)
-FROM node:22.11.0-alpine AS frontend
+# Stage 1: Build the React frontend (pinned node major.minor).
+# Use bookworm-slim (glibc) not Alpine — Vite 5+ / rolldown ships prebuilt
+# native bindings for linux-x64-gnu but the musl variant is often missing,
+# breaking builds inside Alpine.
+FROM node:22.11.0-bookworm-slim AS frontend
 
 WORKDIR /app
 COPY ui/web/package.json ui/web/package-lock.json* ./
-# `npm ci` uses the lockfile for reproducibility (`npm install` may resolve
-# fresh transitive versions). Fall back to install if no lockfile is present.
-RUN if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
+# Known npm bug (https://github.com/npm/cli/issues/4828): `npm ci` against a
+# lockfile generated on a different OS/arch omits platform-specific optional
+# deps (e.g. @rolldown/binding-linux-x64-gnu), then the build blows up
+# looking for the native binary. Force a fresh install that pulls ALL
+# optional deps for the current platform.
+RUN rm -f package-lock.json \
+    && npm install --include=optional --no-audit --no-fund
 COPY ui/web/ ./
 RUN npm run build
 
