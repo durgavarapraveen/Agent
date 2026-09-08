@@ -17,6 +17,14 @@ logger = logging.getLogger(__name__)
 MAX_CHUNK_CHARS = 1500
 CHUNK_OVERLAP = 200
 
+# Parent-child chunking (RAG upgrade #5).
+# Children are what we EMBED and SEARCH — small, so they match tight queries.
+# Parents are what we RETURN to the LLM — big, so it gets full context.
+CHILD_CHUNK_CHARS = 300
+CHILD_CHUNK_OVERLAP = 60
+PARENT_CHUNK_CHARS = 2000
+PARENT_CHUNK_OVERLAP = 200
+
 
 def chunk_text(text: str, max_chars: int = MAX_CHUNK_CHARS, overlap: int = CHUNK_OVERLAP) -> List[str]:
     """Split text into overlapping chunks at paragraph/sentence boundaries."""
@@ -38,6 +46,50 @@ def chunk_text(text: str, max_chars: int = MAX_CHUNK_CHARS, overlap: int = CHUNK
     if current.strip():
         chunks.append(current.strip())
     return chunks
+
+
+def _sub_split(text: str, size: int, overlap: int) -> List[str]:
+    """Sentence-aware character split for the child pass."""
+    if len(text) <= size:
+        return [text]
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    out, cur = [], ""
+    for s in sentences:
+        if not s:
+            continue
+        if len(cur) + len(s) + 1 > size and cur:
+            out.append(cur.strip())
+            tail = cur[-overlap:] if overlap else ""
+            cur = (tail + " " + s).strip()
+        else:
+            cur = (cur + " " + s).strip()
+    if cur.strip():
+        out.append(cur.strip())
+    return out
+
+
+def chunk_parent_child(text: str,
+                       parent_size: int = PARENT_CHUNK_CHARS,
+                       parent_overlap: int = PARENT_CHUNK_OVERLAP,
+                       child_size: int = CHILD_CHUNK_CHARS,
+                       child_overlap: int = CHILD_CHUNK_OVERLAP) -> List[Dict[str, Any]]:
+    """Split into parents (retrieval context) + children (search targets).
+
+    Returns a flat list of children; each carries its `parent_idx` and the
+    full `parent_content`. This matches the storage layout used by
+    `SecurityRAGPipeline._store_chunk`.
+    """
+    parents = chunk_text(text, max_chars=parent_size, overlap=parent_overlap)
+    out: List[Dict[str, Any]] = []
+    for pi, p in enumerate(parents):
+        for ci, c in enumerate(_sub_split(p, child_size, child_overlap)):
+            out.append({
+                "parent_idx": pi,
+                "child_idx": ci,
+                "parent_content": p,
+                "content": c,
+            })
+    return out
 
 
 def content_hash(text: str) -> str:

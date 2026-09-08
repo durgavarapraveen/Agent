@@ -229,35 +229,51 @@ class OSINTOrchestrator:
         }
         
         try:
-            # 1. Employee enumeration
-            logger.info("[OSINTOrchestrator] Phase 1: Employee Enumeration")
-            emp_result = await self.spawn_employee_enumeration_agent(domain, company_name)
-            phase_results['agents'].append(emp_result)
-            
-            # 2. GitHub scanning
-            logger.info("[OSINTOrchestrator] Phase 2: GitHub Scanning")
-            github_result = await self.spawn_github_scanning_agent(company_name)
-            phase_results['agents'].append(github_result)
-            
-            # 3. DNS intelligence
-            logger.info("[OSINTOrchestrator] Phase 3: DNS Intelligence")
-            dns_result = await self.spawn_dns_intelligence_agent(domain)
-            phase_results['agents'].append(dns_result)
-            
-            # 4. Subdomain enumeration
-            logger.info("[OSINTOrchestrator] Phase 4: Subdomain Enumeration")
-            subdomain_result = await self.spawn_subdomain_enumeration_agent(domain)
-            phase_results['agents'].append(subdomain_result)
-            
-            # 5. Threat intelligence correlation
-            logger.info("[OSINTOrchestrator] Phase 5: Threat Intelligence")
+            # Parallel: employee enum, GitHub scan, DNS intel, subdomain enum
+            # all query independent data sources — run concurrently. Threat
+            # intel needs the results of subdomain/domain discovery so it goes
+            # after in a second wave.
+            import asyncio as _asyncio
+            from core.orchestration.parallel_agents import AgentTracker
+            scan_id = getattr(self.ctx, "scan_id", None) or getattr(self.ctx, "_scan_id", "")
+
+            async def _tracked(name: str, coro):
+                t = AgentTracker(scan_id, agent_id=f"osint:{name}",
+                                  label=f"OSINT: {name}", phase="osint", target=domain)
+                t.start(current_step=name)
+                try:
+                    r = await coro
+                    t.finish(status="completed")
+                    return r
+                except Exception as e:
+                    t.finish(status="failed", error=str(e))
+                    raise
+
+            logger.info("[OSINTOrchestrator] Wave 1: employee_enum, github_scan, dns_intel, subdomain_enum (parallel)")
+            wave1 = await _asyncio.gather(
+                _tracked("employee_enum", self.spawn_employee_enumeration_agent(domain, company_name)),
+                _tracked("github_scan",   self.spawn_github_scanning_agent(company_name)),
+                _tracked("dns_intel",     self.spawn_dns_intelligence_agent(domain)),
+                _tracked("subdomain_enum", self.spawn_subdomain_enumeration_agent(domain)),
+                return_exceptions=True,
+            )
+            for r in wave1:
+                if isinstance(r, dict):
+                    phase_results['agents'].append(r)
+
+            # Wave 2: threat intel — consumes the discovered assets above.
+            logger.info("[OSINTOrchestrator] Wave 2: threat_intel (uses wave-1 output)")
             discovered = {
                 'ips': self.ctx.get('discovered_ips', []),
                 'domains': self.ctx.get('discovered_domains', [])
             }
-            threat_result = await self.spawn_threat_intelligence_agent(discovered)
-            phase_results['agents'].append(threat_result)
-            
+            try:
+                threat_result = await _tracked("threat_intel",
+                                                 self.spawn_threat_intelligence_agent(discovered))
+                phase_results['agents'].append(threat_result)
+            except Exception:
+                pass
+
             logger.info(f"[OSINTOrchestrator] OSINT reconnaissance complete: {len(phase_results['agents'])} agents")
             
         except Exception as e:

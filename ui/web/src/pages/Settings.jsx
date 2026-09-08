@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { api } from "../api";
+import { api, getApiKey, setApiKey, clearApiKey } from "../api";
 
 export default function Settings() {
   const [saved, setSaved] = useState(false);
@@ -10,6 +10,11 @@ export default function Settings() {
     try { return JSON.parse(localStorage.getItem("ag_defaults") || "{}"); }
     catch { return {}; }
   });
+
+  // API key management. Masked for display; explicit "reveal" via button.
+  const [apiKeyDraft, setApiKeyDraft] = useState(() => getApiKey());
+  const [revealKey, setRevealKey] = useState(false);
+  const [keySavedMsg, setKeySavedMsg] = useState("");
 
   const update = (key, val) => {
     setDefaults(prev => {
@@ -68,11 +73,11 @@ export default function Settings() {
 
       <div className="card">
         <h3>API Connection</h3>
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 13 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, fontSize: 13 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{ color: "var(--text-dim)", fontWeight: 600, minWidth: 100 }}>Endpoint</span>
             <code style={{ fontFamily: "var(--mono)", color: "var(--accent)", fontSize: 12, padding: "4px 10px", background: "var(--bg)", borderRadius: "var(--radius-sm)" }}>
-              http://localhost:8900/api
+              {window.__ANTIGRAVITY_API__ || `${window.location.origin}`}
             </code>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -81,6 +86,67 @@ export default function Settings() {
               <span style={{ width: 8, height: 8, borderRadius: "50%", background: apiStatus === "connected" ? "var(--green)" : apiStatus === "error" ? "var(--red)" : "var(--text-dim)", display: "inline-block" }} />
               {apiStatus === "connected" ? "Connected" : apiStatus === "error" ? "Disconnected" : "Checking..."}
             </span>
+          </div>
+          {/* ── API key management ───────────────────────────────────── */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ color: "var(--text-dim)", fontWeight: 600, minWidth: 100 }}>API Key</span>
+            <input
+              type={revealKey ? "text" : "password"}
+              value={apiKeyDraft}
+              onChange={(e) => { setApiKeyDraft(e.target.value); setKeySavedMsg(""); }}
+              placeholder="Paste the key printed at the API's first boot"
+              style={{
+                fontFamily: "var(--mono)", fontSize: 12,
+                padding: "6px 10px", borderRadius: "var(--radius-sm)",
+                border: "1px solid var(--border)", background: "var(--bg)",
+                color: "var(--text-h)", minWidth: 320, flex: 1,
+              }}
+            />
+            <button
+              className="btn"
+              onClick={() => setRevealKey(v => !v)}
+              style={{ fontSize: 12 }}
+              title={revealKey ? "Hide" : "Show"}
+            >
+              {revealKey ? "Hide" : "Show"}
+            </button>
+            <button
+              className="btn btn-primary"
+              disabled={apiKeyDraft === getApiKey()}
+              onClick={() => {
+                setApiKey(apiKeyDraft.trim());
+                setKeySavedMsg("Saved. Reloading validators…");
+                // Trigger a lightweight probe so we surface success or 401.
+                api.getScans()
+                  .then(() => { setApiStatus("connected"); setKeySavedMsg("Saved. API responded ok."); })
+                  .catch(() => { setApiStatus("error"); setKeySavedMsg("Saved, but the API rejected it."); });
+              }}
+              style={{ fontSize: 12 }}
+            >
+              Save Key
+            </button>
+            <button
+              className="btn"
+              disabled={!apiKeyDraft}
+              onClick={() => {
+                clearApiKey();
+                setApiKeyDraft("");
+                setKeySavedMsg("Cleared.");
+              }}
+              style={{ fontSize: 12 }}
+            >
+              Clear
+            </button>
+          </div>
+          {keySavedMsg && (
+            <div style={{ marginLeft: 108, color: "var(--text-dim)", fontSize: 12 }}>
+              {keySavedMsg}
+            </div>
+          )}
+          <div style={{ marginLeft: 108, color: "var(--text-dim)", fontSize: 11, lineHeight: 1.6 }}>
+            The API prints an auto-generated dev key at first boot in the log. In production, set
+            <code style={{ margin: "0 4px", fontFamily: "var(--mono)" }}>API_KEY</code>
+            in the environment and paste it here.
           </div>
         </div>
       </div>

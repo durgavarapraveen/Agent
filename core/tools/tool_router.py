@@ -84,71 +84,109 @@ class ToolRouter:
                 target = invocation.params.get("target", invocation.target)
                 tname = best_tool.name
                 if target:
+                    # Validate + escape target/domain before interpolating into
+                    # shell commands executed inside the Kali container. Previously
+                    # `target` was interpolated raw via f-strings; a target string
+                    # containing shell metacharacters (`;`, `` ` ``, `$()`, `|`)
+                    # would achieve command injection.
+                    import shlex, re as _re_router
+
+                    def _valid_url(s: str) -> bool:
+                        return bool(_re_router.match(
+                            r'^https?://[A-Za-z0-9\.\-_:]+(?::\d+)?(?:/[A-Za-z0-9\-._~:/?#\[\]@!$&\'()*+,;=%]*)?$',
+                            s))
+
+                    def _valid_host(s: str) -> bool:
+                        return bool(_re_router.match(
+                            r'^[A-Za-z0-9]([A-Za-z0-9\-\.]{0,253}[A-Za-z0-9])?$', s))
+
                     # Strip http(s):// for tools that expect domain names
                     domain = target.replace("https://", "").replace("http://", "").split("/")[0]
                     # Also derive a base domain for tools that fail on subdomains or just need the root
                     base_domain = domain[4:] if domain.startswith("www.") else domain
+
+                    # Refuse to build the command if either form fails validation.
+                    if not (_valid_url(target) or _valid_host(target)) or not _valid_host(domain):
+                        from core.common.schemas import (
+                            ToolResult as _STR, ToolExecutionStatus as _TES,
+                            ErrorInfo as _EI, ErrorType as _ET,
+                        )
+                        return _STR(
+                            tool=tname,
+                            capability=invocation.operation or "unknown",
+                            status=_TES.FAILED,
+                            target=target,
+                            error=_EI(
+                                error_type=_ET.TOOL_UNAVAILABLE,
+                                message=f"Target failed validation (potential injection): {target!r}",
+                                tool=tname,
+                            ),
+                        )
+
+                    # shlex-quote every substituted value.
+                    t = shlex.quote(target)
+                    d = shlex.quote(domain)
+                    bd = shlex.quote(base_domain)
                     if tname == "subfinder":
-                        invocation.params["command"] = f"subfinder -d {base_domain} -silent"
+                        invocation.params["command"] = f"subfinder -d {bd} -silent"
                     elif tname == "assetfinder":
-                        invocation.params["command"] = f"assetfinder --subs-only {base_domain}"
+                        invocation.params["command"] = f"assetfinder --subs-only {bd}"
                     elif tname == "dnsenum":
-                        invocation.params["command"] = f"dnsenum {base_domain}"
+                        invocation.params["command"] = f"dnsenum {bd}"
                     elif tname == "fierce":
-                        invocation.params["command"] = f"fierce --domain {base_domain}"
+                        invocation.params["command"] = f"fierce --domain {bd}"
                     elif tname == "httpx":
-                        invocation.params["command"] = f"httpx-toolkit -u {target} -silent -title -tech-detect -status-code"
+                        invocation.params["command"] = f"httpx-toolkit -u {t} -silent -title -tech-detect -status-code"
                     elif tname == "nuclei":
                         invocation.params["command"] = (
-                            f"nuclei -u {target} "
+                            f"nuclei -u {t} "
                             f"-tags cve,misconfig,exposure,tech,default-login,takeover "
                             f"-severity info,low,medium,high,critical -jsonl -silent"
                         )
                     elif tname == "nmap":
                         ea = invocation.params.get("extra_args", "") or ""
                         use_fast = "-F" if "-p" not in ea and "--top-ports" not in ea else ""
-                        invocation.params["command"] = f"nmap -sT -sV {use_fast} --unprivileged {domain}".replace("  ", " ")
+                        invocation.params["command"] = f"nmap -sT -sV {use_fast} --unprivileged {d}".replace("  ", " ")
                     elif tname == "masscan":
-                        invocation.params["command"] = f"masscan {domain} -p1-1000 --rate=1000"
+                        invocation.params["command"] = f"masscan {d} -p1-1000 --rate=1000"
                     elif tname == "whatweb":
-                        invocation.params["command"] = f"whatweb {target}"
+                        invocation.params["command"] = f"whatweb {t}"
                     elif tname == "nikto":
-                        invocation.params["command"] = f"nikto -h {target}"
+                        invocation.params["command"] = f"nikto -h {t}"
                     elif tname == "wafw00f":
-                        invocation.params["command"] = f"wafw00f {target}"
+                        invocation.params["command"] = f"wafw00f {t}"
                     elif tname == "sqlmap":
-                        invocation.params["command"] = f"sqlmap -u {target} --batch"
+                        invocation.params["command"] = f"sqlmap -u {t} --batch"
                     elif tname == "katana":
-                        invocation.params["command"] = f"katana -u {target} -d 2 -silent"
+                        invocation.params["command"] = f"katana -u {t} -d 2 -silent"
                     elif tname == "ffuf":
-                        invocation.params["command"] = f"ffuf -u {target}/FUZZ -w /usr/share/wordlists/dirb/common.txt -mc 200,301,302,403"
+                        # FUZZ marker appended after the escaped target
+                        invocation.params["command"] = f"ffuf -u {t}/FUZZ -w /usr/share/wordlists/dirb/common.txt -mc 200,301,302,403"
                     elif tname in ("dirb", "dirsearch", "feroxbuster", "gobuster"):
                         if tname == "gobuster":
-                            invocation.params["command"] = f"gobuster dir -u {target} -w /usr/share/wordlists/dirb/common.txt -q"
+                            invocation.params["command"] = f"gobuster dir -u {t} -w /usr/share/wordlists/dirb/common.txt -q"
                         elif tname == "feroxbuster":
-                            invocation.params["command"] = f"feroxbuster -u {target} -w /usr/share/wordlists/dirb/common.txt -q"
+                            invocation.params["command"] = f"feroxbuster -u {t} -w /usr/share/wordlists/dirb/common.txt -q"
                         else:
-                            invocation.params["command"] = f"{tname} -u {target}"
+                            invocation.params["command"] = f"{tname} -u {t}"
                     elif tname == "dig":
-                        invocation.params["command"] = f"dig {base_domain}"
+                        invocation.params["command"] = f"dig {bd}"
                     elif tname == "whois":
-                        invocation.params["command"] = f"whois {domain}"
+                        invocation.params["command"] = f"whois {d}"
                     elif tname == "sslscan":
-                        invocation.params["command"] = f"sslscan --no-colour {domain}"
+                        invocation.params["command"] = f"sslscan --no-colour {d}"
                     elif tname == "sslyze":
-                        invocation.params["command"] = f"sslyze {domain}"
+                        invocation.params["command"] = f"sslyze {d}"
                     elif tname == "theharvester":
-                        invocation.params["command"] = f"theHarvester -d {base_domain} -b all -l 100"
+                        invocation.params["command"] = f"theHarvester -d {bd} -b all -l 100"
                     elif tname == "wpscan":
-                        invocation.params["command"] = f"wpscan --url {target} --enumerate vp,vt --no-banner"
+                        invocation.params["command"] = f"wpscan --url {t} --enumerate vp,vt --no-banner"
                     elif tname == "dalfox":
-                        invocation.params["command"] = f"dalfox url {target} --silence --no-color --skip-bav"
-                    elif tname == "nikto":
-                        invocation.params["command"] = f"nikto -h {target} -Tuning 1234567890abc -maxtime 600s -nointeractive"
+                        invocation.params["command"] = f"dalfox url {t} --silence --no-color --skip-bav"
                     elif tname == "arjun":
-                        invocation.params["command"] = f"arjun -u {target} --stable"
+                        invocation.params["command"] = f"arjun -u {t} --stable"
                     else:
-                        invocation.params["command"] = f"{tname} {target}"
+                        invocation.params["command"] = f"{tname} {t}"
                     logger.info(f"Auto-constructed command for {tname}: {invocation.params['command']}")
 
             # If it's a PythonHTTPTool and no url is provided, set url from target
@@ -190,11 +228,19 @@ class ToolRouter:
 
             # Append extra_args to command for KaliTool — only safe flags and their values
             if extra_args and "command" in invocation.params and best_tool.__class__.__name__ == "KaliTool":
-                # Strip shell operators — pipe, semicolons, backticks, subshells
                 import re as _re
-                clean_args = _re.split(r'[|;&`$()]', extra_args)[0].strip()
-                if clean_args != extra_args.strip():
-                    logger.info(f"Stripped shell operators from extra_args: {extra_args[:80]}")
+                # REJECT — don't silently accept the prefix — when extra_args
+                # contains shell metacharacters. The previous "keep the first
+                # segment before the first `|;&\`$()`" behavior silently
+                # discarded the tail, which could still be attacker-influenced
+                # by an LLM that split its exploit across shell operators.
+                if _re.search(r'[|;&`$()]', extra_args):
+                    logger.warning(
+                        "Rejecting extra_args containing shell operators: %r",
+                        extra_args[:80],
+                    )
+                    extra_args = ""
+                clean_args = extra_args.strip()
                 # Strip ALL quotes from extra_args — quoted values from LLM break
                 # when split on spaces; the underlying tools don't need them
                 clean_args = clean_args.replace('"', '').replace("'", '')
@@ -207,6 +253,54 @@ class ToolRouter:
                 ]
                 for pat in _BAD_FLAG_PATTERNS:
                     clean_args = _re.sub(pat, '', clean_args).strip()
+
+                # Per-tool bad-flag stripping — LLMs mix up ffuf/feroxbuster/etc
+                # syntax. Strip flags the tool does NOT support so it still runs
+                # instead of failing rc=2.
+                base_cmd_l = invocation.params.get("command", "").split()
+                base_bin = (base_cmd_l[0] if base_cmd_l else "").lower()
+                _PER_TOOL_STRIP = {
+                    # feroxbuster uses -s "200 301" (space-sep), NOT ffuf's -mc "200,301"
+                    "feroxbuster": [
+                        r'-mc\s+[^\s]+',           # ffuf flag
+                        r'-fs\s+[^\s]+',           # ffuf flag
+                        r'-fw\s+[^\s]+',           # ffuf flag
+                        r'-o\s+/dev/stdout',       # duplicate output redirection
+                        r'-x\s+php,json,bak,txt,html',  # comma-list rejected; use -x per ext
+                    ],
+                    # wafw00f only accepts -v (verbose); -silent/-s/-o etc all invalid
+                    "wafw00f": [
+                        r'-silent\b',
+                        r'-s\b(?!\S)',             # bare -s (short for something else)
+                        r'-o\s+[^\s]+',
+                        r'--silent\b',
+                    ],
+                    # gobuster dir: -q and --no-error are valid but LLM sometimes adds -mc
+                    "gobuster": [
+                        r'-mc\s+[^\s]+',
+                        r'-fs\s+[^\s]+',
+                    ],
+                    # dirsearch: -silent invalid; only -q
+                    "dirsearch": [
+                        r'-silent\b',
+                        r'--silent\b',
+                    ],
+                    # whatweb: -mc/-fs are ffuf-only
+                    "whatweb": [
+                        r'-mc\s+[^\s]+',
+                        r'-fs\s+[^\s]+',
+                    ],
+                }
+                for bin_name, patterns in _PER_TOOL_STRIP.items():
+                    if base_bin.endswith(bin_name) or base_bin == bin_name:
+                        for pat in patterns:
+                            new_args = _re.sub(pat, '', clean_args).strip()
+                            if new_args != clean_args:
+                                logger.info(f"Stripped invalid {bin_name} flag matching {pat!r}")
+                                clean_args = new_args
+                        # collapse double spaces
+                        clean_args = _re.sub(r'\s+', ' ', clean_args).strip()
+                        break
 
                 # Validate --top-ports value is a positive integer
                 top_ports_match = _re.search(r'--top-ports\s+(\S+)', clean_args)
@@ -395,6 +489,20 @@ class ToolRouter:
             "github_scanning": ["http_request"],
             "dns_intelligence": ["dig", "whois", "dnsenum", "dns_lookup"],
             "threat_intelligence": ["http_request"],
+            # P2-8: structured HTTP operations. The LLM asks for a capability
+            # (e.g. `api_route_extraction`) and the router picks the
+            # matching adapter from core/tools/http_ops_tools.py.
+            "http_fetch":           ["http_fetch", "http_request", "httpx", "curl"],
+            "http_get":             ["http_fetch"],
+            "http_post":            ["http_fetch"],
+            "link_extraction":      ["extract_links"],
+            "api_route_extraction": ["extract_api_routes"],
+            "file_link_extraction": ["extract_file_links"],
+            "regex_extraction":     ["extract_regex"],
+            "html_parsing":         ["parse_html"],
+            "json_parsing":         ["parse_json"],
+            "response_diff":        ["compare_responses"],
+            "header_extraction":    ["extract_headers"],
         }
         
         tool_ids = op_map.get(operation, [])

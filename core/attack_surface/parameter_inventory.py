@@ -25,8 +25,10 @@ class ParameterInventory:
                 self.by_type[p_type] = []
             self.by_type[p_type].append(param)
             
-            logger.info(f"PARAMETER_MODEL_CREATED endpoint_id={endpoint_id} parameter={param.name} param_type={p_type}")
-            print(f"PARAMETER_MODEL_CREATED endpoint_id={endpoint_id} parameter={param.name} param_type={p_type}")
+            logger.info(
+                "PARAMETER_MODEL_CREATED endpoint_id=%s parameter=%s param_type=%s",
+                endpoint_id, param.name, p_type,
+            )
             
     def get_parameters_for_endpoint(self, endpoint_id: str) -> List[Parameter]:
         return self.by_endpoint.get(endpoint_id, [])

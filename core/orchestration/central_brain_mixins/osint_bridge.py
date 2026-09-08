@@ -7,13 +7,16 @@ the OSINT context dict the recon builder + reporting layer read.
 from __future__ import annotations
 import json
 import logging
+import re
 from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
 
 class OsintBridgeMixin:
+    @staticmethod
     def _mask_secret(val: str) -> str:
+        """Redact a secret for logs. Static because it takes no self."""
         s = str(val or "")
         if len(s) <= 4:
             return "•" * len(s)

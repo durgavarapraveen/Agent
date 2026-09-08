@@ -305,7 +305,7 @@ function PortsSection({ ports }) {
 }
 
 /* ── OSINT Section ───────────────────────────────────────────────────────── */
-function OsintSection({ osint }) {
+export function OsintSection({ osint }) {
   const [osintTab, setOsintTab] = useState("people");
   if (!osint || typeof osint !== "object") return <EmptyState message="No OSINT data collected" />;
 
@@ -319,6 +319,9 @@ function OsintSection({ osint }) {
   ];
   if (osint.other?.github_profiles?.length) tabs.push({ key: "github", label: "GitHub", count: osint.other.github_profiles.length });
   if (osint.cloud_buckets?.length) tabs.push({ key: "buckets", label: "Cloud Buckets", count: osint.cloud_buckets.length });
+  if (osint.other?.interesting_urls?.length) tabs.push({ key: "urls", label: "Interesting URLs", count: osint.other.interesting_urls.length });
+  if (osint.domain_intelligence?.asns?.length) tabs.push({ key: "asns", label: "ASNs", count: osint.domain_intelligence.asns.length });
+  if (osint.other?.linkedin_links?.length) tabs.push({ key: "linkedin", label: "LinkedIn", count: osint.other.linkedin_links.length });
 
   return (
     <>
@@ -415,6 +418,35 @@ function OsintSection({ osint }) {
           ]}
           rows={osint.cloud_buckets}
         />
+      )}
+
+      {osintTab === "urls" && osint.other?.interesting_urls?.length > 0 && (
+        <div style={{ maxHeight: 500, overflowY: "auto" }}>
+          {osint.other.interesting_urls.map((u, i) => (
+            <div key={i} style={{ padding: "8px 12px", fontSize: 12, fontFamily: "var(--mono)", borderBottom: "1px solid var(--border)", wordBreak: "break-all" }}>
+              <a href={u} target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>{u}</a>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {osintTab === "asns" && osint.domain_intelligence?.asns?.length > 0 && (
+        <DataTable
+          columns={[
+            { key: "asn", label: "ASN", tdStyle: { fontFamily: "var(--mono)", fontWeight: 600, color: "var(--accent)" }, render: (a) => typeof a === "string" ? a : JSON.stringify(a) },
+          ]}
+          rows={osint.domain_intelligence.asns}
+        />
+      )}
+
+      {osintTab === "linkedin" && osint.other?.linkedin_links?.length > 0 && (
+        <div style={{ maxHeight: 500, overflowY: "auto" }}>
+          {osint.other.linkedin_links.map((l, i) => (
+            <div key={i} style={{ padding: "8px 12px", fontSize: 12, fontFamily: "var(--mono)", borderBottom: "1px solid var(--border)", wordBreak: "break-all" }}>
+              <a href={l} target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>{l}</a>
+            </div>
+          ))}
+        </div>
       )}
     </>
   );

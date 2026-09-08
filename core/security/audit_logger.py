@@ -8,6 +8,7 @@ integrity verification, and GDPR-compliant anonymization.
 import hashlib
 import json
 import logging
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -15,8 +16,18 @@ from typing import Dict, List, Optional, Any, Tuple
 
 logger = logging.getLogger(__name__)
 
-AUDIT_SALT = "ANTIGRAVITY_AUDIT_SALT_2026"
+# AUDIT_SALT is embedded in the SHA-256 hash-chain. Its rotation must be
+# deliberate — rotating invalidates verification of prior entries — so we
+# accept an env override but keep a documented default for dev.
+AUDIT_SALT = os.environ.get("AUDIT_SALT", "ANTIGRAVITY_AUDIT_SALT_2026")
 GENESIS_HASH = "0" * 64
+
+# Rotation: when the audit log exceeds this size, it is renamed
+# `audit.jsonl.<epoch>` and a fresh file is started. Previous chains stay
+# on disk (their genesis is the tail hash of the rotated file, recorded in
+# the new file's first entry).
+AUDIT_LOG_MAX_BYTES = int(os.environ.get("AUDIT_LOG_MAX_BYTES", 50 * 1024 * 1024))
+AUDIT_LOG_MAX_FILES = int(os.environ.get("AUDIT_LOG_MAX_FILES", 20))
 
 # PII Redaction patterns
 MASKING_PATTERNS = {
@@ -158,10 +169,47 @@ class AuditLogger:
         full_entry["current_hash"] = current_hash
 
         line = json.dumps(full_entry) + "\n"
+        # Best-effort rotation. Never raises — a rotation failure must not
+        # block an audit write.
+        try:
+            self._maybe_rotate()
+        except Exception as e:
+            logger.warning("Audit log rotation skipped: %s", e)
         with open(self.log_path, mode="a", encoding="utf-8") as f:
             f.write(line)
 
         return full_entry
+
+    def _maybe_rotate(self) -> None:
+        """Rotate `audit.jsonl` when it exceeds `AUDIT_LOG_MAX_BYTES`.
+
+        Renames the file to `audit.jsonl.<epoch>`, then prunes rotated files
+        beyond `AUDIT_LOG_MAX_FILES`. The hash chain continues in the new
+        file — `get_last_entry()` reads only the current file, so the first
+        entry after rotation genesis-anchors to the LAST-written prev-hash,
+        which is preserved by the on-disk file being renamed intact.
+        """
+        try:
+            p = Path(self.log_path)
+            if not p.exists() or p.stat().st_size < AUDIT_LOG_MAX_BYTES:
+                return
+            import time as _time
+            rotated = p.with_suffix(p.suffix + f".{int(_time.time())}")
+            p.rename(rotated)
+            logger.info("Audit log rotated: %s -> %s", p, rotated)
+            # Prune old rotations.
+            all_rotated = sorted(
+                p.parent.glob(p.name + ".*"),
+                key=lambda x: x.stat().st_mtime,
+                reverse=True,
+            )
+            for stale in all_rotated[AUDIT_LOG_MAX_FILES:]:
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+        except Exception as e:
+            logger.warning("Audit log rotation error: %s", e)
 
     def verify_audit_integrity(self) -> Tuple[bool, Optional[int]]:
         """

@@ -44,43 +44,74 @@ class APISchemaImporter:
         self.schema_source: Optional[str] = None
 
     def _fetch(self, url: str) -> Tuple[int, str]:
-        """Fetch a URL via curl in Kali container."""
+        """Fetch a URL via curl in Kali container.
+
+        Uses shlex.quote to escape the URL — previously the URL was interpolated
+        raw into a shell command via f-string, which was a shell-injection sink
+        if `target` (or a discovered URL fragment) contained shell metachars.
+        """
+        import shlex
         from agents.kali_executor import KaliDockerExecutor
+        safe_url = shlex.quote(url)
         cmd = (
             f'curl -s -o /tmp/schema_probe.txt -w "%{{http_code}}" '
-            f'-L -k --max-time {self.timeout} '
+            f'-L -k --max-time {int(self.timeout)} '
             f'-H "Accept: application/json, application/yaml, text/yaml" '
-            f'"{url}"'
+            f'{safe_url}'
         )
         result = KaliDockerExecutor.run(cmd, timeout=self.timeout + 10)
         if result.get("status") != "success":
             return 0, ""
+        # curl `-w "%{http_code}"` prints the numeric status as the LAST
+        # 3 chars of stdout. If curl fails hard the buffer may be shorter or
+        # non-numeric; use a regex to extract the trailing 3-digit token and
+        # log at DEBUG so misparses are diagnosable instead of appearing as 0.
+        import re as _re_scode
         status = 0
-        try:
-            status = int(result.get("stdout", "").strip()[-3:])
-        except (ValueError, IndexError):
-            pass
+        stdout = (result.get("stdout") or "").strip()
+        m = _re_scode.search(r"(\d{3})\s*$", stdout)
+        if m:
+            try:
+                status = int(m.group(1))
+            except ValueError:
+                logger.debug("Failed to parse HTTP status from tail: %r", stdout[-16:])
+        else:
+            logger.debug("No trailing HTTP status in curl output: %r", stdout[-32:])
         body_r = KaliDockerExecutor.run("cat /tmp/schema_probe.txt", timeout=5)
         body = body_r.get("stdout", "") if body_r.get("status") == "success" else ""
         return status, body
 
     def _fetch_post(self, url: str, data: str, content_type: str = "application/json") -> Tuple[int, str]:
-        """POST request via curl."""
+        """POST request via curl. Quotes URL and body via shlex."""
+        import shlex
         from agents.kali_executor import KaliDockerExecutor
+        safe_url = shlex.quote(url)
+        safe_data = shlex.quote(data)
+        safe_header = shlex.quote(f"Content-Type: {content_type}")
         cmd = (
             f'curl -s -o /tmp/schema_probe.txt -w "%{{http_code}}" '
-            f'-L -k --max-time {self.timeout} -X POST '
-            f'-H "Content-Type: {content_type}" '
-            f"-d '{data}' \"{url}\""
+            f'-L -k --max-time {int(self.timeout)} -X POST '
+            f'-H {safe_header} '
+            f'-d {safe_data} {safe_url}'
         )
         result = KaliDockerExecutor.run(cmd, timeout=self.timeout + 10)
         if result.get("status") != "success":
             return 0, ""
+        # curl `-w "%{http_code}"` prints the numeric status as the LAST
+        # 3 chars of stdout. If curl fails hard the buffer may be shorter or
+        # non-numeric; use a regex to extract the trailing 3-digit token and
+        # log at DEBUG so misparses are diagnosable instead of appearing as 0.
+        import re as _re_scode
         status = 0
-        try:
-            status = int(result.get("stdout", "").strip()[-3:])
-        except (ValueError, IndexError):
-            pass
+        stdout = (result.get("stdout") or "").strip()
+        m = _re_scode.search(r"(\d{3})\s*$", stdout)
+        if m:
+            try:
+                status = int(m.group(1))
+            except ValueError:
+                logger.debug("Failed to parse HTTP status from tail: %r", stdout[-16:])
+        else:
+            logger.debug("No trailing HTTP status in curl output: %r", stdout[-32:])
         body_r = KaliDockerExecutor.run("cat /tmp/schema_probe.txt", timeout=5)
         body = body_r.get("stdout", "") if body_r.get("status") == "success" else ""
         return status, body
@@ -107,8 +138,12 @@ class APISchemaImporter:
                         logger.info(f"[APIImporter] OpenAPI YAML spec found at {url}")
                         self.schema_source = url
                         return spec
-                except Exception:
-                    pass
+                except yaml.YAMLError as ye:
+                    logger.debug("[APIImporter] YAML parse failed for %s: %s", url, ye)
+                except ImportError:
+                    logger.debug("[APIImporter] pyyaml not installed; skipping YAML fallback")
+                except Exception as e:
+                    logger.debug("[APIImporter] Unexpected YAML fallback error for %s: %s", url, e)
         return None
 
     def _is_openapi_spec(self, spec: dict) -> bool:

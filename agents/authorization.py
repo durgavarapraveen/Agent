@@ -81,16 +81,21 @@ class AuthorizationManager:
             self._log_denied(domain, vuln_type, tier, "Tier exceeds authorization")
             return False
 
-        # 3. Manual approval for high-impact
+        # 3. Manual approval for high-impact.
+        #
+        # Previously this used a blocking sync `input()` inside async paths,
+        # which deadlocks non-TTY / server / container deployments. Route
+        # DEEP-tier approvals through EscalationGate, which supports webhook
+        # + queue-file + optional interactive TTY paths. Environment override:
+        # `AUTO_APPROVE_EXPLOITS=1` skips the gate (legacy behavior, dangerous —
+        # only intended for CI/dry-run pipelines).
         if require_approval and tier == ExploitTier.DEEP:
-            user_input = input(f"\n⚠️  DEEP EXPLOITATION REQUIRED\n"
-                               f"Domain: {domain}\n"
-                               f"Vuln: {vuln_type}\n"
-                               f"Payload: {payload[:100]}...\n"
-                               f"\nType 'AUTHORIZE' to proceed: ").strip()
-            if user_input != "AUTHORIZE":
-                self._log_denied(domain, vuln_type, tier, "User rejected")
-                return False
+            import os
+            if os.getenv("AUTO_APPROVE_EXPLOITS", "").strip() != "1":
+                approved = self._request_deep_approval(domain, vuln_type, payload)
+                if not approved:
+                    self._log_denied(domain, vuln_type, tier, "Approval denied or timed out")
+                    return False
 
         # 4. Log approval
         self._log_approved(domain, vuln_type, tier, payload)
@@ -122,6 +127,49 @@ class AuthorizationManager:
         }
         self._write_audit_log(entry)
         logger.warning(f"✗ Exploit DENIED: {domain} / {reason}")
+
+    def _request_deep_approval(self, domain: str, vuln_type: str, payload: str) -> bool:
+        """Route a DEEP-tier approval through EscalationGate.
+
+        Handles both async and sync callers via `asyncio.run` when no loop is
+        active. Returns True on approval, False on deny/timeout/error. Never
+        blocks an async event loop.
+        """
+        import asyncio as _aio
+        try:
+            from core.escalation.escalation_gate import get_escalation_gate, RiskLevel
+        except Exception as e:
+            logger.error("EscalationGate unavailable; refusing DEEP action (%s)", e)
+            return False
+
+        gate = get_escalation_gate()
+        details = {"domain": domain, "vuln_type": vuln_type, "payload_preview": payload[:200]}
+
+        async def _do_request():
+            decision = await gate.request_approval(
+                action=f"deep_exploit:{vuln_type}",
+                risk_level=RiskLevel.HIGH,
+                details=details,
+                target=domain,
+            )
+            return getattr(decision, "status", "denied") == "approved"
+
+        # If a loop is running, schedule concurrently; otherwise run one.
+        try:
+            _aio.get_running_loop()
+        except RuntimeError:
+            try:
+                return _aio.run(_do_request())
+            except Exception as e:
+                logger.error("Deep-approval request failed: %s", e)
+                return False
+        # Loop is running: block via future
+        try:
+            fut = _aio.run_coroutine_threadsafe(_do_request(), _aio.get_running_loop())
+            return bool(fut.result(timeout=getattr(gate, "timeout_seconds", 300)))
+        except Exception as e:
+            logger.error("Deep-approval request failed inside loop: %s", e)
+            return False
 
     def log_exploit_execution(self, domain: str, vuln_id: str, payload: str, result: Dict):
         """Log actual exploit execution"""

@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink } from "react-router-dom";
 import Dashboard from "./pages/Dashboard";
 import Targets from "./pages/Targets";
@@ -10,6 +11,8 @@ import Compare from "./pages/Compare";
 import Settings from "./pages/Settings";
 import Analytics from "./pages/Analytics";
 import KnowledgeBase from "./pages/KnowledgeBase";
+import SourceIpBadge from "./components/SourceIpBadge";
+import { getApiKey } from "./api";
 
 const DashIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -65,10 +68,56 @@ const SettingsIcon = () => (
   </svg>
 );
 
+function AuthBanner() {
+  const [status, setStatus] = useState(null);
+
+  useEffect(() => {
+    function handler(e) {
+      const d = e.detail || {};
+      // If we have no key at all → guide the operator to Settings.
+      // If we have a key but it was rejected → session invalid.
+      setStatus(d.hasKey ? "invalid" : "missing");
+    }
+    window.addEventListener("ag:unauthorized", handler);
+    return () => window.removeEventListener("ag:unauthorized", handler);
+  }, []);
+
+  if (!status) return null;
+  const msg = status === "missing"
+    ? "API key required. Open Settings and paste the key printed at the API's first boot."
+    : "API key rejected by the server. It may have rotated. Open Settings to update.";
+
+  return (
+    <div style={{
+      position: "fixed", top: 0, left: 240, right: 0,
+      background: "#ff9800", color: "#000",
+      padding: "10px 16px", zIndex: 1000,
+      fontSize: 13, fontWeight: 500,
+    }}>
+      {msg}
+      <button
+        onClick={() => setStatus(null)}
+        style={{ float: "right", background: "transparent", border: "1px solid #000",
+                 color: "#000", padding: "2px 8px", cursor: "pointer", borderRadius: 3 }}
+      >
+        Dismiss
+      </button>
+    </div>
+  );
+}
+
 export default function App() {
+  // Log a one-liner at boot so the operator sees whether a key is loaded.
+  useEffect(() => {
+    const k = getApiKey();
+    // eslint-disable-next-line no-console
+    console.info("[AntiGravity] API client ready; key configured:", !!k);
+  }, []);
+
   return (
     <BrowserRouter>
       <div className="app">
+        <AuthBanner />
         <nav className="sidebar">
           <div className="logo">
             <div className="logo-icon">AG</div>
@@ -105,6 +154,7 @@ export default function App() {
           </div>
 
           <div className="sidebar-footer">
+            <SourceIpBadge />
             <div className="sidebar-status">
               <span className="pulse" />
               <span>Engine Ready</span>

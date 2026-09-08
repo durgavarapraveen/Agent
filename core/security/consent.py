@@ -28,7 +28,22 @@ class ExploitConsentManager:
     def __init__(self):
         self._lock = asyncio.Lock()
         self.decisions: List[Dict] = []
-        self.auto_approve = os.getenv("AUTO_APPROVE_EXPLOITS", "").lower() in ("1", "true", "yes")
+        # AUTO_APPROVE_EXPLOITS is refused in production. A single env var that
+        # bypasses every consent gate is a foot-gun (`.env` leaks, misconfigured
+        # container inherit) — we require the operator to acknowledge that they
+        # know what they're doing by ALSO being in `ANTIGRAVITY_ENV=development`.
+        # Setting `ANTIGRAVITY_ENV=production` + `AUTO_APPROVE_EXPLOITS=1`
+        # ignores the second env var and logs a WARN so it's visible in ops logs.
+        _env_mode = os.getenv("ANTIGRAVITY_ENV", "development").strip().lower()
+        _raw_auto = os.getenv("AUTO_APPROVE_EXPLOITS", "").strip().lower() in ("1", "true", "yes")
+        if _raw_auto and _env_mode in ("production", "prod"):
+            logger.warning(
+                "AUTO_APPROVE_EXPLOITS=1 is ignored in production. Every exploit "
+                "will still require an operator decision. Set ANTIGRAVITY_ENV=development "
+                "to enable auto-approve (only appropriate for CI/dry-run pipelines).")
+            self.auto_approve = False
+        else:
+            self.auto_approve = _raw_auto
         self._prompt: Optional[Callable[[str], str]] = None
 
     # ── configuration ──

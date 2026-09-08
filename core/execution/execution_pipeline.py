@@ -4,7 +4,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.domain.experiment import SecurityExperiment, ExperimentState
 from core.execution.executors.base import ExecutionResult, ExecutionStatus, ExecutorBase
@@ -107,7 +107,78 @@ class ExecutionPipelineV2:
             return False, "No endpoint specified"
         return True, None
 
+    @staticmethod
+    def _authorize_target(experiment: SecurityExperiment) -> Tuple[bool, Optional[str]]:
+        """Enforce scope authorization for THIS specific experiment before firing.
+
+        Called from `_execute` before every executor invocation. Historically,
+        `ExecutorBase.validate_target()` was declared but never invoked anywhere
+        in `core/` — all ~85 offensive executors ran without a per-request scope
+        check. This is the single choke point that closes that gap.
+
+        Prefers the unified `ScopeAuthority` façade (which fans out to every
+        wired back-end). Falls back to the legacy `TargetScopeValidator` if the
+        façade isn't wired yet, so nothing regresses on partial deployments.
+        """
+        # Extract a URL/host from wherever the experiment carries it.
+        params = experiment.input_parameters or {}
+        candidate = (
+            params.get("url")
+            or params.get("target")
+            or params.get("endpoint")
+            or params.get("host")
+            or experiment.endpoint_id
+            or ""
+        )
+        if not candidate:
+            return False, "No target URL/host on experiment — refusing to execute"
+
+        # Preferred path: unified façade.
+        try:
+            from core.security.scope_facade import get_scope_authority
+            auth = get_scope_authority()
+            status = auth.enforcement_status()
+            wired_backends = sum(1 for k, v in status.items()
+                                  if k != "auto_scope_size" and v)
+            if wired_backends > 0:
+                try:
+                    ok = auth.is_authorized(candidate)
+                except Exception as e:
+                    logger.error("ScopeAuthority raised: %s", e)
+                    return False, f"Scope authority error: {e}"
+                if not ok:
+                    return False, f"Target out of authorized scope: {candidate}"
+                return True, None
+        except Exception:
+            pass  # fall through to legacy
+
+        try:
+            from core.security.authorization import TargetScopeValidator
+        except Exception:
+            return False, "TargetScopeValidator import failed — refusing to execute"
+
+        try:
+            validator = TargetScopeValidator.get()
+            ok = bool(validator.validate(candidate))
+        except Exception as e:
+            logger.error("Scope validation raised: %s", e)
+            return False, f"Scope validation error: {e}"
+
+        if not ok:
+            return False, f"Target out of authorized scope: {candidate}"
+        return True, None
+
     def _execute(self, experiment: SecurityExperiment) -> ExecutionResult:
+        # ── Per-request authorization gate ────────────────────────────────
+        authorized, authz_err = self._authorize_target(experiment)
+        if not authorized:
+            logger.warning("Executor refused: %s", authz_err)
+            return ExecutionResult(
+                status=ExecutionStatus.AUTHORIZATION_ERROR,
+                error_code="OUT_OF_SCOPE",
+                error_message=authz_err,
+            )
+
         executor = self.executors.get(experiment.capability)
         if executor is None:
             tools = self.portfolio.get_tools(experiment.capability)
@@ -122,6 +193,27 @@ class ExecutionPipelineV2:
                 error_code="NO_EXECUTOR",
                 error_message=f"No executor for capability '{experiment.capability}'",
             )
+
+        # If the executor overrides validate_target with a real (non-no-op) check,
+        # call it too so subclass-specific policy still applies. Base class returns
+        # (True, None) unconditionally; that no-op is now safely composed with the
+        # scope gate above.
+        try:
+            endpoint_dict = {
+                "url": (experiment.input_parameters or {}).get("url") or experiment.endpoint_id,
+                "id": experiment.endpoint_id,
+                **(experiment.input_parameters or {}),
+            }
+            identity_dict = (experiment.input_parameters or {}).get("identity", {}) or {}
+            ok, why = executor.validate_target(endpoint_dict, identity_dict)
+            if not ok:
+                return ExecutionResult(
+                    status=ExecutionStatus.AUTHORIZATION_ERROR,
+                    error_code="EXECUTOR_REJECT",
+                    error_message=why or "Executor validate_target refused",
+                )
+        except Exception as e:
+            logger.debug("Executor validate_target raised (treated as pass): %s", e)
 
         try:
             return executor.execute(experiment)

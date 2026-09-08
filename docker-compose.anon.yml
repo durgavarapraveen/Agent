@@ -1,0 +1,118 @@
+# Free multi-hop anonymisation chain for the pentest agent.
+#
+#   your box -> vpn1 (ProtonVPN Free, WG) -> vpn2 (Windscribe Free, WG)
+#            -> tor  (3 internal hops) -> target
+#
+# Everything the agent does (scans, HTTP, DNS, LLM API) exits the last hop.
+# If ANY hop drops, gluetun's built-in firewall + Tor's SOCKS blocks all
+# outbound traffic. No leak path.
+#
+# Setup:
+#  1. Register a throwaway email at protonvpn.com/free  and windscribe.com/free
+#     (use SimpleLogin / Proton alias — never your real email).
+#  2. Download the WireGuard config from each site's dashboard.
+#  3. Paste the WG private key + address + peer key/endpoint into the env
+#     blocks below (or put them in a .env file next to this compose).
+#  4. docker compose -f docker-compose.anon.yml up -d
+#  5. Verify hop count:
+#        docker exec agent curl -s https://ifconfig.me      # Tor exit IP
+#        docker exec agent curl -s https://check.torproject.org | grep -i congratulations
+#  6. Start the scan from inside the agent container (or exec into it).
+
+version: "3.8"
+
+networks:
+  vpnchain:
+    driver: bridge
+
+services:
+
+  # ── HOP 1 ─ ProtonVPN Free (WireGuard) ────────────────────────────
+  vpn1:
+    image: qmcgaw/gluetun:latest
+    container_name: anon_vpn1
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      - VPN_SERVICE_PROVIDER=protonvpn
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${PROTON_WG_PRIVATE_KEY}
+      - WIREGUARD_ADDRESSES=${PROTON_WG_ADDRESS}
+      - SERVER_COUNTRIES=Netherlands   # free tier: NL / JP / US
+      - FIREWALL_OUTBOUND_SUBNETS=172.16.0.0/12
+      - DOT=on                          # DNS over TLS via 1.1.1.1
+      - BLOCK_MALICIOUS=on
+      - HEALTH_VPN_DURATION_INITIAL=30s
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "https://ifconfig.me"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── HOP 2 ─ Windscribe Free (WireGuard) ────────────────────────────
+  # Egresses via vpn1 by borrowing its network stack.
+  vpn2:
+    image: qmcgaw/gluetun:latest
+    container_name: anon_vpn2
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    network_mode: "service:vpn1"
+    depends_on:
+      vpn1: {condition: service_healthy}
+    environment:
+      - VPN_SERVICE_PROVIDER=custom
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${WINDSCRIBE_WG_PRIVATE_KEY}
+      - WIREGUARD_ADDRESSES=${WINDSCRIBE_WG_ADDRESS}
+      - WIREGUARD_PUBLIC_KEY=${WINDSCRIBE_WG_PEER_KEY}
+      - VPN_ENDPOINT_IP=${WINDSCRIBE_WG_ENDPOINT_IP}
+      - VPN_ENDPOINT_PORT=${WINDSCRIBE_WG_ENDPOINT_PORT:-443}
+      - DOT=on
+    restart: unless-stopped
+
+  # ── HOP 3 ─ Tor (guard → middle → exit, all inside this container) ─
+  # Egresses via vpn2 (which egresses via vpn1). So the Tor guard node
+  # sees a Windscribe IP, NOT your real IP. This defeats the standard
+  # "Tor guard correlation" attack that lets an adversary who runs guards
+  # de-anonymise you over time.
+  tor:
+    image: dperson/torproxy:latest
+    container_name: anon_tor
+    network_mode: "service:vpn1"
+    depends_on: [vpn2]
+    environment:
+      - LOCATION=US,DE,CH,SE,NL,FR       # exit country preferences
+      - EXITPOLICY=reject *:*            # never act as an exit ourselves
+    restart: unless-stopped
+
+  # ── The agent ─ borrows Tor's stack, so all traffic goes:
+  #    agent → tor SOCKS → tor circuit → exit → target
+  agent:
+    build: .
+    container_name: anon_agent
+    network_mode: "service:vpn1"
+    depends_on: [tor]
+    cap_drop: [ALL]
+    read_only: false
+    security_opt: [no-new-privileges:true]
+    environment:
+      # Force EVERY tool through Tor's SOCKS5 (127.0.0.1 inside the
+      # shared netns is the tor container).
+      - HTTP_PROXY=socks5h://127.0.0.1:9050
+      - HTTPS_PROXY=socks5h://127.0.0.1:9050
+      - ALL_PROXY=socks5h://127.0.0.1:9050
+      - NO_PROXY=127.0.0.1,localhost
+      # Force DNS through Tor (SOCKS5H = resolve on Tor side, no DNS leak)
+      - PROXYCHAINS_CONF=/etc/proxychains.conf
+      # Your LLM / embedding keys still work but now leave from a Tor exit —
+      # DeepSeek / OpenAI may rate-limit or refuse. Have a backup provider.
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - EMBEDDING_API_URL=${EMBEDDING_API_URL:-}
+      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-}
+      # Refuse to start if the exit IP == your real WAN IP (kill switch).
+      - REQUIRE_EXIT_IP_DIFFERS_FROM=${REAL_WAN_IP}
+    volumes:
+      - ./:/app
+    working_dir: /app
+    command: ["python", "main.py"]

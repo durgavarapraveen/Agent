@@ -340,7 +340,7 @@ class CapabilityWorker:
                 from core.database.pg_store import ToolOutputRepo
                 ToolOutputRepo.save(
                     scan_id=_sid, tool_name=tool_name, operation=capability,
-                    target=target, command=command, stdout=stdout,
+                    target=target, command="", stdout=stdout,
                     stderr=str(stderr), exit_code=exit_code,
                 )
             except Exception:

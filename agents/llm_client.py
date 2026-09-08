@@ -249,7 +249,7 @@ class DeepSeekProvider(LLMProvider):
                             if m:
                                 try:
                                     structured = json.loads(m.group(0))
-                                except:
+                                except (json.JSONDecodeError, ValueError):
                                     pass
                                     
                     return NormalizedLLMResponse(

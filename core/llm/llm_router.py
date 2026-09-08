@@ -37,8 +37,16 @@ class LLMRouter:
                                    "justification": "Fallback"}]}
         return {}
 
-    def _run_async(self, coro):
-        """Bridge to the async harness from a sync API."""
+    def _run_async(self, coro, timeout: float = 180.0):
+        """Bridge to the async harness from a sync API.
+
+        Timeout defaults to 180s (matches DeepSeek client timeout). Previously
+        the join used a silent 60s ceiling and returned `None`, causing the
+        caller to fall back to the deterministic heuristic even when a valid
+        LLM response was only slightly delayed. On timeout we now raise
+        `TimeoutError` so the caller can distinguish "provider slow" from
+        "provider returned nothing useful."
+        """
         try:
             loop = asyncio.get_event_loop()
         except RuntimeError:
@@ -46,6 +54,8 @@ class LLMRouter:
         if loop and loop.is_running():
             import threading
             box: Dict[str, Any] = {}
+            done_evt = threading.Event()
+
             def _worker():
                 new_loop = asyncio.new_event_loop()
                 try:
@@ -55,8 +65,15 @@ class LLMRouter:
                     box["e"] = e
                 finally:
                     new_loop.close()
+                    done_evt.set()
+
             t = threading.Thread(target=_worker, daemon=True)
-            t.start(); t.join(timeout=60)
+            t.start()
+            if not done_evt.wait(timeout=timeout):
+                # Coroutine still running; leave it as a daemon (Python will
+                # tear it down at interpreter exit). Raising surfaces the fact
+                # to the caller instead of silently returning None.
+                raise TimeoutError(f"LLM router coroutine exceeded {timeout}s")
             if "e" in box:
                 raise box["e"]
             return box.get("r")

@@ -20,16 +20,22 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Heuristic Content-Types that do not render HTML scripts
+# Heuristic Content-Types that do not render HTML scripts.
+#
+# NOTE: `application/javascript` intentionally NOT in this list. JSONP-XSS is a
+# real, common finding — a response served as `application/javascript` that
+# reflects a user-controlled callback name executes when embedded via
+# `<script src=...>`. Treating that CT as "safely non-HTML" was a false-
+# positive filter that silently suppressed real findings.
+# `image/svg+xml` is also intentionally excluded from this list further down;
+# SVG can contain executable script.
 NON_HTML_CONTENT_TYPES = [
     "application/json",
-    "application/javascript",
     "application/pdf",
     "application/xml",
     "image/png",
     "image/jpeg",
     "image/gif",
-    "image/svg+xml",
     "audio/",
     "video/",
     "application/octet-stream"
@@ -84,18 +90,30 @@ class FalsePositiveFilter:
                             X.append([float(val) for val in row[:7]])
                             y.append(int(row[7]))
 
-            if not X:
-                # Default synthetic training dataset for offline validation
-                X = [
-                    [200, 1024, 45.2, 1, 2, 0, 0],
-                    [404, 0, 12.1, 2, 3, 1, 0],
-                    [200, 0, 15.0, 2, 1, 0, 0],
-                    [302, 450, 110.5, 3, 2, 0, 1],
-                    [500, 2048, 250.0, 4, 3, 1, 0],
-                    [200, 512, 30.0, 1, 1, 0, 0],
-                    [429, 120, 5.0, 2, 2, 1, 1]
-                ]
-                y = [1, 0, 0, 0, 1, 1, 0]
+            # Gate: refuse to train on the tiny synthetic dataset. Predictions
+            # from a 7-row RandomForest are noise, and previously they silently
+            # relegated real HIGH/CRITICAL findings to LOW. The heuristic
+            # signature filter (`check_signature_fp`) still runs — that's
+            # deterministic and doesn't need training data.
+            _MIN_TRAINING_ROWS = int(os.environ.get("FP_MODEL_MIN_ROWS", "200"))
+            if len(X) < _MIN_TRAINING_ROWS:
+                logger.warning(
+                    "[FPFilter] Only %d training rows available (need >= %d); "
+                    "disabling ML FP model. Heuristic signature filter still active. "
+                    "Provide a labelled `training_data.csv` (see docs) to enable ML.",
+                    len(X), _MIN_TRAINING_ROWS,
+                )
+                self.model = None
+                self.scaler = None
+                # Purge any stale on-disk synthetic model so it can't be picked
+                # up on the next boot.
+                for p in (self.model_path, self.scaler_path):
+                    try:
+                        if os.path.exists(p):
+                            os.remove(p)
+                    except Exception:
+                        pass
+                return
 
             scaler = StandardScaler()
             X_scaled = scaler.fit_transform(X)

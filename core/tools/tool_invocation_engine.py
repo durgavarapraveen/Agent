@@ -40,6 +40,16 @@ class ToolInvocationEngine:
         "hydra": "authentication_testing", "arjun": "parameter_discovery",
         "dalfox": "xss_scanning", "theharvester": "employee_enumeration",
         "curl": "http_analysis",
+        # P2-8: structured HTTP ops
+        "http_fetch": "http_fetch",
+        "extract_links": "link_extraction",
+        "extract_api_routes": "api_route_extraction",
+        "extract_file_links": "file_link_extraction",
+        "extract_regex": "regex_extraction",
+        "parse_html": "html_parsing",
+        "parse_json": "json_parsing",
+        "compare_responses": "response_diff",
+        "extract_headers": "header_extraction",
     }
 
     def __init__(self, tool_gateway):
@@ -86,9 +96,15 @@ class ToolInvocationEngine:
                 stderr_len = len(str(result.stderr or ""))
                 _tool = getattr(invocation, "tool_id", None) or getattr(invocation, "tool", "?")
                 _tgt = getattr(invocation, "target", "") or ""
+                _status = getattr(result.status, "value", str(result.status))
+                _ec = getattr(result, "exit_code", None)
+                # P0-1: never emit TOOL_OK when the process reported a non-zero
+                # exit. Downgrade the log tag so downstream log-scrapers can't
+                # confuse partial output with full success.
+                _tag = "TOOL_OK" if (_ec in (None, 0) and str(_status).upper() == "SUCCESS") else "TOOL_PARTIAL"
                 logger.info(
-                    f"TOOL_OK tool={_tool} target={_tgt} | stdout: {stdout_len} bytes | "
-                    f"stderr: {stderr_len} bytes"
+                    f"{_tag} tool={_tool} target={_tgt} status={_status} rc={_ec} | "
+                    f"stdout: {stdout_len} bytes | stderr: {stderr_len} bytes"
                 )
                 
             return result

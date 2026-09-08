@@ -61,14 +61,120 @@ class ToolGateway:
                 error=ErrorInfo(error_type=ErrorType.SCOPE_VIOLATION, message="Authorization denied", details={"target": invocation.target})
             )
         
-        # STEP 2: Cache Lookup
+        # STEP 2: Cache Lookup (legacy per-tool cache)
         cache_key = self._make_cache_key(invocation)
         cached_result = await self.cache.get(cache_key)
         if cached_result:
             logger.info(f"Cache HIT: {invocation.tool_id}")
             self.audit.log_cache_hit(cache_key, invocation)
             return cached_result
+
+        # STEP 2a (P2-4): capability-level result cache. Same target +
+        # operation + normalized args returns the cached payload without
+        # touching the tool, even across different tool_ids.
+        try:
+            from core.tools.result_cache import get_result_cache
+            rc = get_result_cache()
+            hit = rc.get(invocation.target or "", invocation.operation or "",
+                         invocation.params)
+            if hit is not None:
+                logger.info(f"RESULT_CACHE_HIT: op={invocation.operation} target={invocation.target}")
+                return hit
+        except Exception as _e:
+            logger.debug(f"result cache lookup skipped: {_e}")
         
+        # STEP 2b (P1-2): Freshness gate — skip repeated recon that is
+        # still fresh in the knowledge store.
+        try:
+            from core.knowledge.freshness import get_freshness
+            fresh = get_freshness()
+            _op = invocation.operation or ""
+            _tgt = invocation.target or ""
+            if _op and _tgt and fresh.has_fresh_result(_tgt, _op):
+                from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus
+                logger.info(f"FRESHNESS_SKIP: operation={_op} target={_tgt}")
+                try:
+                    from core.observability.scan_metrics import get_metrics
+                    get_metrics().inc("duplicate_tool_calls")
+                except Exception:
+                    pass
+                return SchemaToolResult(
+                    tool=invocation.tool_id or _op or "unknown",
+                    capability=_op or "unknown",
+                    status=ToolExecutionStatus.SUCCESS,
+                    target=_tgt,
+                    stdout="",
+                    data={"freshness_skip": True},
+                    metadata={"reason": "fresh knowledge already recorded"},
+                )
+        except Exception as _e:
+            logger.debug(f"freshness gate skipped: {_e}")
+
+        # STEP 2c (P1-7): Tool health gate — refuse invocation of a tool
+        # already in COOLDOWN or UNAVAILABLE state; pick a replacement
+        # instead of wasting an LLM round on a known-broken binary.
+        try:
+            from core.tools.tool_health import get_health_manager
+            hm = get_health_manager()
+            if invocation.tool_id:
+                h = hm.status_of(invocation.tool_id)
+                if h and not h.is_available():
+                    alt = hm.pick_replacement(invocation.tool_id)
+                    if alt:
+                        logger.info(f"HEALTH_SWAP: {invocation.tool_id} -> {alt} "
+                                    f"({h.last_failure})")
+                        invocation.tool_id = alt
+        except Exception as _e:
+            logger.debug(f"health gate skipped: {_e}")
+
+        # STEP 2d (P1-1): WAF-mode gate — passive-only mode blocks active
+        # tools entirely; cautious mode blocks brute-force.
+        try:
+            from core.adaptation.waf_state import get_waf_state
+            waf = get_waf_state()
+            _tgt = invocation.target or ""
+            _cap = (invocation.operation or "").lower()
+            # Coarse category mapping — mirrors DEFAULT_CLASS keys.
+            _brute = _cap in ("directory_bruteforce", "endpoint_discovery",
+                              "parameter_discovery")
+            _active = _cap in ("vulnerability_scanning", "sql_injection",
+                               "xss_scanning", "web_crawling")
+            _passive = _cap in ("technology_fingerprinting", "waf_detection",
+                                "tls_analysis", "http_analysis",
+                                "subdomain_enumeration", "dns_enumeration")
+            cat = "brute" if _brute else ("active" if _active else ("passive" if _passive else "recon"))
+            if _tgt and not waf.is_tool_allowed(_tgt, cat):
+                from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus, ErrorInfo, ErrorType
+                logger.warning(f"WAF_BLOCKED: operation={_cap} category={cat} "
+                               f"mode={waf.mode_for(_tgt).value} target={_tgt}")
+                try:
+                    from core.observability.scan_metrics import get_metrics
+                    get_metrics().inc("waf_blocks")
+                except Exception:
+                    pass
+                return SchemaToolResult(
+                    tool=invocation.tool_id or _cap or "unknown",
+                    capability=_cap or "unknown",
+                    status=ToolExecutionStatus.BLOCKED,
+                    target=_tgt,
+                    error=ErrorInfo(
+                        error_type=ErrorType.EXECUTION_ERROR,
+                        message=f"blocked by WAF policy in mode {waf.mode_for(_tgt).value}",
+                    ),
+                )
+        except Exception as _e:
+            logger.debug(f"waf gate skipped: {_e}")
+
+        # STEP 2e (P1-8): Clamp timeout to the class ceiling for this capability.
+        try:
+            from core.tools.timeout_classes import default_seconds_for
+            _cap = invocation.operation or ""
+            if _cap and "timeout" not in (invocation.params or {}):
+                invocation.params = dict(invocation.params or {})
+                invocation.params["timeout"] = default_seconds_for(_cap)
+        except Exception:
+            pass
+
         # STEP 3: Resource Check
         if not self.resource_limiter.can_allocate(invocation.tool_id):
             logger.warning(f"Resource limit: {invocation.tool_id}")
@@ -122,18 +228,60 @@ class ToolGateway:
                 raise RuntimeError(msg)
                 
         except asyncio.TimeoutError:
-            logger.error(f"Timeout: {invocation.tool_id}")
-            result = await self._handle_timeout(invocation, auth_context)
+            logger.error(f"Timeout: {invocation.tool_id} after {timeout_val}s")
+            result = await self._handle_timeout(invocation, auth_context, timeout_seconds=timeout_val)
         except Exception as e:
             logger.error(f"Error: {invocation.tool_id}: {e}")
             result = await self._handle_error(invocation, auth_context, e)
         
         # STEP 5: Normalize Result
         result = await self._normalize_result(result, invocation)
+
+        # STEP 5b: Record success/failure into WAF state, freshness, metrics.
+        try:
+            from core.adaptation.waf_state import get_waf_state
+            from core.knowledge.freshness import get_freshness
+            from core.observability.scan_metrics import get_metrics
+            waf = get_waf_state()
+            metrics = get_metrics()
+            metrics.inc("tool_calls")
+            _tgt = invocation.target or ""
+            _status = getattr(result.status, "value", str(result.status)).upper()
+            if _status == "BLOCKED":
+                if _tgt:
+                    waf.record_block(_tgt)
+                metrics.inc("waf_blocks")
+            elif _status == "TIMEOUT":
+                metrics.inc("failed_tools")
+            elif _status in ("FAILED",):
+                metrics.inc("failed_tools")
+            elif _status in ("PARTIAL", "PARTIAL_SUCCESS"):
+                metrics.inc("partial_tools")
+                if _tgt:
+                    waf.record_success(_tgt)
+            elif _status == "SUCCESS":
+                if _tgt:
+                    waf.record_success(_tgt)
+            # Freshness: only cache SUCCESS results.
+            if _status == "SUCCESS" and _tgt and invocation.operation:
+                get_freshness().record(_tgt, invocation.operation)
+        except Exception as _e:
+            logger.debug(f"post-exec accounting skipped: {_e}")
         
         # STEP 6: Cache It (only cache successes — failed results should not poison future calls)
         if result.success:
             await self.cache.set(cache_key, result)
+            # P2-4: also populate the capability-level cache so tool_id
+            # substitution (health swap, WAF category downgrade) still
+            # hits fresh results.
+            try:
+                from core.tools.result_cache import get_result_cache
+                get_result_cache().set(
+                    invocation.target or "", invocation.operation or "",
+                    result, invocation.params,
+                )
+            except Exception:
+                pass
         else:
             logger.info(f"Skipping cache for failed result: operation={invocation.operation} tool={invocation.tool_id}")
         
@@ -172,14 +320,18 @@ class ToolGateway:
         return await self.router.route_and_execute(invocation, auth_context)
     
     async def _handle_timeout(self, invocation: ToolInvocation,
-                             auth_context: AuthContext) -> ToolResult:
-        """Handle tool execution timeout"""
+                             auth_context: AuthContext,
+                             timeout_seconds: int = 0) -> ToolResult:
+        """Handle tool execution timeout. Prefers the actual configured
+        timeout in the error message — previously this hardcoded "300s"
+        regardless of the real cap."""
         from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus, ErrorInfo, ErrorType
         from core.common.error_translator import ErrorTranslator
-        
+
         tool_id = invocation.tool_id or invocation.operation or "unknown"
         translation = ErrorTranslator.translate(tool_id, "timeout", exit_code=1, target=invocation.target)
-        
+
+        actual_timeout = timeout_seconds or int((invocation.params or {}).get("timeout", 900))
         return SchemaToolResult(
             tool=tool_id,
             capability=invocation.operation or "unknown",
@@ -188,7 +340,7 @@ class ToolGateway:
             data={"error_human": translation.get("formatted_report")},
             error=ErrorInfo(
                 error_type=ErrorType.TIMEOUT,
-                message=f"Tool {tool_id} timed out after 300s",
+                message=f"Tool {tool_id} timed out after {actual_timeout}s",
                 retryable=True,
                 tool=tool_id
             )
@@ -253,11 +405,40 @@ class ToolGateway:
             )
         )
     
-    async def _normalize_result(self, result: ToolResult, 
+    async def _normalize_result(self, result: ToolResult,
                                invocation: ToolInvocation) -> ToolResult:
-        """Parse raw tool output into canonical findings"""
-        # We skip normalization here because ToolGateway doesn't have a KnowledgeStore.
-        # The central brain handles evidence and knowledge parsing at a higher level.
+        """Reconcile status vs exit_code (P0-1) then hand off untouched.
+
+        Root fix for the `rc=2 ... TOOL_OK` incident: even if the executor
+        reports SUCCESS, a non-zero exit code must downgrade the status
+        to PARTIAL (useful output) or FAILED (no trustworthy output).
+        Timeout/blocked flags always win.
+        """
+        try:
+            from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus
+            ec = getattr(result, "exit_code", None)
+            if ec is None:
+                ec = getattr(result, "returncode", None)
+            timed_out = str(getattr(result, "status", "")).upper().endswith("TIMEOUT")
+            blocked = str(getattr(result, "status", "")).upper() in ("BLOCKED", "SCOPE_DENIED")
+            derived = SchemaToolResult.derive_status(
+                exit_code=ec,
+                stdout=str(getattr(result, "stdout", "") or ""),
+                stderr=str(getattr(result, "stderr", "") or ""),
+                timed_out=timed_out,
+                blocked=blocked,
+            )
+            # Only overwrite when derivation disagrees (avoids clobbering
+            # richer statuses like EMPTY_RESULT set by upstream parsers).
+            cur = str(getattr(result, "status", "")).upper()
+            if cur in ("SUCCESS", "COMPLETED") and derived != ToolExecutionStatus.SUCCESS:
+                logger.warning(
+                    "STATUS_DOWNGRADE: tool=%s reported %s but exit_code=%s -> %s",
+                    getattr(result, "tool", "?"), cur, ec, derived.value,
+                )
+                result.status = derived
+        except Exception as _e:
+            logger.debug(f"status reconciliation skipped: {_e}")
         return result
     
     def _make_cache_key(self, invocation: ToolInvocation) -> str:

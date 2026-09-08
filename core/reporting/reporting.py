@@ -15,7 +15,7 @@ import html
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +46,32 @@ def mask_sensitive_data(text: str, enabled: bool = True) -> str:
 
     import re
     s = str(text)
-    # Mask AWS Access Key ID (e.g. AKIA1234567890EXAMPLE -> AKIA************EXAMPLE)
-    s = re.sub(r'\b(AKIA)[A-Z0-9]+?([A-Z0-9]{7})\b', r'\1************\2', s)
 
-    # Mask emails (user@domain.com -> u***r@domain.com)
+    # ── AWS ──
+    s = re.sub(r'\b(AKIA)[A-Z0-9]+?([A-Z0-9]{7})\b', r'\1************\2', s)
+    # AWS secret access key (40 chars b64/hex-ish preceded by aws_secret markers)
+    s = re.sub(r'(?i)(aws[_-]?secret[_-]?access[_-]?key\s*[:=]\s*[\'"]?)[A-Za-z0-9/+=]{30,}',
+                r'\1[MASKED]', s)
+
+    # ── GitHub / GitLab ──
+    s = re.sub(r'\bghp_[A-Za-z0-9]{20,}\b', '[MASKED_GH_PAT]', s)
+    s = re.sub(r'\bgho_[A-Za-z0-9]{20,}\b', '[MASKED_GH_OAUTH]', s)
+    s = re.sub(r'\bghs_[A-Za-z0-9]{20,}\b', '[MASKED_GH_SERVER]', s)
+    s = re.sub(r'\bglpat-[A-Za-z0-9_-]{20,}\b', '[MASKED_GL_PAT]', s)
+
+    # ── OpenAI / Stripe / SendGrid / Slack ──
+    s = re.sub(r'\bsk-[A-Za-z0-9]{20,}\b', '[MASKED_SK]', s)
+    s = re.sub(r'\brk_(live|test)_[A-Za-z0-9]{20,}\b', '[MASKED_STRIPE]', s)
+    s = re.sub(r'\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b', '[MASKED_SENDGRID]', s)
+    s = re.sub(r'\bxox[bpoa]-[A-Za-z0-9-]{10,}\b', '[MASKED_SLACK]', s)
+
+    # ── JWT ──
+    s = re.sub(r'\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b', '[MASKED_JWT]', s)
+
+    # ── Google API keys ──
+    s = re.sub(r'\bAIza[0-9A-Za-z_-]{35}\b', '[MASKED_GOOGLE_API]', s)
+
+    # ── Emails ──
     def _mask_email(m):
         local, domain = m.group(1), m.group(2)
         if len(local) <= 2:
@@ -60,28 +82,43 @@ def mask_sensitive_data(text: str, enabled: bool = True) -> str:
 
     s = re.sub(r'\b([a-zA-Z0-9._%+-]+)@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b', _mask_email, s)
 
-    # Mask password/secret/token parameters
-    s = re.sub(r'(?i)(password|passwd|secret|api_key|token)\s*[:=]\s*[\'"]?([^\s\'";,]{3,})[\'"]?', r'\1=[MASKED]', s)
+    # ── Phone (best-effort, doesn't mask 10-digit IDs by requiring a dial format) ──
+    s = re.sub(r'\+?\d{1,3}[\s.-]?\(?\d{2,4}\)?[\s.-]?\d{3,4}[\s.-]?\d{3,4}', '[MASKED_PHONE]', s)
 
-    # Mask Bearer tokens
+    # ── Credit card ──
+    s = re.sub(r'\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13})\b', '[MASKED_CC]', s)
+
+    # ── SSN (US) ──
+    s = re.sub(r'\b\d{3}-\d{2}-\d{4}\b', '[MASKED_SSN]', s)
+
+    # ── password/secret/token/apikey key=value assignments ──
+    s = re.sub(r'(?i)(password|passwd|secret|api[_-]?key|token|access[_-]?token|refresh[_-]?token|session[_-]?id)\s*[:=]\s*[\'"]?([^\s\'";,]{3,})[\'"]?',
+                r'\1=[MASKED]', s)
+
+    # ── Bearer tokens in Authorization headers ──
     s = re.sub(r'(?i)(Bearer\s+)[A-Za-z0-9._~+/-]+=*', r'\1[MASKED]', s)
+
+    # ── Private-key headers ──
+    s = re.sub(
+        r'-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----',
+        '[MASKED_PRIVATE_KEY]', s)
 
     return s
 
 
 class EncryptedTrendStore:
-    """Stores historical scan trend metrics in an encrypted PostgreSQL database table."""
+    """Stores historical scan trend metrics in an encrypted PostgreSQL table.
+
+    Now uses real authenticated encryption (AES-256-GCM) via the project's
+    `core.security.encryption` helper. Previous versions used XOR against a
+    hardcoded default key, which was equivalent to no encryption — known-plaintext
+    recovery of the key was trivial. Existing rows encrypted with the old scheme
+    can no longer be decrypted; the reader silently drops undecryptable rows and
+    returns whatever new AES-GCM rows exist.
+    """
 
     def __init__(self):
-        import os
-        self._key_bytes = os.environ.get("TREND_STORE_KEY", "AntiGravityTrendSecretKey2026").encode("utf-8")
         self._init_db()
-
-    def _xor_cipher(self, data: bytes) -> bytes:
-        out = bytearray()
-        for i, b in enumerate(data):
-            out.append(b ^ self._key_bytes[i % len(self._key_bytes)])
-        return bytes(out)
 
     def _init_db(self):
         from core.memory.database import DatabaseManager
@@ -100,6 +137,14 @@ class EncryptedTrendStore:
         except Exception as e:
             logger.error(f"EncryptedTrendStore init failed: {e}")
 
+    def _encrypt(self, data: bytes) -> bytes:
+        from core.security.encryption import encrypt
+        return encrypt(data)
+
+    def _decrypt(self, blob: bytes) -> bytes:
+        from core.security.encryption import decrypt
+        return decrypt(blob)
+
     def record_scan(self, target: str, severity_counts: Dict[str, int], critical_count: int, risk_score: float):
         import json, time
         from core.memory.database import DatabaseManager
@@ -111,7 +156,11 @@ class EncryptedTrendStore:
             "timestamp": time.time()
         }
         raw_bytes = json.dumps(payload).encode("utf-8")
-        enc_blob = self._xor_cipher(raw_bytes)
+        try:
+            enc_blob = self._encrypt(raw_bytes)
+        except Exception as e:
+            logger.error(f"EncryptedTrendStore encrypt failed: {e}")
+            return
         ts = datetime.now().isoformat()
         try:
             with DatabaseManager.get_connection() as conn:
@@ -132,10 +181,13 @@ class EncryptedTrendStore:
                     cursor.execute("SELECT encrypted_data FROM scan_history_encrypted WHERE target = %s ORDER BY id ASC", (target,))
                     for row in cursor.fetchall():
                         try:
-                            dec_bytes = self._xor_cipher(row[0])
+                            dec_bytes = self._decrypt(bytes(row[0]))
                             records.append(json.loads(dec_bytes.decode("utf-8")))
                         except Exception:
-                            pass
+                            # Row was encrypted with the old XOR scheme or is
+                            # corrupt — skip silently. Records will rebuild
+                            # naturally as new scans complete.
+                            continue
         except Exception as e:
             logger.error(f"EncryptedTrendStore get_target_history failed: {e}")
         return records
@@ -288,6 +340,7 @@ class ExecutiveSummaryGenerator:
 
     def render(self, ctx, industry: str = None, mask_sensitive: bool = True) -> Dict[str, str]:
         import jinja2
+        import jinja2.sandbox
 
         vulns = getattr(ctx, "vulnerabilities", []) or []
         counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
@@ -343,7 +396,12 @@ class ExecutiveSummaryGenerator:
                 "{{ mandatory_disclaimer }}\n"
             )
 
-        template = jinja2.Template(template_str)
+        # Use SandboxedEnvironment so a maliciously modified template on disk
+        # can't reach dangerous attributes (`__class__`, `__subclasses__`, etc.)
+        # to escape into arbitrary Python execution — the classic SSTI vector.
+        # Autoescape is enabled so rendered fields can't break HTML structure.
+        _sandbox_env = jinja2.sandbox.SandboxedEnvironment(autoescape=True)
+        template = _sandbox_env.from_string(template_str)
         rendered_text = template.render(
             target_name=mask_sensitive_data(str(getattr(ctx, "target", "Target")), mask_sensitive),
             scan_date=datetime.now().strftime("%Y-%m-%d"),
@@ -577,11 +635,18 @@ class EnterpriseReporter:
             method = str(v.get("method", "GET")).upper()
             payload = v.get("payload", "")
 
+            # Shell-safe rendering: `shlex.quote` produces a single-quoted
+            # token that shell will re-interpret literally. Without this, a
+            # payload containing `'; rm -rf ~; #` (attacker- or vuln-response-
+            # controlled) would execute when the operator pastes the command
+            # into a terminal — a supply-chain foot-gun in the delivered
+            # report. Using the safer form is essentially free.
+            import shlex
             if method == "POST":
                 data_val = str(payload)
-                curl_cmd = f"curl -k -i -X POST '{url}' -d '{data_val}'"
+                curl_cmd = f"curl -k -i -X POST {shlex.quote(url)} -d {shlex.quote(data_val)}"
             else:
-                curl_cmd = f"curl -k -i -X GET '{url}'"
+                curl_cmd = f"curl -k -i -X GET {shlex.quote(url)}"
 
             rows.append(
                 f"<tr>"
@@ -677,52 +742,67 @@ class EnterpriseReporter:
 
         out = {"html": str(html_path)}
         pdf_path = self.report_dir / f"{stem}.pdf"
-        pdf_generated = False
+        # `renderer` tracks WHICH engine won so we can surface a degraded-quality
+        # warning when we fall past the CSS-capable engines. Previously any
+        # fallback lower than xhtml2pdf silently produced tag-stripped plain
+        # text with a `.pdf` extension, and the operator only found out when
+        # they opened the file. Now we log at WARN and stamp `out["pdf_engine"]`.
+        renderer: Optional[str] = None
         try:
             from weasyprint import HTML as _WHTML   # optional dependency
             _WHTML(string=html_str).write_pdf(str(pdf_path))
             out["pdf"] = str(pdf_path)
-            pdf_generated = True
+            renderer = "weasyprint"
             logger.info(f"[Report] PDF report written via WeasyPrint: {pdf_path}")
         except Exception as e:      # noqa: BLE001
             logger.info(f"[Report] WeasyPrint PDF skipped: {e}")
 
-        if not pdf_generated:
+        if renderer is None:
             try:
                 from xhtml2pdf import pisa
                 with open(pdf_path, "wb") as pdf_file:
                     pisa_status = pisa.CreatePDF(html_str, dest=pdf_file)
                 if not pisa_status.err:
                     out["pdf"] = str(pdf_path)
-                    pdf_generated = True
+                    renderer = "xhtml2pdf"
                     logger.info(f"[Report] PDF report written via xhtml2pdf fallback: {pdf_path}")
             except Exception as e:
                 logger.info(f"[Report] xhtml2pdf fallback skipped: {e}")
 
-        if not pdf_generated:
+        if renderer is None:
             try:
                 import pdfkit
                 pdfkit.from_string(html_str, str(pdf_path), options={"quiet": "", "encoding": "UTF-8"})
                 out["pdf"] = str(pdf_path)
-                pdf_generated = True
+                renderer = "pdfkit"
                 logger.info(f"[Report] PDF report written via pdfkit: {pdf_path}")
             except Exception as e:
                 logger.info(f"[Report] pdfkit fallback skipped: {e}")
 
-        if not pdf_generated:
+        if renderer is None:
             try:
-                from fpdf import FPDF
+                from fpdf import FPDF  # noqa: F401
                 pdf = self._html_to_fpdf(html_str)
                 pdf.output(str(pdf_path))
                 out["pdf"] = str(pdf_path)
-                pdf_generated = True
-                logger.info(f"[Report] PDF report written via fpdf2: {pdf_path}")
+                renderer = "fpdf2"
+                logger.warning(
+                    "[Report] PDF written via fpdf2 fallback — HTML/CSS stripped, "
+                    "no tables/charts/formatting. Install weasyprint (with "
+                    "libgobject/cairo/pango) for full-fidelity reports. File: %s",
+                    pdf_path,
+                )
             except Exception as e:
                 logger.info(f"[Report] fpdf2 fallback skipped: {e}")
 
-        if not pdf_generated:
-            logger.warning("[Report] No PDF renderer available. Install one of: "
-                           "weasyprint, xhtml2pdf, pdfkit (+ wkhtmltopdf), or fpdf2")
+        if renderer is None:
+            logger.error(
+                "[Report] No PDF renderer available. Install one of: "
+                "weasyprint (recommended), xhtml2pdf, pdfkit (+ wkhtmltopdf), or fpdf2. "
+                "Report will be delivered as HTML only.")
+        else:
+            out["pdf_engine"] = renderer
+            out["pdf_degraded"] = renderer in ("fpdf2",)
 
         return out
 
@@ -842,4 +922,11 @@ class EnterpriseReporter:
         </section>
         """
         
-        return report_html.replace('</main>', osint_html + '</main>')
+        # Inject at the LAST `</main>` only. A naive `str.replace` would corrupt
+        # the page if any finding proof block happened to include the literal
+        # substring `</main>` earlier in the document.
+        idx = report_html.rfind('</main>')
+        if idx == -1:
+            # No </main> — append at the end and let the browser be forgiving.
+            return report_html + osint_html
+        return report_html[:idx] + osint_html + report_html[idx:]

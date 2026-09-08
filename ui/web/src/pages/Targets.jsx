@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { api } from "../api";
+import { api, createPoller } from "../api";
 
 export default function Targets() {
   const [targets, setTargets] = useState([]);
@@ -201,18 +201,24 @@ function ScanModal({ target, onClose, onStarted }) {
 
   useEffect(() => {
     if (state !== "running" || !scanId) return;
-    const iv = setInterval(() => {
-      api.getScanLogs(scanId).then(l => {
-        setLogs(l.slice(-50));
+    const pLogs = createPoller(
+      () => api.getScanLogs(scanId),
+      (l) => {
+        setLogs((l || []).slice(-50));
         if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-      }).catch(() => {});
-      api.getScanStatus(scanId).then(s => {
+      },
+      2000,
+    );
+    const pStatus = createPoller(
+      () => api.getScanStatus(scanId),
+      (s) => {
         if (s?.status === "completed") setState("completed");
         if (s?.status === "failed") setState("failed");
         if (s?.status === "stopped") setState("stopped");
-      }).catch(() => {});
-    }, 2000);
-    return () => clearInterval(iv);
+      },
+      2000,
+    );
+    return () => { pLogs.stop(); pStatus.stop(); };
   }, [state, scanId]);
 
   return (

@@ -43,27 +43,45 @@ class TargetContext(BaseModel):
             netloc = target.split("/")[0]
             url = f"https://{target}"
 
-        if ":" in netloc:
+        # IPv6-safe host+port split. `[::1]:8080` → host `::1`, port 8080.
+        # The previous naive `netloc.split(":", 1)` mangled every IPv6 target
+        # into `""` + garbage.
+        port = None
+        if netloc.startswith("[") and "]" in netloc:
+            close = netloc.index("]")
+            host_part = netloc[1:close]
+            rest = netloc[close + 1:]
+            if rest.startswith(":"):
+                try:
+                    port = int(rest[1:])
+                except ValueError:
+                    port = None
+        elif netloc.count(":") == 1:
             host_part, port_str = netloc.split(":", 1)
             try:
                 port = int(port_str)
             except ValueError:
                 port = None
         else:
+            # Bare IPv6 without brackets — no port.
             host_part = netloc
 
         hostname = host_part
-        # Extract base domain
-        parts = hostname.split(".")
-        if len(parts) >= 2 and not re.match(r"^\d+\.\d+\.\d+\.\d+$", hostname):
-            domain = ".".join(parts[-2:])
+        # IP classification via stdlib — handles both v4 and v6.
+        import ipaddress as _ipaddr
+        ip = None
+        try:
+            _ip_obj = _ipaddr.ip_address(hostname)
+            ip = str(_ip_obj)
+        except ValueError:
+            pass
+
+        # Base domain only makes sense for DNS hostnames.
+        if ip is None:
+            parts = hostname.split(".")
+            domain = ".".join(parts[-2:]) if len(parts) >= 2 else hostname
         else:
             domain = hostname
-
-        # IP check
-        ip = None
-        if re.match(r"^\d+\.\d+\.\d+\.\d+$", hostname):
-            ip = hostname
 
         return cls(
             raw=target,

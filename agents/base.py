@@ -94,14 +94,26 @@ class BaseAgent(ABC):
         except Exception as e:
             logger.error(f"Agent {self.agent_id} failed: {e}", exc_info=True)
             self.state = AgentState.FAILED
-            
+
+            # Surface the exception type + short traceback frame to callers
+            # so triage doesn't require pulling logs. The full stack is still
+            # in the logger via exc_info=True above.
+            import traceback as _tb
+            _last_frames = _tb.extract_tb(e.__traceback__)[-2:] if e.__traceback__ else []
+            _origin = " -> ".join(f"{f.filename.split('/')[-1]}:{f.lineno}" for f in _last_frames)
+
             await self.context.event_logger.log_event(
                 EventType.AGENT_FAILED,
                 self.agent_id,
-                {"error": str(e)}
+                {
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "error_origin": _origin,
+                }
             )
-            
-            return AgentResult(status="failed", summary=f"Error: {e}")
+
+            return AgentResult(status="failed",
+                               summary=f"{type(e).__name__}: {e}")
         
         finally:
             self.end_time = datetime.now()

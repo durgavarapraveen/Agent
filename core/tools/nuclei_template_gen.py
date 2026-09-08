@@ -15,6 +15,28 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 
+def _yaml_str(value: str) -> str:
+    """Quote a value for safe YAML embedding.
+
+    Templates are generated from finding-derived strings; without escaping,
+    a title containing `:` or a proof containing `\\n---\\n` could break the
+    template's structure or inject an unintended matcher. We prefer the
+    PyYAML dumper when available and fall back to a conservative double-
+    quoted string with `"`/`\\` escaped.
+    """
+    if value is None:
+        return '""'
+    try:
+        import yaml
+        # Force double-quoted style so multi-line finding fields collapse safely.
+        return yaml.dump(str(value), default_style='"',
+                          default_flow_style=True).rstrip("\n... \n").rstrip()
+    except Exception:
+        s = str(value).replace("\\", "\\\\").replace('"', '\\"')
+        s = s.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+        return f'"{s}"'
+
+
 class NucleiTemplateGenerator:
     """Generates custom nuclei YAML templates from discovered findings."""
 

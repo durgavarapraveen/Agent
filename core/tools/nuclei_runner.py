@@ -66,6 +66,10 @@ class NucleiRunner:
 
     def __init__(self, binary_path: Optional[str] = None):
         self.binary_path = binary_path or shutil.which("nuclei") or "nuclei"
+        # `last_status` records why the last call returned an empty result so
+        # callers can distinguish "clean scan" from "timeout / binary missing /
+        # spawn failed". Set inside `execute_template`.
+        self.last_status: str = "unknown"
 
     def find_templates_for(self, tech: str) -> str:
         """
@@ -142,15 +146,19 @@ class NucleiRunner:
                     process_returncode = res.get("returncode", res.get("exit_code", 0))
                 else:
                     logger.error(f"NUCLEI_BINARY_MISSING: binary '{self.binary_path}' not found in PATH")
+                    self.last_status = "binary_missing"
                     return []
             except Exception as e:
                 logger.error(f"NUCLEI_BINARY_MISSING: binary '{self.binary_path}' not found in PATH ({e})")
+                self.last_status = "binary_missing"
                 return []
         except asyncio.TimeoutError:
             logger.warning(f"NUCLEI_TIMEOUT: scan timed out after {timeout}s for target={target}")
+            self.last_status = "timeout"
             return []
         except Exception as e:
             logger.error(f"NUCLEI_START_FAILED: failed to spawn process: {e}")
+            self.last_status = "spawn_failed"
             return []
 
         if process_returncode != 0 and stderr_bytes:
@@ -174,6 +182,7 @@ class NucleiRunner:
                 logger.debug(f"NUCLEI_PARSE_SKIP: non-JSON line: {line[:100]}")
 
         logger.info(f"NUCLEI_COMPLETE: target={target} matches={len(findings)}")
+        self.last_status = "ok" if findings else "empty"
         return findings
 
     def _parse_json_finding(self, target: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:

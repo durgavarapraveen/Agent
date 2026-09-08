@@ -1,0 +1,39 @@
+# Pentest agent — Ruff config.
+#
+# We only fail CI on REAL bugs (pyflakes) and syntax/parse errors, not on
+# style. The codebase pre-dates the CI lint gate; enabling stylistic rules
+# would take thousands of edits with no correctness gain. If someone wants
+# to enable a style rule later, add it here and clean up the offenders.
+
+line-length = 120
+target-version = "py311"
+
+extend-exclude = [
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+    "node_modules",
+    "tests/_obsolete",
+    "**/__pycache__",
+]
+
+[lint]
+# Only fail on real bugs, not cleanup nits. F401/F541/F841 are noisy
+# unused-import / empty-f-string / unused-local warnings that don't change
+# behaviour — turn back on later as separate cleanup PRs.
+select = [
+    "E9",    # syntax errors
+    "F63",   # broken comparisons (== None, if x is 5)
+    "F7",    # syntax issues in imports / annotations
+    "F82",   # undefined name — real bug
+    "F403",  # `from x import *` obscures names
+    "F811",  # redefined-while-unused
+    "W6",    # deprecated syntax
+]
+
+ignore = []
+
+[lint.per-file-ignores]
+"tests/*" = ["F811"]
+"conftest.py" = ["F811"]

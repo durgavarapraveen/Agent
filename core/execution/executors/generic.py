@@ -77,8 +77,16 @@ class GenericHTTPExecutor(ExecutorBase):
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")[:8192] if e.fp else ""
             return e.code, body, dict(e.headers)
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+            # Network-level failure — the target is unreachable / timed out /
+            # the connection reset. Log at WARNING so downstream reads of the
+            # empty tuple `(0, "", {})` can be traced back to a real failure
+            # instead of being confused with "target returned nothing".
+            logger.warning("Probe network error for %s: %s", url, exc)
+            return 0, "", {}
         except Exception as exc:
-            logger.debug("Probe failed for %s: %s", url, exc)
+            # Unexpected exception — log with stack so it's fixable.
+            logger.exception("Probe unexpected error for %s: %s", url, exc)
             return 0, "", {}
 
     def _url_from_experiment(self, experiment: SecurityExperiment) -> str:
@@ -2460,27 +2468,67 @@ class WAFEvasionDetector(GenericHTTPExecutor):
 
 class _LLMBudget:
     """Per-scan cap on LLM calls so Tier-4 can't dominate cost.
-    Module-level state — one scan = one process, adequate for our use."""
+
+    Keyed by scan_id (auto-derived from the scope validator's active scope, or
+    the current PID as a last-resort fallback) so long-running processes that
+    handle multiple scans don't leak the counter between runs. Callers can
+    also explicitly `reset(scan_id)` at the start of each scan.
+    """
+    import threading as _threading
     MAX_CALLS_PER_SCAN = 30
-    _calls = 0
+    _counts: Dict[str, int] = {}
+    _lock = _threading.RLock()
+
+    @classmethod
+    def _current_scan_key(cls) -> str:
+        # Prefer an explicit scan id from the scope validator; else fall back
+        # to the process id (bounds accumulation to one process lifetime).
+        try:
+            from core.security.authorization import TargetScopeValidator
+            v = TargetScopeValidator.get()
+            sid = getattr(v, "active_scan_id", None)
+            if sid:
+                return str(sid)
+        except Exception:
+            pass
+        import os as _os
+        return f"pid:{_os.getpid()}"
 
     @classmethod
     def can_call(cls) -> bool:
-        return cls._calls < cls.MAX_CALLS_PER_SCAN
+        with cls._lock:
+            return cls._counts.get(cls._current_scan_key(), 0) < cls.MAX_CALLS_PER_SCAN
 
     @classmethod
     def register(cls, n: int = 1):
-        cls._calls += n
+        with cls._lock:
+            k = cls._current_scan_key()
+            cls._counts[k] = cls._counts.get(k, 0) + n
 
     @classmethod
     def snapshot(cls) -> Dict[str, int]:
-        return {"llm_calls_used": cls._calls, "llm_calls_cap": cls.MAX_CALLS_PER_SCAN}
+        with cls._lock:
+            return {"llm_calls_used": cls._counts.get(cls._current_scan_key(), 0),
+                    "llm_calls_cap": cls.MAX_CALLS_PER_SCAN}
+
+    @classmethod
+    def reset(cls, scan_id: Optional[str] = None) -> None:
+        """Clear the budget counter for a specific scan (or the current one).
+        Called at the start of each scan by the orchestrator."""
+        with cls._lock:
+            key = str(scan_id) if scan_id else cls._current_scan_key()
+            cls._counts.pop(key, None)
 
 
-def _run_async(coro):
+def _run_async(coro, timeout: float = 60.0):
     """Safely run an async coroutine from a sync context, whether or not
     there's an event loop already running (some orchestrators call executors
-    from an async task)."""
+    from an async task).
+
+    Raises `TimeoutError` on missed deadline rather than silently returning
+    `None` — the previous behavior confused "coroutine hung" with "coroutine
+    returned nothing" and leaked daemon threads on hang.
+    """
     import asyncio
     try:
         loop = asyncio.get_event_loop()
@@ -2490,36 +2538,54 @@ def _run_async(coro):
         # We're inside a running loop — use a fresh loop in a worker thread.
         import threading
         result_box: Dict[str, Any] = {}
+        done_evt = threading.Event()
 
         def _worker():
             new_loop = asyncio.new_event_loop()
             try:
                 asyncio.set_event_loop(new_loop)
-                result_box["r"] = new_loop.run_until_complete(coro)
+                # Wrap in wait_for so a hung coroutine surfaces as a
+                # concrete asyncio.TimeoutError instead of an infinite hang.
+                result_box["r"] = new_loop.run_until_complete(
+                    asyncio.wait_for(coro, timeout=timeout)
+                )
             except Exception as e:
                 result_box["e"] = e
             finally:
                 new_loop.close()
+                done_evt.set()
+
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
-        t.join(timeout=45)
+        # Give the worker its own deadline plus a small overhead buffer.
+        if not done_evt.wait(timeout=timeout + 5.0):
+            raise TimeoutError(
+                f"_run_async worker thread did not complete within {timeout}s"
+            )
         if "e" in result_box:
             raise result_box["e"]
         return result_box.get("r")
-    return asyncio.run(coro)
+    # No running loop — run the coroutine directly with a timeout guard.
+    return asyncio.run(asyncio.wait_for(coro, timeout=timeout))
 
 
 async def _llm_json(prompt: str, system: Optional[str] = None,
-                    max_tokens: int = 1024) -> Optional[dict]:
-    """Ask the harness for JSON. Returns None on failure or budget exhausted."""
+                    max_tokens: int = 1024,
+                    timeout: float = 60.0) -> Optional[dict]:
+    """Ask the harness for JSON. Returns None on failure, budget exhaustion,
+    or timeout. Never allows a stalled provider to halt the whole phase."""
     if not _LLMBudget.can_call():
         return None
     try:
+        import asyncio as _aio
         from agents.llm_client import LLMClient, TaskTier
         client = LLMClient.get()
         _LLMBudget.register(1)
-        return await client.generate_json(prompt, tier=TaskTier.LARGE,
-                                          system=system, max_tokens=max_tokens)
+        return await _aio.wait_for(
+            client.generate_json(prompt, tier=TaskTier.LARGE,
+                                 system=system, max_tokens=max_tokens),
+            timeout=timeout,
+        )
     except Exception as e:
         logger.debug("LLM call failed: %s", e)
         return None
@@ -4157,22 +4223,50 @@ class SubdomainTakeoverDetector(GenericHTTPExecutor):
         if not subs:
             return _no_endpoints_result("no subdomains to fingerprint")
 
+        # Delegate to the shared evaluator: fingerprint + DNS CNAME.
+        # A fingerprint-only match is not a finding anymore — the CNAME must
+        # dangle into the same provider, and known-false-positive markers
+        # (Heroku "Application Error", S3 AccessDenied, empty GitHub Pages)
+        # short-circuit the check.
+        try:
+            from core.intelligence.takeover_detector import evaluate as _eval_takeover
+        except Exception:
+            _eval_takeover = None
+
         for host in subs:
             for scheme in ("https", "http"):
                 url = f"{scheme}://{host}/"
                 status, body, _ = self._probe(url)
                 if not body:
                     continue
-                for provider, sigs in self.FINGERPRINTS:
-                    if any(sig in body for sig in sigs):
-                        findings.append({"test": "subdomain_takeover_candidate",
-                                         "host": host, "provider": provider,
-                                         "status": status,
-                                         "body_snippet": body[:256]})
-                        break
+                if _eval_takeover is None:
+                    # Fallback if the shared module cannot be imported — keep
+                    # the old behaviour so this executor is never silently
+                    # disabled. Should never happen in practice.
+                    for provider, sigs in self.FINGERPRINTS:
+                        if any(sig in body for sig in sigs):
+                            findings.append({"test": "subdomain_takeover_candidate",
+                                             "host": host, "provider": provider,
+                                             "status": status,
+                                             "body_snippet": body[:256],
+                                             "confidence": "low_fingerprint_only"})
+                            break
+                    else:
+                        continue
+                    break
+                verdict = _eval_takeover(body, host, status_code=status)
+                if verdict.is_takeover:
+                    findings.append({
+                        "test": "subdomain_takeover_confirmed",
+                        "host": host, "provider": verdict.provider,
+                        "cname": verdict.cname, "status": status,
+                        "details": verdict.as_finding_details(),
+                        "body_snippet": body[:256],
+                        "confidence": "high",
+                    })
+                    break
                 else:
                     continue
-                break
 
         evidence = self.collect_evidence({
             "takeover_findings": findings, "findings_count": len(findings),
@@ -5221,16 +5315,39 @@ _KALI_CONTAINER_DEFAULT = "kali-pentesting"
 def _run_in_kali(script: str, timeout: int = 60) -> Tuple[int, str, str]:
     """Execute a Python script inside the Kali container via docker exec.
     Returns (returncode, stdout, stderr). Falls back to (rc=-1, "", err) if
-    docker/container unavailable."""
-    import subprocess, base64 as _b64, shlex
+    docker/container unavailable.
+
+    Container name is validated against a strict allowlist regex before
+    interpolation. Even though it comes from an env var (operator-controlled),
+    a container name with shell metacharacters would enable command injection
+    in an otherwise trusted operator's shell — enforce the Docker naming rules
+    (`[a-zA-Z0-9][a-zA-Z0-9_.-]*`) so the interpolation is safe under all
+    reasonable operator inputs.
+
+    We also switch from `shell=True` to `shell=False` with a list argv, so the
+    only shell-interpretation surface remaining is inside the container.
+    """
+    import subprocess
+    import base64 as _b64
     container = os.getenv(_KALI_CONTAINER_ENV, _KALI_CONTAINER_DEFAULT)
+    if not re.match(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$', container):
+        return -1, "", f"invalid container name in env: {container!r}"
     try:
         b64 = _b64.b64encode(script.encode()).decode()
-        cmd = (f'docker exec {container} python3 -c '
-               f'"import base64; exec(base64.b64decode(\'{b64}\'))"')
-        r = subprocess.run(cmd, shell=True, capture_output=True,
+        # `docker exec` receives the argv directly — no shell parses anything on
+        # the host. The python3 process inside the container executes the
+        # base64-encoded script, whose alphabet cannot contain shell metachars.
+        argv = [
+            "docker", "exec", container, "python3", "-c",
+            f"import base64; exec(base64.b64decode('{b64}'))",
+        ]
+        r = subprocess.run(argv, shell=False, capture_output=True,
                            encoding="utf-8", errors="replace", timeout=timeout)
         return r.returncode, r.stdout or "", r.stderr or ""
+    except subprocess.TimeoutExpired as e:
+        return -1, "", f"docker exec timed out after {timeout}s: {e}"
+    except FileNotFoundError as e:
+        return -1, "", f"docker CLI not found: {e}"
     except Exception as e:
         return -1, "", str(e)
 

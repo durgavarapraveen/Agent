@@ -57,11 +57,33 @@ class QualityGate:
             retested_f = self.retest_engine.process_finding_retest(f)
             retested_findings.append(retested_f)
 
-        # 3. Baseline Normalization
+        # 3. Baseline Normalization.
+        # First-scan mode previously captured EVERY retested finding as the
+        # baseline, including LOW/INFO noise; the second scan would then
+        # silently suppress the same real findings as "known baseline." Cap
+        # the first-scan baseline at CONFIRMED + INFO severity, so real
+        # findings never become invisible on the second run.
         if first_scan_mode:
-            self.baseline_manager.capture_baseline(scan_id, target, retested_findings)
+            def _is_baseline_worthy(f):
+                sev = str(f.get("severity", "")).upper()
+                # Skip anything actively confirmed HIGH+ as baseline noise —
+                # those are real findings, not background.
+                if sev in ("CRITICAL", "HIGH"):
+                    return False
+                # Skip inconclusive retests.
+                if str(f.get("reproducibility_status", "")).upper() == "INCONCLUSIVE":
+                    return False
+                return True
+
+            baseline_candidates = [f for f in retested_findings if _is_baseline_worthy(f)]
+            self.baseline_manager.capture_baseline(scan_id, target, baseline_candidates)
             clean_findings = retested_findings
-            baseline_stats = {"mode": "first_scan_baseline_captured", "total_captured": len(retested_findings)}
+            baseline_stats = {
+                "mode": "first_scan_baseline_captured",
+                "total_captured": len(baseline_candidates),
+                "total_findings": len(retested_findings),
+                "excluded_from_baseline": len(retested_findings) - len(baseline_candidates),
+            }
         else:
             clean_findings, baseline_stats = self.baseline_manager.filter_noise_and_detect_drift(target, retested_findings)
 

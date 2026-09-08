@@ -1,4 +1,13 @@
-"""AntiGravity Dashboard API — PostgreSQL-backed, no flat files or SQLite."""
+"""AntiGravity Dashboard API — PostgreSQL-backed, no flat files or SQLite.
+
+Module organisation follow-up (#159): this file is a 2.5k-line monolith. The
+next refactor should split it into per-domain routers under `ui/api/routers/`
+(scans, targets, review, rag, canonical, health/metrics, ws). The
+`app.include_router(...)` pattern lets us move routes one file at a time
+without breaking clients. Not done in this pass — a mid-audit split would
+break the running system too easily. Placeholder skeleton at
+`ui/api/routers/__init__.py` documents the mapping.
+"""
 
 import json
 import logging
@@ -9,7 +18,25 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
+
+# ── Observability bootstrap ─────────────────────────────────────────────
+# Structured JSON logging with global PII redaction, Prometheus metrics, and
+# OpenTelemetry tracing (all with graceful no-op fallbacks). Installed BEFORE
+# any other logger is instantiated so every downstream log line goes through
+# the JSON formatter and PII filter.
+from core.observability import logging as _ag_logging
+_ag_logging.configure_root(level=os.environ.get("LOG_LEVEL", "INFO"))
+from core.observability import metrics as _metrics
+from core.observability import tracing as _tracing
+
+# Phase 6.4 — install egress firewall guard on httpx so every outbound
+# request (from server or from any imported library) is scope-checked.
+try:
+    from core.security.egress_firewall import install_httpx_guard as _install_egress
+    _install_egress()
+except Exception:
+    pass
 
 logger = logging.getLogger("antigravity.api")
 
@@ -20,34 +47,225 @@ from pydantic import BaseModel
 
 app = FastAPI(title="AntiGravity Dashboard API", version="1.0.0")
 
-# CORS — configurable via CORS_ORIGINS (comma-separated). Defaults to "*" for
-# development. In production, set e.g. CORS_ORIGINS=https://ui.example.com
-_cors_origins_env = os.getenv("CORS_ORIGINS", "*").strip()
-_cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()] or ["*"]
+# ── Rate limiting ─────────────────────────────────────────────────────────
+# `slowapi` is a soft dependency. When installed, it caps the abuse-prone
+# endpoints (scan launch, kill-all, RAG ingest) per-IP; when absent, the app
+# still boots but rate limiting is a no-op. Install with `pip install slowapi`.
+_LIMITER = None
+try:
+    from slowapi import Limiter
+    from slowapi.util import get_remote_address
+    from slowapi.errors import RateLimitExceeded
+    from slowapi.middleware import SlowAPIMiddleware
+
+    _LIMITER = Limiter(key_func=get_remote_address, default_limits=[])
+    app.state.limiter = _LIMITER
+
+    @app.exception_handler(RateLimitExceeded)
+    async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
+        return JSONResponse(
+            {"error": "rate_limit_exceeded", "detail": str(exc)},
+            status_code=429,
+            headers={"Retry-After": "60"},
+        )
+
+    app.add_middleware(SlowAPIMiddleware)
+except ImportError:
+    logger.warning(
+        "slowapi not installed — rate limiting disabled. "
+        "Install with `pip install slowapi` before deploying.")
+
+
+def _rate_limit(limit: str):
+    """Return a rate-limit decorator that no-ops when slowapi is absent."""
+    if _LIMITER is None:
+        def _noop(fn):
+            return fn
+        return _noop
+    return _LIMITER.limit(limit)
+
+
+# ── Simple built-in per-route rate limiter ────────────────────────────────
+# Backstop that works even without slowapi. A rolling window per (client, route)
+# guards the abuse-prone endpoints listed in `_ROUTE_LIMITS` below. This is
+# best-effort in-memory; behind a reverse proxy the real primary rate limiter
+# should live at the proxy.
+import time as _time
+from collections import deque as _deque, defaultdict as _defaultdict
+
+_ROUTE_LIMITS = {
+    # (path_prefix): (max_requests, window_seconds)
+    "/api/scans/run":         (5, 60),
+    "/api/scans/kill-all":    (10, 60),
+    "/api/rag/ingest/file":   (10, 60),
+    "/api/rag/ingest/url":    (10, 60),
+    "/api/rag/ingest/search": (10, 60),
+    "/api/rag/ingest/uploaded": (10, 60),
+    "/api/campaigns/run":     (3, 60),
+}
+_rl_buckets: dict = _defaultdict(_deque)
+_rl_lock = threading.Lock()
+
+
+@app.middleware("http")
+async def _builtin_rate_limit(request: Request, call_next):
+    path = request.url.path or ""
+    for prefix, (limit, window) in _ROUTE_LIMITS.items():
+        if path.startswith(prefix):
+            client = (request.client.host if request.client else "unknown")
+            key = f"{client}|{prefix}"
+            now = _time.monotonic()
+            with _rl_lock:
+                q = _rl_buckets[key]
+                # Drop timestamps outside the rolling window.
+                while q and q[0] <= now - window:
+                    q.popleft()
+                if len(q) >= limit:
+                    return JSONResponse(
+                        {"error": "rate_limit_exceeded",
+                         "detail": f"max {limit} requests per {window}s per client"},
+                        status_code=429,
+                        headers={"Retry-After": str(window)},
+                    )
+                q.append(now)
+            break
+    return await call_next(request)
+
+# ── HTTP metrics middleware ─────────────────────────────────────────────
+@app.middleware("http")
+async def _http_metrics(request: Request, call_next):
+    """Emit `antigravity_http_requests_total{method, route, status_class}`
+    for every request. The `route` label is the route's PATH TEMPLATE
+    (`/api/scans/{scan_id}`) — never the resolved URL — so path-variable
+    cardinality doesn't explode Prometheus."""
+    response = await call_next(request)
+    try:
+        route = getattr(request.scope.get("route"), "path", None) or "unknown"
+        status_class = f"{response.status_code // 100}xx"
+        _metrics.HTTP_REQUEST.labels(
+            method=request.method,
+            route=route,
+            status_class=status_class,
+        ).inc()
+    except Exception:
+        pass
+    return response
+
+
+# ── Environment mode ──────────────────────────────────────────────────────
+# `ANTIGRAVITY_ENV` selects the runtime mode. Values: `development` (dev-friendly
+# defaults), `production` (strict; refuses to boot without auth+CORS).
+_ENV_MODE = os.getenv("ANTIGRAVITY_ENV", "development").strip().lower()
+_IS_PROD = _ENV_MODE in ("production", "prod")
+
+# ── CORS ──────────────────────────────────────────────────────────────────
+# In production, an explicit `CORS_ORIGINS` allowlist is required. `*` is
+# refused at boot. In development, defaults to common localhost origins.
+_cors_origins_env = os.getenv("CORS_ORIGINS", "").strip()
+if _cors_origins_env:
+    _cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+elif _IS_PROD:
+    raise RuntimeError(
+        "ANTIGRAVITY_ENV=production requires explicit CORS_ORIGINS allowlist "
+        "(e.g. CORS_ORIGINS=https://ui.example.com). Refusing to start with `*`.")
+else:
+    _cors_origins = [
+        "http://localhost:5173", "http://127.0.0.1:5173",  # Vite dev
+        "http://localhost:8903", "http://127.0.0.1:8903",  # same-origin
+    ]
+
+if _IS_PROD and "*" in _cors_origins:
+    raise RuntimeError(
+        "CORS_ORIGINS=`*` is not permitted in production. Provide an allowlist.")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    allow_credentials=(_cors_origins != ["*"]),
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=("*" not in _cors_origins),
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-API-Key"],
 )
 
-# Optional API-key auth — set API_KEY env var to require X-API-Key on every
-# non-health endpoint. Empty = auth disabled (dev-friendly default).
+# ── API-key auth ──────────────────────────────────────────────────────────
+# `API_KEY` env is REQUIRED in production. In development, if unset, we
+# auto-generate a random key on first boot and write it to `.antigravity/
+# dev_api_key` so the dev flow keeps working — the operator can copy the
+# printed key into their SPA config. The key is NEVER accepted via query
+# string (leaks to logs / Referer / proxy caches). Header only.
 _API_KEY = os.getenv("API_KEY", "").strip()
+if not _API_KEY:
+    if _IS_PROD:
+        raise RuntimeError(
+            "ANTIGRAVITY_ENV=production requires API_KEY to be set. "
+            "Generate one with: python -c 'import secrets; print(secrets.token_urlsafe(32))'")
+    # Dev auto-key
+    _dev_key_path = Path(__file__).resolve().parent.parent.parent / ".antigravity" / "dev_api_key"
+    try:
+        if _dev_key_path.exists():
+            _API_KEY = _dev_key_path.read_text().strip()
+        else:
+            import secrets
+            _API_KEY = secrets.token_urlsafe(32)
+            _dev_key_path.parent.mkdir(parents=True, exist_ok=True)
+            _dev_key_path.write_text(_API_KEY)
+            try:
+                os.chmod(_dev_key_path, 0o600)
+            except Exception:
+                pass  # Windows
+        logger.warning(
+            "DEV MODE: auto-generated API key at %s. "
+            "Set API_KEY explicitly and ANTIGRAVITY_ENV=production before deploying.",
+            _dev_key_path)
+    except Exception as e:
+        logger.error("Failed to persist dev API key (%s); auth still enforced in-memory.", e)
+        import secrets
+        _API_KEY = secrets.token_urlsafe(32)
+
 _AUTH_EXEMPT_PATHS = {"/", "/docs", "/openapi.json", "/redoc",
                        "/api/health", "/favicon.ico"}
 
 
+def _constant_time_eq(a: str, b: str) -> bool:
+    import hmac
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
+# Download-style GETs — the browser cannot set custom headers on a top-level
+# navigation (window.open / <a href>) so we accept `?api_key=` on this narrow
+# allowlist only. Everything else must use the X-API-Key header.
+_QUERY_AUTH_SUFFIXES = (
+    "/logs-download",
+    "/report",
+    "/sarif",
+    "/gitlab-dast",
+)
+_QUERY_AUTH_PREFIXES = (
+    "/api/evidence/",
+)
+
+
+def _accepts_query_auth(path: str, method: str) -> bool:
+    if method.upper() != "GET":
+        return False
+    if any(path.endswith(s) for s in _QUERY_AUTH_SUFFIXES):
+        return True
+    if any(path.startswith(p) for p in _QUERY_AUTH_PREFIXES):
+        return True
+    return False
+
+
 @app.middleware("http")
 async def _require_api_key(request: Request, call_next):
-    if not _API_KEY:
-        return await call_next(request)
     path = request.url.path or ""
     if path in _AUTH_EXEMPT_PATHS or path.startswith(("/assets/", "/static/")):
         return await call_next(request)
-    provided = request.headers.get("x-api-key") or request.query_params.get("api_key")
-    if provided != _API_KEY:
+    provided = request.headers.get("x-api-key") or ""
+    if not _constant_time_eq(provided, _API_KEY):
+        # Allow `?api_key=` on download-style GETs only.
+        if _accepts_query_auth(path, request.method):
+            qp = request.query_params.get("api_key") or ""
+            if _constant_time_eq(qp, _API_KEY):
+                return await call_next(request)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return await call_next(request)
 
@@ -132,7 +350,7 @@ sys.path.insert(0, str(BASE))
 from core.database.pg_store import (
     _init_schema, TargetRepo, ScanRepo, VulnRepo, LiveDataRepo,
     FindingV2Repo, DedupRepo, AuditRepo, ScheduleRepo, CampaignRepo,
-    ExploitResultRepo, ScanArtifactRepo, AuthBypassRepo, make_run_id,
+    ExploitResultRepo, ScanArtifactRepo, AuthBypassRepo, LiveAgentRepo, make_run_id,
 )
 try:
     _init_schema()
@@ -140,23 +358,107 @@ except Exception as _e:
     import logging as _log
     _log.getLogger(__name__).warning(f"PG schema init failed (will retry on first query): {_e}")
 
+# Reconcile any scan rows left in `running/starting/stopping` from a previous
+# API/process crash. Without this, a crashed scan blocks new scans of the same
+# target forever and the UI shows a stuck progress bar. Best-effort — never
+# raises.
+try:
+    ScanRepo.bootstrap_recover()
+except Exception as _e:
+    import logging as _log
+    _log.getLogger(__name__).warning(f"bootstrap_recover skipped: {_e}")
+
 
 # ── Models ──────────────────────────────────────────────────────────────────
+from pydantic import Field, field_validator
+from urllib.parse import urlparse as _urlparse
+import ipaddress as _ipaddress
+
+
+_ALLOWED_TIERS = {"PASSIVE", "SAFE_ACTIVE", "DEEP", "POC"}
+_ALLOWED_PHASES = {
+    "RECON", "OSINT", "DISCOVERY", "SCANNING", "ACTIVE_SCANNING",
+    "EXPLOITATION", "POSTEX", "POST_EXPLOIT", "REPORTING",
+}
+# URL schemes accepted on user-facing inputs. `file://`, `gopher://`, `dict://`
+# and other non-HTTP schemes are blocked to prevent SSRF via RAG/URL ingest.
+_ALLOWED_SCHEMES = {"http", "https"}
+
+
+def _validate_target_url(v: str) -> str:
+    """Common validator for user-supplied target URLs / hostnames.
+
+    Accepts either a bare hostname/IP or a full HTTP(S) URL. Rejects credentials
+    embedded in the URL (`http://user:pass@host`) — those must come through the
+    credentials field. Refuses schemes outside {http, https}.
+    """
+    if not v or not isinstance(v, str):
+        raise ValueError("target must be a non-empty string")
+    v = v.strip()
+    if len(v) > 2048:
+        raise ValueError("target too long (max 2048)")
+    parsed = _urlparse(v if "://" in v else "http://" + v)
+    if parsed.scheme not in _ALLOWED_SCHEMES:
+        raise ValueError(f"scheme must be one of {sorted(_ALLOWED_SCHEMES)}")
+    if parsed.username or parsed.password:
+        raise ValueError("credentials in URL are not allowed")
+    if not parsed.hostname:
+        raise ValueError("hostname required")
+    # Allow IPs and hostnames; reject only obviously-malformed characters.
+    import re as _re
+    if not _re.match(
+        r'^[A-Za-z0-9._\-:%\[\]]+$',  # []: for IPv6 literals
+        parsed.hostname,
+    ):
+        raise ValueError("hostname contains invalid characters")
+    return v
+
 
 class TargetCreate(BaseModel):
-    url: str
-    scope: str = ""
-    notes: str = ""
+    url: str = Field(..., max_length=2048)
+    scope: str = Field("", max_length=8192)
+    notes: str = Field("", max_length=8192)
+
+    @field_validator("url")
+    @classmethod
+    def _v_url(cls, v: str) -> str:
+        return _validate_target_url(v)
 
 
 class ScanRequest(BaseModel):
-    target: str
+    target: str = Field(..., max_length=2048)
     tier: str = "POC"
     auto_approve: bool = False
     skip_osint: bool = False
     reset_dedup: bool = False
-    phases: list = []
-    credentials: list = []  # [{"role": "admin", "username": "", "password": "", "login_url": ""}, ...]
+    phases: List[str] = Field(default_factory=list, max_length=16)
+    credentials: List[dict] = Field(default_factory=list, max_length=32)
+
+    @field_validator("target")
+    @classmethod
+    def _v_target(cls, v: str) -> str:
+        return _validate_target_url(v)
+
+    @field_validator("tier")
+    @classmethod
+    def _v_tier(cls, v: str) -> str:
+        v = str(v or "").strip().upper()
+        if v not in _ALLOWED_TIERS:
+            raise ValueError(f"tier must be one of {sorted(_ALLOWED_TIERS)}")
+        return v
+
+    @field_validator("phases")
+    @classmethod
+    def _v_phases(cls, v: List[str]) -> List[str]:
+        out = []
+        for p in v or []:
+            p_norm = str(p or "").strip().upper()
+            if p_norm and p_norm not in _ALLOWED_PHASES:
+                raise ValueError(f"phase '{p}' not one of {sorted(_ALLOWED_PHASES)}")
+            if p_norm:
+                out.append(p_norm)
+        return out
+
 
 
 # ── Scan Process Tracker ────────────────────────────────────────────────────
@@ -174,6 +476,59 @@ def _persist_scan_state():
                                    log_file=job.get("log_file", ""))
         except Exception:
             pass
+
+
+_SECRET_PATTERNS = None
+
+
+def _scrub_secrets(text: str) -> str:
+    """Redact secrets from a single log line before it hits the WebSocket / API.
+
+    Patterns compiled once. Aggressive by intent — a false-positive redaction is
+    always safer than leaking a credential to any operator viewing the live UI."""
+    global _SECRET_PATTERNS
+    if _SECRET_PATTERNS is None:
+        import re as _re
+        _SECRET_PATTERNS = [
+            # Authorization / Cookie headers
+            (_re.compile(r'(?i)(authorization\s*[:=]\s*)(bearer\s+)?\S+'),
+             r'\1\2[REDACTED]'),
+            (_re.compile(r'(?i)(cookie\s*[:=]\s*)[^\r\n]+'),
+             r'\1[REDACTED]'),
+            (_re.compile(r'(?i)(set-cookie\s*[:=]\s*)[^\r\n]+'),
+             r'\1[REDACTED]'),
+            # password / api_key / token / secret in key=value form
+            (_re.compile(r'(?i)(pass(?:word)?|api[_-]?key|token|secret|access[_-]?token'
+                          r'|refresh[_-]?token|session[_-]?id)\s*[:=]\s*[\'"]?([^\s\'";,]{4,})[\'"]?'),
+             r'\1=[REDACTED]'),
+            # AWS
+            (_re.compile(r'AKIA[0-9A-Z]{16}'), '[REDACTED_AWS_KEY]'),
+            # JWT (3 dot-separated base64url segments; head is usually eyJ...)
+            (_re.compile(r'\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+'),
+             '[REDACTED_JWT]'),
+        ]
+    out = text
+    for pat, repl in _SECRET_PATTERNS:
+        out = pat.sub(repl, out)
+    return out
+
+
+def _redact_command(cmd: list) -> str:
+    """Redact anything that might leak credentials or file paths that lead to
+    them. Called before the command string is exposed via any API endpoint."""
+    redacted = []
+    skip_next = False
+    for tok in cmd:
+        if skip_next:
+            redacted.append("[REDACTED]")
+            skip_next = False
+            continue
+        if tok in ("--credentials", "--credentials-file", "--password", "--token"):
+            redacted.append(tok)
+            skip_next = True
+            continue
+        redacted.append(str(tok))
+    return " ".join(redacted)
 
 
 def _is_pid_alive(pid: int) -> bool:
@@ -224,6 +579,180 @@ def _load_scan_state():
 _load_scan_state()
 
 
+# ── Health, metrics, and lifecycle ─────────────────────────────────────
+def _kali_container_healthy() -> tuple[bool, str]:
+    """Best-effort readiness probe for the Kali tool container.
+
+    Returns (is_healthy, detail). If `docker` isn't installed we return
+    True with detail "docker_cli_missing" — the tool router will still fall
+    back to Python-only tools. If the CLI is installed and the named
+    container exists but isn't running, we return False.
+    """
+    import shutil as _sh
+    import subprocess as _sp
+    if not _sh.which("docker"):
+        return True, "docker_cli_missing"
+    container = os.getenv("KALI_CONTAINER", os.getenv("DOCKER_CONTAINER", "kali-pentesting"))
+    try:
+        r = _sp.run(
+            ["docker", "inspect", "--format", "{{.State.Status}}", container],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode != 0:
+            return False, f"container_missing:{container}"
+        state = (r.stdout or "").strip().lower()
+        return state == "running", f"state:{state or 'unknown'}"
+    except Exception as e:
+        return False, f"probe_error:{e}"
+
+
+@app.get("/api/source-ip", include_in_schema=True)
+def source_ip():
+    """Report the IP the scanner will use — direct real IP, or VPN exit IP.
+
+    UI can call this at page load to show a badge like
+    "🌐 Direct  1.2.3.4"  vs  "🛡️ VPN  5.6.7.8 (Tor)".
+    """
+    import os
+    from core.security.anon_gate import _vpn_configured, _fetch_direct_ip
+    mode = "vpn" if _vpn_configured() else "direct"
+    if mode == "vpn":
+        try:
+            from core.security.anon_gate import check_exit_ip
+            ip, is_tor = check_exit_ip()
+            return {"mode": "vpn", "ip": ip, "is_tor": is_tor,
+                    "chain_up": True,
+                    "proxy": os.getenv("HTTPS_PROXY") or os.getenv("ALL_PROXY") or ""}
+        except Exception as e:
+            return {"mode": "vpn", "ip": None, "is_tor": False,
+                    "chain_up": False, "error": str(e)}
+    return {"mode": "direct", "ip": _fetch_direct_ip() or None,
+            "is_tor": False, "chain_up": True}
+
+
+@app.get("/api/health", include_in_schema=True)
+def health():
+    """Deep health check for readiness probes.
+
+    Returns 200 with `status=ok` when Postgres is reachable and — best
+    effort — the Kali container is running. Returns 503 with a structured
+    body when any critical dependency is unavailable so k8s / cron watchers
+    can react.
+    """
+    checks: dict = {"status": "ok", "checks": {}}
+    http_code = 200
+
+    # Postgres
+    try:
+        from core.memory.database import DatabaseManager
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+        checks["checks"]["postgres"] = "ok"
+    except Exception as e:
+        checks["checks"]["postgres"] = f"unavailable: {e}"
+        checks["status"] = "degraded"
+        http_code = 503
+
+    # Kali container (soft — degrades to "warn" so lifecycle probes can
+    # still start the API while the Kali container comes up).
+    ok, detail = _kali_container_healthy()
+    checks["checks"]["kali_container"] = detail if ok else f"down ({detail})"
+    if not ok:
+        checks["status"] = "degraded" if checks["status"] == "ok" else checks["status"]
+
+    # LLM harness (informational only)
+    try:
+        from agents.llm_harness_adapter import get_llm
+        checks["checks"]["llm_harness"] = "initialised" if get_llm() else "not_initialised"
+    except Exception as e:
+        checks["checks"]["llm_harness"] = f"error: {e}"
+
+    # Metrics adapter
+    checks["checks"]["metrics"] = "prometheus" if _metrics.is_available() else "noop"
+    checks["checks"]["tracing"] = "otel" if _tracing.is_available() else "noop"
+
+    return JSONResponse(checks, status_code=http_code)
+
+
+@app.get("/api/metrics", include_in_schema=False)
+def metrics_endpoint():
+    """Prometheus scrape endpoint. Returns 501 with a plain-text hint if
+    `prometheus_client` isn't installed."""
+    from fastapi.responses import Response
+    body, content_type = _metrics.render()
+    if not _metrics.is_available():
+        return Response(
+            body,
+            status_code=501,
+            media_type=content_type,
+            headers={"X-Metrics-Backend": "noop"},
+        )
+    return Response(body, media_type=content_type)
+
+
+@app.on_event("startup")
+async def _on_startup():
+    # Report which IP will be used (direct or VPN exit). Aborts the API
+    # process only when VPN mode is on and the chain isn't up.
+    try:
+        from core.security.anon_gate import enforce_or_die
+        enforce_or_die()
+    except SystemExit:
+        raise
+    except Exception as _e:
+        logger.warning(f"[AnonGate] skipped in API startup: {_e}")
+
+    _metrics.SCAN_ACTIVE.set(len(_active_scans))
+    logger.info("API startup complete", extra={
+        "active_scans": len(_active_scans),
+        "metrics_backend": "prometheus" if _metrics.is_available() else "noop",
+        "tracing_backend": "otel" if _tracing.is_available() else "noop",
+    })
+
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    """Drain WS push tasks and mark all in-flight scans `stopping` so a
+    supervisor restart resumes them cleanly. Every step is best-effort —
+    we never block shutdown longer than a few seconds per drain step."""
+    logger.info("API shutdown starting", extra={
+        "active_scans": len(_active_scans),
+        "ws_push_tasks": len(_ws_push_tasks) if "_ws_push_tasks" in globals() else 0,
+    })
+
+    # 1. Cancel every WS push task. Each has its own asyncio.CancelledError
+    # handler that closes the sockets cleanly.
+    if "_ws_push_tasks" in globals():
+        import asyncio as _aio
+        tasks = list(_ws_push_tasks.values())
+        for t in tasks:
+            try:
+                t.cancel()
+            except Exception:
+                pass
+        if tasks:
+            try:
+                await _aio.wait(tasks, timeout=3.0)
+            except Exception:
+                pass
+        _ws_push_tasks.clear()
+
+    # 2. Mark active scans `stopping` so the next boot's bootstrap_recover
+    # sweep can pick them up. Never terminate the subprocess here — supervisor
+    # restart may want to hand off to the same PID.
+    try:
+        for job_id, job in list(_active_scans.items()):
+            if job.get("status") in ("running", "starting"):
+                job["status"] = "stopping"
+        _persist_scan_state()
+    except Exception as e:
+        logger.warning("Shutdown scan-state persistence failed: %s", e)
+
+    logger.info("API shutdown complete")
+
+
 def _run_scan_process(job_id: str, target: str, tier: str,
                       auto_approve: bool, skip_osint: bool, reset_dedup: bool,
                       resume: bool = False, phases: list = None,
@@ -241,16 +770,53 @@ def _run_scan_process(job_id: str, target: str, tier: str,
         cmd.append("--resume")
     if phases:
         cmd.extend(["--phases", ",".join(phases)])
+    # Credentials must NEVER be passed as command-line arguments — argv is
+    # world-readable via /proc/<pid>/cmdline and would echo through every
+    # `/api/scans/job/{id}` response (see #046/#047). Instead we write them
+    # to a locked temporary file under `.antigravity/scan_creds/<job_id>.json`
+    # with restrictive permissions and hand the child process the path. The
+    # child (main.py) reads and unlinks. On any failure the file is unlinked.
+    creds_path: Optional[Path] = None
     if credentials:
         import json as _json
-        cmd.extend(["--credentials", _json.dumps(credentials)])
+        import stat as _stat
+        creds_dir = BASE / ".antigravity" / "scan_creds"
+        creds_dir.mkdir(parents=True, exist_ok=True)
+        creds_path = creds_dir / f"{job_id}.json"
+        creds_path.write_text(_json.dumps(credentials), encoding="utf-8")
+        try:
+            os.chmod(creds_path, _stat.S_IRUSR | _stat.S_IWUSR)  # 0600
+        except Exception:
+            pass  # Windows: NTFS ACL applies
+        cmd.extend(["--credentials-file", str(creds_path)])
+
     # The run's identity is the job_id — pass it so the brain persists every row
     # (scan, vulns, review queue) under this exact id and never merges with another run.
     cmd.extend(["--scan-id", job_id])
 
     _active_scans[job_id]["status"] = "running"
-    _active_scans[job_id]["command"] = " ".join(cmd)
+    # Store a REDACTED representation of the command in the active-scans dict
+    # so `/api/scans/job/{job_id}` can't leak credential contents (the value
+    # displayed to the operator is just the argv skeleton). The `--credentials-file`
+    # path itself does not contain the secret.
+    _active_scans[job_id]["command"] = _redact_command(cmd)
     _persist_scan_state()
+
+    # Metrics: increment scans-started; bump active-scans gauge.
+    try:
+        _metrics.SCAN_STARTED.labels(tier=tier or "unknown").inc()
+        _metrics.SCAN_ACTIVE.set(len(_active_scans))
+    except Exception:
+        pass
+    _scan_start_wall = datetime.utcnow()
+
+    # Propagate the current OpenTelemetry span context to the child via
+    # a `traceparent` env var so all child spans link back to this scan.
+    _child_env = os.environ.copy()
+    try:
+        _child_env.update({k.upper(): v for k, v in _tracing.inject_headers().items()})
+    except Exception:
+        pass
 
     # Clean any leftover stop signal from a previous kill-all
     slug = target.replace("://", "_").replace("/", "_").replace(":", "_")
@@ -266,6 +832,7 @@ def _run_scan_process(job_id: str, target: str, tier: str,
             proc = subprocess.Popen(
                 cmd, stdout=lf, stderr=subprocess.STDOUT,
                 cwd=str(BASE), encoding="utf-8", errors="replace",
+                env=_child_env,
             )
             _active_scans[job_id]["pid"] = proc.pid
             _persist_scan_state()
@@ -278,6 +845,23 @@ def _run_scan_process(job_id: str, target: str, tier: str,
     except Exception as e:
         _active_scans[job_id]["status"] = "failed"
         _active_scans[job_id]["error"] = str(e)
+    finally:
+        # Record terminal metrics regardless of how we exited.
+        try:
+            elapsed = max(0.0, (datetime.utcnow() - _scan_start_wall).total_seconds())
+            terminal_status = _active_scans[job_id].get("status", "unknown")
+            _metrics.SCAN_FINISHED.labels(tier=tier or "unknown", status=terminal_status).inc()
+            _metrics.SCAN_DURATION_SECONDS.labels(tier=tier or "unknown").observe(elapsed)
+            _metrics.SCAN_ACTIVE.set(len(_active_scans))
+        except Exception:
+            pass
+        # Always unlink the credentials file, even if the child crashed before
+        # reading it. Keeps the on-disk lifetime bounded.
+        if creds_path is not None:
+            try:
+                creds_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     _active_scans[job_id]["finished_at"] = datetime.utcnow().isoformat()
     _persist_scan_state()
@@ -778,6 +1362,199 @@ def get_recon(scan_id: str):
         return recon
     except Exception as e:
         raise HTTPException(500, f"recon data unavailable: {e}")
+
+
+# ── LIVE CHAIN-OF-THOUGHT — per-agent reasoning stream ────────────────────
+@app.get("/api/scans/{scan_id}/agents/reasoning")
+def list_agent_reasoning(scan_id: str, agent_id: str = "", limit: int = 100):
+    """Per-agent chain-of-thought stream: every tool the LLM decided to call
+    with its rationale. Rendered as live thought bubbles in the UI."""
+    try:
+        from core.database.pg_store import DatabaseManager
+        import psycopg2.extras
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                if agent_id:
+                    cur.execute("""
+                        SELECT * FROM agent_reasoning WHERE scan_id=%s AND agent_id=%s
+                        ORDER BY created_at DESC LIMIT %s
+                    """, (scan_id, agent_id, limit))
+                else:
+                    cur.execute("""
+                        SELECT * FROM agent_reasoning WHERE scan_id=%s
+                        ORDER BY created_at DESC LIMIT %s
+                    """, (scan_id, limit))
+                rows = [dict(r) for r in cur.fetchall()]
+                for r in rows:
+                    if r.get("created_at") and not isinstance(r["created_at"], str):
+                        r["created_at"] = r["created_at"].isoformat()
+        return {"scan_id": scan_id, "count": len(rows), "reasoning": rows}
+    except Exception as e:
+        raise HTTPException(500, f"reasoning unavailable: {e}")
+
+
+# ── ATTACK CHAINS — LLM-synthesised exploitation paths ────────────────────
+@app.get("/api/scans/{scan_id}/attack-chains")
+def get_attack_chains(scan_id: str):
+    try:
+        from core.database.pg_store import AttackChainRepo
+        chains = AttackChainRepo.get_by_scan(scan_id) if hasattr(AttackChainRepo, "get_by_scan") else []
+        return {"scan_id": scan_id, "count": len(chains), "chains": chains}
+    except Exception as e:
+        raise HTTPException(500, f"attack chains unavailable: {e}")
+
+
+@app.post("/api/scans/{scan_id}/attack-chains/regenerate")
+async def regenerate_attack_chains(scan_id: str):
+    from core.reporting.chain_intelligence import synthesize_chains
+    try:
+        chains = await synthesize_chains(scan_id)
+        return {"scan_id": scan_id, "count": len(chains), "chains": chains}
+    except Exception as e:
+        raise HTTPException(500, f"regenerate failed: {e}")
+
+
+# ── SCAN DIFF — new / resolved / regressed vs a baseline scan ─────────────
+@app.get("/api/scans/{scan_id}/diff/{baseline_scan_id}")
+def diff_scans(scan_id: str, baseline_scan_id: str):
+    from core.reporting.scan_diff import compare_scans
+    try:
+        return compare_scans(baseline_scan_id, scan_id)
+    except Exception as e:
+        raise HTTPException(500, f"diff failed: {e}")
+
+
+# ── REPRO BUNDLES — regenerate on demand ──────────────────────────────────
+@app.post("/api/scans/{scan_id}/repro-bundles/regenerate")
+def regenerate_repro_bundles(scan_id: str, min_severity: str = "HIGH"):
+    from core.reporting.repro_bundle import generate_bundles_for_scan
+    try:
+        return generate_bundles_for_scan(scan_id, min_severity=min_severity)
+    except Exception as e:
+        raise HTTPException(500, f"bundle generation failed: {e}")
+
+
+# ── SCAN CHATBOT — LLM Q&A over this scan's collected data ─────────────────
+class ScanChatMessage(BaseModel):
+    message: str
+    history: list = []   # [{role: 'user'|'assistant', content: str}, ...]
+
+
+@app.post("/api/scans/{scan_id}/chat")
+async def scan_chat(scan_id: str, body: ScanChatMessage):
+    """Answer one user question about this scan using the LLM. Every call
+    rebuilds context from the DB (vulns, access gained, OSINT, recon) so the
+    answer reflects the latest scan state — even mid-scan."""
+    from core.reporting.scan_chatbot import answer_question
+    try:
+        result = await answer_question(scan_id, body.message, history=body.history)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"chat failed: {e}")
+
+
+# ── BACKFILL — reflush live_results + report_data into vulnerabilities table ─
+@app.post("/api/scans/{scan_id}/backfill")
+def backfill_scan_findings(scan_id: str):
+    """Re-run VulnRepo.bulk_insert on every finding present in live_results /
+    recon_data / report_data for this scan, then extract embedded credentials
+    from finding evidence into post_exploit_data + auth_bypasses.
+
+    Use case: an earlier scan wrote findings to live_results (the raw stream)
+    but too-aggressive finding_uid dedup dropped rows during persist. Under
+    the current (relaxed) dedup, backfill recovers them without a re-scan."""
+    try:
+        from core.database.pg_store import (LiveDataRepo, VulnRepo, ReconRepo,
+            DatabaseManager, AuthBypassRepo)
+        import psycopg2.extras
+        # Collect vulns from every source
+        vulns_all: list = []
+        seen_titles = set()
+        def _add(vs):
+            n = 0
+            for v in (vs or []):
+                if not isinstance(v, dict):
+                    continue
+                key = ((v.get("title") or "").strip().lower(),
+                        (v.get("location") or v.get("target") or "").strip().lower())
+                if key in seen_titles:
+                    continue
+                seen_titles.add(key)
+                vulns_all.append(v)
+                n += 1
+            return n
+        # Live results (holds the current run's raw finding stream if this
+        # scan is the active singleton)
+        live_added = 0
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("SELECT scan_id, data FROM live_results WHERE id = 1")
+                    r = cur.fetchone()
+                    if r and r.get("scan_id") == scan_id and isinstance(r.get("data"), dict):
+                        live_added = _add(r["data"].get("vulnerabilities", []))
+        except Exception:
+            pass
+        # report_data.vulnerabilities (finalised scans)
+        report_added = 0
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("SELECT report_data FROM scans WHERE scan_id = %s", (scan_id,))
+                    r = cur.fetchone()
+                    if r and isinstance(r.get("report_data"), dict):
+                        report_added = _add(r["report_data"].get("vulnerabilities", []))
+        except Exception:
+            pass
+        # recon_data.vulnerabilities (sometimes populated by mixins)
+        recon_added = 0
+        try:
+            recon = ReconRepo.get(scan_id) or {}
+            recon_added = _add(recon.get("vulnerabilities", []))
+        except Exception:
+            pass
+        # Persist under the new relaxed finding_uid
+        before = len(VulnRepo.get_by_scan(scan_id) or [])
+        VulnRepo.bulk_insert(scan_id, vulns_all)
+        after = len(VulnRepo.get_by_scan(scan_id) or [])
+        # Extract structured credentials from every finding's evidence
+        from core.exploitation.dump_extractor import extract_from_all_findings
+        creds_added = extract_from_all_findings(scan_id, vulns_all, ctx=None)
+        auth_count = AuthBypassRepo.count_by_scan(scan_id)
+        return {
+            "scan_id": scan_id,
+            "sources": {"live_results": live_added, "report_data": report_added,
+                        "recon_data": recon_added},
+            "vulns_considered": len(vulns_all),
+            "vulns_before": before, "vulns_after": after,
+            "vulns_added": after - before,
+            "credentials_extracted": creds_added,
+            "auth_bypass_rows": auth_count,
+        }
+    except Exception as e:
+        raise HTTPException(500, f"backfill failed: {e}")
+
+
+# ── LIVE AGENTS — per-agent card view of parallel work in progress ─────────
+@app.get("/api/scans/{scan_id}/agents/live")
+def list_live_agents(scan_id: str):
+    """Per-agent live view: one row per parallel sub-task (subdomain scan,
+    OSINT sub-phase, expert probe, cred-chain executor). Each row carries
+    status/current_tool/current_step/steps_taken/findings_count/cost so the
+    UI can render a card per agent, updating in place."""
+    try:
+        rows = LiveAgentRepo.list_by_scan(scan_id) or []
+        counts = LiveAgentRepo.counts_by_scan(scan_id) or {}
+        # Convert timestamps to ISO strings for JSON safety
+        for r in rows:
+            for k in ("started_at", "finished_at", "updated_at"):
+                v = r.get(k)
+                if v is not None and not isinstance(v, str):
+                    r[k] = v.isoformat()
+        return {"scan_id": scan_id, "count": len(rows),
+                "counts_by_status": counts, "agents": rows}
+    except Exception as e:
+        raise HTTPException(500, f"live agents unavailable: {e}")
 
 
 # ── AUTH BYPASSES / "Access Gained" (SQLi bypass, mass-assign, cred replay) ──
@@ -1331,8 +2108,11 @@ class ConnectionManager:
         self.active: dict = {}  # job_id -> set of WebSocket connections
         self._broadcast_lock = threading.Lock()
 
-    async def connect(self, websocket: WebSocket, job_id: str):
-        await websocket.accept()
+    async def connect(self, websocket: WebSocket, job_id: str, subprotocol: str = None):
+        if subprotocol:
+            await websocket.accept(subprotocol=subprotocol)
+        else:
+            await websocket.accept()
         if job_id not in self.active:
             self.active[job_id] = set()
         self.active[job_id].add(websocket)
@@ -1400,7 +2180,10 @@ async def _ws_push_loop(job_id: str):
                 "status": job.get("status", "unknown"),
                 "progress": progress,
                 "results": results,
-                "log_tail": [l.rstrip() for l in log_lines],
+                # Scrub bearer tokens, API keys, passwords, and long hex/base64
+                # secrets before they hit the wire. Log lines commonly contain
+                # captured Authorization headers from target responses.
+                "log_tail": [_scrub_secrets(l.rstrip()) for l in log_lines],
                 "timestamp": datetime.utcnow().isoformat(),
             }
 
@@ -1419,10 +2202,33 @@ async def _ws_push_loop(job_id: str):
 
 @app.websocket("/ws/scan/{job_id}")
 async def ws_scan_feed(websocket: WebSocket, job_id: str):
-    """WebSocket endpoint for real-time scan updates."""
+    """WebSocket endpoint for real-time scan updates.
+
+    Auth: because @app.websocket bypasses the HTTP middleware, we authenticate
+    the WS handshake ourselves. The client must present the API key via one of:
+      1) a `Sec-WebSocket-Protocol: api-key,<key>` subprotocol pair, or
+      2) a `X-API-Key` header (works with clients that support custom headers).
+    We use constant-time comparison. If auth fails we close with code 4401 so
+    the frontend can surface an "unauthorized" state instead of a silent reject.
+    """
     import asyncio as _aio
 
-    await ws_manager.connect(websocket, job_id)
+    # Extract client-provided key
+    provided = websocket.headers.get("x-api-key") or ""
+    subprotocol_to_accept = None
+    if not provided:
+        # Subprotocol form: client sends ["api-key", "<the-key>"]
+        subs = websocket.headers.get("sec-websocket-protocol", "")
+        parts = [p.strip() for p in subs.split(",") if p.strip()]
+        if len(parts) >= 2 and parts[0] == "api-key":
+            provided = parts[1]
+            subprotocol_to_accept = "api-key"
+
+    if not _constant_time_eq(provided, _API_KEY):
+        await websocket.close(code=4401)  # 4xxx = application-defined
+        return
+
+    await ws_manager.connect(websocket, job_id, subprotocol=subprotocol_to_accept)
 
     # Start push loop if not already running
     if job_id not in _ws_push_tasks:
@@ -1576,10 +2382,39 @@ def export_gitlab_dast(scan_id: str):
 # ── Scheduled Scans ────────────────────────────────────────────────────────
 
 class ScheduleRequest(BaseModel):
-    target: str
-    interval_hours: int = 24
+    target: str = Field(..., max_length=2048)
+    # 1 hour minimum stops a scheduler spin-loop; 24 * 30 days upper bound is
+    # generous for monthly cadence but still finite.
+    interval_hours: int = Field(24, ge=1, le=24 * 30)
     tier: str = "POC"
-    phases: list = None
+    phases: Optional[List[str]] = None
+
+    @field_validator("target")
+    @classmethod
+    def _v_target(cls, v: str) -> str:
+        return _validate_target_url(v)
+
+    @field_validator("tier")
+    @classmethod
+    def _v_tier(cls, v: str) -> str:
+        v = str(v or "").strip().upper()
+        if v not in _ALLOWED_TIERS:
+            raise ValueError(f"tier must be one of {sorted(_ALLOWED_TIERS)}")
+        return v
+
+    @field_validator("phases")
+    @classmethod
+    def _v_phases(cls, v):
+        if v is None:
+            return None
+        out = []
+        for p in v:
+            p_norm = str(p or "").strip().upper()
+            if p_norm and p_norm not in _ALLOWED_PHASES:
+                raise ValueError(f"phase '{p}' not one of {sorted(_ALLOWED_PHASES)}")
+            if p_norm:
+                out.append(p_norm)
+        return out
 
 
 @app.get("/api/schedules")
@@ -1625,9 +2460,24 @@ def start_scheduler():
 # ── Campaign Mode ──────────────────────────────────────────────────────────
 
 class CampaignRequest(BaseModel):
-    targets: list
+    targets: List[str] = Field(..., min_length=1, max_length=1000)
     tier: str = "POC"
-    max_parallel: int = 3
+    # 1 to 32 parallel scans. Above 32 the Kali container + subprocess storm
+    # exhausts host resources; below 1 the campaign wouldn't progress.
+    max_parallel: int = Field(3, ge=1, le=32)
+
+    @field_validator("targets")
+    @classmethod
+    def _v_targets(cls, v: List[str]) -> List[str]:
+        return [_validate_target_url(t) for t in v]
+
+    @field_validator("tier")
+    @classmethod
+    def _v_tier(cls, v: str) -> str:
+        v = str(v or "").strip().upper()
+        if v not in _ALLOWED_TIERS:
+            raise ValueError(f"tier must be one of {sorted(_ALLOWED_TIERS)}")
+        return v
 
 
 @app.post("/api/campaigns/run")
@@ -1955,13 +2805,35 @@ def _parse_exploit_md(content: str, filename: str) -> dict:
 
 @app.get("/api/evidence/{filename}")
 def get_evidence_file(filename: str):
-    """Serve evidence screenshots/files from reports/evidence/."""
+    """Serve evidence screenshots/files from reports/evidence/.
+
+    Path safety: we require the filename to be a single path component with no
+    `..`, no separators, and no null bytes, then resolve and enforce that the
+    result lives inside the evidence directory. The previous `^[\\w\\-\\.]+$`
+    regex allowed `..` (the dot is in the character class), which was a path
+    traversal vulnerability.
+    """
     import re
-    if not re.match(r'^[\w\-\.]+$', filename):
+    if not filename or "\x00" in filename:
         raise HTTPException(400, "Invalid filename")
-    evidence_dir = REPORTS_DIR / "evidence"
-    file_path = evidence_dir / filename
-    if not file_path.exists():
+    # No separators, no traversal segments.
+    if "/" in filename or "\\" in filename or filename in ("", ".", ".."):
+        raise HTTPException(400, "Invalid filename")
+    # Conservative allowlist for evidence filenames.
+    if not re.match(r'^[A-Za-z0-9._-]+$', filename):
+        raise HTTPException(400, "Invalid filename")
+
+    evidence_dir = (REPORTS_DIR / "evidence").resolve()
+    try:
+        file_path = (evidence_dir / filename).resolve()
+    except Exception:
+        raise HTTPException(400, "Invalid filename")
+    # Enforce boundary — refuse anything that resolved outside evidence_dir.
+    try:
+        file_path.relative_to(evidence_dir)
+    except ValueError:
+        raise HTTPException(400, "Invalid filename")
+    if not file_path.exists() or not file_path.is_file():
         raise HTTPException(404, "Evidence file not found")
     from fastapi.responses import FileResponse
     media_type = "image/png" if filename.endswith(".png") else "application/octet-stream"
@@ -1992,13 +2864,10 @@ def get_executive_summary(scan_id: str):
     }
 
 
-@app.get("/api/scans/{scan_id}/attack-chains")
-async def get_attack_chains(scan_id: str):
-    try:
-        from core.database.pg_store import AttackChainRepo
-        return AttackChainRepo.get_by_scan(scan_id)
-    except Exception as e:
-        return {"error": str(e), "chains": []}
+# NOTE: the earlier `@app.get("/api/scans/{scan_id}/attack-chains")` at ~1110
+# is the canonical handler. FastAPI keeps the last-registered handler for a
+# path, so a second registration here was silently masking the earlier one
+# and returning a different shape than the frontend expects. Removed.
 
 
 @app.get("/api/scans/{scan_id}/post-exploit")
@@ -2029,8 +2898,39 @@ class RAGTextIngest(BaseModel):
     metadata: dict = {}
 
 class RAGURLIngest(BaseModel):
-    url: str
+    url: str = Field(..., max_length=4096)
     metadata: dict = {}
+
+    @field_validator("url")
+    @classmethod
+    def _v_url(cls, v: str) -> str:
+        """Accept only http/https URLs, and refuse hostnames that resolve to
+        loopback, private, link-local, or cloud-metadata addresses. Without
+        this, this endpoint is an SSRF sink pointing at `169.254.169.254` and
+        internal service IPs."""
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("url required")
+        parsed = _urlparse(v)
+        if parsed.scheme not in _ALLOWED_SCHEMES:
+            raise ValueError(f"url scheme must be one of {sorted(_ALLOWED_SCHEMES)}")
+        if not parsed.hostname:
+            raise ValueError("url must include a hostname")
+        # Reject IP literals in blocked ranges. Hostnames are DNS-resolved by
+        # the ingest client; if the operator's environment permits SSRF, run
+        # the API in a network namespace with egress restricted.
+        try:
+            ip = _ipaddress.ip_address(parsed.hostname)
+            if (ip.is_loopback or ip.is_private or ip.is_link_local
+                    or ip.is_multicast or ip.is_reserved):
+                raise ValueError("url points to a non-routable / private address")
+            if str(ip) == "169.254.169.254":
+                raise ValueError("cloud metadata address is not permitted")
+        except ValueError as e:
+            # Re-raise our own; ignore _ipaddress ValueError from hostname strings.
+            if "url" in str(e) or "cloud metadata" in str(e):
+                raise
+        return v
 
 class RAGSearchIngest(BaseModel):
     query: str
@@ -2077,18 +2977,67 @@ async def rag_stats():
 
 @app.post("/api/rag/ingest/file")
 async def rag_ingest_file(file_path: str = "", metadata: str = "{}"):
-    """Ingest a local file. Pass file_path as query param."""
+    """Ingest a local file. Pass file_path as query param.
+
+    Path safety: the file must live inside one of the operator-approved
+    ingestion roots (env `RAG_INGEST_ROOTS`, colon/`;`-separated). Defaults to
+    a single directory under the repo (`data/rag_ingest`). Without this, this
+    endpoint was an arbitrary-file-read primitive (any authenticated caller
+    could ingest `/etc/passwd`, `.env`, or `.antigravity/secrets.enc` into the
+    vector store and query it back). File uploads should use
+    `/api/rag/ingest/uploaded` instead.
+    """
     if not file_path:
         raise HTTPException(status_code=400, detail="file_path required")
+
+    # Resolve the requested file and enforce it lives under an approved root.
+    try:
+        candidate = Path(file_path).expanduser().resolve()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid file_path")
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="file not found")
+
+    _default_root = (BASE / "data" / "rag_ingest").resolve()
+    _default_root.mkdir(parents=True, exist_ok=True)
+    _roots_env = os.getenv("RAG_INGEST_ROOTS", "").strip()
+    if _roots_env:
+        # Split on ; and : (but leave Windows drive letters alone by only
+        # treating single-char colons as separators when they're not the 2nd char).
+        import re as _re
+        raw_roots = [p for p in _re.split(r"[;\n]+", _roots_env) if p.strip()]
+        roots = []
+        for r in raw_roots:
+            try:
+                roots.append(Path(r).expanduser().resolve())
+            except Exception:
+                pass
+    else:
+        roots = [_default_root]
+
+    if not any(_is_within(candidate, r) for r in roots):
+        raise HTTPException(
+            status_code=403,
+            detail=f"file_path must be within an approved RAG_INGEST_ROOTS directory. "
+                   f"Approved: {[str(r) for r in roots]}")
+
     rag = _get_rag()
     try:
         meta = json.loads(metadata) if metadata else {}
     except Exception:
         meta = {}
-    result = await rag.ingest_file(file_path, metadata=meta)
+    result = await rag.ingest_file(str(candidate), metadata=meta)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
 
 
 from fastapi import UploadFile, File, Form
@@ -2189,8 +3138,19 @@ if _FRONTEND_DIR.exists():
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def _spa_fallback(full_path: str):
-        """Serve index.html for all non-API routes (SPA client-side routing)."""
-        file = _FRONTEND_DIR / full_path
+        """Serve index.html for all non-API routes (SPA client-side routing).
+
+        Path safety: resolve the target and confirm it is inside `_FRONTEND_DIR`
+        before serving. Without this, `/foo/../../../etc/passwd` would escape.
+        Any escape or missing file falls back to index.html (React handles the
+        route client-side).
+        """
+        try:
+            _frontend_root = _FRONTEND_DIR.resolve()
+            file = (_FRONTEND_DIR / full_path).resolve()
+            file.relative_to(_frontend_root)
+        except Exception:
+            return _SFR(str(_FRONTEND_DIR / "index.html"))
         if file.exists() and file.is_file():
             return _SFR(str(file))
         return _SFR(str(_FRONTEND_DIR / "index.html"))

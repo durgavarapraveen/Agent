@@ -10,10 +10,32 @@ from core.memory.database import DatabaseManager
 logger = logging.getLogger(__name__)
 
 class KnowledgeStore:
-    """PostgreSQL-based persistent knowledge store."""
-    
+    """PostgreSQL-based persistent knowledge store.
+
+    DEPRECATED. This `kb_*` schema was an early prototype that ran alongside
+    the canonical `scans / vulnerabilities / findings_v2` tables and has
+    since drifted from them (audit #153/#154). New code MUST write through
+    the canonical repos in `core/database/pg_store.py`. This class is kept
+    only so existing callers keep functioning while they migrate; every call
+    logs a one-time deprecation warning.
+
+    Removal target: after every caller has been migrated to `pg_store`
+    repositories, delete this module and drop the `kb_*` tables. Until then
+    set `KB_STRICT_DEPRECATION=1` to convert the warning into a `RuntimeError`
+    (useful when running the test suite so new callers can't sneak in).
+    """
+    _deprecation_warned = False
+
     def __init__(self, db_path: str = None):
         # db_path is ignored now as we use the global Postgres pool
+        if not KnowledgeStore._deprecation_warned:
+            import os as _os_kb
+            msg = ("core.knowledge.persistent_store.KnowledgeStore is DEPRECATED. "
+                    "Use the canonical repos in core.database.pg_store instead.")
+            if _os_kb.environ.get("KB_STRICT_DEPRECATION", "").strip() == "1":
+                raise RuntimeError(msg)
+            logger.warning(msg)
+            KnowledgeStore._deprecation_warned = True
         self._init_database()
     
     def _init_database(self):
@@ -200,6 +222,26 @@ class KnowledgeStore:
                         completed_at TEXT
                     )
                 ''')
+
+                # FK columns need indexes — Postgres does NOT create them
+                # automatically for foreign keys, and every `WHERE fk = %s`
+                # query on the kb_* tables previously did a full scan
+                # (audit #154). All additive; safe on existing DBs.
+                for stmt in (
+                    "CREATE INDEX IF NOT EXISTS idx_kb_assets_target ON kb_assets(target_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_kb_technologies_asset ON kb_technologies(asset_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_kb_endpoints_asset ON kb_endpoints(asset_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_kb_apis_asset ON kb_apis(asset_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_kb_findings_target ON kb_findings(target_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_kb_evidence_finding ON kb_evidence(finding_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_kb_attack_paths_target ON kb_attack_paths(target_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_kb_exploit_results_target ON kb_exploit_results(target_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_kb_post_exploit_findings_target ON kb_post_exploit_findings(target_id)",
+                ):
+                    try:
+                        cursor.execute(stmt)
+                    except Exception as e:
+                        logger.debug("kb_* index skipped: %s", e)
                 conn.commit()
     
     def add_target(self, target_id: str, url_or_path: str, target_type: str):

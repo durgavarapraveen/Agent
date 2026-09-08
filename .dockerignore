@@ -18,6 +18,30 @@ logs/
 *.db
 *.sqlite
 *.enc
+# --- secrets ---
 .env
 .env.*
+.venv/
+venv/
+env/
+!.env.example
 *.log
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+# --- credentials / caches that must never enter an image ---
+.antigravity/dev_api_key
+.antigravity/dev_encryption_key
+.antigravity/secrets.enc
+.antigravity/scan_creds/
+# --- test + scratch ---
+tests/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+docs/
+.vscode/
+# --- OS metadata ---
+.DS_Store
+Thumbs.db

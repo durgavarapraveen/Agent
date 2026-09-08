@@ -15,8 +15,14 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 logger = logging.getLogger(__name__)
 
-# Master key fallback if environment variable is not set
-DEFAULT_FALLBACK_KEY_RAW = b"ANTIGRAVITY_DEFAULT_KEY_32BYTES!"
+# NOTE: The previous hardcoded fallback constant has been removed. Any deployment
+# that reaches `get_encryption_key` without ENCRYPTION_KEY / ENCRYPTION_KEY_CURRENT
+# set will now hard-fail, which is the correct behavior — a hardcoded default is
+# equivalent to no encryption at all (anyone with the source can decrypt).
+#
+# For local development, set:
+#     ANTIGRAVITY_ENV=development ENCRYPTION_KEY_DEV_UNSAFE=1
+# and a per-machine dev key is auto-generated at `.antigravity/dev_encryption_key`.
 
 MASKING_PATTERNS = {
     "email": r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
@@ -26,14 +32,58 @@ MASKING_PATTERNS = {
 }
 
 
+class EncryptionKeyMissingError(RuntimeError):
+    """Raised when neither ENCRYPTION_KEY nor a dev-key fallback is available."""
+
+
+def _load_or_create_dev_key() -> bytes:
+    """Load a machine-local dev encryption key. Only invoked in explicit dev mode.
+    Persists to `.antigravity/dev_encryption_key` (chmod 600 where supported)."""
+    import secrets
+    from pathlib import Path
+    _repo_root = Path(__file__).resolve().parents[2]
+    key_path = _repo_root / ".antigravity" / "dev_encryption_key"
+    if key_path.exists():
+        try:
+            data = base64.b64decode(key_path.read_text().strip())
+            if len(data) == 32:
+                return data
+        except Exception:
+            pass  # fall through and regenerate
+    key = secrets.token_bytes(32)
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.write_text(base64.b64encode(key).decode("ascii"))
+    try:
+        os.chmod(key_path, 0o600)
+    except Exception:
+        pass  # Windows
+    logger.warning(
+        "DEV MODE: auto-generated encryption key at %s. Never deploy this key.",
+        key_path)
+    return key
+
+
 def get_encryption_key(env_var_name: str = "ENCRYPTION_KEY") -> bytes:
     """
     Load 256-bit (32 bytes) master key from environment variable.
     Supports raw strings or base64-encoded strings.
+
+    Raises EncryptionKeyMissingError when unset unless the caller is in explicit
+    dev mode (ANTIGRAVITY_ENV=development + ENCRYPTION_KEY_DEV_UNSAFE=1).
     """
     key_str = os.getenv(env_var_name) or os.getenv("ENCRYPTION_KEY_CURRENT")
     if not key_str:
-        return DEFAULT_FALLBACK_KEY_RAW
+        env_mode = os.getenv("ANTIGRAVITY_ENV", "development").strip().lower()
+        dev_ok = os.getenv("ENCRYPTION_KEY_DEV_UNSAFE", "").strip() == "1"
+        if env_mode not in ("production", "prod") and dev_ok:
+            return _load_or_create_dev_key()
+        raise EncryptionKeyMissingError(
+            f"{env_var_name} is not set. Generate one with: "
+            "python -c 'import secrets,base64; "
+            "print(base64.b64encode(secrets.token_bytes(32)).decode())'  "
+            "and export ENCRYPTION_KEY=<value>. "
+            "For local dev only, set ENCRYPTION_KEY_DEV_UNSAFE=1 to auto-generate "
+            "a per-machine dev key (never use in production).")
 
     try:
         # Try base64 decode first
@@ -49,7 +99,7 @@ def get_encryption_key(env_var_name: str = "ENCRYPTION_KEY") -> bytes:
     elif len(raw_bytes) > 32:
         return raw_bytes[:32]
     else:
-        # Pad to 32 bytes
+        # Pad to 32 bytes (backwards-compat for existing short keys)
         return raw_bytes.ljust(32, b"0")
 
 

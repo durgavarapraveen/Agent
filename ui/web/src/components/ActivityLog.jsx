@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, createPoller } from "../api";
 
 const ACTION_COLORS = {
   phase: "#6366f1", tool_run: "#3b82f6", finding: "#22c55e", retest: "#f59e0b",
@@ -29,17 +29,19 @@ export default function ActivityLog({ scanId, poll = false }) {
   const [filter, setFilter] = useState("ALL");
 
   useEffect(() => {
-    const load = () => {
+    if (!poll) {
       api.getActivity(scanId)
         .then(setItems)
         .catch(() => setItems([]))
         .finally(() => setLoading(false));
-    };
-    load();
-    if (poll) {
-      const iv = setInterval(load, 8000);
-      return () => clearInterval(iv);
+      return;
     }
+    const p = createPoller(
+      () => api.getActivity(scanId),
+      (v) => { setItems(v || []); setLoading(false); },
+      8000,
+    );
+    return () => p.stop();
   }, [scanId, poll]);
 
   if (loading) return <div style={{ padding: 16, color: "var(--text-dim)" }}>Loading activity log...</div>;

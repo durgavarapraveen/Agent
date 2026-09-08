@@ -21,7 +21,21 @@ from core.memory.database import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
-_SSL_CONTEXT = ssl._create_unverified_context()
+# Use system trust store with verification enabled by default. TLS verification
+# was previously globally disabled here, which made every threat-feed HTTP
+# call MITM-swappable — an attacker on-path could inject fabricated CVEs,
+# malicious IP reputation, or empty results to blind the pentesting decisioner.
+#
+# Opt-out for local dev / broken corporate MITM proxies:
+#   THREAT_INTEL_INSECURE_TLS=1
+import os as _os_ti
+if _os_ti.getenv("THREAT_INTEL_INSECURE_TLS", "").strip() == "1":
+    logger.warning(
+        "THREAT_INTEL_INSECURE_TLS=1 — TLS verification disabled for threat feeds. "
+        "Do not enable in production.")
+    _SSL_CONTEXT = ssl._create_unverified_context()
+else:
+    _SSL_CONTEXT = ssl.create_default_context()
 
 # Common threat intel sources
 ABUSEIPDB_URL = "https://api.abuseipdb.com/api/v2/check"

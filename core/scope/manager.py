@@ -28,21 +28,42 @@ class ScopeManager:
             "destroy_data"
         }
     
+    @staticmethod
+    def _normalize_host(host: str) -> str:
+        """Canonicalize a hostname for scope comparisons.
+
+        - Lowercases.
+        - Strips one trailing dot (`example.com.` and `example.com` are the same
+          authority in DNS).
+        - Converts IDN / punycode via IDNA so `bücher.de` and `xn--bcher-kva.de`
+          match.
+        - Strips IPv6 brackets if the caller left them attached.
+        """
+        h = (host or "").strip().lower().rstrip(".")
+        if h.startswith("[") and h.endswith("]"):
+            h = h[1:-1]
+        try:
+            h = h.encode("idna").decode("ascii")
+        except UnicodeError:
+            # ASCII-only or malformed; leave as-is (validators below will reject).
+            pass
+        return h
+
     def _normalize_domains(self, domains: List[str]) -> Set[str]:
         """Normalize domain patterns."""
         normalized = set()
         for domain in domains:
-            domain = domain.lower()
-            if domain.startswith("*."):
-                normalized.add(domain[2:])  # Store without wildcard
+            d = self._normalize_host(domain)
+            if d.startswith("*."):
+                normalized.add(d[2:])  # Store without wildcard
             else:
-                normalized.add(domain)
+                normalized.add(d)
         return normalized
-    
+
     def _is_domain_allowed(self, domain: str) -> bool:
         """Check if a domain is in allowed scope."""
-        domain = domain.lower()
-        
+        domain = self._normalize_host(domain)
+
         for allowed in self.allowed_domains:
             if allowed.startswith("."):
                 # Subdomain wildcard
@@ -52,25 +73,31 @@ class ScopeManager:
                 return True
             elif domain.endswith("." + allowed):
                 return True
-        
+
         return False
-    
+
     def _is_ip_allowed(self, ip: str) -> bool:
         """Check if an IP is in allowed scope."""
         try:
             ip_obj = ipaddress.ip_address(ip)
-            
-            for allowed_range in self.allowed_ips:
-                try:
-                    network = ipaddress.ip_network(allowed_range, strict=False)
-                    if ip_obj in network:
-                        return True
-                except:
-                    pass
-            
+        except ValueError:
+            # Not a valid IP literal — the caller should have routed this to
+            # `_is_domain_allowed`. Log at debug so misrouting is diagnosable
+            # but not noisy.
+            logger.debug("_is_ip_allowed: %r is not a valid IP literal", ip)
             return False
-        except:
-            return False
+
+        for allowed_range in self.allowed_ips:
+            try:
+                network = ipaddress.ip_network(allowed_range, strict=False)
+                if ip_obj in network:
+                    return True
+            except ValueError as e:
+                # A malformed range in configuration is a real bug — log at
+                # warning so operators notice. Previously silently swallowed.
+                logger.warning("Malformed CIDR in scope config: %r (%s)", allowed_range, e)
+
+        return False
     
     def _is_path_allowed(self, path: str) -> bool:
         """Check if a local path is in allowed scope."""
@@ -80,22 +107,37 @@ class ScopeManager:
         return False
     
     def validate_url(self, url: str) -> bool:
-        """Validate that a URL is in authorized scope."""
-        if url in self.allowed_urls:
+        """Validate that a URL is in authorized scope.
+
+        Normalizes hostname (trailing dot, IDN, case), handles IPv6 literals
+        (`urlparse.hostname` already strips the brackets and the port), and
+        routes IP-literal hostnames to the IP allowlist instead of the domain
+        allowlist.
+        """
+        # Normalize the exact-URL fast path too — else trailing-slash /
+        # fragment differences would defeat the shortcut.
+        norm_url = url.strip()
+        if norm_url in self.allowed_urls:
             return True
-        
+
         try:
-            parsed = urlparse(url)
-            domain = parsed.netloc.lower()
-            
-            # Remove port if present
-            if ":" in domain:
-                domain = domain.split(":")[0]
-            
-            return self._is_domain_allowed(domain)
-        except:
-            logger.warning(f"Could not parse URL: {url}")
+            parsed = urlparse(norm_url)
+        except ValueError as e:
+            logger.warning("Could not parse URL %r: %s", url, e)
             return False
+
+        host = (parsed.hostname or "").strip()
+        if not host:
+            logger.debug("URL had no hostname: %r", url)
+            return False
+
+        # If the host is an IP literal, route to the IP allowlist. Otherwise
+        # normalize and route to the domain allowlist.
+        try:
+            ipaddress.ip_address(host)
+            return self._is_ip_allowed(host)
+        except ValueError:
+            return self._is_domain_allowed(self._normalize_host(host))
     
     def validate_ip(self, ip: str) -> bool:
         """Validate that an IP is in authorized scope."""
@@ -136,16 +178,39 @@ class ScopeManager:
         """Planning-time scope validation (Phase 14).
         Returns empty string if allowed, or a rejection reason.
         An unauthorized target must never become an executable task.
+
+        Handles IPv6 literals correctly: `urlparse('[2001:db8::1]:8080').hostname`
+        returns `2001:db8::1` — no naive `split(":")` slicing that would mangle
+        v6 addresses.
         """
         if not target:
             return "PLAN_REJECTED_SCOPE: empty target"
-        if target.startswith("http"):
-            if not self.validate_url(target):
-                return f"PLAN_REJECTED_SCOPE: URL {target} not in authorized scope"
-        else:
-            domain = target.lower().split(":")[0].split("/")[0]
-            if not self._is_domain_allowed(domain) and not self._is_ip_allowed(domain):
-                return f"PLAN_REJECTED_SCOPE: {target} not in authorized scope"
+
+        # Always route through urlparse — prepend a synthetic scheme when the
+        # caller gave a bare host so the parser cooperates.
+        candidate = target if "://" in target else "http://" + target
+        try:
+            parsed = urlparse(candidate)
+        except ValueError as e:
+            return f"PLAN_REJECTED_SCOPE: unparseable target {target!r}: {e}"
+
+        host = (parsed.hostname or "").strip()
+        if not host:
+            return f"PLAN_REJECTED_SCOPE: no host in {target!r}"
+
+        # Exact-URL allowlist first (only when the caller passed a full URL).
+        if "://" in target and target.strip() in self.allowed_urls:
+            return ""
+
+        # IP literal → IP allowlist. Hostname → domain allowlist (normalized).
+        try:
+            ipaddress.ip_address(host)
+            allowed = self._is_ip_allowed(host)
+        except ValueError:
+            allowed = self._is_domain_allowed(self._normalize_host(host))
+
+        if not allowed:
+            return f"PLAN_REJECTED_SCOPE: {target} not in authorized scope"
         return ""
 
     def can_expand_scope(self, new_domain: str, new_ip: str = None) -> bool:

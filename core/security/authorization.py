@@ -170,6 +170,19 @@ class TargetScopeValidator:
     def validate(self, target: str) -> None:
         """Raises AuthorizationError if target is not in authorized scope"""
         logger.debug(f"[TargetScopeValidator] Validating target: {target}")
+        # Phase 6.1 seal: `TargetScopeValidator` MUST NOT be no-op'd, even in
+        # benchmark mode. The HF July 2026 incident happened partly because
+        # cyber-eval workloads ran without production classifiers. We enforce
+        # here that a validator with an empty scope refuses everything —
+        # never accidentally-passes because scope was cleared for a test.
+        if not self.authorized_scope:
+            logger.error("[TargetScopeValidator] AUTHORIZATION_DENIED: scope is EMPTY — "
+                         "refusing every target. This is the fail-closed guarantee.")
+            raise AuthorizationError(
+                "TargetScopeValidator scope is empty. Fail-closed guarantee "
+                "denies every target when scope is unset. Load a scope via "
+                "load_authorization_document() before any tool call."
+            )
         if not self.is_authorized(target):
             logger.error(f"[TargetScopeValidator] AUTHORIZATION_DENIED: '{target}' is out of scope!")
             raise AuthorizationError(

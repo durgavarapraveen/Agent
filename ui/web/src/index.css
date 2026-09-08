@@ -1,71 +1,69 @@
-/* ── AntiGravity v3 — Cyberpunk Terminal (Matrix-green primary) ───────────── */
-@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+/* ── AntiGravity v4 — Tesla-inspired minimalist dark ─────────────────────── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 :root {
-  /* Surfaces — near-black with hair-thin tinted borders */
-  --bg:          #050706;
-  --bg-alt:      #0a0d0b;
-  --bg-card:     #080b09;
-  --bg-card-hover: #10140f;
-  --bg-sidebar:  #050706;
-  --bg-surface:  #10140f;
-  --bg-elev:     #12181a;
-  --border:      rgba(0, 255, 65, 0.08);
-  --border-strong: rgba(0, 255, 65, 0.20);
-  --border-glow: rgba(0, 255, 65, 0.35);
+  /* Surfaces — pure Tesla black with hair-thin neutral borders */
+  --bg:          #000000;
+  --bg-alt:      #0a0a0a;
+  --bg-card:     #131313;
+  --bg-card-hover: #1a1a1a;
+  --bg-sidebar:  #000000;
+  --bg-surface:  #171717;
+  --bg-elev:     #1f1f1f;
+  --border:      rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --border-glow: rgba(255, 255, 255, 0.28);
 
-  /* Text — cool white, dimmed by intent */
-  --text:        #b7c7c0;
-  --text-dim:    #6a7c72;
-  --text-h:      #e6ffee;
-  --text-mute:   #55605b;
+  /* Text — Tesla white/greys */
+  --text:        #c9ced1;
+  --text-dim:    #7c8286;
+  --text-h:      #ffffff;
+  --text-mute:   #5a6064;
 
-  /* Primary — matrix / phosphor green */
-  --accent:      #00ff9a;      /* softer than pure #00FF41 for long viewing */
-  --accent-dim:  rgba(0, 255, 154, 0.08);
-  --accent-mid:  rgba(0, 255, 154, 0.18);
-  --accent-solid: #00ff9a;
-  --accent-hot:  #00ff41;      /* pure matrix — used sparingly (focus/glow) */
-  --accent-on:   #05100b;      /* text on --accent surfaces */
+  /* Primary — Tesla signature blue (used sparingly for CTAs/active) */
+  --accent:      #3E6AE1;
+  --accent-dim:  rgba(62, 106, 225, 0.10);
+  --accent-mid:  rgba(62, 106, 225, 0.22);
+  --accent-solid: #3E6AE1;
+  --accent-hot:  #5b82ea;
+  --accent-on:   #ffffff;
 
-  /* Alias tokens kept for existing components (hue-shifted to green so
-     the same variable names produce a coherent Cyberpunk look) */
+  /* Alias tokens kept so existing components keep working */
   --accent-purple: var(--accent);
-  --purple:      #22ffb4;
-  --purple-dim:  rgba(34, 255, 180, 0.10);
-  --cyan:        #22e6ff;
-  --cyan-dim:    rgba(34, 230, 255, 0.10);
+  --purple:      #3E6AE1;
+  --purple-dim:  rgba(62, 106, 225, 0.10);
+  --cyan:        #6aa9ff;
+  --cyan-dim:    rgba(106, 169, 255, 0.10);
 
-  /* Severity — high-contrast against near-black */
-  --green:       #22ffb4;
-  --green-dim:   rgba(34, 255, 180, 0.12);
-  --red:         #ff3355;       /* alert red — Cyberpunk destructive */
-  --red-dim:     rgba(255, 51, 85, 0.14);
-  --orange:      #ff9130;
-  --orange-dim:  rgba(255, 145, 48, 0.12);
-  --yellow:      #ffe14a;
-  --yellow-dim:  rgba(255, 225, 74, 0.12);
-  --blue:        #38b6ff;
-  --blue-dim:    rgba(56, 182, 255, 0.12);
+  /* Severity — restrained, Tesla-flat */
+  --green:       #2fbf71;
+  --green-dim:   rgba(47, 191, 113, 0.12);
+  --red:         #e82127;         /* Tesla red */
+  --red-dim:     rgba(232, 33, 39, 0.12);
+  --orange:      #ff9a3c;
+  --orange-dim:  rgba(255, 154, 60, 0.10);
+  --yellow:      #ffcb3a;
+  --yellow-dim:  rgba(255, 203, 58, 0.10);
+  --blue:        #3E6AE1;
+  --blue-dim:    rgba(62, 106, 225, 0.12);
 
-  /* Type — Fira Code / Fira Sans (Cyberpunk-style pairing) with
-     JetBrains + Inter as fallbacks so nothing shifts if fonts fail. */
-  --mono:        "Fira Code", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --sans:        "Fira Sans", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* Type — Inter primary, JetBrains for mono/technical data */
+  --mono:        "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans:        "Inter", -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 
-  /* Radius — tighter, more technical */
-  --radius:      10px;
-  --radius-sm:   6px;
-  --radius-lg:   14px;
+  /* Radius — Tesla uses pill buttons + tight card rounds */
+  --radius:      8px;
+  --radius-sm:   4px;
+  --radius-lg:   12px;
   --radius-nested: 4px;
 
-  /* Effects — subtle neon glow, no bold drop-shadows */
+  /* Effects — flat, no glows, no drop-shadows */
   --shadow:      none;
   --shadow-lg:   none;
-  --glow-accent: 0 0 22px rgba(0, 255, 154, 0.22);
-  --glow-hot:    0 0 12px rgba(0, 255, 65, 0.55);
-  --glow-red:    0 0 18px rgba(255, 51, 85, 0.35);
-  --scanline:    rgba(255, 255, 255, 0.018);
+  --glow-accent: none;
+  --glow-hot:    none;
+  --glow-red:    none;
+  --scanline:    transparent;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -84,39 +82,8 @@ body {
   min-height: 100vh;
 }
 
-/* Subtle scanline overlay (pure decoration, non-interactive) */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background:
-    repeating-linear-gradient(
-      to bottom,
-      transparent 0,
-      transparent 2px,
-      var(--scanline) 2px,
-      var(--scanline) 3px
-    );
-  z-index: 1000;
-  mix-blend-mode: overlay;
-  opacity: 0.7;
-}
-
-/* Radial vignette to focus attention centrally, terminal-style */
-body::after {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background: radial-gradient(
-    ellipse at center,
-    transparent 0%,
-    transparent 60%,
-    rgba(0, 0, 0, 0.35) 100%
-  );
-  z-index: 999;
-}
+/* Tesla-flat: no scanline, no vignette overlays */
+body::before, body::after { content: none; }
 
 @media (prefers-reduced-motion: reduce) {
   body::before, body::after { display: none; }
@@ -126,11 +93,10 @@ body::after {
   }
 }
 
-/* Selection = matrix green */
+/* Selection = Tesla blue tint */
 ::selection {
   background: var(--accent-mid);
   color: var(--text-h);
-  text-shadow: 0 0 6px var(--accent);
 }
 
 /* Slim, tinted scrollbars */
@@ -163,23 +129,20 @@ code, kbd, samp, pre, .mono, [data-mono] {
   font-feature-settings: "calt" 1, "liga" 1, "zero" 1, "ss01" 1;
 }
 
-/* Small "TERMINAL" marker used above section titles */
+/* Section eyebrow marker (Tesla-style small caps) */
 .term-marker {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.14em;
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: var(--accent);
+  color: var(--text-dim);
   margin-bottom: 8px;
 }
-.term-marker::before {
-  content: ">_";
-  color: var(--accent-hot);
-  text-shadow: 0 0 6px var(--accent-hot);
-}
+.term-marker::before { content: none; }
 
 /* ── Layout ──────────────────────────────────────────────────────────────── */
 .app {
@@ -190,8 +153,7 @@ code, kbd, samp, pre, .mono, [data-mono] {
 
 .sidebar {
   width: 240px;
-  background: rgba(51, 50, 72, 0.4);
-  backdrop-filter: blur(10px);
+  background: var(--bg-sidebar);
   border-right: 1px solid var(--border);
   padding: 0;
   display: flex;
@@ -216,34 +178,20 @@ code, kbd, samp, pre, .mono, [data-mono] {
 .sidebar .logo-icon {
   width: 36px;
   height: 36px;
-  background: var(--accent-solid);
-  border-radius: var(--radius-nested);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
-  color: var(--accent-on);
-  font-weight: 700;
-  letter-spacing: -0.5px;
-  font-family: var(--mono);
-  box-shadow: var(--glow-hot);
+  font-size: 13px;
+  color: var(--text-h);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  font-family: var(--sans);
   position: relative;
 }
-/* Ring pulse (subtle, reduced-motion respected globally) */
-.sidebar .logo-icon::after {
-  content: "";
-  position: absolute;
-  inset: -3px;
-  border: 1px solid var(--accent-hot);
-  border-radius: calc(var(--radius-nested) + 3px);
-  opacity: 0.4;
-  animation: agPulse 2.4s ease-out infinite;
-}
-@keyframes agPulse {
-  0%   { opacity: 0.4; transform: scale(1); }
-  70%  { opacity: 0; transform: scale(1.25); }
-  100% { opacity: 0; transform: scale(1.25); }
-}
+.sidebar .logo-icon::after { content: none; }
 
 .sidebar .logo-text {
   display: flex;
@@ -313,12 +261,12 @@ code, kbd, samp, pre, .mono, [data-mono] {
 
 .sidebar a.active {
   color: var(--text-h);
-  background: rgba(175, 80, 255, 0.1);
+  background: rgba(255, 255, 255, 0.06);
   font-weight: 500;
   border: none;
 }
 
-.sidebar a.active svg { opacity: 1; color: var(--accent); }
+.sidebar a.active svg { opacity: 1; color: var(--text-h); }
 
 .sidebar-footer {
   margin-top: auto;
@@ -334,12 +282,52 @@ code, kbd, samp, pre, .mono, [data-mono] {
   color: var(--text-dim);
 }
 
+/* Source-IP badge — shows the IP the scanner exits from. */
+.source-ip-badge {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  border-radius: 6px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  cursor: default;
+}
+.source-ip-badge.source-ip-ok     { border-color: #1f6b3a; }
+.source-ip-badge.source-ip-warn   { border-color: #7a5a15; }
+.source-ip-badge.source-ip-danger { border-color: #7a1f1f; background: #2a0f0f; }
+.source-ip-badge.source-ip-error,
+.source-ip-badge.source-ip-loading { color: var(--text-dim); }
+
+.source-ip-icon { font-size: 16px; line-height: 1; }
+.source-ip-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.source-ip-mode {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+.source-ip-ip {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text-h);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 140px;
+}
+.source-ip-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--text-dim);
+}
+
 .sidebar-status .pulse {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 8px rgba(175, 80, 255, 0.4);
+  background: var(--green);
   animation: pulse 2s infinite;
 }
 
@@ -371,75 +359,49 @@ code, kbd, samp, pre, .mono, [data-mono] {
 }
 
 h1 {
-  font-size: 22px;
+  font-size: 28px;
   font-weight: 500;
   color: var(--text-h);
   margin-bottom: 24px;
-  letter-spacing: -0.4px;
+  letter-spacing: -0.5px;
   line-height: 1.2;
   font-family: var(--sans);
 }
-/* h1 accented lead-in slash — subtle terminal cue */
-h1::before {
-  content: "// ";
-  color: var(--accent);
-  font-family: var(--mono);
-  font-weight: 400;
-  font-size: 0.9em;
-  opacity: 0.7;
-  margin-right: 2px;
-}
+h1::before { content: none; }
 
 h2 {
-  font-size: 15px;
-  font-weight: 600;
+  font-size: 17px;
+  font-weight: 500;
   color: var(--text-h);
   margin-bottom: 16px;
-  letter-spacing: 0.02em;
+  letter-spacing: -0.2px;
   font-family: var(--sans);
 }
 
 h3 {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
   color: var(--text-dim);
   margin-bottom: 8px;
   text-transform: uppercase;
-  letter-spacing: 1.8px;
-  font-family: var(--mono);
+  letter-spacing: 0.16em;
+  font-family: var(--sans);
 }
 
 /* ── Cards ────────────────────────────────────────────────────────────────── */
 .card {
-  background:
-    linear-gradient(180deg, rgba(0, 255, 154, 0.015) 0%, transparent 60%),
-    var(--bg-card);
+  background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 20px;
   margin-bottom: 16px;
   box-shadow: none;
-  transition: border-color 0.2s, box-shadow 0.2s;
+  transition: border-color 0.2s;
   overflow: visible;
   position: relative;
 }
-/* Hair-thin top edge that lights up on hover — terminal window feel */
-.card::before {
-  content: "";
-  position: absolute;
-  inset: 0 0 auto 0;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, var(--accent-mid), transparent);
-  opacity: 0;
-  transition: opacity 0.25s;
-  border-radius: var(--radius) var(--radius) 0 0;
-  pointer-events: none;
-}
-.card:hover {
-  border-color: var(--border-strong);
-  box-shadow: 0 0 24px rgba(0, 255, 154, 0.05);
-}
-.card:hover::before { opacity: 1; }
+.card::before { content: none; }
+.card:hover { border-color: var(--border-strong); }
 
 .card-grid {
   display: grid;
@@ -471,19 +433,19 @@ h3 {
 }
 
 .stat-card .label {
-  font-size: 10px;
+  font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 1.8px;
+  letter-spacing: 0.16em;
   color: var(--text-dim);
   font-weight: 500;
-  font-family: var(--mono);
+  font-family: var(--sans);
 }
 
 .stat-card .value {
-  font-size: 32px;
-  font-weight: 300;
+  font-size: 34px;
+  font-weight: 400;
   color: var(--text-h);
-  letter-spacing: -1px;
+  letter-spacing: -1.2px;
   line-height: 1;
 }
 
@@ -515,7 +477,7 @@ h3 {
   white-space: nowrap;
 }
 
-.badge.critical { background: var(--red-dim); color: var(--red); border: 1px solid rgba(255, 51, 85, 0.35); text-shadow: 0 0 6px rgba(255, 51, 85, 0.4); }
+.badge.critical { background: var(--red-dim); color: var(--red); border: 1px solid rgba(232, 33, 39, 0.35); }
 .badge.high     { background: var(--orange-dim); color: var(--orange); border: 1px solid rgba(255, 145, 48, 0.35); }
 .badge.medium   { background: var(--yellow-dim); color: var(--yellow); border: 1px solid rgba(255, 225, 74, 0.30); }
 .badge.low      { background: var(--blue-dim); color: var(--blue); border: 1px solid rgba(56, 182, 255, 0.30); }
@@ -535,8 +497,8 @@ h3 {
 }
 
 @keyframes badge-pulse {
-  0%, 100% { box-shadow: none; }
-  50% { box-shadow: 0 0 12px rgba(175, 80, 255, 0.4); }
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
 }
 
 /* ── Table ────────────────────────────────────────────────────────────────── */
@@ -556,20 +518,20 @@ table {
 }
 
 thead th {
-  background: var(--bg-card, #1a1a2e);
+  background: var(--bg-card);
   color: var(--text-dim);
   font-weight: 500;
   text-transform: uppercase;
-  font-size: 10px;
-  letter-spacing: 1.8px;
-  padding: 12px 16px;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  padding: 14px 16px;
   text-align: left;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
   position: sticky;
   top: 0;
   z-index: 1;
-  font-family: var(--mono);
+  font-family: var(--sans);
 }
 
 tbody td {
@@ -587,57 +549,59 @@ tbody tr:hover { background: rgba(247, 249, 250, 0.03); }
 .btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
-  padding: 0px 16px;
-  height: 36px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: transparent;
+  padding: 0 22px;
+  height: 38px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.20);
+  background: rgba(0, 0, 0, 0.30);
   color: var(--text-h);
-  font-size: 14px;
-  font-weight: 400;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
   font-family: var(--sans);
   white-space: nowrap;
 }
 
 .btn:hover {
-  background: var(--accent-dim);
-  border-color: var(--accent-mid);
+  background: rgba(255, 255, 255, 0.10);
+  border-color: rgba(255, 255, 255, 0.35);
   color: var(--text-h);
 }
-.btn:active { transform: scale(0.98); }
+.btn:active { transform: none; }
 .btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
 .btn-primary {
   background: var(--accent);
-  border-color: var(--accent-hot);
-  color: var(--accent-on);
-  font-weight: 600;
-  text-shadow: 0 0 6px rgba(0, 0, 0, 0.35);
-  box-shadow: var(--glow-accent);
+  border-color: var(--accent);
+  color: #ffffff;
+  font-weight: 500;
+  text-shadow: none;
+  box-shadow: none;
 }
 .btn-primary:hover {
   background: var(--accent-hot);
   border-color: var(--accent-hot);
-  box-shadow: var(--glow-hot), var(--glow-accent);
+  box-shadow: none;
 }
 
 .btn-danger {
-  border-color: rgba(255, 51, 85, 0.35);
+  border-color: rgba(232, 33, 39, 0.45);
   color: var(--red);
   background: transparent;
 }
 .btn-danger:hover {
   background: var(--red-dim);
   border-color: var(--red);
-  box-shadow: var(--glow-red);
+  box-shadow: none;
 }
 
-.btn-sm { padding: 0px 10px; height: 28px; font-size: 12px; font-family: var(--mono); letter-spacing: 0.02em; }
+.btn-sm { padding: 0 14px; height: 30px; font-size: 12px; font-family: var(--sans); letter-spacing: 0.02em; }
 .btn-ghost { border-color: transparent; background: transparent; }
-.btn-ghost:hover { background: var(--accent-dim); color: var(--text-h); }
+.btn-ghost:hover { background: rgba(255, 255, 255, 0.06); color: var(--text-h); }
 
 /* ── Forms ────────────────────────────────────────────────────────────────── */
 .form-row {
@@ -655,12 +619,12 @@ tbody tr:hover { background: rgba(247, 249, 250, 0.03); }
 }
 
 .form-group label {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-dim);
   font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 1.8px;
-  font-family: var(--mono);
+  letter-spacing: 0.14em;
+  font-family: var(--sans);
 }
 
 .form-group input,
@@ -699,28 +663,28 @@ tbody tr:hover { background: rgba(247, 249, 250, 0.03); }
 }
 
 .tab {
-  padding: 8px 14px;
-  font-size: 12px;
+  padding: 10px 16px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--text-dim);
   cursor: pointer;
   border-bottom: 2px solid transparent;
-  transition: color 0.15s, border-color 0.15s, text-shadow 0.15s;
+  transition: color 0.2s, border-color 0.2s;
   background: none;
   border-top: none;
   border-left: none;
   border-right: none;
-  font-family: var(--mono);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font-family: var(--sans);
+  letter-spacing: 0.02em;
+  text-transform: none;
   white-space: nowrap;
 }
 
 .tab:hover { color: var(--text-h); }
 .tab.active {
-  color: var(--accent);
-  border-bottom-color: var(--accent-hot);
-  text-shadow: 0 0 8px var(--accent-dim);
+  color: var(--text-h);
+  border-bottom-color: var(--text-h);
+  text-shadow: none;
 }
 
 /* ── Code block — terminal window aesthetic ─────────────────────────────── */
@@ -1046,7 +1010,6 @@ tbody tr:hover { background: rgba(247, 249, 250, 0.03); }
 
 .phase-step.active .phase-dot {
   background: var(--accent);
-  box-shadow: 0 0 8px rgba(175, 80, 255, 0.4);
 }
 
 .phase-step.completed .phase-dot {

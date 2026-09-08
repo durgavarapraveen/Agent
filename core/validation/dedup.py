@@ -111,11 +111,28 @@ class DedupStore:
                     "function_name TEXT, package_version TEXT, severity TEXT, "
                     "first_seen REAL, last_seen REAL, last_scan_id TEXT, "
                     "status TEXT)")
+                # Additive migration: `target` column scopes mark_resolved so that
+                # scanning target B never marks target A's findings as resolved.
+                c.execute(
+                    "ALTER TABLE findings_history ADD COLUMN IF NOT EXISTS target TEXT")
+                c.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_findings_history_target "
+                    "ON findings_history(target)")
                 conn.commit()
+
+    @staticmethod
+    def _normalize_target(target: str) -> str:
+        t = (target or "").strip().lower()
+        if "://" in t:
+            t = t.split("://", 1)[1]
+        if "/" in t:
+            t = t.split("/", 1)[0]
+        return t
 
     def classify(self, finding: Dict, scan_id: str) -> DedupResult:
         """Classify one finding for the current scan and update history."""
         target_val = finding.get("target") or finding.get("host") or finding.get("domain") or ""
+        target_norm = self._normalize_target(target_val)
         title_val = finding.get("title") or finding.get("name") or ""
         type_val = finding.get("type") or finding.get("vuln_type") or ""
         fp = fingerprint(
@@ -136,12 +153,13 @@ class DedupStore:
                     c.execute(
                         "INSERT INTO findings_history(fingerprint, cve_id, file_path, "
                         "function_name, package_version, severity, first_seen, last_seen, "
-                        "last_scan_id, status) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                        "last_scan_id, status, target) "
+                        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                         (fp, finding.get("cve_id", ""),
                          finding.get("file_path", finding.get("location", "")),
                          finding.get("function_name", ""),
                          finding.get("package_version", ""),
-                         severity, now, now, scan_id, NEW))
+                         severity, now, now, scan_id, NEW, target_norm))
                     conn.commit()
                     return DedupResult(fp, NEW, severity, "", False, False, now, now)
 
@@ -150,35 +168,46 @@ class DedupStore:
                 changed = prev_sev != severity
                 c.execute(
                     "UPDATE findings_history SET severity=%s, last_seen=%s, "
-                    "last_scan_id=%s, status=%s WHERE fingerprint=%s",
-                    (severity, now, scan_id, RECURRING, fp))
+                    "last_scan_id=%s, status=%s, target=COALESCE(NULLIF(target,''),%s) "
+                    "WHERE fingerprint=%s",
+                    (severity, now, scan_id, RECURRING, target_norm, fp))
                 conn.commit()
                 return DedupResult(
                     fp, RECURRING, severity, prev_sev, changed,
                     suppressed=not changed, first_seen=first_seen, last_seen=now)
 
-    def mark_resolved(self, scan_id: str) -> List[str]:
-        """Findings not seen in this scan_id are resolved. Returns their fingerprints."""
+    def mark_resolved(self, scan_id: str, target: str = None) -> List[str]:
+        """Findings not seen in this scan_id are resolved. Scoped by target so
+        that a scan against target B does NOT mark target A's findings as resolved.
+
+        `target` MUST be supplied when there are historical findings for other
+        targets in the DB. If it is None, we log a warning and skip the sweep
+        rather than performing a dangerous global mark.
+        """
+        if not target:
+            logger.warning(
+                "mark_resolved called without target; skipping to avoid cross-target "
+                "contamination. Pass target explicitly.")
+            return []
+        target_norm = self._normalize_target(target)
         with DatabaseManager.get_connection() as conn:
             with conn.cursor() as c:
                 c.execute(
                     "SELECT fingerprint FROM findings_history "
-                    "WHERE last_scan_id != %s AND status != %s",
-                    (scan_id, RESOLVED))
+                    "WHERE last_scan_id != %s AND status != %s AND target = %s",
+                    (scan_id, RESOLVED, target_norm))
                 rows = c.fetchall()
                 fps = [r[0] for r in rows]
                 if fps:
-                    # Update all resolved findings
-                    for fp in fps:
-                        c.execute(
-                            "UPDATE findings_history SET status=%s WHERE fingerprint=%s",
-                            (RESOLVED, fp)
-                        )
+                    c.execute(
+                        "UPDATE findings_history SET status=%s "
+                        "WHERE fingerprint = ANY(%s)",
+                        (RESOLVED, fps))
                     conn.commit()
         return fps
 
     def process_scan(self, findings: List[Dict], scan_id: str,
-                     include_recurring: bool = False) -> Dict:
+                     include_recurring: bool = False, target: str = None) -> Dict:
         """Classify a full scan's findings and compute resolved set.
 
         Returns {'results': [DedupResult...], 'report': [findings kept],
@@ -196,17 +225,37 @@ class DedupStore:
             f["_dedup"] = res.to_dict()
             title = f.get("title") or f.get("name") or f.get("type") or "unnamed finding"
             loc = f.get("file_path") or f.get("location") or f.get("url") or ""
-            if res.suppressed and not include_recurring:
+            sev = (res.severity or "").upper()
+            # Never suppress recurring HIGH/CRITICAL even when their severity
+            # hasn't changed. A HIGH SQLi that's still exploitable in the
+            # current scan must appear in the current report — silently
+            # suppressing it was the source of "the report says everything is
+            # fine but the vuln is still there" incidents (#104).
+            force_include = sev in ("CRITICAL", "HIGH")
+            if res.suppressed and not include_recurring and not force_include:
                 suppressed += 1
                 suppressed_findings.append(f)
                 logger.info(f"DEDUP_ACTION: status=RECURRING_SUPPRESSED title='{title}' location='{loc}' fingerprint={res.fingerprint} severity={res.severity} reason='Finding already recorded in prior scan with identical severity'")
             else:
                 report.append(f)
-                if res.suppressed:
+                if res.suppressed and force_include:
+                    logger.info(f"DEDUP_ACTION: status=RECURRING_KEPT_HIGH_SEV title='{title}' location='{loc}' fingerprint={res.fingerprint} severity={res.severity}")
+                elif res.suppressed:
                     logger.info(f"DEDUP_ACTION: status=RECURRING_INCLUDED title='{title}' location='{loc}' fingerprint={res.fingerprint} severity={res.severity}")
                 else:
                     logger.info(f"DEDUP_ACTION: status={res.status} title='{title}' location='{loc}' fingerprint={res.fingerprint} severity={res.severity}")
-        resolved = self.mark_resolved(scan_id)
+        # If target not passed explicitly, infer from the first finding that carries
+        # one. This preserves backward compatibility for callers that don't yet pass
+        # target while keeping the safety property: mark_resolved refuses to run
+        # without a target.
+        target_for_sweep = target
+        if not target_for_sweep:
+            for f in findings:
+                t = f.get("target") or f.get("host") or f.get("domain")
+                if t:
+                    target_for_sweep = t
+                    break
+        resolved = self.mark_resolved(scan_id, target=target_for_sweep)
         return {"results": results, "report": report,
                 "suppressed_findings": suppressed_findings,
                 "suppressed": suppressed, "resolved": resolved}

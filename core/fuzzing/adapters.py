@@ -1,4 +1,5 @@
 import subprocess
+import shutil
 import json
 import uuid
 import logging
@@ -10,6 +11,28 @@ from core.domain.finding import SecurityFinding, FindingState
 from core.fuzzing.models import ToolResult, ToolStatus
 
 logger = logging.getLogger(__name__)
+
+
+def _tool_available(binary: str) -> bool:
+    """Cheap preflight — cache is provided by shutil.which itself on Linux."""
+    return shutil.which(binary) is not None
+
+
+def _missing_binary_result(tool: str, binary: str, start: float) -> ToolResult:
+    """Distinguishable result for a missing binary. Previously every adapter
+    caught `FileNotFoundError` inside its generic `except Exception` and
+    returned an indistinguishable ERROR — operators couldn't tell whether
+    the tool was misconfigured or the target was refusing connections."""
+    duration = (time.time() - start) * 1000
+    logger.warning("Tool binary not found: %s (%s)", tool, binary)
+    return ToolResult(
+        tool_name=tool,
+        status=ToolStatus.ERROR,
+        findings=[],
+        evidence=f"binary_not_found:{binary}",
+        execution_time_ms=duration,
+    )
+
 
 class BaseAdapter:
     def __init__(self, endpoint: Endpoint, target: str):
@@ -26,20 +49,23 @@ class SQLMapAdapter(BaseAdapter):
         self.tool_name = "sqlmap"
 
     def execute(self, params: Dict[str, Any]) -> ToolResult:
+        start = time.time()
+        if not _tool_available("sqlmap"):
+            return _missing_binary_result(self.tool_name, "sqlmap", start)
+
         cmd = [
             "sqlmap",
             "-u", self.endpoint.url,
             "--batch",
             "--dbs"
         ]
-        
+
         # Additional params from config
         if params.get("tamper"):
             cmd.extend(["--tamper", params["tamper"]])
         if params.get("threads"):
             cmd.extend(["--threads", str(params["threads"])])
-            
-        start = time.time()
+
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30.0)
             duration = (time.time() - start) * 1000
@@ -71,17 +97,50 @@ class SQLMapAdapter(BaseAdapter):
                 execution_time_ms=(time.time() - start) * 1000
             )
 
+    # sqlmap prints per-parameter blocks like:
+    #   Parameter: id (GET)
+    #       Type: boolean-based blind
+    #       Title: AND boolean-based blind - WHERE or HAVING clause
+    #       Payload: id=1 AND 1=1
+    # A block is only a real finding if it contains BOTH `Parameter:` and
+    # at least one of the confirmation markers. The previous substring
+    # check accepted any stdout that happened to include those keywords
+    # anywhere, including sqlmap's own banner text.
+    _SQLMAP_CONFIRMATION_MARKERS = (
+        "the following injection point",
+        "sqlmap identified the following injection point",
+        "type:",
+        "payload:",
+        "target url appears to be UNION injectable",
+    )
+
     def _parse_output(self, stdout: str) -> List[SecurityFinding]:
-        findings = []
-        if "Parameter:" in stdout and "is vulnerable" in stdout:
+        findings: List[SecurityFinding] = []
+        import re as _re_sql
+        # Find each `Parameter: <name> (<method>)` block and verify at least
+        # one confirmation marker appears within its slice.
+        param_iter = list(_re_sql.finditer(
+            r"Parameter:\s+([\w\[\]#-]+)\s+\((GET|POST|COOKIE|HEADER|URI)\)",
+            stdout,
+        ))
+        for i, m in enumerate(param_iter):
+            start = m.end()
+            end = param_iter[i + 1].start() if i + 1 < len(param_iter) else len(stdout)
+            block = stdout[start:end]
+            low_block = block.lower()
+            if not any(marker in low_block for marker in self._SQLMAP_CONFIRMATION_MARKERS):
+                continue
+            param_name = m.group(1)
+            method = m.group(2)
             findings.append(SecurityFinding(
                 finding_id=str(uuid.uuid4()),
-                title="SQL Injection Detected",
-                description="SQLMap detected a vulnerable parameter.",
+                title=f"SQL Injection in {method} parameter '{param_name}'",
+                description=("SQLMap detected an injectable parameter with at least "
+                              "one confirmation marker in its output block."),
                 severity="CRITICAL",
                 endpoint_id=self.endpoint.endpoint_id,
                 state=FindingState.CANDIDATE,
-                evidence={"output": stdout}
+                evidence={"parameter": param_name, "method": method, "output": block[:2000]},
             ))
         return findings
 
@@ -92,18 +151,21 @@ class NucleiAdapter(BaseAdapter):
         self.tool_name = "nuclei"
 
     def execute(self, params: Dict[str, Any]) -> ToolResult:
+        start = time.time()
+        if not _tool_available("nuclei"):
+            return _missing_binary_result(self.tool_name, "nuclei", start)
+
         cmd = [
             "nuclei",
             "-u", self.endpoint.url,
             "-json-export", "-" # output json to stdout
         ]
-        
+
         if params.get("template"):
             cmd.extend(["-t", params["template"]])
         if params.get("rate_limit"):
             cmd.extend(["-rl", str(params["rate_limit"])])
-            
-        start = time.time()
+
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30.0)
             duration = (time.time() - start) * 1000
@@ -159,14 +221,17 @@ class DalfoxAdapter(BaseAdapter):
         self.tool_name = "dalfox"
 
     def execute(self, params: Dict[str, Any]) -> ToolResult:
+        start = time.time()
+        if not _tool_available("dalfox"):
+            return _missing_binary_result(self.tool_name, "dalfox", start)
+
         cmd = [
             "dalfox", "url", self.endpoint.url
         ]
-        
+
         if params.get("concurrency"):
             cmd.extend(["-w", str(params["concurrency"])])
-            
-        start = time.time()
+
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30.0)
             duration = (time.time() - start) * 1000
@@ -196,15 +261,35 @@ class DalfoxAdapter(BaseAdapter):
             )
 
     def _parse_output(self, stdout: str) -> List[SecurityFinding]:
-        findings = []
-        if "[V]" in stdout or "[G]" in stdout:
+        """Parse dalfox stdout for confirmed and grep findings.
+
+        Dalfox prints one line per finding:
+            [V] URL  -- confirmed vulnerable (payload triggered)
+            [G] URL  -- grep-based match (weak signal, may be FP)
+        Emit ONE finding per line so downstream dedup can score them
+        individually. The previous "any `[V]` or `[G]` anywhere → one
+        finding" collapsed dozens of real hits into a single entry.
+        """
+        findings: List[SecurityFinding] = []
+        import re as _re_dx
+        for m in _re_dx.finditer(r"^\s*\[(V|G|R)\]\s+(\S+)(.*)$", stdout, _re_dx.MULTILINE):
+            tag, url, tail = m.group(1), m.group(2), (m.group(3) or "").strip()
+            if tag == "V":
+                severity = "HIGH"
+                title = f"XSS confirmed by Dalfox on {url}"
+            elif tag == "G":
+                severity = "MEDIUM"  # grep-based, weaker signal
+                title = f"XSS candidate (grep-match) by Dalfox on {url}"
+            else:  # 'R' = reflected but not proven
+                severity = "LOW"
+                title = f"Dalfox reflected marker on {url}"
             findings.append(SecurityFinding(
                 finding_id=str(uuid.uuid4()),
-                title="XSS Detected by Dalfox",
-                description="Dalfox identified a reflected or stored XSS payload.",
-                severity="HIGH",
+                title=title,
+                description="Dalfox reported a signal against the parameter.",
+                severity=severity,
                 endpoint_id=self.endpoint.endpoint_id,
                 state=FindingState.CANDIDATE,
-                evidence={"output": stdout}
+                evidence={"tag": tag, "url": url, "detail": tail[:400]},
             ))
         return findings
