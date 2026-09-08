@@ -368,6 +368,31 @@ class SharedContextV2:
         with self._state_lock:
             return list(self.endpoints.values())
 
+    # P3: the endpoint store is a canonical-id -> record dict. Pruning/reset must
+    # go through these so the dict contract is never replaced by a bare list
+    # (which silently breaks dedup, iteration-by-value, and DB persistence).
+    def clear_endpoints(self) -> None:
+        """Authoritative reset of the endpoint store (keeps the dict contract)."""
+        with self._state_lock:
+            self.endpoints.clear()
+
+    def drop_endpoints_by_url(self, urls) -> int:
+        """Remove endpoints whose URL is in `urls`. Returns the count removed.
+        The one mutation path for pruning (e.g. dead-liveness sweeps), so callers
+        never reassign ``ctx.endpoints`` to a list."""
+        dead = {str(u) for u in (urls or []) if u}
+        if not dead:
+            return 0
+        with self._state_lock:
+            keep, removed = {}, 0
+            for eid, ep in self.endpoints.items():
+                if self._endpoint_url(ep) in dead:
+                    removed += 1
+                else:
+                    keep[eid] = ep
+            self.endpoints = keep
+            return removed
+
     def add_ports(self, host_or_ports, ports: List[Dict] = None, source: str = None):
         if ports is None:
             actual_ports = host_or_ports

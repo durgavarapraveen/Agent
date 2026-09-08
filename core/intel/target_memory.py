@@ -206,15 +206,22 @@ async def verify_and_refresh(ctx, target: str,
         # ── If fingerprint drifted, drop primed endpoints/subs entirely
         if stats["fingerprint_changed"]:
             try:
-                ctx.endpoints = []
+                if hasattr(ctx, "clear_endpoints"):
+                    ctx.clear_endpoints()
+                else:
+                    ctx.endpoints = {}
                 ctx.subdomains = []
             except Exception:
                 pass
             return stats
 
         # ── Liveness re-check on primed endpoints (parallel batched HEAD)
+        # P3: iterate endpoint RECORDS via the getter (the store is a dict; a bare
+        # ``for e in ctx.endpoints`` iterates canonical-id keys, not records).
+        _eps = ctx.get_endpoints() if hasattr(ctx, "get_endpoints") else \
+            list((getattr(ctx, "endpoints", {}) or {}).values())
         primed_urls = []
-        for e in (getattr(ctx, "endpoints", []) or []):
+        for e in _eps:
             u = e if isinstance(e, str) else (e.get("url") or e.get("path") or "")
             if u and u.startswith(("http://", "https://")):
                 primed_urls.append(u)
@@ -244,14 +251,15 @@ async def verify_and_refresh(ctx, target: str,
         await _aio.gather(*(_check(u) for u in primed_urls))
         stats["endpoints_dropped"] = len(dead)
         stats["endpoints_kept"] = len(alive)
-        # Drop dead endpoints from ctx
+        # Drop dead endpoints from ctx (P3: prune through the authoritative
+        # mutator so the canonical-id dict contract is preserved).
         try:
-            new_eps = []
-            for e in (getattr(ctx, "endpoints", []) or []):
-                u = e if isinstance(e, str) else (e.get("url") or e.get("path") or "")
-                if u not in dead:
-                    new_eps.append(e)
-            ctx.endpoints = new_eps
+            if hasattr(ctx, "drop_endpoints_by_url"):
+                ctx.drop_endpoints_by_url(dead)
+            else:
+                keep = {k: v for k, v in (getattr(ctx, "endpoints", {}) or {}).items()
+                        if (v if isinstance(v, str) else (v.get("url") or v.get("path") or "")) not in dead}
+                ctx.endpoints = keep
         except Exception:
             pass
 
@@ -272,11 +280,9 @@ def prime_ctx(ctx, target: str) -> Dict[str, Any]:
     try:
         if intel.get("known_endpoints"):
             eps = list(intel["known_endpoints"])
-            try:
-                ctx.add_endpoints(eps, source="target_memory")
-            except Exception:
-                cur = list(getattr(ctx, "endpoints", []) or [])
-                ctx.endpoints = list(dict.fromkeys(cur + eps))
+            # P3: add_endpoints is the single ingestion funnel (dict-safe dedup);
+            # do NOT fall back to reassigning ctx.endpoints as a list.
+            ctx.add_endpoints(eps, source="target_memory")
             stats["endpoints"] = len(eps)
         if intel.get("known_subdomains"):
             subs = list(intel["known_subdomains"])
