@@ -82,3 +82,28 @@ class Endpoint(DomainModel):
         """
         import hashlib
         return "ep_" + hashlib.sha256(self.normalized_key().encode("utf-8")).hexdigest()[:24]
+
+
+def canonical_endpoint_key(method: str, url: str) -> str:
+    """The ONE endpoint identity used to dedup across every store (P0.1/P3).
+
+    Normalizes method + scheme/host case, default ports, trailing slash and
+    query-parameter order so ``https://H/a`` and ``https://h/a/?b=1&a=2`` collapse
+    to a single row. Kept as a module-level function (leaf module, no imports of
+    memory/attack_surface) so SharedContextV2, EndpointInventoryV2 and any other
+    dict-keyed store share the same key instead of each rolling its own.
+    """
+    try:
+        from urllib.parse import urlsplit, parse_qsl, urlencode
+        m = (method or "GET").upper()
+        sp = urlsplit(url)
+        scheme = (sp.scheme or "https").lower()
+        host = (sp.hostname or "").lower()
+        port = f":{sp.port}" if sp.port and sp.port not in (80, 443) else ""
+        path = sp.path or "/"
+        if len(path) > 1:
+            path = path.rstrip("/")
+        q = urlencode(sorted(parse_qsl(sp.query, keep_blank_values=True)))
+        return f"{m}:{scheme}://{host}{port}{path}" + (f"?{q}" if q else "")
+    except Exception:
+        return f"{(method or 'GET').upper()}:{url}"

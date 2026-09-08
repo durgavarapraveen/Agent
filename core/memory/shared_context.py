@@ -261,21 +261,12 @@ class SharedContextV2:
         counted several times under trivially different spellings (scheme case,
         host case, trailing slash, query-parameter order). Used as the dedup key
         for the V1 endpoint map.
+
+        P3: delegates to the single ``canonical_endpoint_key`` so every store
+        (this one, EndpointInventoryV2, …) shares one identity function.
         """
-        try:
-            from urllib.parse import urlsplit, parse_qsl, urlencode
-            m = (method or "GET").upper()
-            sp = urlsplit(url)
-            scheme = (sp.scheme or "https").lower()
-            host = (sp.hostname or "").lower()
-            port = f":{sp.port}" if sp.port and sp.port not in (80, 443) else ""
-            path = sp.path or "/"
-            if len(path) > 1:
-                path = path.rstrip("/")
-            q = urlencode(sorted(parse_qsl(sp.query, keep_blank_values=True)))
-            return f"{m}:{scheme}://{host}{port}{path}" + (f"?{q}" if q else "")
-        except Exception:
-            return f"{(method or 'GET').upper()}:{url}"
+        from core.domain.endpoint import canonical_endpoint_key
+        return canonical_endpoint_key(method, url)
 
     # P1.12: probe artifacts the scanner itself generates — must never become
     # normal attack-surface discoveries.
