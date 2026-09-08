@@ -61,7 +61,8 @@ def mask_sensitive_data(text: str, enabled: bool = True) -> str:
 
     # ── OpenAI / Stripe / SendGrid / Slack ──
     s = re.sub(r'\bsk-[A-Za-z0-9]{20,}\b', '[MASKED_SK]', s)
-    s = re.sub(r'\brk_(live|test)_[A-Za-z0-9]{20,}\b', '[MASKED_STRIPE]', s)
+    # Stripe secret/restricted keys: sk_live_/sk_test_/rk_live_/rk_test_ (underscore form).
+    s = re.sub(r'\b[sr]k_(live|test)_[A-Za-z0-9]{16,}\b', '[MASKED_STRIPE]', s)
     s = re.sub(r'\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b', '[MASKED_SENDGRID]', s)
     s = re.sub(r'\bxox[bpoa]-[A-Za-z0-9-]{10,}\b', '[MASKED_SLACK]', s)
 

@@ -21,6 +21,7 @@ _FALLBACK = [
     (re.compile(r'(?i)\b(password|passwd|pwd|secret|token|api[_\-]?key|access[_\-]?token|refresh[_\-]?token)"?\s*[:=]\s*"?[^"\s,&}]{4,}'), r'\1=[REDACTED]'),
     (re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b'), '[REDACTED_EMAIL]'),
     (re.compile(r'\bAKIA[0-9A-Z]{16}\b'), '[REDACTED_AWS_KEY]'),
+    (re.compile(r'\b[sr]k_(live|test)_[A-Za-z0-9]{16,}\b'), '[REDACTED_STRIPE]'),
     (re.compile(r'\b\d{4}[ \-]?\d{4}[ \-]?\d{4}[ \-]?\d{4}\b'), '[REDACTED_CARD]'),
     (re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]+?-----END [A-Z ]*PRIVATE KEY-----'), '[REDACTED_PRIVATE_KEY]'),
 ]
