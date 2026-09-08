@@ -2,6 +2,43 @@ import { useState, useEffect, useRef } from "react";
 import { api } from "../api";
 
 const TABS = ["Documents", "Upload", "URL", "Search", "Notes", "Query"];
+
+// Small inline progress bar used while an ingestion job runs.
+function ProgressBar({ percent, label }) {
+  const pct = Math.max(0, Math.min(100, Math.round(percent || 0)));
+  return (
+    <div style={{ marginTop: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--text-m)", marginBottom: 6 }}>
+        <span>{label || "Ingesting…"}</span>
+        <span>{pct}%</span>
+      </div>
+      <div style={{ height: 8, borderRadius: 999, background: "var(--border)", overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${pct}%`, background: "var(--accent)", transition: "width 0.3s ease" }} />
+      </div>
+    </div>
+  );
+}
+
+// Generate a client-side job id and poll ingestion progress until terminal.
+function newJobId() {
+  try { return crypto.randomUUID(); }
+  catch { return "job_" + Math.random().toString(36).slice(2) + Date.now().toString(36); }
+}
+
+async function pollIngestProgress(jobId, onTick, { intervalMs = 700, stopRef } = {}) {
+  // Returns the final progress record ({status, percent, result, error}).
+  while (true) {
+    if (stopRef?.current) return null;
+    let p;
+    try { p = await api.ragIngestProgress(jobId); }
+    catch { p = null; }
+    if (p) {
+      onTick?.(p);
+      if (p.status === "done" || p.status === "error") return p;
+    }
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+}
 const SOURCE_LABELS = {
   seed: "Built-in Security Knowledge",
   file: "Uploaded Files",
@@ -275,21 +312,34 @@ function UploadTab({ flash, reload }) {
   const fileRef = useRef();
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const [progress, setProgress] = useState(null); // {percent, label}
 
   const handleFiles = async (files) => {
     if (!files?.length) return;
     setUploading(true);
-    let ok = 0, fail = 0;
     for (const file of files) {
+      const jobId = newJobId();
+      setProgress({ percent: 0, label: `${file.name} — starting…` });
       try {
-        const r = await api.ragUploadFile(file);
-        ok++;
-        flash("ok", `${file.name}: ${r.new_chunks} new chunks ingested (${r.chunks} total)`);
+        const started = await api.ragUploadFile(file, {}, jobId);
+        if (started && started.status === "started") {
+          const final = await pollIngestProgress(jobId, (p) =>
+            setProgress({ percent: p.percent, label: `${file.name} — ${p.done}/${p.total} chunks` }));
+          if (final?.status === "error") {
+            flash("err", `${file.name}: ${final.error || "ingestion failed"}`);
+          } else {
+            const nc = final?.result?.new_chunks ?? 0;
+            flash("ok", `${file.name}: ${nc} new chunks ingested`);
+          }
+        } else {
+          // Backend without job support — synchronous result.
+          flash("ok", `${file.name}: ${started.new_chunks} new chunks ingested`);
+        }
       } catch (e) {
-        fail++;
         flash("err", `${file.name}: ${e.message}`);
       }
     }
+    setProgress(null);
     setUploading(false);
     reload();
   };
@@ -316,6 +366,7 @@ function UploadTab({ flash, reload }) {
           {uploading ? "Uploading..." : "Drop files here or click to browse"}
         </div>
       </div>
+      {progress && <ProgressBar percent={progress.percent} label={progress.label} />}
       <input ref={fileRef} type="file" multiple hidden accept=".pdf,.txt,.md,.html,.htm,.csv,.json,.yaml,.yml,.rst,.log"
         onChange={e => handleFiles(e.target.files)} />
     </div>
@@ -325,19 +376,34 @@ function UploadTab({ flash, reload }) {
 function URLTab({ flash, reload }) {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState(null);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!url.trim()) return;
     setLoading(true);
+    const jobId = newJobId();
+    setProgress({ percent: 0, label: "Fetching page…" });
     try {
-      const r = await api.ragIngestUrl(url.trim());
-      flash("ok", `URL ingested: ${r.new_chunks} new chunks from ${r.chunks} total`);
-      setUrl("");
+      const started = await api.ragIngestUrl(url.trim(), {}, jobId);
+      if (started && started.status === "started") {
+        const final = await pollIngestProgress(jobId, (p) =>
+          setProgress({ percent: p.percent, label: `${p.done}/${p.total} chunks` }));
+        if (final?.status === "error") {
+          flash("err", final.error || "ingestion failed");
+        } else {
+          flash("ok", `URL ingested: ${final?.result?.new_chunks ?? 0} new chunks`);
+          setUrl("");
+        }
+      } else {
+        flash("ok", `URL ingested: ${started.new_chunks} new chunks`);
+        setUrl("");
+      }
       reload();
     } catch (e) {
       flash("err", e.message);
     }
+    setProgress(null);
     setLoading(false);
   };
 
@@ -358,6 +424,7 @@ function URLTab({ flash, reload }) {
           {loading ? "Fetching..." : "Ingest URL"}
         </button>
       </form>
+      {progress && <ProgressBar percent={progress.percent} label={progress.label} />}
     </div>
   );
 }
@@ -367,19 +434,35 @@ function SearchTab({ flash, reload }) {
   const [maxResults, setMaxResults] = useState(3);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
+  const [progress, setProgress] = useState(null);
 
   const handleSearch = async (e) => {
     e.preventDefault();
     if (!query.trim()) return;
     setLoading(true);
+    const jobId = newJobId();
+    setProgress({ percent: 0, label: "Searching the web…" });
     try {
-      const r = await api.ragSearch(query.trim(), maxResults);
-      setResult(r);
-      flash("ok", `Search complete: ${r.new_chunks} new chunks from ${r.pages_fetched} pages`);
+      const started = await api.ragSearch(query.trim(), maxResults, jobId);
+      if (started && started.status === "started") {
+        const final = await pollIngestProgress(jobId, (p) =>
+          setProgress({ percent: p.percent, label: `step ${p.done}/${p.total}` }));
+        if (final?.status === "error") {
+          flash("err", final.error || "search failed");
+        } else {
+          const r = final?.result || {};
+          setResult(r);
+          flash("ok", `Search complete: ${r.new_chunks ?? 0} new chunks from ${r.pages_fetched ?? 0} pages`);
+        }
+      } else {
+        setResult(started);
+        flash("ok", `Search complete: ${started.new_chunks} new chunks from ${started.pages_fetched} pages`);
+      }
       reload();
     } catch (e) {
       flash("err", e.message);
     }
+    setProgress(null);
     setLoading(false);
   };
 
@@ -409,6 +492,7 @@ function SearchTab({ flash, reload }) {
           {loading ? "Searching..." : "Search & Ingest"}
         </button>
       </form>
+      {progress && <ProgressBar percent={progress.percent} label={progress.label} />}
       {result && result.sources && (
         <div style={{ fontSize: 12, color: "var(--text-m)" }}>
           <strong>Sources ingested:</strong>
@@ -427,20 +511,36 @@ function NotesTab({ flash, reload }) {
   const [text, setText] = useState("");
   const [title, setTitle] = useState("");
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState(null);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!text.trim()) return;
     setLoading(true);
+    const jobId = newJobId();
+    setProgress({ percent: 0, label: "Saving note…" });
     try {
-      const r = await api.ragIngestText(text.trim(), title.trim() || "manual_note");
-      flash("ok", `Note ingested: ${r.new_chunks} new chunks`);
-      setText("");
-      setTitle("");
+      const started = await api.ragIngestText(text.trim(), title.trim() || "manual_note", {}, jobId);
+      if (started && started.status === "started") {
+        const final = await pollIngestProgress(jobId, (p) =>
+          setProgress({ percent: p.percent, label: `${p.done}/${p.total} chunks` }));
+        if (final?.status === "error") {
+          flash("err", final.error || "ingestion failed");
+        } else {
+          flash("ok", `Note ingested: ${final?.result?.new_chunks ?? 0} new chunks`);
+          setText("");
+          setTitle("");
+        }
+      } else {
+        flash("ok", `Note ingested: ${started.new_chunks} new chunks`);
+        setText("");
+        setTitle("");
+      }
       reload();
     } catch (e) {
       flash("err", e.message);
     }
+    setProgress(null);
     setLoading(false);
   };
 
@@ -469,6 +569,7 @@ function NotesTab({ flash, reload }) {
           {loading ? "Saving..." : "Add to Knowledge Base"}
         </button>
       </form>
+      {progress && <ProgressBar percent={progress.percent} label={progress.label} />}
     </div>
   );
 }

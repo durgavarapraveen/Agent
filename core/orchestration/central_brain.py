@@ -362,6 +362,20 @@ class CentralBrain(
         self._write_live_results()
 
     def _transition_to_next_phase(self):
+        # P1-9: report REAL coverage (executed vs applicable), not the
+        # theoretical applicable-cell headline, at each transition.
+        try:
+            cm = getattr(self, "coverage_matrix", None)
+            if cm is not None and hasattr(cm, "coverage_summary"):
+                cs = cm.coverage_summary()
+                logger.info(
+                    f"COVERAGE_REAL: applicable={cs['applicable']} "
+                    f"executed={cs['executed']} ({cs['pct_executed']*100:.1f}%) "
+                    f"resolved={cs['resolved']} not_tested={cs['not_tested']} "
+                    f"blocked={cs['blocked']}")
+        except Exception as _e:
+            logger.debug(f"coverage summary skipped: {_e}")
+
         # P2-2: emit hypothesis-engine summary at every transition so we
         # can see whether the LLM's next-best-action is being pursued.
         try:
@@ -383,10 +397,36 @@ class CentralBrain(
         # yet — in that case we terminate the loop, same as before).
         try:
             from core.orchestration.phase_dag import PhaseScheduler, default_dag
-            completed = {p.value for p in getattr(self, "phase_history", []) or []
-                         if hasattr(p, "value")}
+            # Authoritative completed set (P0-4). Union the explicit set with any
+            # phase_history entries that DO expose a name, for resume safety.
+            completed = set(getattr(self, "_completed_phases", set()) or set())
+            for p in getattr(self, "phase_history", []) or []:
+                nm = getattr(p, "value", None) or getattr(p, "phase_name", None)
+                if nm:
+                    completed.add(nm if isinstance(nm, str) else getattr(nm, "value", str(nm)))
             if getattr(self, "current_phase", None):
                 completed.add(self.current_phase.value)
+            # P0.6: controlled re-entry — a completed phase may be re-run ONLY
+            # when a genuine dependency event (new host/endpoint/finding/auth
+            # context) appeared since the last transition, and only within a
+            # per-phase budget. Absent events this is a no-op (forward-only).
+            try:
+                from core.orchestration.phase_reentry import (
+                    PhaseReentryController, snapshot_ctx)
+                if not hasattr(self, "_reentry"):
+                    self._reentry = PhaseReentryController()
+                    self._phase_snapshot = {}
+                cur_snap = snapshot_ctx(self.ctx)
+                self._reentry.detect(self._phase_snapshot or cur_snap, cur_snap)
+                self._phase_snapshot = cur_snap
+                before = set(completed)
+                completed = self._reentry.consume_reentries(completed)
+                reopened = before - completed
+                if reopened:
+                    logger.info(f"PHASE_REENTRY: re-opening {sorted(reopened)} on "
+                                "dependency event(s)")
+            except Exception as _re:
+                logger.debug(f"phase re-entry check skipped: {_re}")
             allowed = set(self._allowed_phases) if self._allowed_phases else None
             sched = PhaseScheduler(default_dag(), allowed=allowed)
             nxt = sched.next_ready(self.ctx, completed)
@@ -465,6 +505,11 @@ class CentralBrain(
         self.current_phase = ExecutionPhase.RECON
         self.phase_config = PhaseConfig()
         self.phase_history = []
+        # P0-4: authoritative set of phase VALUES already run. phase_history
+        # holds PhaseState objects (no `.value`), so deriving "completed" from
+        # it silently yielded an empty set — letting the DAG re-enter RECON
+        # forever (RECON has no deps). This set makes the DAG truly forward-only.
+        self._completed_phases: set = set()
         
         from core.security.compliance_gate import ComplianceGate, ScopeValidator, ComplianceAuditLogger
         scope_val = ScopeValidator(authorized_targets=scope.get("domains") or [target] if scope else [target])
@@ -1166,32 +1211,65 @@ class CentralBrain(
                     f"= {len(applicable_pairs)} applicable + {len(not_discovered_pairs)} not_discovered")
 
     def _feed_endpoints_to_v2(self):
-        """Sync discovered endpoints from ctx/attack_surface into the v2 inventory."""
+        """Sync discovered endpoints from ctx/attack_surface into the v2 inventory.
+
+        P0.1: ``ctx.endpoints`` is a ``Dict[id, Endpoint]`` — the old code
+        iterated its KEYS (canonical-id strings) and fed each as a URL, and
+        called a non-existent ``get_endpoints()`` on the graph's plain dict
+        (which always threw and was silently swallowed), so the "unique" count
+        this logged was meaningless. Iterate the endpoint OBJECTS from the
+        authoritative deduped stores instead.
+        """
         count = 0
-        if hasattr(self.ctx, 'endpoints') and self.ctx.endpoints:
-            for ep in self.ctx.endpoints:
+
+        def _params_of(ep):
+            out = []
+            for p in getattr(ep, "parameters", []) or []:
+                pt = getattr(p, "parameter_type", None)
+                loc = pt.value if hasattr(pt, "value") else (pt or "query")
+                out.append({"name": getattr(p, "name", ""), "location": loc})
+            return out
+
+        def _feed_obj(ep):
+            self.endpoint_inventory.add_endpoint({
+                "endpoint_id": getattr(ep, "endpoint_id", "")
+                or (ep.canonical_id() if hasattr(ep, "canonical_id") else ""),
+                "url": getattr(ep, "url", "") or getattr(ep, "path", ""),
+                "method": (ep.method_set[0] if getattr(ep, "method_set", None) else "GET"),
+                "parameters": _params_of(ep),
+                "auth_required": getattr(ep, "auth_required", False),
+                "content_type": getattr(ep, "content_type", "") or "text/html",
+            })
+
+        eps = getattr(self.ctx, "endpoints", None) or {}
+        ep_iter = eps.values() if isinstance(eps, dict) else eps
+        for ep in ep_iter:
+            try:
                 if isinstance(ep, str):
                     self.endpoint_inventory.add_endpoint({"url": ep, "method": "GET"})
                 elif isinstance(ep, dict):
                     self.endpoint_inventory.add_endpoint(ep)
+                else:
+                    _feed_obj(ep)
                 count += 1
+            except Exception as e:
+                logger.debug(f"[V2Sync] ctx endpoint feed skipped: {e}")
 
-        try:
-            for ep in self.attack_surface.endpoints.get_endpoints():
-                self.endpoint_inventory.add_endpoint({
-                    "endpoint_id": ep.endpoint_id,
-                    "url": ep.path,
-                    "method": ep.method_set[0] if ep.method_set else "GET",
-                    "parameters": [{"name": p.name, "location": getattr(p, 'parameter_type', {}).value if hasattr(getattr(p, 'parameter_type', None), 'value') else "query"} for p in getattr(ep, 'parameters', [])],
-                    "auth_required": getattr(ep, 'auth_required', False),
-                    "content_type": getattr(ep, 'content_type', "text/html"),
-                })
-                count += 1
-        except Exception as e:
-            logger.debug(f"[V2Sync] Could not sync attack surface endpoints: {e}")
+        # Pull the deduped AttackSurfaceState endpoints (store #2, authoritative).
+        surface = getattr(self.ctx, "attack_surface", None)
+        surf_eps = getattr(surface, "endpoints", None)
+        if isinstance(surf_eps, dict):
+            for ep in surf_eps.values():
+                try:
+                    _feed_obj(ep)
+                    count += 1
+                except Exception as e:
+                    logger.debug(f"[V2Sync] surface endpoint feed skipped: {e}")
 
         if count > 0:
-            logger.info(f"[V2Sync] Fed {count} endpoints into EndpointInventoryV2 ({self.endpoint_inventory.list_endpoints().__len__()} unique)")
+            uniq = len(self.endpoint_inventory.list_endpoints())
+            logger.info(f"[V2Sync] Fed {count} endpoint records into EndpointInventoryV2 "
+                        f"({uniq} unique)")
             self.security_context_v2.endpoints = {
                 ep.get("endpoint_id", ep.get("url", "")): ep
                 for ep in self.endpoint_inventory.list_endpoints()
@@ -1608,6 +1686,13 @@ class CentralBrain(
                                    detail=f"Beginning {self.current_phase.value} phase on {self.ctx.target}")
                 await self.run_phase(self.current_phase.value)
 
+                # P0-4: mark this phase completed so the scheduler never re-enters
+                # it (breaks the RECON -> ACTIVE_SCANNING -> RECON loop).
+                try:
+                    self._completed_phases.add(self.current_phase.value)
+                except Exception:
+                    pass
+
                 # Record state
                 if hasattr(self, 'phase_state'):
                     self.phase_history.append(self.phase_state)
@@ -1702,6 +1787,24 @@ class CentralBrain(
         except Exception as e:
             logger.warning(f"[ScanCleanup] Failed (non-fatal): {e}")
 
+        # P2.7: tear down resources the scan itself created (users, feedback,
+        # orders …). Only scan-created resources are touched; pre-existing target
+        # data is never deleted. Gated by SCAN_MUTATION_CLEANUP (default on).
+        try:
+            import os as _os
+            if _os.getenv("SCAN_MUTATION_CLEANUP", "1").strip().lower() in ("1", "true", "yes", "on"):
+                from core.security.mutation_ledger import get_ledger
+                led = get_ledger(self.ctx)
+                if led is not None and led.entries():
+                    auth_hdr = (getattr(self.ctx, "auth_headers", {}) or {}).get("Authorization", "")
+                    mrep = await led.cleanup(auth_header=auth_hdr)
+                    logger.info(f"[MutationCleanup] {mrep}")
+                    if mrep.get("failed"):
+                        logger.warning(f"[MutationCleanup] {mrep['failed']} resource(s) "
+                                       "could not be cleaned up")
+        except Exception as e:
+            logger.warning(f"[MutationCleanup] Failed (non-fatal): {e}")
+
         return {"stopped": stopped, "phase": self.current_phase.value if self.current_phase else None}
 
     async def run_phase(self, phase: str):
@@ -1758,7 +1861,15 @@ class CentralBrain(
             # API Schema Auto-Import (OpenAPI/Swagger/GraphQL)
             try:
                 from core.discovery.api_schema_importer import APISchemaImporter
-                importer = APISchemaImporter(target=self.ctx.target)
+                # P1.3: harvest schema URLs recon already found so the importer
+                # consumes them instead of re-probing in isolation.
+                try:
+                    from core.domain.artifact_registry import harvest_from_ctx
+                    _areg = harvest_from_ctx(self.ctx)
+                    logger.info(f"[Artifacts] {_areg.summary()}")
+                except Exception:
+                    _areg = getattr(self.ctx, "artifact_registry", None)
+                importer = APISchemaImporter(target=self.ctx.target, artifacts=_areg)
                 schema_endpoints = importer.import_all()
                 if schema_endpoints:
                     domain_eps = importer.to_domain_endpoints()
@@ -1775,7 +1886,8 @@ class CentralBrain(
             # Deep JavaScript Analysis (secrets, endpoints, source maps)
             try:
                 from core.discovery.js_analyzer import JSAnalyzer
-                js_analyzer = JSAnalyzer(target=self.ctx.target)
+                js_analyzer = JSAnalyzer(target=self.ctx.target,
+                                         asset_registry=getattr(self.ctx, "asset_registry", None))
                 html = getattr(self.ctx, 'page_content', '') or ''
                 eps_list = getattr(self.ctx, 'endpoints', {}) or {}
                 ep_values = list(eps_list.values()) if isinstance(eps_list, dict) else list(eps_list)
@@ -1835,6 +1947,21 @@ class CentralBrain(
                             self.attack_surface.add_endpoint(ep)
                         for req in domain_requests:
                             self.attack_surface.add_request(req)
+                        # P1.4: populate workflow + page nodes from the real
+                        # captured sequence so the graph stops reporting
+                        # workflows=0 / pages=0. discover_workflows_from_requests
+                        # groups requests into observed sequences (register ->
+                        # login -> ... ) — no fabricated data.
+                        try:
+                            wfs = self.attack_surface.workflows.discover_workflows_from_requests(domain_requests)
+                            for _pg in (getattr(self.ctx, "crawled_pages", []) or []):
+                                _purl = _pg.get("url") if isinstance(_pg, dict) else str(_pg)
+                                if _purl:
+                                    self.attack_surface.add_page_call(_purl, "")
+                            logger.info(f"[Workflows] {len(wfs)} workflow(s), "
+                                        f"{len(self.attack_surface.pages)} page(s)")
+                        except Exception as _wf_e:
+                            logger.debug(f"[Workflows] discovery skipped: {_wf_e}")
                         self.attack_surface.build_graph()
                         logger.info(f"[AttackSurface] Graph built: {len(extracted_endpoints)} endpoints, "
                                     f"{len(domain_requests)} requests")
@@ -1984,23 +2111,37 @@ class CentralBrain(
                 logger.warning(f"[V1→V2Bridge] Post-scan sync failed (non-fatal): {e}")
 
             # ── V2 Hook: Record scan responses in feedback loop + structured learning ──
+            # P2-8: real findings live in ctx.vulnerabilities (ctx.findings was
+            # empty), and the call used kwargs that don't match
+            # record_experiment_outcome's signature (payload/success/details) →
+            # every call raised and nothing was recorded ("Recorded 0"). Map vuln
+            # fields onto the real signature and count what actually persisted.
             try:
-                scan_findings = getattr(self.ctx, 'findings', [])
+                scan_findings = getattr(self.ctx, 'vulnerabilities', []) or []
                 if isinstance(scan_findings, dict):
                     scan_findings = list(scan_findings.values())
-                for finding in scan_findings[-20:]:
-                    attack_type = finding.get("attack_type", finding.get("category", ""))
-                    test_id = finding.get("test_id", "")
-                    if attack_type and test_id:
-                        self.structured_learning.record_experiment_outcome(
-                            test_id=test_id,
-                            attack_type=attack_type,
-                            technology=finding.get("technology", ""),
-                            payload=finding.get("payload", ""),
-                            success=finding.get("state") in ("CONFIRMED", "REPORTABLE"),
-                            details=finding.get("title", ""),
-                        )
-                logger.info(f"[StructuredLearning] Recorded {min(len(scan_findings), 20)} scan outcomes")
+                recorded = 0
+                for finding in scan_findings[-50:]:
+                    if not isinstance(finding, dict):
+                        continue
+                    vtype = (finding.get("type") or "").strip()
+                    attack_type = (finding.get("attack_type") or finding.get("category")
+                                   or vtype or "generic").lower()
+                    test_id = finding.get("test_id") or vtype or "auto_detect"
+                    confirmed = bool(finding.get("confirmed")) or \
+                        str(finding.get("status", "")).upper() in ("CONFIRMED", "REPORTABLE")
+                    self.structured_learning.record_experiment_outcome(
+                        test_id=test_id,
+                        attack_type=attack_type,
+                        target=finding.get("location") or finding.get("target") or self.ctx.target,
+                        outcome="CONFIRMED" if confirmed else "REPORTED",
+                        technology=finding.get("technology", ""),
+                        payload_used=finding.get("payload") or finding.get("proof", ""),
+                        lesson=finding.get("title", ""),
+                        confidence=1.0 if confirmed else 0.5,
+                    )
+                    recorded += 1
+                logger.info(f"[StructuredLearning] Recorded {recorded} scan outcomes")
             except Exception as e:
                 logger.debug(f"[StructuredLearning] Scan recording skipped: {e}")
 
@@ -2476,17 +2617,23 @@ class CentralBrain(
             # ── V2 Hook: Structured learning from exploitation outcomes ──
             try:
                 exploit_results = self.ctx.exploit_results if hasattr(self.ctx, 'exploit_results') else []
+                _ex_rec = 0
                 for result in exploit_results[-20:]:
                     if isinstance(result, dict):
+                        _succ = bool(result.get("success", False))
                         self.structured_learning.record_experiment_outcome(
-                            test_id=result.get("test_id", result.get("exploit_type", "")),
-                            attack_type=result.get("attack_type", result.get("exploit_type", "")),
+                            test_id=result.get("test_id") or result.get("exploit_type") or result.get("vuln_type", "exploit"),
+                            attack_type=(result.get("attack_type") or result.get("exploit_type")
+                                         or result.get("vuln_type", "exploit")),
+                            target=result.get("location") or result.get("target") or self.ctx.target,
+                            outcome="CONFIRMED" if _succ else "REJECTED",
                             technology=result.get("technology", ""),
-                            payload=result.get("payload", ""),
-                            success=result.get("success", False),
-                            details=result.get("title", result.get("description", "")),
+                            payload_used=result.get("payload") or result.get("proof", ""),
+                            lesson=result.get("title", result.get("description", "")),
+                            confidence=1.0 if _succ else 0.3,
                         )
-                logger.info(f"[StructuredLearning] Recorded {min(len(exploit_results), 20)} exploit outcomes")
+                        _ex_rec += 1
+                logger.info(f"[StructuredLearning] Recorded {_ex_rec} exploit outcomes")
             except Exception as e:
                 logger.debug(f"[StructuredLearning] Exploit recording skipped: {e}")
 
@@ -2560,6 +2707,26 @@ class CentralBrain(
                                    detail=f"RetestEngine: {confirmed}/{len(self.ctx.vulnerabilities)} reproduced",
                                    tool="retest_engine",
                                    output_data=f"Confirmed: {confirmed}, Total: {len(self.ctx.vulnerabilities)}")
+
+                # P1.5: evidence-gated attack-path correlation over CONFIRMED
+                # findings only (post-retest). Strict mode links steps only when
+                # a real evidence dependency exists — never merges unrelated
+                # findings. Kept separate from the permissive narrative pass above.
+                try:
+                    from core.analysis.correlation_engine import CorrelationEngine as _CE
+                    _ce = _CE()
+                    _paths = _ce.correlate(self.ctx.vulnerabilities,
+                                           confirmed_only=True,
+                                           require_evidence_link=True)
+                    if _paths:
+                        self.ctx.update('attack_paths', _ce.get_summary())
+                        logger.info(f"ATTACK_PATHS_CONFIRMED: {len(_paths)} evidence-linked "
+                                    "chain(s) over confirmed findings")
+                        for _p in _paths[:5]:
+                            logger.info(f"  AttackPath: {_p.name} sev={_p.severity} "
+                                        f"confirmed={_p.confirmed} evidence_link={_p.evidence_link}")
+                except Exception as _pe_err:
+                    logger.debug(f"attack-path correlation skipped: {_pe_err}")
 
             # Adversarial Critic (Planner–Worker–Critic loop) — semantic second
             # opinion that challenges each surviving finding and quarantines the
@@ -3003,8 +3170,21 @@ class CentralBrain(
             capturer = RequestCapturer(max_pages=12, max_depth=2)
             result = await asyncio.to_thread(capturer.capture, target)
             if result.error and not result.requests:
-                logger.warning(f"[capture] no requests captured: {result.error}")
+                # P1.9: distinguish a BROWSER-UNAVAILABLE failure (no Chromium /
+                # playwright) from a page that genuinely made no client-side
+                # requests. The former must not be read as negative evidence.
+                err = str(result.error or "").lower()
+                browser_markers = ("playwright", "chromium", "executable doesn't exist",
+                                    "browser launch", "playwright install", "no browser")
+                if any(m in err for m in browser_markers):
+                    self.ctx.browser_status = "UNAVAILABLE"
+                    self.ctx.browser_status_reason = str(result.error)[:200]
+                    logger.warning(f"[capture] BROWSER_UNAVAILABLE: {result.error} — "
+                                   "client-side tests will be marked UNAVAILABLE, not negative")
+                else:
+                    logger.warning(f"[capture] no requests captured: {result.error}")
                 return
+            self.ctx.browser_status = "AVAILABLE"
             capturer.store(result, self.ctx)
             self.metrics.record_event(
                 "tool", "request_capture",
@@ -3635,8 +3815,12 @@ class CentralBrain(
 
                 # Phase 44: Validate tool arguments before execution
                 try:
+                    # Only enforce tool-existence when the planner actually
+                    # named a concrete tool; otherwise the capability routes to
+                    # a tool later and must not be validated as a tool name.
+                    _pref = params.get('preferred_tool')
                     self.tool_argument_validator.validate(
-                        tool_name=params.get('preferred_tool', capability),
+                        tool_name=_pref if _pref else "",
                         target=target,
                         args=params,
                         capability=capability,
@@ -4500,10 +4684,8 @@ class CentralBrain(
                 scheme = parsed.scheme or "https"
                 port = parsed.port or (443 if scheme == "https" else 80)
 
-                import uuid as _uuid
-                ep_id = str(_uuid.uuid4())
                 ep = EPObj(
-                    endpoint_id=ep_id,
+                    endpoint_id="",
                     url=url,
                     path=path,
                     method_set=[method],
@@ -4512,6 +4694,13 @@ class CentralBrain(
                     port=port,
                     source="recon_pipeline",
                 )
+                # P0.1: one canonical, content-addressed identity across every
+                # store — a random uuid made the same URL "new" here but a
+                # "duplicate" elsewhere, which drove transferred_to_v2 to 1-3.
+                try:
+                    ep.endpoint_id = ep.canonical_id()
+                except Exception:
+                    ep.endpoint_id = ep.normalized_key()
                 if surface.add_endpoint(ep, source="recon_pipeline"):
                     fed["endpoints"] += 1
 
@@ -5516,7 +5705,11 @@ class CentralBrain(
             logger.debug(f"[SemanticFuzz] import failed: {e}")
             return
         if not getattr(self.ctx, "captured_requests", None):
-            logger.info("[SemanticFuzz] no captured_requests — skipping")
+            if getattr(self.ctx, "browser_status", "") == "UNAVAILABLE":
+                logger.info("[SemanticFuzz] captured_requests UNAVAILABLE (browser missing) "
+                            "— not a negative result; skipping")
+            else:
+                logger.info("[SemanticFuzz] no captured_requests — skipping")
             return
         tracker = CoverageTracker()
         # Expose the tracker to the fuzzer via ctx so it can filter blind
@@ -5593,7 +5786,11 @@ class CentralBrain(
         except Exception:
             pass
         if not captured:
-            logger.info("[AUTHZ] no captured_requests on ctx — skipping cross-role replay")
+            if getattr(self.ctx, "browser_status", "") == "UNAVAILABLE":
+                logger.info("[AUTHZ] captured_requests UNAVAILABLE (browser missing) — "
+                            "not a negative result; skipping cross-role replay")
+            else:
+                logger.info("[AUTHZ] no captured_requests on ctx — skipping cross-role replay")
             return
         if len(identities) < 2:
             logger.info(f"[AUTHZ] only {len(identities)} identity/identities discovered — "

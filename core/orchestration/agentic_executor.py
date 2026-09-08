@@ -417,6 +417,15 @@ class AgenticExecutor:
         if context_hint:
             user_message += f"## Additional Context\n{context_hint}\n\n"
 
+        # P1.8: inject the fixed sandbox/environment profile once so the LLM
+        # never spends tool calls discovering module availability / async / the
+        # RESULT contract during exploitation.
+        try:
+            from core.execution.environment_profile import describe_for_llm as _env_desc
+            user_message += _env_desc()
+        except Exception:
+            pass
+
         user_message += (
             f"## Available Tools (in Docker)\n"
             f"These tools are confirmed available: {available_tools_str}\n"
@@ -470,6 +479,7 @@ class AgenticExecutor:
         REPROMPT_ROUNDS = 3
         for i in range(REPROMPT_ROUNDS):
             steps_before = self.result.steps_taken
+            sigs_before = len(getattr(self, "_action_sigs", set()) or set())
             reprompt_messages = list(messages)
             reprompt_messages.append({"role": "assistant", "content": response.content or ""})
             reprompt_messages.append({
@@ -496,9 +506,15 @@ class AgenticExecutor:
             if follow.content:
                 self.result.summary = (self.result.summary or "") + "\n\n" + follow.content
             new_steps = self.result.steps_taken - steps_before
-            logger.info(f"[AgenticExecutor] Re-prompt {i+1}/{REPROMPT_ROUNDS} triggered {new_steps} extra tool call(s)")
-            if new_steps == 0:
-                break   # LLM truly has nothing more; stop re-prompting
+            new_distinct = len(getattr(self, "_action_sigs", set()) or set()) - sigs_before
+            logger.info(f"[AgenticExecutor] Re-prompt {i+1}/{REPROMPT_ROUNDS}: "
+                        f"{new_steps} tool call(s), {new_distinct} NEW distinct action(s), "
+                        f"{getattr(self, '_duplicate_actions_prevented', 0)} duplicates seen")
+            # P1.7: stop when the round produced no NEW distinct actions — either
+            # the LLM called nothing, or it only re-issued prior probes (no
+            # marginal information gain). This ends the duplicate-call explosion.
+            if new_steps == 0 or new_distinct == 0:
+                break
             response = follow
 
         self.result.total_cost = self.result.total_cost or response.cost_usd
@@ -573,6 +589,25 @@ class AgenticExecutor:
         Returns the result as a string the LLM can read.
         """
         self.result.steps_taken += 1
+        # P1.7: record a distinct action signature so the re-prompt loop can
+        # detect a round that only repeats prior actions (the duplicate-tool-call
+        # explosion) and stop instead of re-planning the same space.
+        try:
+            if not hasattr(self, "_action_sigs"):
+                self._action_sigs = set()
+                self._duplicate_actions_prevented = 0
+            _sig = "|".join((
+                fn_name,
+                str(fn_args.get("method") or fn_args.get("tool_id") or fn_args.get("tool") or ""),
+                str(fn_args.get("target") or fn_args.get("url") or ""),
+                str(fn_args.get("operation") or fn_args.get("hypothesis") or "")[:80],
+            ))
+            if _sig in self._action_sigs:
+                self._duplicate_actions_prevented += 1
+            else:
+                self._action_sigs.add(_sig)
+        except Exception:
+            pass
         # Per-agent heartbeat — feeds the UI's live agent panel.
         try:
             if self._tracker:
@@ -641,7 +676,10 @@ class AgenticExecutor:
 
                 def _write_reasoning_row(sid, aid, step, thg, tp, args, prev, st, dur):
                     from core.database.pg_store import DatabaseManager
-                    import json as _json
+                    from core.utils.sanitize import clean_text, safe_json_dumps
+                    # Strip NUL/control bytes: raw \x00 breaks text columns,
+                    # 0x00 breaks the jsonb column. Binary tool output routinely
+                    # carries these, so sanitize every param before the insert.
                     with DatabaseManager.get_connection() as conn:
                         with conn.cursor() as cur:
                             cur.execute("""
@@ -649,8 +687,8 @@ class AgenticExecutor:
                                   (scan_id, agent_id, step, thought, tool_planned,
                                    tool_args, tool_result_preview, tool_status, duration_ms)
                                 VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
-                            """, (sid, aid, step, thg, tp, _json.dumps(args, default=str),
-                                  prev, st, dur))
+                            """, (sid, aid, step, clean_text(thg), clean_text(tp),
+                                  safe_json_dumps(args), clean_text(prev), st, dur))
                             conn.commit()
 
                 import asyncio as _aio
@@ -1413,19 +1451,34 @@ RULES:
         else:
             logger.info(f"[AgenticExecutor] HTTP {method} {url}")
 
-        # Auto-inject a captured JWT for this host if the LLM didn't set one itself.
-        # Once /rest/user/login (or similar) hands us a Bearer token we keep using it
-        # for every subsequent request to the same netloc so authenticated endpoints
-        # (basket, admin, IDOR targets) actually get tested.
+        # P0.2: resolve the request identity explicitly. A request that names a
+        # session uses only that session's token; an explicitly-anonymous one
+        # sends none. A request that declares NO session is anonymous by default
+        # and gets no captured token unless the operator opted into ambient reuse
+        # (ALLOW_AMBIENT_AUTH=1) — this stops a captured JWT silently
+        # authenticating later anonymous / access-control probes.
         try:
+            from core.security.session_context import (
+                resolve_request_auth, is_anonymous, log_request_identity)
             from urllib.parse import urlparse as _up
-            _netloc = _up(url).netloc.lower()
+            _sid = args.get("session_id")
             _has_auth = any(k.lower() == "authorization" for k in (headers or {}).keys())
-            _tok = self._captured_tokens.get(_netloc)
-            if _tok and not _has_auth:
-                headers = dict(headers or {})
-                headers["Authorization"] = f"Bearer {_tok}"
-                logger.info(f"[AgenticExecutor] Auto-attached captured Bearer to {method} {url}")
+            if not _has_auth:
+                _auth, _ident, _mode = resolve_request_auth(self.ctx, _sid)
+                if not _auth and _mode == "ambient":
+                    # Ambient opted in but no global token — use this executor's
+                    # own same-host capture as the ambient source.
+                    _tok = self._captured_tokens.get(_up(url).netloc.lower())
+                    if _tok:
+                        _auth = f"Bearer {_tok}"
+                if _auth:
+                    headers = dict(headers or {})
+                    headers["Authorization"] = _auth
+                log_request_identity("AgenticExecutor", method, url, _sid, _auth, _mode)
+            elif is_anonymous(args.get("session_id")):
+                # Explicit anonymous overrides any inherited header.
+                headers = {k: v for k, v in (headers or {}).items()
+                           if k.lower() != "authorization"}
         except Exception:
             pass
 
@@ -1449,9 +1502,36 @@ RULES:
                     f"\n--- Body ({len(resp.text)}b) ---\n{body_text}",
                 ]
 
+                # P1.15: learn the serving layer (edge/origin/app) for this host
+                # from the response headers so findings can be attributed to it.
+                try:
+                    from core.attack_surface.infra_layer import classify_layer
+                    from urllib.parse import urlparse as _up2
+                    _h = (_up2(url).hostname or "").lower()
+                    if _h and hasattr(self.ctx, "host_layers"):
+                        _layer = classify_layer(dict(resp.headers))
+                        if _layer and _layer != "UNKNOWN":
+                            self.ctx.host_layers[_h] = _layer
+                except Exception:
+                    pass
+
                 self._auto_detect_vulns(method, url, body, resp.status_code, resp.text)
                 self._capture_auth_from_response(url, resp, req_method=method, req_body=body)
                 self._harvest_emails_and_hashes(url, resp.text)
+                # P2.7: track any resource this scan just created so it can be
+                # cleaned up at scan end (only scan-created state, never
+                # pre-existing target data).
+                try:
+                    if method.upper() in ("POST", "PUT") and 200 <= resp.status_code < 300:
+                        from core.security.mutation_ledger import get_ledger
+                        led = get_ledger(self.ctx)
+                        if led is not None:
+                            led.record(method, url, resp.status_code,
+                                       body_text=resp.text[:3000],
+                                       headers=dict(resp.headers),
+                                       session_id=str(args.get("session_id") or "anonymous"))
+                except Exception:
+                    pass
                 # Chain: if a POST to /api/Users (or similar registration endpoint)
                 # succeeded and the response echoes "role":"admin", immediately try
                 # to log in as the new user and capture the admin JWT.
@@ -1726,6 +1806,11 @@ RULES:
     def _auto_detect_vulns(self, method: str, url: str, req_body: str, status: int, resp_text: str):
         import re as _re
         from urllib.parse import urlparse, unquote
+        from core.utils.sanitize import is_http_success, is_http_redirect
+        # Generic success detection — 2xx (200/201/202/204/206...), not just 200.
+        # POSTs that store a payload return 201; accepted state-changes return
+        # 202/204. Keying only on 200 silently dropped those confirmations.
+        _ok = is_http_success(status)
         url_decoded = unquote(url)
         url_lower = url_decoded.lower()
         body_lower = unquote(req_body or "").lower()
@@ -1765,7 +1850,7 @@ RULES:
         ]
         has_sqli_error = any(sig in resp_lower for sig in sqli_error_sigs)
 
-        if sqli_in_req and status == 200 and len(resp_text) > 50:
+        if sqli_in_req and _ok and len(resp_text) > 50:
             _record("vulnerability", f"SQL Injection — {method} {target_base[-60:]}", "critical",
                     f"HTTP {status} response to SQL payload. URL: {url[:200]}")
             logger.info(f"[AutoDetect] SQLi confirmed: {method} {url[:120]} → HTTP {status}")
@@ -1785,7 +1870,7 @@ RULES:
                         r"document\.cookie", r"alert\s*\(", r"prompt\s*\(",
                         r"confirm\s*\(", r"eval\s*\("]
         xss_in_req = any(_re.search(p, url_lower) or _re.search(p, body_lower) for p in xss_payloads)
-        if xss_in_req and status in (200, 500):
+        if xss_in_req and (_ok or status == 500):
             for p in xss_payloads:
                 if _re.search(p, resp_lower):
                     _record("vulnerability", f"Reflected XSS — {target_base[-60:]}", "high",
@@ -1804,7 +1889,7 @@ RULES:
                           r"/bin/(?:ba)?sh", r"windows nt \d+\.\d+",
                           r"total\s+\d+\s+drwx", r"directory of c:\\"]
         cmdi_in_resp = any(_re.search(p, resp_lower) for p in cmdi_resp_sigs)
-        if cmdi_in_req and cmdi_in_resp and status == 200:
+        if cmdi_in_req and cmdi_in_resp and _ok:
             _record("vulnerability", f"OS Command Injection — {target_base[-60:]}", "critical",
                     f"Command output detected in HTTP {status} response. URL: {url[:200]}")
             logger.info(f"[AutoDetect] Command injection: {method} {url[:120]}")
@@ -1818,7 +1903,7 @@ RULES:
                          "[operating systems]", "; for 16-bit app support",
                          "nobody:x:", "www-data:x:"]
         lfi_in_resp = any(sig in resp_lower for sig in lfi_resp_sigs)
-        if lfi_in_req and lfi_in_resp and status == 200:
+        if lfi_in_req and lfi_in_resp and _ok:
             _record("vulnerability", f"Local File Inclusion — {target_base[-60:]}", "critical",
                     f"System file content in HTTP {status} response. URL: {url[:200]}")
             logger.info(f"[AutoDetect] LFI confirmed: {method} {url[:120]}")
@@ -1833,7 +1918,7 @@ RULES:
         ssrf_resp_sigs = ["ami-id", "instance-id", "instance-type", "iam/security-credentials",
                           "computemetadata", "latest/meta-data", "169.254.169.254"]
         ssrf_in_resp = any(sig in resp_lower for sig in ssrf_resp_sigs)
-        if ssrf_in_req and ssrf_in_resp and status == 200:
+        if ssrf_in_req and ssrf_in_resp and _ok:
             _record("vulnerability", f"Server-Side Request Forgery — {target_base[-60:]}", "critical",
                     f"Internal/cloud metadata in response. URL: {url[:200]}")
             logger.info(f"[AutoDetect] SSRF confirmed: {method} {url[:120]}")
@@ -1842,7 +1927,7 @@ RULES:
         xxe_patterns = [r"<!entity", r"<!doctype.*\[", r"system\s+[\"']file://",
                         r"system\s+[\"']http://", r"public\s+[\"']"]
         xxe_in_req = any(_re.search(p, body_lower) for p in xxe_patterns)
-        if xxe_in_req and status == 200 and lfi_in_resp:
+        if xxe_in_req and _ok and lfi_in_resp:
             _record("vulnerability", f"XML External Entity (XXE) — {target_base[-60:]}", "critical",
                     f"XXE payload returned system file content. URL: {url[:200]}")
             logger.info(f"[AutoDetect] XXE confirmed: {method} {url[:120]}")
@@ -1863,7 +1948,7 @@ RULES:
         nosql_patterns = [r'\$gt', r'\$ne', r'\$regex', r'\$where', r'\$exists',
                           r'true,\s*\$where', r'\{\s*"\$gt"\s*:', r'\[\$ne\]']
         nosql_in_req = any(_re.search(p, url_lower) or _re.search(p, body_lower) for p in nosql_patterns)
-        if nosql_in_req and status == 200 and len(resp_text) > 50:
+        if nosql_in_req and _ok and len(resp_text) > 50:
             _record("vulnerability", f"NoSQL Injection — {target_base[-60:]}", "high",
                     f"NoSQL operator in request got HTTP {status}. URL: {url[:200]}")
             logger.info(f"[AutoDetect] NoSQL injection: {method} {url[:120]}")
@@ -1872,7 +1957,7 @@ RULES:
         ldap_patterns = [r"\)\(\|", r"\)\(&", r"\*\)\(", r"admin\)\(&",
                          r"\)\(\w+=\*", r"objectclass=\*"]
         ldap_in_req = any(_re.search(p, url_lower) or _re.search(p, body_lower) for p in ldap_patterns)
-        if ldap_in_req and status == 200 and len(resp_text) > 50:
+        if ldap_in_req and _ok and len(resp_text) > 50:
             _record("vulnerability", f"LDAP Injection — {target_base[-60:]}", "high",
                     f"LDAP filter injection got HTTP {status}. URL: {url[:200]}")
             logger.info(f"[AutoDetect] LDAP injection: {method} {url[:120]}")
@@ -1993,7 +2078,7 @@ RULES:
             "/version": ("Version endpoint exposed", "low"),
             "/info": ("Info endpoint exposed", "low"),
         }
-        if status == 200 and len(resp_text) > 20:
+        if _ok and len(resp_text) > 20:
             for sens_path, (title, sev) in sensitive_paths.items():
                 if path_lower.rstrip("/") == sens_path.rstrip("/") or path_lower.startswith(sens_path):
                     _record("information_disclosure", f"{title} — {netloc}", sev,
@@ -2002,7 +2087,7 @@ RULES:
                     break
 
         # ── 13. SECURITY HEADERS MISSING ──
-        if status == 200 and method == "GET" and resp_text and len(resp_text) > 100:
+        if _ok and method == "GET" and resp_text and len(resp_text) > 100:
             resp_headers_lower = resp_text[:2000].lower()
             if "<!doctype html" in resp_lower or "<html" in resp_lower:
                 missing_headers = []

@@ -702,7 +702,9 @@ function LogsSection({ logs, logRef, jobId }) {
           </button>
         </div>
       </div>
-      <div className="log-terminal" ref={logRef} style={{ maxHeight: 600 }} onScroll={handleScroll}>
+      {/* P3-2: overflowAnchor:none disables the browser's scroll-anchoring,
+          which was nudging the view up a few px whenever a new line appended. */}
+      <div className="log-terminal" ref={logRef} style={{ maxHeight: 600, overflowAnchor: "none" }} onScroll={handleScroll}>
         {lines.map((l, i) => {
           const raw = typeof l === "string" ? l.replace(/\x1b\[[0-9;]*m|\[0m/g, "").trimEnd() : String(l);
           return (

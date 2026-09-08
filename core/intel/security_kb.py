@@ -11,9 +11,15 @@ next to the operator's own ingested files / URLs / scan findings.
 from __future__ import annotations
 import asyncio
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Cost controls for KB context injected into the LLM prompt. Fewer, shorter
+# snippets = fewer prompt tokens per query_security_kb call.
+_KB_TOP_K = int(os.getenv("RAG_KB_TOP_K", "3"))
+_KB_SNIPPET_CHARS = int(os.getenv("RAG_KB_SNIPPET_CHARS", "800"))
 
 
 # Seed corpus — merged into the RAG store on first call. Deduped by
@@ -111,7 +117,7 @@ async def _ensure_seeded():
         logger.warning(f"[SecurityKB] seed failed: {e}")
 
 
-def query_kb(topic: str, tech_stack: str = "", top_k: int = 4) -> str:
+def query_kb(topic: str, tech_stack: str = "", top_k: int = _KB_TOP_K) -> str:
     """Synchronous LLM tool. Uses the existing SecurityRAGPipeline for
     embedding-based retrieval. Falls back to a helpful message on error."""
     query = (topic + " " + tech_stack).strip()
@@ -156,11 +162,11 @@ def query_kb(topic: str, tech_stack: str = "", top_k: int = 4) -> str:
         title = meta.get("title") or meta.get("category") or "excerpt"
         src = meta.get("source") or meta.get("source_type") or "?"
         parts.append(f"### {title}  _(source: {src}, similarity={d.get('similarity',0):.2f})_\n"
-                       f"{(d.get('content') or '')[:1600]}")
+                       f"{(d.get('content') or '')[:_KB_SNIPPET_CHARS]}")
     return "\n\n".join(parts)
 
 
-async def query_kb_async(topic: str, tech_stack: str = "", top_k: int = 4) -> str:
+async def query_kb_async(topic: str, tech_stack: str = "", top_k: int = _KB_TOP_K) -> str:
     """Async variant — called by AgenticExecutor's async loop directly."""
     query = (topic + " " + tech_stack).strip()
     if not query:
@@ -182,7 +188,7 @@ async def query_kb_async(topic: str, tech_stack: str = "", top_k: int = 4) -> st
         title = meta.get("title") or meta.get("category") or "excerpt"
         src = meta.get("source") or meta.get("source_type") or "?"
         parts.append(f"### {title}  _(source: {src}, similarity={d.get('similarity',0):.2f})_\n"
-                       f"{(d.get('content') or '')[:1600]}")
+                       f"{(d.get('content') or '')[:_KB_SNIPPET_CHARS]}")
     return "\n\n".join(parts)
 
 

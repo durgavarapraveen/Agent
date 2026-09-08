@@ -20,6 +20,11 @@ class AttackChain:
     findings: List[Dict] = field(default_factory=list)
     steps: List[str] = field(default_factory=list)
     likelihood: float = 0.0  # 0.0-1.0
+    # P1.5: provenance for the chain — whether every member was CONFIRMED and
+    # whether an evidence dependency (not just a type/host coincidence) links
+    # the steps. A chain built under strict mode has both True.
+    confirmed: bool = False
+    evidence_link: bool = False
 
 
 # Rules defining how finding types can chain together
@@ -201,6 +206,39 @@ class CorrelationEngine:
         }
         return aliases.get(t, t)
 
+    @staticmethod
+    def _is_confirmed(f: Dict) -> bool:
+        """A finding counts as CONFIRMED via any of the three signals the
+        pipeline uses (P1.5)."""
+        if f.get("confirmed") is True:
+            return True
+        for k in ("status", "reproducibility_status"):
+            if str(f.get(k) or "").upper() == "CONFIRMED":
+                return True
+        return False
+
+    @staticmethod
+    def _evidence_link(up: Dict, down: Dict) -> bool:
+        """True only when `down` has an evidence dependency on `up` — not just a
+        type/host coincidence (P1.5). Conservative, to never merge unrelated
+        findings: requires either an explicit id/parent reference, or a concrete
+        artifact string from `up`'s evidence reappearing in `down`'s evidence.
+        """
+        import re as _re
+        down_text = " ".join(str(down.get(k, "")) for k in
+                             ("proof", "details", "depends_on", "evidence",
+                              "parent_finding", "derived_from", "prerequisite"))
+        if not down_text.strip():
+            return False
+        up_id = str(up.get("id") or up.get("vuln_id") or "").strip()
+        if up_id and up_id in down_text:
+            return True
+        up_text = " ".join(str(up.get(k, "")) for k in ("proof", "details", "evidence"))
+        # Concrete artifacts: tokens/emails/paths/keys >= 8 chars, not pure digits.
+        up_tokens = {t for t in _re.findall(r"[A-Za-z0-9_\-\.@:/]{8,}", up_text)
+                     if not t.isdigit()}
+        return bool(up_tokens and any(t in down_text for t in up_tokens))
+
     def _same_scope(self, finding_a: Dict, finding_b: Dict) -> bool:
         """Check if two findings are in the same scope (same host)."""
         def _host(f):
@@ -260,13 +298,28 @@ class CorrelationEngine:
                 return name
         return rule_severity
 
-    def correlate(self, findings: List[Dict]) -> List[AttackChain]:
-        """Analyze findings and identify attack chains."""
+    def correlate(self, findings: List[Dict],
+                  confirmed_only: bool = False,
+                  require_evidence_link: bool = False) -> List[AttackChain]:
+        """Analyze findings and identify attack chains.
+
+        P1.5 strict mode (opt-in, backward compatible):
+          * ``confirmed_only`` — only CONFIRMED findings may form a chain.
+          * ``require_evidence_link`` — a multi-step chain is created only when
+            an evidence dependency links the steps (not just type + host), so
+            unrelated findings are never merged.
+        Default behaviour (both False) is unchanged.
+        """
         self.chains = []
         self._chain_counter = 0
 
         if not findings:
             return []
+
+        if confirmed_only:
+            findings = [f for f in findings if self._is_confirmed(f)]
+            if not findings:
+                return []
 
         used_finding_sets: Set[frozenset] = set()
 
@@ -295,6 +348,8 @@ class CorrelationEngine:
                                 f"2. Impact: {rule['impact']}",
                             ],
                             likelihood=self._compute_likelihood([f], rule),
+                            confirmed=self._is_confirmed(f),
+                            evidence_link=True,  # standalone: single finding is self-evident
                         )
                         self.chains.append(chain)
                         used_finding_sets.add(fset)
@@ -311,6 +366,13 @@ class CorrelationEngine:
                         if fa is fb:
                             continue
                         if not self._same_scope(fa, fb):
+                            continue
+
+                        # P1.5: require an evidence dependency (either direction)
+                        # before chaining, so unrelated same-host findings are
+                        # never merged.
+                        ev_linked = self._evidence_link(fa, fb) or self._evidence_link(fb, fa)
+                        if require_evidence_link and not ev_linked:
                             continue
 
                         fset = frozenset([id(fa), id(fb)])
@@ -332,6 +394,8 @@ class CorrelationEngine:
                                 f"3. Achieve: {rule['impact']}",
                             ],
                             likelihood=self._compute_likelihood(chain_findings, rule),
+                            confirmed=self._is_confirmed(fa) and self._is_confirmed(fb),
+                            evidence_link=ev_linked,
                         )
                         self.chains.append(chain)
                         used_finding_sets.add(fset)

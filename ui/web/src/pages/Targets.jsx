@@ -125,6 +125,8 @@ function ScanModal({ target, onClose, onStarted }) {
   const [autoApprove, setAutoApprove] = useState(true);
   const [skipOsint, setSkipOsint] = useState(false);
   const [resetDedup, setResetDedup] = useState(false);
+  const [allowShellOperators, setAllowShellOperators] = useState(false);
+  const [allowAmbientAuth, setAllowAmbientAuth] = useState(false);
   const [selectedPhases, setSelectedPhases] = useState(["RECON", "ACTIVE_SCANNING", "EXPLOITATION", "REPORTING"]);
   const [showCreds, setShowCreds] = useState(false);
   const [credList, setCredList] = useState([{ role: "admin", username: "", password: "", login_url: "" }]);
@@ -171,6 +173,8 @@ function ScanModal({ target, onClose, onStarted }) {
         auto_approve: autoApprove,
         skip_osint: skipOsint,
         reset_dedup: resetDedup,
+        allow_shell_operators: allowShellOperators,
+        allow_ambient_auth: allowAmbientAuth,
         phases: selectedPhases,
         credentials: validCreds,
       });
@@ -278,6 +282,14 @@ function ScanModal({ target, onClose, onStarted }) {
               <label className={`scan-option ${resetDedup ? "selected" : ""}`}>
                 <input type="checkbox" checked={resetDedup} onChange={(e) => setResetDedup(e.target.checked)} />
                 Reset deduplication
+              </label>
+              <label className={`scan-option ${allowShellOperators ? "selected" : ""}`} title="Allow tool arguments to contain shell metacharacters (| ; & ` $ ( )) as literal data — needed for payloads like --data=&quot;a=1&amp;b=2&quot;. Passed shell-quoted, never as raw shell. Leave off unless a tool needs it.">
+                <input type="checkbox" checked={allowShellOperators} onChange={(e) => setAllowShellOperators(e.target.checked)} />
+                Allow shell-operator args
+              </label>
+              <label className={`scan-option ${allowAmbientAuth ? "selected" : ""}`} title="Reuse a token captured mid-scan for requests that do not declare a session. Off (default) = anonymous-by-default: a captured JWT never silently authenticates anonymous or access-control tests. Turn on only for a fully-authenticated single-identity scan.">
+                <input type="checkbox" checked={allowAmbientAuth} onChange={(e) => setAllowAmbientAuth(e.target.checked)} />
+                Reuse captured token (ambient auth)
               </label>
             </div>
 

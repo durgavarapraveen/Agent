@@ -178,11 +178,29 @@ class HypothesisEngine:
                     break
         return results
 
+    @staticmethod
+    def _ep_field(ep_data, name, default):
+        """Read a field whether ep_data is a dict or an Endpoint-like object.
+
+        surface.endpoints values are normally dicts, but some code paths insert
+        Endpoint objects. The previous `.get` call raised
+        `'Endpoint' object has no attribute 'get'` and aborted hypothesis
+        generation. This accessor tolerates both shapes.
+        """
+        if isinstance(ep_data, dict):
+            return ep_data.get(name, default)
+        if hasattr(ep_data, "to_dict"):
+            try:
+                return ep_data.to_dict().get(name, default)
+            except Exception:
+                pass
+        return getattr(ep_data, name, default)
+
     def _from_endpoints(self, surface: AttackSurfaceState) -> List[Dict[str, Any]]:
         results = []
         for ep_key, ep_data in surface.endpoints.items():
-            methods = ep_data.get("methods", [])
-            path = ep_data.get("path", ep_key)
+            methods = self._ep_field(ep_data, "methods", []) or []
+            path = self._ep_field(ep_data, "path", ep_key) or ep_key
 
             if any(m in ("POST", "PUT", "PATCH", "DELETE") for m in methods):
                 results.append({

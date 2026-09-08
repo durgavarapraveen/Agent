@@ -78,6 +78,17 @@ class Embedder:
             self._client = httpx.AsyncClient(timeout=30.0)
         return self._client
 
+    def semantic_available(self) -> bool:
+        """True if a real (non-hash) embedder is usable, so ingestion will
+        actually persist. False means both the API and local sentence-
+        transformers are unavailable and every chunk would be refused."""
+        if self._use_api and not self._api_disabled:
+            return True
+        try:
+            return LocalSemanticEmbedder.available()
+        except Exception:
+            return False
+
     async def embed(self, text: str) -> EmbedResult:
         if self._use_api and not self._api_disabled:
             try:

@@ -16,8 +16,15 @@ import psycopg2
 import psycopg2.extras
 
 from core.memory.database import DatabaseManager
+from core.utils.sanitize import safe_json_dumps
 
 logger = logging.getLogger(__name__)
+
+# All jsonb writes go through safe_json_dumps so NUL/control bytes from binary
+# tool output (\x00 -> jsonb "0x00 cannot be converted to text") never reach
+# Postgres. Kept as a module alias so existing `_dumps(...)` call sites can
+# be swapped 1:1 without touching read-side json.loads usage.
+_dumps = safe_json_dumps
 
 
 def _target_slug(target: str) -> str:
@@ -946,8 +953,8 @@ class ScanRepo:
                     UPDATE scans SET report_data = %s, metadata = %s,
                     duration_seconds = %s, agents_used = %s
                     WHERE scan_id = %s
-                """, (json.dumps(report_data, default=str),
-                      json.dumps(meta, default=str),
+                """, (_dumps(report_data, default=str),
+                      _dumps(meta, default=str),
                       meta.get("duration_seconds", 0),
                       meta.get("agents_used", 0),
                       scan_id))
@@ -1131,7 +1138,7 @@ class VulnRepo:
                 v.get("remediation", ""), v.get("tool", ""),
                 v.get("cwe_id", ""), v.get("cve_id", ""),
                 v.get("confidence_score", 0.5),
-                json.dumps({k: v.get(k) for k in v
+                _dumps({k: v.get(k) for k in v
                             if k not in ("title", "type", "severity", "status",
                                           "target", "location", "details", "proof",
                                           "remediation", "tool", "cwe_id", "cve_id",
@@ -1268,7 +1275,7 @@ class LiveDataRepo:
                         data = EXCLUDED.data, updated_at = NOW()
                 """, (scan_id,
                       data.get("phase", ""), data.get("progress", 0),
-                      data.get("status", ""), json.dumps(data, default=str)))
+                      data.get("status", ""), _dumps(data, default=str)))
                 conn.commit()
 
     @staticmethod
@@ -1299,7 +1306,7 @@ class LiveDataRepo:
                     VALUES (%s, %s, NOW())
                     ON CONFLICT (scan_id) DO UPDATE SET
                         data = EXCLUDED.data, updated_at = NOW()
-                """, (scan_id, json.dumps(data, default=str)))
+                """, (scan_id, _dumps(data, default=str)))
                 conn.commit()
 
     @staticmethod
@@ -1342,7 +1349,7 @@ class ExploitResultRepo:
                         details = EXCLUDED.details
                 """, (scan_id, dk, title, etype, target,
                       result.get("status") or ("SUCCESS" if result.get("success") else "ATTEMPTED"),
-                      json.dumps(result, default=str)))
+                      _dumps(result, default=str)))
                 conn.commit()
 
     @staticmethod
@@ -1371,7 +1378,7 @@ class ExploitResultRepo:
                             status = EXCLUDED.status,
                             details = EXCLUDED.details
                     """, (scan_id, dk, title, etype, target, status,
-                          json.dumps(r, default=str)))
+                          _dumps(r, default=str)))
                 conn.commit()
 
     @staticmethod
@@ -1406,7 +1413,7 @@ class FindingV2Repo:
                     ON CONFLICT (finding_id) DO UPDATE SET
                         state = EXCLUDED.state, severity = EXCLUDED.severity, extra = EXCLUDED.extra
                 """, (finding_id, title, description, severity, endpoint,
-                      state, evidence_ids or [], json.dumps(extra or {}, default=str)))
+                      state, evidence_ids or [], _dumps(extra or {}, default=str)))
                 conn.commit()
 
     @staticmethod
@@ -1492,7 +1499,7 @@ class AuditRepo:
                 cur.execute("""
                     INSERT INTO audit_log (action, target, details, previous_hash, current_hash)
                     VALUES (%s, %s, %s, %s, %s)
-                """, (action, target, json.dumps(details or {}, default=str),
+                """, (action, target, _dumps(details or {}, default=str),
                       previous_hash, current_hash))
                 conn.commit()
 
@@ -1510,8 +1517,8 @@ class AuditRepo:
                 cur.execute("""
                     INSERT INTO execution_audit (action, params, result, hash)
                     VALUES (%s, %s, %s, %s)
-                """, (action, json.dumps(params or {}, default=str),
-                      json.dumps(result or {}, default=str), hash_val))
+                """, (action, _dumps(params or {}, default=str),
+                      _dumps(result or {}, default=str), hash_val))
                 conn.commit()
 
     @staticmethod
@@ -1578,7 +1585,7 @@ class ScheduleRepo:
                         last_report = %s,
                         last_delta = %s
                     WHERE schedule_id = %s
-                """, (last_report, json.dumps(delta or {}, default=str), schedule_id))
+                """, (last_report, _dumps(delta or {}, default=str), schedule_id))
                 conn.commit()
 
 
@@ -1595,7 +1602,7 @@ class ReconRepo:
                     VALUES (%s, %s, %s, NOW())
                     ON CONFLICT (scan_id) DO UPDATE SET
                         data = EXCLUDED.data, target = EXCLUDED.target, updated_at = NOW()
-                """, (scan_id, target, json.dumps(data, default=str)))
+                """, (scan_id, target, _dumps(data, default=str)))
                 conn.commit()
 
     @staticmethod
@@ -1667,7 +1674,7 @@ class CapturedRequestRepo:
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """, (scan_id, method, url[:2000], resource_type,
                           status, is_preflight,
-                          json.dumps(headers or {}),
+                          _dumps(headers or {}),
                           (post_data or "")[:4000], source))
                     conn.commit()
         except Exception:
@@ -1705,7 +1712,7 @@ class CapturedRequestRepo:
                               r.get("resource_type", ""),
                               status,
                               r.get("is_preflight", False),
-                              json.dumps(r.get("headers", {})),
+                              _dumps(r.get("headers", {})),
                               post_data,
                               r.get("source", "playwright")))
                         if cur.rowcount:
@@ -1821,7 +1828,7 @@ class ActivityLogRepo:
                           rec.get("target", ""), rec.get("phase", ""),
                           rec.get("input_data", ""), rec.get("output_data", ""),
                           rec.get("status", "ok"), rec.get("duration_s", 0),
-                          json.dumps(rec.get("metadata", {}), default=str)))
+                          _dumps(rec.get("metadata", {}), default=str)))
                     conn.commit()
         except Exception:
             pass
@@ -1865,7 +1872,7 @@ class ReviewRepo:
                       rec.get("severity", ""), int(rec.get("steps", 0)),
                       rec.get("evidence", ""), rec.get("tried_summary", ""),
                       rec.get("manual_guidance", ""),
-                      json.dumps(rec.get("history", []), default=str),
+                      _dumps(rec.get("history", []), default=str),
                       rec.get("scan_id", "")))
                 conn.commit()
         return rec
@@ -1932,7 +1939,7 @@ class CampaignRepo:
                 cur.execute("""
                     UPDATE campaigns SET status = 'completed', report = %s, finished_at = NOW()
                     WHERE campaign_id = %s
-                """, (json.dumps(report, default=str), campaign_id))
+                """, (_dumps(report, default=str), campaign_id))
                 conn.commit()
 
     @staticmethod
@@ -1985,7 +1992,7 @@ class AttackChainRepo:
                 c.get("description", ""),
                 float(c.get("score", 0)),
                 c.get("status", "detected"),
-                json.dumps(c.get("steps") or c.get("path") or [], default=str),
+                _dumps(c.get("steps") or c.get("path") or [], default=str),
                 c.get("impact") or c.get("final_impact", ""),
             ))
 
@@ -2051,7 +2058,7 @@ class PostExploitRepo:
                     else:
                         title = str(item)[:200]
                         item = {"value": str(item)}
-                    details_json = json.dumps(item, default=str)
+                    details_json = _dumps(item, default=str)
                     key = (title, hashlib.md5(details_json.encode("utf-8", "ignore")).hexdigest())
                     if key in seen:
                         continue
@@ -2089,7 +2096,7 @@ class ScanMetadataRepo:
                     VALUES (%s, %s, %s, NOW())
                     ON CONFLICT (scan_id, key) DO UPDATE SET
                         value = EXCLUDED.value, updated_at = NOW()
-                """, (scan_id, key, json.dumps(value, default=str)))
+                """, (scan_id, key, _dumps(value, default=str)))
                 conn.commit()
 
     @staticmethod
@@ -2140,7 +2147,7 @@ class ScanArtifactRepo:
                         RETURNING id
                     """, (scan_id, kind, name or "", mime_type,
                           psycopg2.Binary(content_bytes), len(content_bytes),
-                          json.dumps(metadata or {}, default=str)))
+                          _dumps(metadata or {}, default=str)))
                     aid = cur.fetchone()[0]
                     conn.commit()
                     return aid
@@ -2356,7 +2363,7 @@ class LiveAgentRepo:
                     """, (scan_id, agent_id, label, phase, target, status,
                           current_tool, current_step, steps_taken or 0,
                           findings_count or 0, cost_usd or 0.0,
-                          started, finished, json.dumps(metadata or {})))
+                          started, finished, _dumps(metadata or {})))
                     conn.commit()
         except Exception:
             pass

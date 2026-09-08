@@ -13,12 +13,13 @@ Upgrades wired in this file:
   5. Parent-child chunks: small children indexed, big parents returned
 """
 
+import asyncio
 import json
 import logging
 import os
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from core.memory.database import DatabaseManager
 from core.rag.embedder import DIMENSION, Embedder, EmbedResult
@@ -41,6 +42,12 @@ SEMANTIC_DUP_THRESHOLD = float(os.getenv("RAG_SEMANTIC_DUP", "0.98"))
 # Stage-1 fan-out: how many candidates pgvector returns before the reranker
 # whittles them down to the caller's top_k. 4x is a solid default.
 RERANK_FANOUT = int(os.getenv("RAG_RERANK_FANOUT", "20"))
+
+# HyDE rewrites the query into a hypothetical answer via an EXTRA LLM call
+# before embedding. It marginally improves recall but adds one LLM round-trip
+# per retrieval — a real API-cost hit when the agent queries the KB often.
+# Off by default; set RAG_USE_HYDE=1 to re-enable.
+RAG_USE_HYDE_DEFAULT = os.getenv("RAG_USE_HYDE", "0").strip().lower() in ("1", "true", "yes", "on")
 
 _pipeline: Optional["SecurityRAGPipeline"] = None
 
@@ -65,6 +72,11 @@ class SecurityRAGPipeline:
         self.reranker = get_reranker()
         self._initialized = False
         self._warned_hash = False
+        # Opt-in: persist the non-semantic hash-bag fallback when no real
+        # embedder is configured. Vector search quality is poor with these
+        # vectors, so this is off unless explicitly enabled.
+        self._allow_hash = (os.getenv("RAG_ALLOW_HASH_EMBED", "")
+                            .strip().lower() in ("1", "true", "yes", "on"))
 
     async def initialize(self):
         if self._initialized:
@@ -202,15 +214,22 @@ class SecurityRAGPipeline:
 
         emb = await self.embedder.embed(content)
 
-        if emb.is_hash:
+        if emb.is_hash and not self._allow_hash:
             if not self._warned_hash:
                 logger.warning(
                     "[RAG] Neither embedding API nor sentence-transformers is "
                     "available — refusing to persist hash-bag vectors. Install "
-                    "'sentence-transformers' or set EMBEDDING_API_URL/KEY."
+                    "'sentence-transformers', set EMBEDDING_API_URL/KEY, or set "
+                    "RAG_ALLOW_HASH_EMBED=true to store non-semantic vectors."
                 )
                 self._warned_hash = True
             return ""
+        if emb.is_hash and self._allow_hash and not self._warned_hash:
+            logger.warning(
+                "[RAG] RAG_ALLOW_HASH_EMBED enabled — persisting non-semantic "
+                "hash-bag vectors; semantic search quality will be poor."
+            )
+            self._warned_hash = True
 
         # Semantic dedup: is this content nearly identical to something we
         # already have in the same embedding space?
@@ -260,14 +279,24 @@ class SecurityRAGPipeline:
         return False
 
     async def _ingest_parent_child(self, text: str, source_type: str,
-                                     source_ref: str, base_meta: Dict[str, Any]) -> int:
-        """Split into parent/child, store every child pointing at its parent."""
+                                     source_ref: str, base_meta: Dict[str, Any],
+                                     progress_cb: Optional[Callable[[int, int], None]] = None) -> int:
+        """Split into parent/child, store every child pointing at its parent.
+
+        `progress_cb(done, total)` is invoked after each chunk so callers can
+        surface ingestion progress (e.g. a UI progress bar)."""
         pieces = chunk_parent_child(text)
+        total = len(pieces)
         stored = 0
+        if progress_cb:
+            try:
+                progress_cb(0, total)
+            except Exception:
+                pass
         # Assign a stable parent_id per unique parent within this ingest so
         # the parent-content dedup at retrieval time is O(1).
         parent_ids: Dict[int, str] = {}
-        for piece in pieces:
+        for idx, piece in enumerate(pieces):
             pi = piece["parent_idx"]
             if pi not in parent_ids:
                 parent_ids[pi] = f"par_{uuid.uuid4().hex[:12]}"
@@ -284,56 +313,106 @@ class SecurityRAGPipeline:
             )
             if doc_id:
                 stored += 1
+            if progress_cb:
+                try:
+                    progress_cb(idx + 1, total)
+                except Exception:
+                    pass
+            # Yield to the event loop so a concurrent progress poll can be
+            # served between chunks (embedding is otherwise loop-blocking).
+            await asyncio.sleep(0)
         return stored
 
     # ── Public ingestion methods ──────────────────────────────────────
 
-    async def ingest_file(self, file_path: str, metadata: Optional[Dict] = None) -> Dict[str, Any]:
+    async def ingest_file(self, file_path: str, metadata: Optional[Dict] = None,
+                          progress_cb: Optional[Callable[[int, int], None]] = None) -> Dict[str, Any]:
         path = Path(file_path)
         if not path.exists():
             return {"error": f"File not found: {file_path}", "chunks": 0}
+        if not self.embedder.semantic_available() and not self._allow_hash:
+            return {"error": self._NO_EMBEDDER_MSG, "file": path.name, "new_chunks": 0}
         text = extract_text_from_file(file_path)
         if not text.strip():
             return {"error": "No text extracted", "chunks": 0}
         meta = {**(metadata or {}), "filename": path.name}
-        stored = await self._ingest_parent_child(text, "file", str(path.name), meta)
+        stored = await self._ingest_parent_child(text, "file", str(path.name), meta,
+                                                 progress_cb=progress_cb)
         logger.info(f"[RAG] Ingested file {path.name}: {stored} new child chunks")
         return {"file": path.name, "new_chunks": stored}
 
     async def ingest_text(self, text: str, title: str = "manual",
                           metadata: Optional[Dict] = None,
                           source_type: str = "text",
-                          source_ref: str = "") -> Dict[str, Any]:
+                          source_ref: str = "",
+                          progress_cb: Optional[Callable[[int, int], None]] = None) -> Dict[str, Any]:
+        if not self.embedder.semantic_available() and not self._allow_hash:
+            return {"error": self._NO_EMBEDDER_MSG, "title": title, "new_chunks": 0}
         meta = {**(metadata or {}), "title": title}
         ref = source_ref or title
-        stored = await self._ingest_parent_child(text, source_type, ref, meta)
+        stored = await self._ingest_parent_child(text, source_type, ref, meta,
+                                                 progress_cb=progress_cb)
         return {"title": title, "new_chunks": stored}
 
-    async def ingest_url(self, url: str, metadata: Optional[Dict] = None) -> Dict[str, Any]:
+    _NO_EMBEDDER_MSG = (
+        "No embedding backend available, so nothing can be stored. Install it "
+        "with 'pip install sentence-transformers' (local, no API key), or set "
+        "EMBEDDING_API_URL/EMBEDDING_API_KEY/EMBEDDING_MODEL in .env, then "
+        "restart the API."
+    )
+
+    async def ingest_url(self, url: str, metadata: Optional[Dict] = None,
+                         progress_cb: Optional[Callable[[int, int], None]] = None) -> Dict[str, Any]:
+        from core.security.egress_firewall import rag_ingest_egress
+        if not self.embedder.semantic_available() and not self._allow_hash:
+            return {"error": self._NO_EMBEDDER_MSG, "url": url, "new_chunks": 0}
         try:
-            text = await fetch_url_text(url)
+            with rag_ingest_egress():
+                text = await fetch_url_text(url)
         except Exception as e:
             return {"error": str(e), "url": url, "chunks": 0}
         if not text.strip():
             return {"error": "No text extracted from URL", "url": url, "chunks": 0}
         meta = {**(metadata or {}), "url": url}
-        stored = await self._ingest_parent_child(text, "url", url, meta)
+        stored = await self._ingest_parent_child(text, "url", url, meta,
+                                                 progress_cb=progress_cb)
         logger.info(f"[RAG] Ingested URL {url}: {stored} new child chunks")
         return {"url": url, "new_chunks": stored}
 
-    async def search_and_ingest(self, query: str, max_results: int = 3) -> Dict[str, Any]:
-        pages = await search_and_extract(query, max_results=max_results)
+    async def search_and_ingest(self, query: str, max_results: int = 3,
+                                progress_cb: Optional[Callable[[int, int], None]] = None) -> Dict[str, Any]:
+        from core.security.egress_firewall import rag_ingest_egress
+        if not self.embedder.semantic_available() and not self._allow_hash:
+            return {"error": self._NO_EMBEDDER_MSG, "query": query, "new_chunks": 0}
+        # Progress spans one step for the web search itself plus one per page.
+        if progress_cb:
+            try:
+                progress_cb(0, max_results + 1)
+            except Exception:
+                pass
+        with rag_ingest_egress():
+            pages = await search_and_extract(query, max_results=max_results)
+        steps_total = len(pages) + 1
+        if progress_cb:
+            try:
+                progress_cb(1, steps_total)
+            except Exception:
+                pass
         total_new = 0
         sources = []
-        for page in pages:
-            if not page.get("text", "").strip():
-                continue
-            meta = {"url": page.get("url", ""), "title": page.get("title", ""),
-                    "search_query": query}
-            n = await self._ingest_parent_child(page["text"], "web_search",
-                                                  page.get("url", query), meta)
-            total_new += n
-            sources.append(page.get("url", ""))
+        for i, page in enumerate(pages):
+            if page.get("text", "").strip():
+                meta = {"url": page.get("url", ""), "title": page.get("title", ""),
+                        "search_query": query}
+                n = await self._ingest_parent_child(page["text"], "web_search",
+                                                      page.get("url", query), meta)
+                total_new += n
+                sources.append(page.get("url", ""))
+            if progress_cb:
+                try:
+                    progress_cb(i + 2, steps_total)
+                except Exception:
+                    pass
         logger.info(f"[RAG] Web search '{query}': {total_new} new chunks from {len(sources)} pages")
         return {"query": query, "pages_fetched": len(pages),
                 "new_chunks": total_new, "sources": sources}
@@ -368,7 +447,7 @@ class SecurityRAGPipeline:
     async def retrieve(self, query: str, top_k: int = 5,
                        category_filter: Optional[str] = None,
                        min_similarity: float = 0.05,
-                       use_hyde: bool = True,
+                       use_hyde: bool = RAG_USE_HYDE_DEFAULT,
                        use_rerank: bool = True) -> List[Dict[str, Any]]:
         """Retrieve relevant knowledge chunks for a query.
 

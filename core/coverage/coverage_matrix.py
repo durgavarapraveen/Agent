@@ -113,6 +113,46 @@ class CoverageMatrix:
                     blocked.append((ep_id, test_id))
         return blocked
 
+    def state_counts(self) -> Dict[str, int]:
+        """Raw per-state cell counts across the whole matrix."""
+        counts: Dict[str, int] = {}
+        for _ep, tests in self._matrix.items():
+            for _t, cell in tests.items():
+                k = cell["state"].value if hasattr(cell["state"], "value") else str(cell["state"])
+                counts[k] = counts.get(k, 0) + 1
+        return counts
+
+    def coverage_summary(self) -> Dict[str, Any]:
+        """P1-9: report coverage from EXECUTED cells, not theoretical applicability.
+
+        `applicable` excludes NOT_APPLICABLE / NOT_DISCOVERED. `executed` counts
+        cells that actually reached a terminal or run state (CONFIRMED / REJECTED
+        / INCONCLUSIVE / BLOCKED / RUNNING). `pct_executed` is executed/applicable
+        — the honest number to report, versus the raw applicable headline.
+        """
+        counts = self.state_counts()
+        total = sum(counts.values())
+        na = counts.get(CoverageState.NOT_APPLICABLE.value, 0)
+        nd = counts.get(CoverageState.NOT_DISCOVERED.value, 0)
+        applicable = total - na - nd
+        executed = sum(counts.get(s.value, 0) for s in (
+            CoverageState.CONFIRMED, CoverageState.REJECTED,
+            CoverageState.INCONCLUSIVE, CoverageState.BLOCKED,
+            CoverageState.RUNNING))
+        resolved = counts.get(CoverageState.CONFIRMED.value, 0) + \
+            counts.get(CoverageState.REJECTED.value, 0)
+        return {
+            "total_cells": total,
+            "applicable": applicable,
+            "executed": executed,
+            "resolved": resolved,
+            "not_tested": counts.get(CoverageState.NOT_TESTED.value, 0),
+            "blocked": counts.get(CoverageState.BLOCKED.value, 0),
+            "pct_executed": round(executed / applicable, 4) if applicable else 0.0,
+            "pct_resolved": round(resolved / applicable, 4) if applicable else 0.0,
+            "by_state": counts,
+        }
+
     def get_matrix(self) -> Dict[str, Dict[str, CoverageState]]:
         result: Dict[str, Dict[str, CoverageState]] = {}
         for ep_id, tests in self._matrix.items():

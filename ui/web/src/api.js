@@ -367,9 +367,13 @@ export const api = {
   // RAG Knowledge Base
   ragInit: () => post("/api/rag/init", {}),
   ragStats: () => request("/api/rag/stats"),
-  ragIngestText: (text, title, metadata) => post("/api/rag/ingest/text", { text, title, metadata: metadata || {} }),
-  ragIngestUrl: (url, metadata) => post("/api/rag/ingest/url", { url, metadata: metadata || {} }),
-  ragSearch: (query, max_results) => post("/api/rag/ingest/search", { query, max_results: max_results || 3 }),
+  ragIngestText: (text, title, metadata, jobId) =>
+    post(`/api/rag/ingest/text${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ""}`, { text, title, metadata: metadata || {} }),
+  ragIngestUrl: (url, metadata, jobId) =>
+    post(`/api/rag/ingest/url${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ""}`, { url, metadata: metadata || {} }),
+  ragIngestProgress: (jobId) => request(`/api/rag/ingest/progress/${encodeURIComponent(jobId)}`),
+  ragSearch: (query, max_results, jobId) =>
+    post(`/api/rag/ingest/search${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ""}`, { query, max_results: max_results || 3 }),
   ragQuery: (query, top_k, category) => post("/api/rag/query", { query, top_k: top_k || 5, category: category || "" }),
   ragDelete: (source_type, source_ref) => del("/api/rag/documents", { source_type, source_ref: source_ref || "" }),
   ragListDocuments: (source_type, limit, offset) =>
@@ -379,11 +383,12 @@ export const api = {
       offset: offset || 0,
     })}`),
   ragDeleteDoc: (doc_id) => del(`/api/rag/documents/${doc_id}`),
-  ragUploadFile: async (file, metadata) => {
+  ragUploadFile: async (file, metadata, jobId) => {
     const form = new FormData();
     form.append("file", file);
     form.append("metadata", JSON.stringify(metadata || {}));
-    const res = await fetch(`${BASE}/api/rag/ingest/uploaded`, {
+    const qs = jobId ? `?job_id=${encodeURIComponent(jobId)}` : "";
+    const res = await fetch(`${BASE}/api/rag/ingest/uploaded${qs}`, {
       method: "POST",
       // NB: don't set Content-Type; the browser sets multipart boundary.
       headers: _authHeaders(),

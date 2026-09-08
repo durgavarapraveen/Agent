@@ -182,7 +182,11 @@ class ToolRouter:
                     elif tname == "wpscan":
                         invocation.params["command"] = f"wpscan --url {t} --enumerate vp,vt --no-banner"
                     elif tname == "dalfox":
-                        invocation.params["command"] = f"dalfox url {t} --silence --no-color --skip-bav"
+                        # --skip-bav removed: rejected by current dalfox (rc=2,
+                        # "unexpected argument '--skip-bav'"), which the pipeline
+                        # then mislabels as a WAF block. The BAV scan is optional;
+                        # dropping the flag lets the XSS scan run.
+                        invocation.params["command"] = f"dalfox url {t} --silence --no-color"
                     elif tname == "arjun":
                         invocation.params["command"] = f"arjun -u {t} --stable"
                     else:
@@ -234,16 +238,40 @@ class ToolRouter:
                 # segment before the first `|;&\`$()`" behavior silently
                 # discarded the tail, which could still be attacker-influenced
                 # by an LLM that split its exploit across shell operators.
+                _operator_passthrough = False
                 if _re.search(r'[|;&`$()]', extra_args):
-                    logger.warning(
-                        "Rejecting extra_args containing shell operators: %r",
-                        extra_args[:80],
-                    )
-                    extra_args = ""
+                    from core.utils.scan_flags import allow_shell_operators
+                    if allow_shell_operators():
+                        # Operator chars present, and operator-passthrough was
+                        # authorised at scan start. Do NOT run them as shell
+                        # control: shlex-tokenise (respecting the LLM's quoting)
+                        # then shlex.quote each token so the characters survive as
+                        # LITERAL DATA (e.g. sqlmap --data="a=1&b=2"). Safe even
+                        # though the Kali layer runs shell=True.
+                        try:
+                            import shlex as _shlex
+                            toks = _shlex.split(extra_args)
+                            extra_args = " ".join(_shlex.quote(tk) for tk in toks)
+                            _operator_passthrough = True
+                        except ValueError:
+                            logger.warning(
+                                "Unbalanced quotes in extra_args; rejecting: %r",
+                                extra_args[:80],
+                            )
+                            extra_args = ""
+                    else:
+                        logger.warning(
+                            "Rejecting extra_args containing shell operators "
+                            "(shell passthrough disabled for this scan): %r",
+                            extra_args[:80],
+                        )
+                        extra_args = ""
                 clean_args = extra_args.strip()
-                # Strip ALL quotes from extra_args — quoted values from LLM break
-                # when split on spaces; the underlying tools don't need them
-                clean_args = clean_args.replace('"', '').replace("'", '')
+                if not _operator_passthrough:
+                    # Strip ALL quotes from extra_args — quoted values from LLM
+                    # break when split on spaces; the underlying tools don't need
+                    # them. Skipped when we deliberately shlex-quoted above.
+                    clean_args = clean_args.replace('"', '').replace("'", '')
 
                 # Strip known-bad flags that LLMs generate but tools reject
                 # sslscan doesn't accept --target=; nmap --top-ports needs int validation

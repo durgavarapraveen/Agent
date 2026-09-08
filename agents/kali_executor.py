@@ -5,6 +5,7 @@ Auto-detects or provisions Kali Docker containers and auto-installs required too
 
 import logging
 import os
+import re
 import shlex
 import subprocess
 from typing import Dict, List, Optional
@@ -291,6 +292,17 @@ class KaliDockerExecutor:
         # can run for tens of minutes. Scope it and bound concurrency/rate/timeout so
         # it finishes fast with high-signal results instead of being SIGKILLed.
         if parts and parts[0] == "nuclei":
+            # Findings are parsed from STDOUT, so strip any output-redirect flag
+            # (-o/-output/-store-resp/-je/-jsonl-export) that would divert the
+            # JSONL to a file the parser never reads. Also never force -stats:
+            # the docker executor merges stderr into stdout, so -stats progress
+            # lines pollute the JSONL stream.
+            command = re.sub(
+                r'\s+-(?:o|output|store-resp|store-resp-dir|je|jsonl-export|se|sarif-export)(?:=\S+|\s+\S+)',
+                '',
+                command,
+            )
+            parts = command.split()
             add = []
             if not any(f in command for f in ("-severity", "-s ", "-tags", "-t ", "-templates")):
                 add += ["-severity", "critical,high,medium,low"]
@@ -302,11 +314,55 @@ class KaliDockerExecutor:
                 add += ["-timeout", "8"]
             if "-retries" not in command:
                 add += ["-retries", "1"]
-            if "-stats" not in command:
-                add += ["-stats"]
+            # Ensure JSONL output on stdout for the parser.
+            if "-jsonl" not in command and "-j " not in command:
+                add += ["-jsonl"]
             if add:
                 fixed = command + " " + " ".join(add)
                 logger.info(f"[Kali] scoped nuclei command -> {fixed}")
+                return fixed
+            return command
+
+        # nmap: a full-port version scan (`-p- -sV`) against a live host behind
+        # network latency runs for 30+ minutes and blows the timeout budget,
+        # getting SIGKILLed with empty output. Scope the port range and add a
+        # host-timeout so nmap self-terminates gracefully with partial results
+        # before the container SIGKILL fires.
+        if parts and parts[0] == "nmap":
+            add = []
+            # Replace an unbounded full-port sweep with the top ports.
+            if "-p-" in parts:
+                command = command.replace("-p-", "--top-ports 2000")
+                parts = command.split()
+                logger.info("[Kali] scoped nmap -p- -> --top-ports 2000")
+            if "--host-timeout" not in command:
+                add += ["--host-timeout", "600s"]
+            if "--max-retries" not in command:
+                add += ["--max-retries", "2"]
+            if add:
+                fixed = command + " " + " ".join(add)
+                logger.info(f"[Kali] scoped nmap command -> {fixed}")
+                return fixed
+
+        # dnsenum: with no flags it runs a reverse-DNS sweep over the entire
+        # WHOIS-derived netblock plus Google scraping, which hangs until the
+        # 900s kill fires and yields nothing. Bound the slow phases so it
+        # returns real DNS data in seconds.
+        if parts and parts[0] == "dnsenum":
+            add = []
+            if "--noreverse" not in command:
+                add += ["--noreverse"]          # skip the slow netblock reverse sweep
+            if "-p " not in command and "--pages" not in command:
+                add += ["-p", "0"]              # no Google page scraping
+            if "-s " not in command and "--scrap" not in command:
+                add += ["-s", "0"]              # no Google scrape results
+            if "--timeout" not in command:
+                add += ["--timeout", "10"]       # per-query timeout
+            if "--threads" not in command:
+                add += ["--threads", "10"]
+            if add:
+                fixed = command + " " + " ".join(add)
+                logger.info(f"[Kali] scoped dnsenum command -> {fixed}")
                 return fixed
         return command
 

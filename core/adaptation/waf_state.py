@@ -25,17 +25,22 @@ class WafMode(str, Enum):
 # Per-mode strategy: which tool categories are allowed, and concurrency cap.
 STRATEGY: Dict[WafMode, Dict] = {
     WafMode.NORMAL: {
-        "allowed_categories": {"recon", "fingerprint", "crawl", "active", "brute", "exploit"},
+        # passive/osint/cache are the safest tier and must be allowed in every
+        # mode (PASSIVE_ONLY is the most restrictive and still permits them).
+        "allowed_categories": {"passive", "osint", "cache", "recon", "fingerprint",
+                               "crawl", "active", "brute", "exploit"},
         "concurrency": 8,
         "delay_ms": 0,
     },
     WafMode.CAUTIOUS: {
-        "allowed_categories": {"recon", "fingerprint", "crawl", "active"},
+        "allowed_categories": {"passive", "osint", "cache", "recon", "fingerprint",
+                               "crawl", "active"},
         "concurrency": 3,
         "delay_ms": 500,
     },
     WafMode.LOW_RATE: {
-        "allowed_categories": {"recon", "fingerprint", "targeted"},
+        "allowed_categories": {"passive", "osint", "cache", "recon", "fingerprint",
+                               "targeted"},
         "concurrency": 1,
         "delay_ms": 2000,
     },

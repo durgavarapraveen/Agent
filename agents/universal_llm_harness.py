@@ -781,10 +781,20 @@ class DeepSeekProvider(LLMProvider):
                     else:
                         result = f"Tool {fn_name} not implemented"
 
+                    # P2.8: scrub the tool result (e.g. an HTTP response body)
+                    # before it re-enters the model context.
+                    _content = str(result)
+                    try:
+                        from core.utils.scan_flags import redact_llm_context
+                        if redact_llm_context():
+                            from core.security.llm_redact import redact_for_llm
+                            _content = redact_for_llm(_content)
+                    except Exception:
+                        pass
                     conv_messages.append({
                         "role": "tool",
                         "tool_call_id": tc["id"],
-                        "content": str(result),
+                        "content": _content,
                     })
 
             except Exception as e:
@@ -1113,6 +1123,16 @@ class UniversalLLMHarness:
         # RAG context injection: retrieve relevant security knowledge and prepend to system prompt
         system = await self._inject_rag_context(prompt, system)
 
+        # P2.8: minimize sensitive data before it enters model context.
+        try:
+            from core.utils.scan_flags import redact_llm_context
+            if redact_llm_context():
+                from core.security.llm_redact import redact_for_llm
+                prompt = redact_for_llm(prompt)
+                system = redact_for_llm(system)
+        except Exception:
+            pass
+
         # Economic policy: hard-stop and tier downgrade before dispatch.
         if self.governor is not None:
             model_hint = self.active_provider.get_model_for_tier(tier) if self.active_provider else ""
@@ -1206,6 +1226,14 @@ class UniversalLLMHarness:
                 return LLMResponse(content="", provider=self.primary_provider.value,
                                    error="Budget governor: hard stop reached")
             tier = self.governor.adjust_tier(tier)
+        # P2.8: redact the initial conversation before the tool loop dispatches.
+        try:
+            from core.utils.scan_flags import redact_llm_context
+            if redact_llm_context():
+                from core.security.llm_redact import redact_messages
+                messages = redact_messages(messages)
+        except Exception:
+            pass
         if isinstance(self.active_provider, DeepSeekProvider):
             resp = await self.active_provider.generate_with_tools(
                 messages, tools, max_tokens=max_tokens, tier=tier,

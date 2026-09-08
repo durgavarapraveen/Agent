@@ -41,6 +41,14 @@ class ToolHealth:
     cooldown_until: Optional[datetime] = None
     replacement_tools: List[str] = field(default_factory=list)
     state: HealthState = HealthState.UNKNOWN
+    # P0.3: a tool absent from the host PATH is NOT unavailable if the Kali/
+    # Docker backend can run it. Track the backend explicitly.
+    kali_available: Optional[bool] = None       # None = not yet determinable
+    execution_backend: str = "unknown"          # local | kali | none | unknown
+
+    @property
+    def local_available(self) -> bool:
+        return bool(self.binary_exists)
 
     def is_available(self) -> bool:
         if self.state in (HealthState.UNAVAILABLE,):
@@ -60,6 +68,9 @@ class ToolHealth:
             "cooldown_until": self.cooldown_until.isoformat() if self.cooldown_until else None,
             "replacement_tools": list(self.replacement_tools),
             "state": self.state.value,
+            "local_available": self.local_available,
+            "kali_available": self.kali_available,
+            "execution_backend": self.execution_backend,
         }
 
 
@@ -92,12 +103,40 @@ class ToolHealthManager:
         health = self._states.get(tool) or ToolHealth(tool=tool, container=container)
         health.binary_exists = bool(shutil.which(tool))
         if not health.binary_exists:
-            health.state = HealthState.UNAVAILABLE
-            health.last_failure = "binary not found in PATH"
+            # P0.3: a host-PATH miss is NOT "capability unavailable" — the
+            # Kali/Docker backend that actually runs these tools may have it.
+            # Consult the backend before declaring UNAVAILABLE; when the backend
+            # is not up yet, report UNKNOWN (still usable) rather than a false
+            # UNAVAILABLE that misleads the planner.
+            kali_ok: Optional[bool] = None
+            try:
+                from agents.kali_executor import KaliDockerExecutor
+                if KaliDockerExecutor.get_container(auto_create=False):
+                    kali_ok = bool(KaliDockerExecutor.is_tool_installed(tool))
+                elif KaliDockerExecutor.is_native_environment():
+                    kali_ok = False   # native PATH already checked above
+            except Exception:
+                kali_ok = None
+            health.kali_available = kali_ok
             health.replacement_tools = DEFAULT_REPLACEMENTS.get(tool, [])
+            if kali_ok:
+                health.execution_backend = "kali"
+                health.dependencies_ok = True
+                health.last_failure = ""
+                health.state = HealthState.READY
+            elif kali_ok is None:
+                health.execution_backend = "unknown"
+                health.last_failure = "host PATH miss; Kali backend not yet probeable"
+                health.state = HealthState.UNKNOWN
+            else:
+                health.execution_backend = "none"
+                health.last_failure = "binary not found on host PATH or in Kali backend"
+                health.state = HealthState.UNAVAILABLE
             with self._lock:
                 self._states[tool] = health
             return health
+        health.execution_backend = "local"
+        health.kali_available = None
         try:
             r = subprocess.run(
                 [tool, version_arg],

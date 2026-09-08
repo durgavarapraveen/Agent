@@ -37,11 +37,22 @@ GRAPHQL_INTROSPECTION_QUERY = '{"query":"{ __schema { types { name kind fields {
 class APISchemaImporter:
     """Discovers and imports API schemas from OpenAPI/Swagger/GraphQL endpoints."""
 
-    def __init__(self, target: str, timeout: int = 15):
+    def __init__(self, target: str, timeout: int = 15, artifacts=None):
         self.target = target.rstrip("/")
         self.timeout = timeout
         self.endpoints: List[Dict] = []
         self.schema_source: Optional[str] = None
+        # P1.3: an ArtifactRegistry of already-discovered schemas; consumed
+        # before re-probing the hardcoded path list.
+        self.artifacts = artifacts
+
+    def _registered_urls(self, *types) -> List[str]:
+        if self.artifacts is None:
+            return []
+        try:
+            return list(self.artifacts.urls_of(*types))
+        except Exception:
+            return []
 
     def _fetch(self, url: str) -> Tuple[int, str]:
         """Fetch a URL via curl in Kali container.
@@ -117,9 +128,18 @@ class APISchemaImporter:
         return status, body
 
     def discover_openapi(self) -> Optional[Dict]:
-        """Probe common OpenAPI/Swagger spec paths."""
-        for path in OPENAPI_PATHS:
-            url = f"{self.target}{path}"
+        """Consume already-discovered OpenAPI/Swagger artifacts first, then probe
+        common spec paths (P1.3)."""
+        candidates: List[str] = []
+        for u in self._registered_urls("OPENAPI", "SWAGGER"):
+            if u:
+                candidates.append(u)
+        candidates.extend(f"{self.target}{path}" for path in OPENAPI_PATHS)
+        seen = set()
+        for url in candidates:
+            if url in seen:
+                continue
+            seen.add(url)
             status, body = self._fetch(url)
             if status != 200 or not body.strip():
                 continue
