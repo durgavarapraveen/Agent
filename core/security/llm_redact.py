@@ -46,8 +46,8 @@ def redact_for_llm(text: Any) -> Any:
     try:
         from core.security.secret_vault import redact_secrets
         text = redact_secrets(text)
-    except Exception:
-        pass
+    except Exception as e:
+        raise SystemError(f"Policy enforcement failed: {e}") from e
     # Legacy pattern masking on anything the vault didn't catch
     try:
         from core.reporting.reporting import mask_sensitive_data

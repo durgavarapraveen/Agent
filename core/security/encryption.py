@@ -90,8 +90,8 @@ def get_encryption_key(env_var_name: str = "ENCRYPTION_KEY") -> bytes:
         decoded = base64.b64decode(key_str)
         if len(decoded) == 32:
             return decoded
-    except Exception:
-        pass
+    except Exception as e:
+        raise SystemError(f"Policy enforcement failed: {e}") from e
 
     raw_bytes = key_str.encode("utf-8")
     if len(raw_bytes) == 32:

@@ -128,21 +128,10 @@ class PythonHTTPTool(Tool):
         _verify_tls = _os_thr.environ.get("HTTP_TOOL_VERIFY_TLS", "").strip() == "1"
         try:
             async def _fetch():
-                async with httpx.AsyncClient(timeout=timeout, verify=_verify_tls,
-                                              follow_redirects=follow) as client:
-                    if method.upper() == "GET":
-                        r = await client.get(url, headers=headers)
-                    elif method.upper() == "POST":
-                        r = await client.post(url, headers=headers, content=data)
-                    elif method.upper() == "HEAD":
-                        r = await client.head(url, headers=headers)
-                    elif method.upper() == "PUT":
-                        r = await client.put(url, headers=headers, content=data)
-                    elif method.upper() == "DELETE":
-                        r = await client.delete(url, headers=headers)
-                    else:
-                        r = await client.request(method, url, headers=headers, content=data)
-                    return r
+                from core.network.network_broker import get_network_broker
+                r = await get_network_broker().request(method.upper(), url, follow_redirects=follow, 
+                                                       headers=headers, content=data, timeout=timeout, verify=_verify_tls)
+                return r
 
             loop = asyncio.get_event_loop()
             if loop.is_running():
@@ -161,8 +150,10 @@ class PythonHTTPTool(Tool):
                 bypass_hdrs.update(WAFEvasionManager.get_403_bypass_headers(url))
                 try:
                     async def _retry_bypass():
-                        async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=follow) as client:
-                            return await client.request(method, url, headers=bypass_hdrs, content=data)
+                        from core.network.network_broker import get_network_broker
+                        r = await get_network_broker().request(method.upper(), url, follow_redirects=follow,
+                                                               headers=bypass_hdrs, content=data, timeout=timeout, verify=False)
+                        return r
                     
                     if loop.is_running():
                         with concurrent.futures.ThreadPoolExecutor() as pool:
@@ -203,10 +194,10 @@ class PythonDNSTool(Tool):
             addrs = socket.getaddrinfo(domain, None)
             ips = sorted(set(r[4][0] for r in addrs))
             try:
-                from core.security.authorization import TargetScopeValidator
-                validator = TargetScopeValidator.get()
+                from core.security.policy_engine import get_policy_engine
+                engine = get_policy_engine()
                 for ip in ips:
-                    validator.add_target(ip)
+                    engine.authorize_target(ip)
             except Exception:
                 pass
             return ToolResult(success=True, output="\n".join(ips), data={"ips": ips})

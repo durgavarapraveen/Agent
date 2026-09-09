@@ -474,6 +474,7 @@ class NetworkBroker:
         )
 
     async def request(self, method: str, url: str,
+                      follow_redirects: bool = True,
                       **kwargs) -> Any:
         """Make a governed HTTP request with redirect revalidation.
         Returns httpx.Response."""
@@ -490,7 +491,7 @@ class NetworkBroker:
             for hop in range(self._max_redirects + 1):
                 resp = await client.request(method, current_url, **kwargs)
 
-                if resp.is_redirect and resp.has_redirect_location:
+                if follow_redirects and resp.is_redirect and resp.has_redirect_location:
                     next_url = str(resp.next_request.url)
                     redir_decision = self.validate_redirect(
                         current_url, next_url, hop,

@@ -53,8 +53,8 @@ class PIIRedactionFilter(logging.Filter):
                 record.msg = self._mask(record.msg)
                 # P0.5: Also route through SecretVault for reference-based redaction
                 try:
-                    from core.security.secret_vault import redact_secrets
-                    record.msg = redact_secrets(record.msg)
+                    from core.security.secret_vault import SecretVault
+                    record.msg = SecretVault.get().redact(record.msg)
                 except Exception:
                     pass
         except Exception:

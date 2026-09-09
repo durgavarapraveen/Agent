@@ -101,8 +101,8 @@ class ActionGate:
                 sig = f"{op}|{host}"
                 flags["duplicate"] = sig in seen
                 seen.add(sig)
-        except Exception:
-            pass
+        except Exception as e:
+            raise SystemError(f"Policy enforcement failed: {e}") from e
 
         # 5) RISK — advisory flag for high-risk active operations.
         if op in _HIGH_RISK_OPS:

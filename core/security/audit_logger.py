@@ -153,6 +153,14 @@ class AuditLogger:
         entry_id = last_id + 1
         timestamp = datetime.now().isoformat()
 
+        try:
+            from core.security.secret_vault import SecretVault
+            vault = SecretVault.get()
+            target = vault.redact(target)
+            details = vault.redact(details)
+        except Exception as e:
+            raise SystemError(f"Policy enforcement failed: {e}") from e
+
         entry_body = {
             "entry_id": entry_id,
             "timestamp": timestamp,

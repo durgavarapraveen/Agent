@@ -81,8 +81,8 @@ class TargetScopeValidator:
                 if got not in self._authorized_ips:
                     self._authorized_ips.add(got)
                     logger.info(f"[TargetScopeValidator] Authorized IP {got} (resolved from in-scope host {host_norm})")
-        except Exception:
-            pass
+        except Exception as e:
+            raise SystemError(f"Policy enforcement failed: {e}") from e
 
     def _host_in_scope(self, norm: str) -> bool:
         """True if a (non-IP) hostname matches an authorized domain or subdomain."""
@@ -205,8 +205,8 @@ class TargetScopeValidator:
                 parsed = urlparse(url)
                 if parsed.netloc:
                     targets.append(parsed.netloc)
-            except Exception:
-                pass
+            except Exception as e:
+                raise SystemError(f"Policy enforcement failed: {e}") from e
                 
         # 2. Extract standalone IPs and domains from tokens
         tokens = command.split()

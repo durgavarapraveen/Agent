@@ -74,24 +74,19 @@ class Actuators:
         self.timeout = timeout
         self.session_headers: Dict[str, str] = dict(auth_headers or {})
         self.last_responses: list = []
-        # Scope enforcement: default to the global validator when available.
-        if scope_validator is None:
-            try:
-                from core.security.authorization import TargetScopeValidator
-                scope_validator = TargetScopeValidator.get()
-            except Exception:
-                scope_validator = None
         self.scope_validator = scope_validator
 
     def _in_scope(self, url: str) -> bool:
-        if not self.scope_validator:
-            return True
         try:
+            from core.security.policy_engine import get_policy_engine
             host = urlparse(url).hostname or url
-            self.scope_validator.validate(host)
+            decision = get_policy_engine().authorize_browser_request(url)
+            if not decision.allowed:
+                logger.warning(f"[Actuators] BLOCKED out-of-scope target '{url}': {decision.reason}")
+                return False
             return True
         except Exception as e:
-            logger.warning(f"[Actuators] BLOCKED out-of-scope target '{url}': {e}")
+            logger.warning(f"[Actuators] Error validating target '{url}': {e}")
             return False
 
     # ------------------------------------------------------------------ HTTP
@@ -110,29 +105,29 @@ class Actuators:
         import os as _os_actu
         _verify_tls = _os_actu.environ.get("HTTP_ACTUATOR_VERIFY_TLS", "").strip() == "1"
         try:
-            async with httpx.AsyncClient(timeout=self.timeout, verify=_verify_tls, follow_redirects=True) as c:
-                r = await c.request(method.upper(), url, headers=merged, json=json_body,
-                                    data=data, params=params)
-                body = r.text
-                # Structured token auto-capture — the previous
-                # `'"token"' in body.lower()` substring missed `access_token`,
-                # `id_token`, `jwt`, `sessionToken`, and nested paths. Parse
-                # JSON if the response is JSON, then walk a small allowlist
-                # of key names at any depth.
-                try:
-                    j = r.json()
-                    tok = _extract_token(j) if isinstance(j, (dict, list)) else None
-                    if tok:
-                        self.session_headers["Authorization"] = f"Bearer {tok}"
-                except Exception:
-                    pass
-                for k, v in r.cookies.items():
-                    cur = self.session_headers.get("Cookie", "")
-                    self.session_headers["Cookie"] = (cur + f"; {k}={v}").strip("; ")
-                obs = {"status": r.status_code, "len": len(body), "body": body[:4000],
-                       "headers": dict(r.headers)}
-                self.last_responses.append(obs)
-                return obs
+            from core.network.network_broker import get_network_broker
+            r = await get_network_broker().request(method.upper(), url, headers=merged, json=json_body,
+                                                   data=data, params=params, timeout=self.timeout, verify=_verify_tls)
+            body = r.text
+            # Structured token auto-capture — the previous
+            # `'"token"' in body.lower()` substring missed `access_token`,
+            # `id_token`, `jwt`, `sessionToken`, and nested paths. Parse
+            # JSON if the response is JSON, then walk a small allowlist
+            # of key names at any depth.
+            try:
+                j = r.json()
+                tok = _extract_token(j) if isinstance(j, (dict, list)) else None
+                if tok:
+                    self.session_headers["Authorization"] = f"Bearer {tok}"
+            except Exception:
+                pass
+            for k, v in r.cookies.items():
+                cur = self.session_headers.get("Cookie", "")
+                self.session_headers["Cookie"] = (cur + f"; {k}={v}").strip("; ")
+            obs = {"status": r.status_code, "len": len(body), "body": body[:4000],
+                   "headers": dict(r.headers)}
+            self.last_responses.append(obs)
+            return obs
         except Exception as e:
             return {"error": str(e)}
 
@@ -200,10 +195,11 @@ class Actuators:
         import os as _os_upl
         _verify_tls_up = _os_upl.environ.get("HTTP_ACTUATOR_VERIFY_TLS", "").strip() == "1"
         try:
-            async with httpx.AsyncClient(timeout=self.timeout, verify=_verify_tls_up) as c:
-                files = {field: (filename, content.encode(), content_type)}
-                r = await c.post(url, files=files, headers=self.session_headers)
-                return {"status": r.status_code, "body": r.text[:4000]}
+            from core.network.network_broker import get_network_broker
+            files = {field: (filename, content.encode(), content_type)}
+            r = await get_network_broker().request("POST", url, files=files, headers=self.session_headers,
+                                                   timeout=self.timeout, verify=_verify_tls_up)
+            return {"status": r.status_code, "body": r.text[:4000]}
         except Exception as e:
             return {"error": str(e)}
 

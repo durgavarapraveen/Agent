@@ -44,8 +44,18 @@ class FindingStateMachine:
         self._transition(finding, FindingState.VALIDATING)
 
     def mark_confirmed(self, finding: Finding, evidence_ids: List[str],
-                       bypass_gate: bool = False) -> None:
+                       bypass_gate: bool = False, reproduction_responses: Optional[List[Dict[str, Any]]] = None) -> None:
         if not bypass_gate:
+            try:
+                from core.verification.reproduction_gate import ReproductionGate
+                rg = ReproductionGate()
+                rg.check_reproducible(finding.finding_id, finding.to_dict(), responses=reproduction_responses)
+                ok, repro_reason = rg.is_confirmation_allowed(finding.finding_id)
+                if not ok:
+                    raise ValueError(f"P0.8 reproduction gate rejected: {repro_reason}")
+            except ImportError:
+                pass
+
             try:
                 from core.verification.finding_confirmation_gate import FindingConfirmationGate
                 gate = FindingConfirmationGate()

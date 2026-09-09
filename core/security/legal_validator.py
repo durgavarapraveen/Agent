@@ -41,8 +41,8 @@ class LegalValidator:
         try:
             from core.database.pg_store import AuditRepo
             AuditRepo.log_event(event_data.get("event_type", ""), event_data.get("target", ""), event_data)
-        except Exception:
-            pass
+        except Exception as e:
+            raise SystemError(f"Policy enforcement failed: {e}") from e
 
     def parse_authorization_document(self, doc_path: str, scope_id: str = "scope_default") -> Dict[str, Any]:
         path = Path(doc_path)

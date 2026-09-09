@@ -121,25 +121,19 @@ async def author_tool(args: Dict[str, Any], ctx) -> str:
     # ── P0.4 pipeline: deterministic validation is the authority ─────────
     validation = None
     tool_def = None
-    try:
-        from core.security.tool_validator import (
-            validate_authored_code, build_tool_definition,
-        )
-        validation = validate_authored_code(code, name=name)
-        if validation.blocked:
-            logger.warning("[author_tool] BLOCKED by validator: %s", validation.blocked_reason)
-            _persist_tool(name, desc, schema, code, "rejected",
-                          {"pipeline": "p0.4_validator",
-                           "blocked_reason": validation.blocked_reason,
-                           "issues": validation.issues})
-            return (f"tool {name!r} REJECTED (validator: {validation.blocked_reason}). "
-                    f"issues={validation.issues}")
-        tool_def = build_tool_definition(name, desc, code, validation)
-    except ImportError:
-        logger.debug("[author_tool] tool_validator unavailable, using legacy banned-token check")
-        for b in BANNED:
-            if b in code:
-                return f"[ERROR] author_tool: banned token {b!r} in code"
+    from core.security.tool_validator import (
+        validate_authored_code, build_tool_definition,
+    )
+    validation = validate_authored_code(code, name=name)
+    if validation.blocked:
+        logger.warning("[author_tool] BLOCKED by validator: %s", validation.blocked_reason)
+        _persist_tool(name, desc, schema, code, "rejected",
+                      {"pipeline": "p0.4_validator",
+                       "blocked_reason": validation.blocked_reason,
+                       "issues": validation.issues})
+        return (f"tool {name!r} REJECTED (validator: {validation.blocked_reason}). "
+                f"issues={validation.issues}")
+    tool_def = build_tool_definition(name, desc, code, validation)
 
     # ── LLM critic — advisory only, never overrides validator ────────────
     review = await _critic_review(name, desc, schema, code)
@@ -226,21 +220,16 @@ async def run_authored_tool(args: Dict[str, Any], ctx, tracker=None) -> str:
 
     # P0.4: Re-validate at execution time — a tool approved before P0.4
     # might contain capabilities that are now blocked.
-    try:
-        from core.security.tool_validator import validate_authored_code
-        validation = validate_authored_code(code, name=name)
-        if validation.blocked:
-            logger.warning("[run_authored_tool] %s blocked at runtime: %s",
-                           name, validation.blocked_reason)
-            return (f"[ERROR] run_authored_tool: {name!r} blocked by runtime "
-                    f"validator: {validation.blocked_reason}")
-        if not validation.valid:
-            return (f"[ERROR] run_authored_tool: {name!r} failed runtime "
-                    f"validation: {validation.issues}")
-    except ImportError:
-        pass
-    except Exception as e:
-        logger.warning("[run_authored_tool] runtime validation error: %s", e)
+    from core.security.tool_validator import validate_authored_code
+    validation = validate_authored_code(code, name=name)
+    if validation.blocked:
+        logger.warning("[run_authored_tool] %s blocked at runtime: %s",
+                       name, validation.blocked_reason)
+        return (f"[ERROR] run_authored_tool: {name!r} blocked by runtime "
+                f"validator: {validation.blocked_reason}")
+    if not validation.valid:
+        return (f"[ERROR] run_authored_tool: {name!r} failed runtime "
+                f"validation: {validation.issues}")
 
     tool_args = args.get("args") or {}
     wrapped_code = (
