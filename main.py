@@ -126,7 +126,16 @@ async def run_single(target: str, auth_file: str = None, tier: str = "POC",
         else:
             logger.warning("No checkpoint found for this target, starting fresh")
 
-    await brain.run_main_loop(auth_document=auth_document, phases=phases)
+    try:
+        await brain.run_main_loop(auth_document=auth_document, phases=phases)
+    finally:
+        # Guarantee findings reach the DB even on Ctrl+C / cancellation, so
+        # vulnerabilities discovered after the last phase checkpoint are not lost.
+        try:
+            if hasattr(brain, "_persist_vulnerabilities"):
+                await brain._persist_vulnerabilities()
+        except Exception as e:
+            logger.error(f"Final vulnerability flush failed: {e}")
 
 
 async def run_multi(targets: list, auth_file: str = None):
@@ -333,4 +342,10 @@ Examples:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        # Clean stop on Ctrl+C — asyncio unwinds in-flight tasks with
+        # CancelledError; that's expected shutdown, not a crash.
+        logger.info("Scan interrupted by user (Ctrl+C) — shutting down.")
+        sys.exit(130)

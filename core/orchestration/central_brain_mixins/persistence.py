@@ -216,6 +216,7 @@ class PersistenceMixin:
                 return
 
             logger.info("Persisting captured HTTP requests...")
+            self.report_dir.mkdir(parents=True, exist_ok=True)
             request_file = self.report_dir / f"captured_requests_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
             with open(request_file, 'w') as f:
                 json.dump({
@@ -228,13 +229,103 @@ class PersistenceMixin:
         except Exception as e:
             logger.error(f"Failed to persist captured requests: {e}")
 
+    async def _llm_probe_finding_sweep(self):
+        """LLM safety-net: review exploit-intent probes the deterministic oracle
+        did not classify, and materialize any missed vulnerabilities before
+        persistence. Ensures ambiguous-but-real findings still reach the DB.
+        """
+        obs = getattr(self.ctx, "probe_observations", None) or []
+        if not obs:
+            return
+        llm = getattr(self, "llm", None)
+        if llm is None or not hasattr(llm, "generate_json"):
+            return
+
+        # Token savers:
+        #  1) never re-review a probe already sent to the LLM (per-scan cursor);
+        #  2) drop clearly-blocked/absent responses (401/403/404/405/429/400) —
+        #     those are non-findings, so they never need an LLM call;
+        #  3) collapse repeated attempts to the same (method, path, status).
+        seen = getattr(self.ctx, "_probe_sweep_seen", None)
+        if seen is None:
+            seen = set()
+            setattr(self.ctx, "_probe_sweep_seen", seen)
+        known = {(v.get("location") or v.get("target") or "").split("?")[0].lower()
+                 for v in self.ctx.vulnerabilities}
+        _blocked = {400, 401, 403, 404, 405, 429}
+        pending, batch_sigs = [], []
+        for o in obs:
+            url = o.get("url", "")
+            path = url.split("?")[0].lower()
+            status = int(o.get("status") or 0)
+            sig = f"{o.get('method')}|{path}|{status}"
+            if sig in seen or path in known or status in _blocked or status == 0:
+                continue
+            seen.add(sig)
+            pending.append(o)
+            if len(pending) >= 40:
+                break
+        if not pending:
+            return
+        import json as _json
+        prompt = (
+            "You are triaging HTTP exploit probes from a pentest of an authorized "
+            "target. For EACH probe decide if the response proves a real, reportable "
+            "web vulnerability (auth bypass, IDOR/BOLA, injection, XSS, SSRF, access "
+            "control, info disclosure, etc.). Ignore failed/blocked probes and pure "
+            "recon. Return STRICT JSON: {\"findings\":[{\"index\":<int>,\"title\":str,"
+            "\"type\":str,\"severity\":\"CRITICAL|HIGH|MEDIUM|LOW\",\"cwe\":str,"
+            "\"rationale\":str}]}. Only include probes that are genuinely vulnerable.\n\n"
+            "PROBES:\n" + _json.dumps(
+                [{"index": i, "method": o.get("method"), "url": o.get("url"),
+                  "status": o.get("status"), "hypothesis": o.get("hypothesis"),
+                  "body_snippet": o.get("body_snippet", "")[:300]}
+                 for i, o in enumerate(pending)], default=str)[:12000]
+        )
+        try:
+            resp = await llm.generate_json(prompt, max_tokens=1500)
+        except Exception as e:
+            logger.warning(f"[ProbeSweep] LLM review skipped: {e}")
+            return
+        findings = (resp or {}).get("findings", []) if isinstance(resp, dict) else []
+        added = 0
+        for f in findings:
+            try:
+                idx = int(f.get("index", -1))
+                if not (0 <= idx < len(pending)):
+                    continue
+                o = pending[idx]
+                self.ctx.add_vulnerability({
+                    "type": (f.get("type") or "LLM_TRIAGE").upper().replace(" ", "_"),
+                    "title": f.get("title") or f"Probe finding: {o.get('url')}",
+                    "severity": (f.get("severity") or "MEDIUM").upper(),
+                    "target": o.get("url"), "location": o.get("url"),
+                    "details": (f.get("rationale") or "") +
+                               f" [probe: {o.get('method')} {o.get('url')} -> HTTP {o.get('status')}]",
+                    "proof": f"{o.get('method')} {o.get('url')} -> HTTP {o.get('status')}",
+                    "hypothesis": o.get("hypothesis", ""),
+                    "cwe": f.get("cwe", ""), "tool": "custom_probe+llm_triage",
+                    "confirmed": False, "status": "CANDIDATE",
+                })
+                added += 1
+            except Exception:
+                continue
+        if added:
+            logger.info(f"[ProbeSweep] LLM triage recovered {added} missed finding(s) from {len(pending)} probes")
+
     async def _persist_vulnerabilities(self):
         """Save vulnerability findings to knowledge store."""
         try:
+            # LLM safety-net over unclassified probes before we persist.
+            try:
+                await self._llm_probe_finding_sweep()
+            except Exception as e:
+                logger.warning(f"[ProbeSweep] skipped: {e}")
+
             if not self.ctx.vulnerabilities:
                 logger.debug("No vulnerabilities to persist")
                 return
-            
+
             logger.info("Persisting vulnerability findings...")
             for vuln in self.ctx.vulnerabilities:
                 finding_id = self.persistent_knowledge_store.add_finding(

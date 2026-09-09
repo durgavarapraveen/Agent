@@ -19,6 +19,9 @@ Docker helper (Phase 6.4):
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import ipaddress
 import logging
 import os
 import re
@@ -31,6 +34,56 @@ logger = logging.getLogger(__name__)
 
 class EgressBlocked(Exception):
     """Raised when an outbound HTTP call would leave authorised scope."""
+
+
+# When set, outbound requests on the current async task/thread are user-initiated
+# RAG knowledge ingestion of an arbitrary PUBLIC URL — legitimately outside scan
+# scope. We still block internal/private/reserved destinations so the bypass
+# can't be turned into an SSRF primitive.
+_RAG_INGEST_BYPASS: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "egress_rag_ingest_bypass", default=False)
+
+
+@contextlib.contextmanager
+def rag_ingest_egress():
+    """Scope in which RAG ingestion may fetch arbitrary public URLs.
+
+        with rag_ingest_egress():
+            await fetch_url_text(url)
+    """
+    token = _RAG_INGEST_BYPASS.set(True)
+    try:
+        yield
+    finally:
+        _RAG_INGEST_BYPASS.reset(token)
+
+
+def _is_internal_address(host: str) -> bool:
+    """True if host is (or resolves to) a loopback/private/link-local/reserved
+    address. Used to keep the RAG bypass from reaching internal services."""
+    h = (host or "").strip().lower().strip("[]")
+    if not h:
+        return True
+    candidates: List[str] = []
+    try:
+        ipaddress.ip_address(h)
+        candidates.append(h)
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(h, None)
+            candidates = [ai[4][0] for ai in infos]
+        except Exception:
+            # Cannot resolve — treat as internal (fail closed).
+            return True
+    for ip in candidates:
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return True
+        if (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_reserved or addr.is_multicast or addr.is_unspecified):
+            return True
+    return False
 
 
 # Loopback + link-local + RFC-1918 + carrier-grade NAT — never authoritative
@@ -68,6 +121,10 @@ _INFRA_ALLOWLIST = {
     # Nuclei / template updates
     "raw.githubusercontent.com", "github.com", "api.github.com",
     "codeload.github.com", "objects.githubusercontent.com",
+    # Model hub — RAG local embedder (sentence-transformers) validates and
+    # downloads all-MiniLM-L6-v2 from HuggingFace. CDN subdomains are covered
+    # by the suffix match in _is_infra().
+    "huggingface.co", "hf.co", "cdn-lfs.huggingface.co",
     # Public DNS (dig / OSINT resolvers)
     "dns.google", "cloudflare-dns.com", "1.1.1.1", "8.8.8.8",
     # DuckDuckGo search fallback in ingestion
@@ -80,9 +137,16 @@ def _is_loopback(host: str) -> bool:
     return any(h.startswith(p) for p in _LOOPBACK_PREFIXES) or h in ("localhost",)
 
 
+# Trusted infra domain suffixes — cover rotating CDN subdomains we can't
+# enumerate (e.g. HuggingFace model/LFS CDNs).
+_INFRA_SUFFIXES = (".huggingface.co", ".hf.co", ".duckduckgo.com")
+
+
 def _is_infra(host: str) -> bool:
     h = (host or "").strip().lower().strip("[]")
     if h in _INFRA_ALLOWLIST:
+        return True
+    if any(h == s.lstrip(".") or h.endswith(s) for s in _INFRA_SUFFIXES):
         return True
     # Env-var extension
     extra = (os.getenv("EGRESS_INFRA_ALLOWLIST") or "").strip()
@@ -118,6 +182,14 @@ def assert_egress_allowed(url_or_host: str, purpose: str = "http") -> None:
     host = _extract_host(url_or_host)
     if not host:
         raise EgressBlocked(f"egress denied: no host in {url_or_host!r}")
+    # User-initiated RAG ingestion may reach arbitrary PUBLIC URLs (outside scan
+    # scope), but NEVER internal/private/reserved/loopback destinations — that
+    # keeps the bypass from becoming an SSRF primitive against local services.
+    if _RAG_INGEST_BYPASS.get():
+        if _is_internal_address(host):
+            logger.error(f"[EgressFirewall] BLOCKED rag-ingest egress to internal {host}")
+            raise EgressBlocked(f"egress denied (rag ingest): {host} is an internal address")
+        return
     if _is_loopback(host):
         return
     if _is_infra(host):

@@ -84,16 +84,48 @@ SOURCE_MAP_PATTERNS = [
 ]
 
 
+# P2-2: content-addressed bundle cache. A bundle version (by content hash) is
+# analyzed once per process; identical re-fetches (main.js/vendor.js re-crawled
+# across phases) skip the expensive regex/tool/source-map passes.
+_ANALYZED_BUNDLE_HASHES: Set[str] = set()
+
+
 class JSAnalyzer:
     """Deep JavaScript analysis for endpoint and secret extraction."""
 
-    def __init__(self, target: str, timeout: int = 30):
+    def __init__(self, target: str, timeout: int = 30, asset_registry=None):
         self.target = target.rstrip("/")
         self.timeout = timeout
+        self.asset_registry = asset_registry
         self.findings: List[JSFinding] = []
         self._seen_values: Set[str] = set()
         self.js_urls: List[str] = []
         self.source_map_urls: List[str] = []
+
+    def _origin(self) -> str:
+        """P1.2: resolve against the origin assets were actually served from
+        (learned via the AssetRegistry) rather than a possibly-unreachable
+        global target — the cause of the container curl rc=7 drop."""
+        reg = getattr(self, "asset_registry", None)
+        if reg is not None:
+            try:
+                po = reg.primary_origin()
+                if po:
+                    return po
+            except Exception:
+                pass
+        return self.target
+
+    def _resolve(self, ref: str) -> str:
+        """Resolve a root-relative asset ref against the canonical origin."""
+        reg = getattr(self, "asset_registry", None)
+        if reg is not None:
+            try:
+                return reg.resolve(ref, self._origin())
+            except Exception:
+                pass
+        from urllib.parse import urljoin as _uj
+        return _uj(self._origin().rstrip("/") + "/", ref.lstrip("/"))
 
     def _fetch(self, url: str) -> str:
         """Fetch URL content via curl. URL is shlex-quoted to prevent shell
@@ -110,9 +142,17 @@ class JSAnalyzer:
         """Find all JavaScript file URLs from HTML and known endpoints."""
         urls = set()
 
-        # Fetch main page if no HTML provided
+        # P1.2: seed from canonical registered assets (real origin URLs).
+        reg = getattr(self, "asset_registry", None)
+        if reg is not None:
+            try:
+                urls.update(reg.js_urls())
+            except Exception:
+                pass
+
+        # Fetch main page if no HTML provided (against the canonical origin).
         if not html:
-            html = self._fetch(self.target)
+            html = self._fetch(self._origin())
 
         if html:
             # Find script src attributes
@@ -124,7 +164,7 @@ class JSAnalyzer:
                     elif src.startswith("//"):
                         urls.add(f"https:{src}")
                     elif src.startswith("/"):
-                        urls.add(f"{self.target}{src}")
+                        urls.add(self._resolve(src))
 
             # Find webpack chunk references
             for match in re.finditer(r'["\']([^"\']*(?:chunk|bundle|vendor|app|main)[^"\']*\.js)["\']', html):
@@ -132,7 +172,7 @@ class JSAnalyzer:
                 if path.startswith("http"):
                     urls.add(path)
                 elif path.startswith("/"):
-                    urls.add(f"{self.target}{path}")
+                    urls.add(self._resolve(path))
 
         # Check common JS paths
         common_js_paths = [
@@ -143,7 +183,7 @@ class JSAnalyzer:
             "/static/js/bundle.js",
         ]
         for path in common_js_paths:
-            urls.add(f"{self.target}{path}")
+            urls.add(self._resolve(path))
 
         # From known endpoints that look like JS files
         for ep in (endpoints or []):
@@ -244,7 +284,7 @@ class JSAnalyzer:
                 if map_ref.startswith("http"):
                     map_url = map_ref
                 elif map_ref.startswith("/"):
-                    map_url = f"{self.target}{map_ref}"
+                    map_url = self._resolve(map_ref)
                 else:
                     base = js_url.rsplit("/", 1)[0]
                     map_url = f"{base}/{map_ref}"
@@ -349,13 +389,13 @@ class JSAnalyzer:
             if chunk_path.startswith("http"):
                 chunks.append(chunk_path)
             elif chunk_path.startswith("/"):
-                chunks.append(f"{self.target}{chunk_path}")
+                chunks.append(self._resolve(chunk_path))
         # __webpack_require__ and dynamic import patterns
         for match in re.finditer(r'(?:__webpack_require__|import)\s*\(\s*["\']([^"\']+)["\']', content):
             path = match.group(1)
             if path.endswith(".js"):
                 if path.startswith("/"):
-                    chunks.append(f"{self.target}{path}")
+                    chunks.append(self._resolve(path))
         return chunks
 
     def analyze(self, html: str = None, endpoints: List = None, max_files: int = 20) -> List[JSFinding]:
@@ -371,6 +411,16 @@ class JSAnalyzer:
                 continue
             if "<html" in content[:200].lower():
                 continue  # Skip HTML pages returned for 404s
+
+            # P2-2: skip a bundle version already analyzed this process (same
+            # content hash), regardless of URL — avoids re-parsing identical
+            # main.js/vendor.js re-discovered on later crawls.
+            import hashlib as _hl
+            _bhash = _hl.sha256(content.encode("utf-8", "ignore")).hexdigest()
+            if _bhash in _ANALYZED_BUNDLE_HASHES:
+                logger.debug(f"[JSAnalyzer] bundle cache hit — skipping {js_url}")
+                continue
+            _ANALYZED_BUNDLE_HASHES.add(_bhash)
 
             analyzed += 1
             logger.info(f"[JSAnalyzer] Analyzing {js_url} ({len(content)} bytes)")

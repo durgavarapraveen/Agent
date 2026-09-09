@@ -54,6 +54,31 @@ class Endpoint(DomainModel):
         return [m.upper() for m in v]
 
     def normalized_key(self) -> str:
-        """Dedup key: scheme + host + port + method + normalized_path"""
-        methods = ",".join(sorted(self.method_set))
-        return f"{self.scheme}://{self.host}:{self.port}/{methods}/{self.path}"
+        """Canonical dedup identity: scheme + host + port + methods + normalized path.
+
+        Host/scheme are lowercased and a trailing slash on a non-root path is
+        stripped, so ``https://H/a`` and ``https://h/a/`` collapse to one row
+        instead of inflating the duplicate tally (P0.1). This is the single
+        identity every store must dedup by.
+        """
+        methods = ",".join(sorted(m.upper() for m in self.method_set))
+        scheme = (self.scheme or "https").lower()
+        host = (self.host or "").lower()
+        port = self.port or (443 if scheme == "https" else 80)
+        path = self.path or "/"
+        if len(path) > 1 and path.endswith("/"):
+            path = path.rstrip("/")
+        if not path.startswith("/"):
+            path = "/" + path
+        return f"{scheme}://{host}:{port}/{methods}{path}"
+
+    def canonical_id(self) -> str:
+        """Stable content-addressed endpoint id derived from ``normalized_key``.
+
+        Every feed path must use this instead of a random ``uuid4`` so an
+        endpoint has ONE identity across all stores — otherwise the same URL is
+        "new" in one store and "duplicate" in another and the transfer/dedup
+        counts disagree by construction (P0.1).
+        """
+        import hashlib
+        return "ep_" + hashlib.sha256(self.normalized_key().encode("utf-8")).hexdigest()[:24]

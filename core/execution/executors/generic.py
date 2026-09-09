@@ -149,16 +149,20 @@ class GenericHTTPExecutor(ExecutorBase):
         # shared-context registry populated by CentralBrain. Without this, every
         # executor probes authenticated endpoints unauthenticated even when we
         # already hold an admin JWT.
+        # P0.2: the ambient captured token is used only when the operator opted in
+        # (ALLOW_AMBIENT_AUTH=1). An explicit input_parameters token always wins.
         if not token or not cookie:
             try:
-                from core.execution.executors.auth_registry import get_active_auth
-                active = get_active_auth() or {}
-                if not token:
-                    auth_hdr = (active.get("headers") or {}).get("Authorization", "")
-                    if auth_hdr.startswith("Bearer "):
-                        token = auth_hdr[len("Bearer "):]
-                if not cookie and active.get("cookies"):
-                    cookie = "; ".join(f"{k}={v}" for k, v in active["cookies"].items())
+                from core.utils.scan_flags import allow_ambient_auth
+                if allow_ambient_auth():
+                    from core.execution.executors.auth_registry import get_active_auth
+                    active = get_active_auth() or {}
+                    if not token:
+                        auth_hdr = (active.get("headers") or {}).get("Authorization", "")
+                        if auth_hdr.startswith("Bearer "):
+                            token = auth_hdr[len("Bearer "):]
+                    if not cookie and active.get("cookies"):
+                        cookie = "; ".join(f"{k}={v}" for k, v in active["cookies"].items())
             except Exception:
                 pass
         if token:

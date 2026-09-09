@@ -53,3 +53,6 @@ pdfkit
 PyYAML
 aiolimiter>=1.1.0
 sentence-transformers>=3.0.0
+
+# Web search for RAG "Search & Ingest" (core/rag/ingestion.py: from ddgs import DDGS)
+ddgs>=6.0

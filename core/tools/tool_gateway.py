@@ -49,6 +49,37 @@ class ToolGateway:
         8. Handle errors & fallbacks
         """
         
+        # STEP 0 (P0-9): Unified deterministic action gate — schema -> scope ->
+        # precondition -> duplicate -> risk. Rejects malformed / out-of-scope LLM
+        # plans before anything else runs; surfaces duplicate/risk flags.
+        try:
+            from core.security.action_gate import ActionGate
+            _ctx = getattr(self, "ctx", None) or getattr(auth_context, "ctx", None)
+            _tier = getattr(auth_context, "tier", None) or "POC"
+            _decision = ActionGate.evaluate(invocation, _ctx, _tier)
+            if _decision.flags:
+                logger.info(f"ACTION_GATE: allow={_decision.allowed} "
+                            f"op={invocation.operation} flags={_decision.flags}")
+            if not _decision.allowed:
+                logger.warning(f"ACTION_GATE_DENIED: stage={_decision.stage} "
+                               f"reason={_decision.reason} op={invocation.operation} "
+                               f"target={invocation.target}")
+                from core.common.schemas import ErrorInfo, ErrorType
+                return ToolResult(
+                    tool=invocation.tool_id or invocation.operation or "unknown",
+                    capability=invocation.operation or "unknown",
+                    status="failed",
+                    target=invocation.target,
+                    error=ErrorInfo(
+                        error_type=ErrorType.SCOPE_VIOLATION,
+                        message=f"Action gate denied at {_decision.stage}: {_decision.reason}",
+                        details={"stage": _decision.stage}),
+                )
+        except ImportError:
+            pass
+        except Exception as _ge:
+            logger.debug(f"[ActionGate] evaluation skipped: {_ge}")
+
         # STEP 1: Authorization & Scope
         if not await self._authorize(invocation, auth_context):
             self.audit.log_denial(invocation, auth_context)
@@ -67,7 +98,7 @@ class ToolGateway:
         if cached_result:
             logger.info(f"Cache HIT: {invocation.tool_id}")
             self.audit.log_cache_hit(cache_key, invocation)
-            return cached_result
+            return self._stamp_cached(cached_result)
 
         # STEP 2a (P2-4): capability-level result cache. Same target +
         # operation + normalized args returns the cached payload without
@@ -79,7 +110,7 @@ class ToolGateway:
                          invocation.params)
             if hit is not None:
                 logger.info(f"RESULT_CACHE_HIT: op={invocation.operation} target={invocation.target}")
-                return hit
+                return self._stamp_cached(hit)
         except Exception as _e:
             logger.debug(f"result cache lookup skipped: {_e}")
         
@@ -101,11 +132,17 @@ class ToolGateway:
                 return SchemaToolResult(
                     tool=invocation.tool_id or _op or "unknown",
                     capability=_op or "unknown",
-                    status=ToolExecutionStatus.SUCCESS,
+                    # P0.4: the truth lives in the STATUS field, not just metadata.
+                    # SKIPPED_FRESH is a non-failing no-op (see ToolResult.success)
+                    # so it neither triggers a retry nor is recorded as SUCCESS.
+                    status=ToolExecutionStatus.SKIPPED_FRESH,
+                    exit_code=0,
                     target=_tgt,
-                    stdout="",
+                    stdout=f"[SKIPPED_FRESH] {_op} on {_tgt} not re-executed — a "
+                           "fresh prior result is already in the knowledge store.",
                     data={"freshness_skip": True},
-                    metadata={"reason": "fresh knowledge already recorded"},
+                    metadata={"reason": "fresh knowledge already recorded",
+                              "execution_state": "SKIPPED_FRESH"},
                 )
         except Exception as _e:
             logger.debug(f"freshness gate skipped: {_e}")
@@ -441,6 +478,30 @@ class ToolGateway:
             logger.debug(f"status reconciliation skipped: {_e}")
         return result
     
+    def _stamp_cached(self, result):
+        """P0.4: mark a returned cache hit as CACHED so it is not recorded as a
+        fresh SUCCESS. A cached success becomes CACHED (still non-failing); a
+        cached non-success keeps its status and only gains a cache_hit flag.
+        The original status is preserved in metadata for audit.
+        """
+        try:
+            from core.common.schemas import ToolExecutionStatus
+            _st = getattr(result, "status", "")
+            orig = str(_st.value if hasattr(_st, "value") else _st).upper()
+            md = dict(getattr(result, "metadata", {}) or {})
+            md["cache_hit"] = True
+            md.setdefault("original_status", orig)
+            update = {"metadata": md}
+            if orig in ("SUCCESS", "PARTIAL_SUCCESS", "PARTIAL", "COMPLETED"):
+                update["status"] = ToolExecutionStatus.CACHED
+            if hasattr(result, "copy"):
+                return result.copy(update=update)
+            if hasattr(result, "model_copy"):
+                return result.model_copy(update=update)
+        except Exception as _e:
+            logger.debug(f"cache stamp skipped: {_e}")
+        return result
+
     def _make_cache_key(self, invocation: ToolInvocation) -> str:
         """Hash: operation + tool_id + target + params = cache key"""
         import hashlib

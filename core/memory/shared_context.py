@@ -1,6 +1,7 @@
 import json
 import threading
 from typing import Dict, List, Optional, Any
+from datetime import datetime as _dt
 import logging
 from core.domain.endpoint import Endpoint
 from core.domain.identity import Identity
@@ -60,6 +61,40 @@ class SharedContextV2:
         self.persistence_plan: Dict[str, Any] = {}
         self.mitre_mappings: List[Dict] = []
         self.has_shell_access: bool = False
+        # P0-5: endpoints on hosts outside the authorised scope are kept here for
+        # context (so the operator can see what the app depends on) but never
+        # enter endpoints/hypotheses/test queues.
+        self.external_dependencies: List[Dict] = []
+        # P1.12: scanner-generated probe artifacts (SPA-detect paths, 404
+        # baseline probes, deliberately-nonexistent URLs) are kept here for
+        # audit but never enter the real attack surface / hypotheses / coverage.
+        self.synthetic_endpoints: List[Dict] = []
+        # P1.9: browser/Chromium capability. A capture failure due to a missing
+        # browser is UNAVAILABLE, NOT "no client-side requests" — downstream must
+        # not read it as negative security evidence.
+        self.browser_status: str = "UNKNOWN"          # UNKNOWN|AVAILABLE|UNAVAILABLE
+        self.browser_status_reason: str = ""
+        # P1.15: observed serving layer per host (EDGE/ORIGIN/APPLICATION),
+        # learned from response headers, so findings can be attributed correctly.
+        self.host_layers: Dict[str, str] = {}
+
+        # P1.2: canonical registry of discovered assets (JS/etc). Analyzers must
+        # resolve relative refs against a registered origin, never re-prefix the
+        # global target — otherwise an asset served from the real origin gets
+        # rebuilt to an unreachable address (curl rc=7) and silently dropped.
+        try:
+            from core.domain.asset_registry import AssetRegistry
+            self.asset_registry = AssetRegistry()
+        except Exception:
+            self.asset_registry = None
+        # P1.3: canonical registry of discovered artifacts (OpenAPI/Swagger/
+        # GraphQL/robots/sitemap/auth-metadata) so the API importer consumes
+        # what recon already found instead of re-probing in isolation.
+        try:
+            from core.domain.artifact_registry import ArtifactRegistry
+            self.artifact_registry = ArtifactRegistry()
+        except Exception:
+            self.artifact_registry = None
 
         self.target_summary = {
             "tech_stack": [],
@@ -90,10 +125,31 @@ class SharedContextV2:
     def log_brain(self, msg: str, event_type: str = "brain"):
         self.brain_log.append(f"[{event_type}] {msg}")
 
+    # P1-10/P1-11: finding classes that describe a HOST-level control, not a
+    # per-URL defect. These are deduped by (type, host) so one policy finding
+    # covers the whole host instead of one row per path (root-cause clustering).
+    _HOST_LEVEL_TYPES = {
+        "MISSING_HEADER", "MISSING_HEADERS", "MISSING_SECURITY_HEADERS",
+        "SECURITY_HEADER", "SECURITY_HEADERS",
+        "TLS_WEAKNESS", "SSL_ISSUE", "HSTS", "CSP", "CLICKJACKING",
+    }
+
+    @staticmethod
+    def _vuln_host(vuln: Dict) -> str:
+        loc = vuln.get("location") or vuln.get("target") or ""
+        try:
+            from urllib.parse import urlparse
+            return (urlparse(loc).netloc or loc).lower()
+        except Exception:
+            return str(loc).lower()
+
     def add_vulnerability(self, vuln: Dict):
         title = (vuln.get("title") or "").lower()
         vtype = (vuln.get("type") or "").upper()
         location = (vuln.get("location") or vuln.get("target") or "").lower()
+        host = self._vuln_host(vuln)
+        host_level = vtype in self._HOST_LEVEL_TYPES or (
+            "header" in title and "missing" in title)
 
         with self._state_lock:
             for existing in self.vulnerabilities:
@@ -101,6 +157,17 @@ class SharedContextV2:
                 e_type = (existing.get("type") or "").upper()
                 e_loc = (existing.get("location") or existing.get("target") or "").lower()
                 if e_title == title and e_type == vtype and e_loc == location:
+                    return
+                # P1-11 / P1.14: same host-level control on the same host → one
+                # root finding. Preserve the per-endpoint evidence by recording
+                # the affected endpoint on the existing root finding instead of
+                # silently dropping the duplicate.
+                if host_level and e_type == vtype and self._vuln_host(existing) == host:
+                    loc_new = vuln.get("location") or vuln.get("target") or ""
+                    if loc_new:
+                        aff = existing.setdefault("affected_endpoints", [])
+                        if loc_new not in aff:
+                            aff.append(loc_new)
                     return
 
             # Conflict resolution: don't add "Missing X header" if we already know the header is present
@@ -111,7 +178,64 @@ class SharedContextV2:
                     if header_name in e_title and "present" in e_title:
                         return
 
+            # P1.13: stamp an evidence-based confidence label. A finding whose
+            # only evidence is a noisy status (HTTP 500/406) is INCONCLUSIVE, not
+            # proof — this label is authoritative for the mirror guard below.
+            try:
+                from core.analysis.finding_confidence import classify, FindingConfidence
+                label = classify(vuln)
+                vuln.setdefault("confidence_label", label)
+            except Exception:
+                label = None
+
+            # P1.15: attribute the finding to the serving layer of its host
+            # (edge/origin/application) when we have observed it.
+            try:
+                if "infra_layer" not in vuln:
+                    layer = self.host_layers.get(host)
+                    if layer:
+                        vuln["infra_layer"] = layer
+            except Exception:
+                pass
+
             self.vulnerabilities.append(vuln)
+            # P0-1: a deterministically CONFIRMED vulnerability is also an
+            # exploitation result. Mirror it into exploit_results so it persists
+            # as an exploit row (and increments the EXPLOITS counter) instead of
+            # living only in logs. Dedup by proof/location so re-detections don't
+            # inflate the count. P1.13: never mirror a finding that only a noisy
+            # status backs (classified INCONCLUSIVE) — a 500 is not an exploit.
+            try:
+                confirmed = bool(vuln.get("confirmed")) or \
+                    str(vuln.get("status", "")).upper() == "CONFIRMED"
+                if confirmed and label != "INCONCLUSIVE":
+                    self._mirror_confirmed_exploit(vuln)
+            except Exception:
+                pass
+
+    def _mirror_confirmed_exploit(self, vuln: Dict):
+        """Record a confirmed finding as an exploit_results row (deduped)."""
+        proof = vuln.get("proof") or ""
+        loc = vuln.get("location") or vuln.get("target") or ""
+        dedup_key = (proof or loc).lower()
+        for ex in self.exploit_results:
+            if (ex.get("proof") or ex.get("location") or "").lower() == dedup_key:
+                return
+        self.exploit_results.append({
+            "vuln_id": vuln.get("id", ""),
+            "exploit_id": vuln.get("cwe", "") or vuln.get("type", ""),
+            "vuln_type": vuln.get("type", ""),
+            "title": vuln.get("title", ""),
+            "payload": vuln.get("payload", "") or vuln.get("proof", ""),
+            "success": True,
+            "proof": proof or f"{loc}",
+            "location": loc,
+            "severity": (vuln.get("severity") or "MEDIUM").upper(),
+            "tool": vuln.get("tool", ""),
+            "strategy": vuln.get("type", "unknown"),
+            "test_type": vuln.get("type", "unknown"),
+            "timestamp": _dt.now().isoformat(),
+        })
 
     def add_subdomains(self, subs: List[str], source: str = None):
         with self._state_lock:
@@ -123,15 +247,120 @@ class SharedContextV2:
         with self._state_lock:
             return list(self.subdomains)
 
+    @staticmethod
+    def _endpoint_url(ep) -> str:
+        if isinstance(ep, str):
+            return ep
+        if isinstance(ep, dict):
+            return ep.get("url") or ep.get("name") or ""
+        return getattr(ep, "url", "") or ""
+
+    @staticmethod
+    def canonical_endpoint_id(method: str, url: str) -> str:
+        """P0-7: one stable identity for an endpoint so the same endpoint is not
+        counted several times under trivially different spellings (scheme case,
+        host case, trailing slash, query-parameter order). Used as the dedup key
+        for the V1 endpoint map.
+        """
+        try:
+            from urllib.parse import urlsplit, parse_qsl, urlencode
+            m = (method or "GET").upper()
+            sp = urlsplit(url)
+            scheme = (sp.scheme or "https").lower()
+            host = (sp.hostname or "").lower()
+            port = f":{sp.port}" if sp.port and sp.port not in (80, 443) else ""
+            path = sp.path or "/"
+            if len(path) > 1:
+                path = path.rstrip("/")
+            q = urlencode(sorted(parse_qsl(sp.query, keep_blank_values=True)))
+            return f"{m}:{scheme}://{host}{port}{path}" + (f"?{q}" if q else "")
+        except Exception:
+            return f"{(method or 'GET').upper()}:{url}"
+
+    # P1.12: probe artifacts the scanner itself generates — must never become
+    # normal attack-surface discoveries.
+    _SYNTHETIC_MARKERS = (
+        "__spa_detect", "spa_detect", "does-not-exist", "doesnotexist",
+        "does_not_exist", "should-not-exist", "nonexistent", "non-existent",
+        "__baseline", "randomnonexistent", "__antigravity_probe",
+    )
+
+    @classmethod
+    def _is_synthetic_url(cls, url: str) -> bool:
+        u = (url or "").lower()
+        if any(m in u for m in cls._SYNTHETIC_MARKERS):
+            return True
+        # A path segment that is a long random hex/alnum token (baseline 404
+        # probes) — e.g. /this-path-…-98765 or /a1b2c3d4e5f6a7b8.
+        import re as _re
+        for seg in u.split("?")[0].split("/"):
+            if len(seg) >= 16 and _re.fullmatch(r"[a-z0-9]+", seg) and _re.search(r"\d", seg) and _re.search(r"[a-f]", seg):
+                return True
+        return False
+
+    @classmethod
+    def _endpoint_origin(cls, url: str, source: str) -> str:
+        """Classify how an endpoint was obtained (P1.12)."""
+        s = (source or "").lower()
+        if cls._is_synthetic_url(url) or any(k in s for k in ("synthetic", "spa_probe", "baseline", "404probe")):
+            return "SYNTHETIC"
+        if any(k in s for k in ("capture", "browser", "playwright", "observed", "crawl")):
+            return "OBSERVED"
+        if any(k in s for k in ("nuclei", "ffuf", "gobuster", "feroxbuster", "dirsearch", "tool", "katana", "sqlmap")):
+            return "TOOL_DERIVED"
+        if any(k in s for k in ("llm", "guess", "generated", "candidate", "inferred")):
+            return "GENERATED"
+        return "DISCOVERED"
+
+    def _endpoint_in_scope(self, ep) -> bool:
+        """P0-5: only endpoints on authorised hosts may enter the attack surface."""
+        url = self._endpoint_url(ep)
+        if not url:
+            return True  # relative/path-only endpoints belong to the target
+        try:
+            from urllib.parse import urlparse
+            host = urlparse(url).hostname
+            if not host:
+                return True  # no host → relative path on the target
+            from core.security.authorization import TargetScopeValidator
+            return TargetScopeValidator.get().is_authorized(host)
+        except Exception:
+            return True  # fail open: never drop a real endpoint on a scope error
+
     def add_endpoints(self, eps: List, source: str = None):
         with self._state_lock:
             for ep in eps:
+                if not self._endpoint_in_scope(ep):
+                    url = self._endpoint_url(ep)
+                    if not any(d.get("url") == url for d in self.external_dependencies):
+                        try:
+                            from urllib.parse import urlparse
+                            self.external_dependencies.append({
+                                "url": url,
+                                "host": urlparse(url).hostname or "",
+                                "source": source or "",
+                            })
+                        except Exception:
+                            pass
+                    continue
+                # P1.12: divert scanner-generated probe artifacts out of the real
+                # attack surface (they otherwise pollute coverage & hypotheses),
+                # and stamp the origin on everything else.
+                _url = self._endpoint_url(ep)
+                _origin = self._endpoint_origin(_url, source or "")
+                if _origin == "SYNTHETIC":
+                    if not any(d.get("url") == _url for d in self.synthetic_endpoints):
+                        self.synthetic_endpoints.append({"url": _url, "source": source or ""})
+                    continue
+                if isinstance(ep, dict):
+                    ep.setdefault("origin", _origin)
                 if isinstance(ep, str):
-                    eid = ep
+                    eid = self.canonical_endpoint_id("GET", ep) if "://" in ep else ep
                 elif isinstance(ep, dict):
-                    eid = f"{ep.get('method', 'GET')}:{ep.get('url', '')}"
+                    eid = self.canonical_endpoint_id(ep.get("method", "GET"), ep.get("url", ""))
                 else:
-                    eid = getattr(ep, 'endpoint_id', str(ep))
+                    eid = getattr(ep, "endpoint_id", None) or self.canonical_endpoint_id(
+                        getattr(ep, "method", "GET"), getattr(ep, "url", str(ep)))
                 if eid not in self.endpoints:
                     self.endpoints[eid] = ep
 
@@ -170,6 +399,31 @@ class SharedContextV2:
 
     def add_exploit_result(self, result: Dict):
         self.exploit_results.append(result)
+
+    # ── P2-6: response baseline store ──────────────────────────────────────
+    def record_baseline(self, method: str, url: str, status: int,
+                        length: int, content_type: str = "") -> None:
+        """Store the FIRST clean response per (method, canonical endpoint) so
+        later probes can compare deltas (status/length) instead of interpreting
+        a single response in isolation."""
+        try:
+            key = self.canonical_endpoint_id(method, url)
+            store = getattr(self, "response_baselines", None)
+            if store is None:
+                store = {}
+                setattr(self, "response_baselines", store)
+            if key not in store:
+                store[key] = {"status": int(status or 0), "length": int(length or 0),
+                              "content_type": content_type}
+        except Exception:
+            pass
+
+    def baseline_for(self, method: str, url: str) -> Optional[Dict]:
+        try:
+            store = getattr(self, "response_baselines", None) or {}
+            return store.get(self.canonical_endpoint_id(method, url))
+        except Exception:
+            return None
 
     def add_tool_result(self, tool_id: str = None, result: Dict = None):
         if tool_id and result:

@@ -9,6 +9,7 @@ break the running system too easily. Placeholder skeleton at
 `ui/api/routers/__init__.py` documents the mapping.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -431,6 +432,14 @@ class ScanRequest(BaseModel):
     auto_approve: bool = False
     skip_osint: bool = False
     reset_dedup: bool = False
+    # Operator opt-in (decided at scan start): allow tool arguments to carry
+    # shell metacharacters as literal data (shlex-quoted, never raw shell).
+    # Default False = safe reject. See core.utils.scan_flags.allow_shell_operators.
+    allow_shell_operators: bool = False
+    # Operator opt-in: reuse a captured/active bearer token for requests that do
+    # NOT declare a session. Default False = anonymous-by-default (P0.2), so a
+    # captured JWT cannot silently authenticate later anonymous/authz tests.
+    allow_ambient_auth: bool = False
     phases: List[str] = Field(default_factory=list, max_length=16)
     credentials: List[dict] = Field(default_factory=list, max_length=32)
 
@@ -756,7 +765,8 @@ async def _on_shutdown():
 def _run_scan_process(job_id: str, target: str, tier: str,
                       auto_approve: bool, skip_osint: bool, reset_dedup: bool,
                       resume: bool = False, phases: list = None,
-                      credentials: dict = None):
+                      credentials: dict = None, allow_shell_operators: bool = False,
+                      allow_ambient_auth: bool = False):
     """Runs main.py as a subprocess in a background thread."""
     log_file = _scan_log_path(job_id)
     cmd = [sys.executable, str(BASE / "main.py"), "--target", target, "--tier", tier]
@@ -813,6 +823,11 @@ def _run_scan_process(job_id: str, target: str, tier: str,
     # Propagate the current OpenTelemetry span context to the child via
     # a `traceparent` env var so all child spans link back to this scan.
     _child_env = os.environ.copy()
+    # Per-scan operator policy: propagate the shell-operator decision to the
+    # scan subprocess (read by core.utils.scan_flags.allow_shell_operators).
+    _child_env["ALLOW_SHELL_OPERATORS"] = "1" if allow_shell_operators else "0"
+    # Per-scan operator policy: ambient (undeclared-session) token reuse.
+    _child_env["ALLOW_AMBIENT_AUTH"] = "1" if allow_ambient_auth else "0"
     try:
         _child_env.update({k.upper(): v for k, v in _tracing.inject_headers().items()})
     except Exception:
@@ -1862,7 +1877,9 @@ def run_scan(body: ScanRequest):
         args=(job_id, body.target, body.tier,
               body.auto_approve, body.skip_osint, body.reset_dedup),
         kwargs={"phases": body.phases if body.phases else None,
-                "credentials": body.credentials if body.credentials else None},
+                "credentials": body.credentials if body.credentials else None,
+                "allow_shell_operators": body.allow_shell_operators,
+                "allow_ambient_auth": body.allow_ambient_auth},
         daemon=True,
     )
     t.start()
@@ -2954,6 +2971,57 @@ def _get_rag():
     return rag
 
 
+async def _ensure_rag():
+    """Return the RAG pipeline, initializing it on first use. Ingest/query
+    endpoints call this so they work immediately after a server start without
+    requiring a prior scan or a manual /api/rag/init."""
+    from core.rag.pipeline import get_rag, SecurityRAGPipeline
+    rag = get_rag()
+    if rag:
+        return rag
+    from core.common.config import get_config
+    config = get_config()
+    rag = SecurityRAGPipeline(api_key=config.get("DEEPSEEK_API_KEY"))
+    await rag.initialize()
+    return rag
+
+
+# ── RAG ingest progress registry ──────────────────────────────────────────
+# In-memory per-job progress so the UI can show a real percentage while a
+# large PDF/URL is being embedded. Bounded to the most recent jobs.
+_RAG_PROGRESS: "OrderedDict[str, dict]" = __import__("collections").OrderedDict()
+_RAG_PROGRESS_MAX = 200
+
+
+def _rag_progress_set(job_id: str, **fields) -> None:
+    if not job_id:
+        return
+    cur = _RAG_PROGRESS.get(job_id) or {"done": 0, "total": 0, "status": "running"}
+    cur.update(fields)
+    _RAG_PROGRESS[job_id] = cur
+    _RAG_PROGRESS.move_to_end(job_id)
+    while len(_RAG_PROGRESS) > _RAG_PROGRESS_MAX:
+        _RAG_PROGRESS.popitem(last=False)
+
+
+def _rag_progress_cb(job_id: str):
+    """Build a (done,total) callback that records progress for job_id."""
+    def _cb(done: int, total: int):
+        pct = int(done * 100 / total) if total else 0
+        _rag_progress_set(job_id, done=done, total=total, percent=pct,
+                          status="running" if done < total else "finalizing")
+    return _cb
+
+
+@app.get("/api/rag/ingest/progress/{job_id}")
+def rag_ingest_progress(job_id: str):
+    """Poll ingestion progress for a job started with ?job_id=<id>."""
+    p = _RAG_PROGRESS.get(job_id)
+    if not p:
+        return {"job_id": job_id, "status": "unknown", "percent": 0, "done": 0, "total": 0}
+    return {"job_id": job_id, **p}
+
+
 @app.post("/api/rag/init")
 async def rag_init():
     try:
@@ -2972,7 +3040,7 @@ async def rag_init():
 
 @app.get("/api/rag/stats")
 async def rag_stats():
-    return _get_rag().stats()
+    return (await _ensure_rag()).stats()
 
 
 @app.post("/api/rag/ingest/file")
@@ -3021,7 +3089,7 @@ async def rag_ingest_file(file_path: str = "", metadata: str = "{}"):
             detail=f"file_path must be within an approved RAG_INGEST_ROOTS directory. "
                    f"Approved: {[str(r) for r in roots]}")
 
-    rag = _get_rag()
+    rag = await _ensure_rag()
     try:
         meta = json.loads(metadata) if metadata else {}
     except Exception:
@@ -3043,10 +3111,15 @@ def _is_within(child: Path, parent: Path) -> bool:
 from fastapi import UploadFile, File, Form
 
 @app.post("/api/rag/ingest/uploaded")
-async def rag_ingest_uploaded(file: UploadFile = File(...), metadata: str = Form("{}")):
-    """Ingest an uploaded file (PDF, txt, md, html, csv, json)."""
+async def rag_ingest_uploaded(file: UploadFile = File(...), metadata: str = Form("{}"),
+                              job_id: str = ""):
+    """Ingest an uploaded file (PDF, txt, md, html, csv, json).
+
+    Pass ?job_id=<id> to run in the background and poll
+    /api/rag/ingest/progress/{job_id} for a live percentage; without it the
+    call blocks and returns the result directly."""
     import tempfile
-    rag = _get_rag()
+    rag = await _ensure_rag()
     suffix = Path(file.filename).suffix if file.filename else ".txt"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False, dir=str(REPORTS_DIR)) as tmp:
         content = await file.read()
@@ -3057,6 +3130,28 @@ async def rag_ingest_uploaded(file: UploadFile = File(...), metadata: str = Form
     except Exception:
         meta = {}
     meta["original_filename"] = file.filename
+
+    if job_id:
+        _rag_progress_set(job_id, status="running", done=0, total=0, percent=0,
+                          label=file.filename)
+
+        async def _job():
+            try:
+                res = await rag.ingest_file(tmp_path, metadata=meta,
+                                            progress_cb=_rag_progress_cb(job_id))
+                _rag_progress_set(job_id, result=res, error=res.get("error"),
+                                  status="error" if "error" in res else "done",
+                                  percent=100 if "error" not in res else _RAG_PROGRESS.get(job_id, {}).get("percent", 0))
+            except Exception as e:
+                _rag_progress_set(job_id, status="error", error=str(e))
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+        asyncio.create_task(_job())
+        return {"job_id": job_id, "status": "started"}
+
     result = await rag.ingest_file(tmp_path, metadata=meta)
     try:
         os.unlink(tmp_path)
@@ -3068,14 +3163,50 @@ async def rag_ingest_uploaded(file: UploadFile = File(...), metadata: str = Form
 
 
 @app.post("/api/rag/ingest/text")
-async def rag_ingest_text(body: RAGTextIngest):
-    rag = _get_rag()
-    return await rag.ingest_text(body.text, title=body.title, metadata=body.metadata)
+async def rag_ingest_text(body: RAGTextIngest, job_id: str = ""):
+    rag = await _ensure_rag()
+    if job_id:
+        _rag_progress_set(job_id, status="running", done=0, total=0, percent=0,
+                          label=body.title or "note")
+
+        async def _job():
+            try:
+                res = await rag.ingest_text(body.text, title=body.title,
+                                            metadata=body.metadata,
+                                            progress_cb=_rag_progress_cb(job_id))
+                _rag_progress_set(job_id, result=res, error=res.get("error"),
+                                  status="error" if "error" in res else "done",
+                                  percent=100 if "error" not in res else _RAG_PROGRESS.get(job_id, {}).get("percent", 0))
+            except Exception as e:
+                _rag_progress_set(job_id, status="error", error=str(e))
+        asyncio.create_task(_job())
+        return {"job_id": job_id, "status": "started"}
+
+    result = await rag.ingest_text(body.text, title=body.title, metadata=body.metadata)
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
 
 
 @app.post("/api/rag/ingest/url")
-async def rag_ingest_url(body: RAGURLIngest):
-    rag = _get_rag()
+async def rag_ingest_url(body: RAGURLIngest, job_id: str = ""):
+    rag = await _ensure_rag()
+    if job_id:
+        _rag_progress_set(job_id, status="running", done=0, total=0, percent=0,
+                          label=body.url)
+
+        async def _job():
+            try:
+                res = await rag.ingest_url(body.url, metadata=body.metadata,
+                                           progress_cb=_rag_progress_cb(job_id))
+                _rag_progress_set(job_id, result=res, error=res.get("error"),
+                                  status="error" if "error" in res else "done",
+                                  percent=100 if "error" not in res else _RAG_PROGRESS.get(job_id, {}).get("percent", 0))
+            except Exception as e:
+                _rag_progress_set(job_id, status="error", error=str(e))
+        asyncio.create_task(_job())
+        return {"job_id": job_id, "status": "started"}
+
     result = await rag.ingest_url(body.url, metadata=body.metadata)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
@@ -3083,16 +3214,35 @@ async def rag_ingest_url(body: RAGURLIngest):
 
 
 @app.post("/api/rag/ingest/search")
-async def rag_ingest_search(body: RAGSearchIngest):
+async def rag_ingest_search(body: RAGSearchIngest, job_id: str = ""):
     """Search the web and ingest results into the knowledge base."""
-    rag = _get_rag()
-    return await rag.search_and_ingest(body.query, max_results=body.max_results)
+    rag = await _ensure_rag()
+    if job_id:
+        _rag_progress_set(job_id, status="running", done=0, total=0, percent=0,
+                          label=f"searching: {body.query}")
+
+        async def _job():
+            try:
+                res = await rag.search_and_ingest(body.query, max_results=body.max_results,
+                                                  progress_cb=_rag_progress_cb(job_id))
+                _rag_progress_set(job_id, result=res, error=res.get("error"),
+                                  status="error" if "error" in res else "done",
+                                  percent=100 if "error" not in res else _RAG_PROGRESS.get(job_id, {}).get("percent", 0))
+            except Exception as e:
+                _rag_progress_set(job_id, status="error", error=str(e))
+        asyncio.create_task(_job())
+        return {"job_id": job_id, "status": "started"}
+
+    result = await rag.search_and_ingest(body.query, max_results=body.max_results)
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
 
 
 @app.post("/api/rag/query")
 async def rag_query(body: RAGQuery):
     """Query the knowledge base for relevant documents."""
-    rag = _get_rag()
+    rag = await _ensure_rag()
     docs = await rag.retrieve(
         body.query,
         top_k=body.top_k,
@@ -3103,21 +3253,21 @@ async def rag_query(body: RAGQuery):
 
 @app.delete("/api/rag/documents")
 async def rag_delete_docs(body: RAGDelete):
-    rag = _get_rag()
+    rag = await _ensure_rag()
     deleted = await rag.delete_by_source(body.source_type, body.source_ref or None)
     return {"deleted": deleted}
 
 
 @app.get("/api/rag/documents")
 async def rag_list_documents(source_type: str = None, limit: int = 100, offset: int = 0):
-    rag = _get_rag()
+    rag = await _ensure_rag()
     docs = rag.list_documents(source_type=source_type, limit=limit, offset=offset)
     return {"documents": docs, "count": len(docs)}
 
 
 @app.delete("/api/rag/documents/{doc_id}")
 async def rag_delete_single_doc(doc_id: str):
-    rag = _get_rag()
+    rag = await _ensure_rag()
     try:
         from core.memory.database import DatabaseManager
         with DatabaseManager.get_connection() as conn:

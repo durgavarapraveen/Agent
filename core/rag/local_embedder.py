@@ -13,26 +13,52 @@ whichever column matches the active embedder path.
 from __future__ import annotations
 
 import logging
+import os
 import threading
+from pathlib import Path
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
+
+# P3-1: persist the HuggingFace / sentence-transformers model cache to a stable
+# on-disk location so the ~80 MB MiniLM model downloads ONCE and is reused by
+# every scan subprocess, instead of re-downloading each run. Honors an existing
+# HF_HOME if the operator already set one.
+_CACHE_DIR = os.environ.get("HF_HOME") or str(
+    Path(os.environ.get("ANTIGRAVITY_CACHE_DIR", str(Path.home() / ".cache" / "antigravity")))
+    / "huggingface")
+try:
+    Path(_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("HF_HOME", _CACHE_DIR)
+    os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", _CACHE_DIR)
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+except Exception:
+    pass
 
 LOCAL_DIMENSION = 384
 _MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 _model = None
 _model_lock = threading.Lock()
-_load_failed = False
+# Count of hard load failures. We do NOT permanently latch on failure: a
+# long-running server may attempt a load before the package is installed /
+# the model is cached, and must succeed on a later attempt once it is —
+# without needing a process restart. Give up only after repeated hard failures.
+_load_attempts = 0
+_MAX_LOAD_ATTEMPTS = 5
 
 
 def _load_model():
-    global _model, _load_failed
-    if _model is not None or _load_failed:
+    global _model, _load_attempts
+    if _model is not None:
         return _model
+    if _load_attempts >= _MAX_LOAD_ATTEMPTS:
+        return None
     with _model_lock:
-        if _model is not None or _load_failed:
+        if _model is not None:
             return _model
+        if _load_attempts >= _MAX_LOAD_ATTEMPTS:
+            return None
         try:
             from sentence_transformers import SentenceTransformer
             logger.info(f"[LocalEmbedder] loading {_MODEL_NAME} (first call, ~80 MB)")
@@ -40,10 +66,13 @@ def _load_model():
             _dim_fn = getattr(_model, "get_embedding_dimension",
                               _model.get_sentence_embedding_dimension)
             logger.info(f"[LocalEmbedder] model loaded, dim={_dim_fn()}")
+            _load_attempts = 0
         except Exception as e:
-            _load_failed = True
-            logger.warning(f"[LocalEmbedder] failed to load {_MODEL_NAME}: {e}. "
-                            "Install with: pip install sentence-transformers")
+            _load_attempts += 1
+            logger.warning(
+                f"[LocalEmbedder] load attempt {_load_attempts}/{_MAX_LOAD_ATTEMPTS} "
+                f"for {_MODEL_NAME} failed: {e}. "
+                "Install with: pip install sentence-transformers")
     return _model
 
 

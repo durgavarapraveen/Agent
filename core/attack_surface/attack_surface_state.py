@@ -61,14 +61,23 @@ class AttackSurfaceState:
         # SPA catch-all detection
         self.spa_baselines: Dict[str, Dict[str, Any]] = {}
 
-        # Counters for data flow auditing (Phase 4)
+        # Counters for data flow auditing (Phase 4).
+        # P0.1: these are now DERIVED (recomputed from set sizes), never
+        # accumulated cumulatively. `endpoints_raw_fed` is the only running
+        # tally (every add_endpoint call, new or duplicate); everything else is
+        # computed from it and `len(self.endpoints)` so the invariant
+        #   raw_fed >= unique >= 0  and  deduplicated == raw_fed - unique
+        # always holds and "deduplicated" can never exceed the input.
         self._counts = {
             "assets_discovered": 0,
             "applications_discovered": 0,
-            "endpoints_discovered": 0,
-            "endpoints_normalized": 0,
-            "endpoints_deduplicated": 0,
-            "endpoints_transferred_to_v2": 0,
+            "endpoints_raw_fed": 0,        # cumulative add_endpoint calls (new+dup)
+            "endpoints_discovered": 0,     # unique (derived)
+            "endpoints_normalized": 0,     # unique (derived)
+            "endpoints_deduplicated": 0,   # duplicates removed = raw_fed - unique (derived)
+            "endpoints_unique": 0,         # len(self.endpoints) (derived)
+            "endpoints_transferred_to_v2": 0,   # endpoints now present in the V2 surface
+            "endpoints_new_last_transfer": 0,   # genuinely-new in the last wire pass
             "parameters_discovered": 0,
             "parameters_transferred_to_v2": 0,
         }
@@ -129,6 +138,8 @@ class AttackSurfaceState:
         endpoints.
         """
         norm_key = endpoint.normalized_key()
+        # Every feed attempt counts as raw input (new OR duplicate).
+        self._counts["endpoints_raw_fed"] += 1
 
         existing_id = self._endpoint_key_index.get(norm_key)
         if existing_id is not None:
@@ -136,18 +147,55 @@ class AttackSurfaceState:
             if existing is not None:
                 existing.last_seen = datetime.utcnow().isoformat()
                 existing.evidence_ids.extend(endpoint.evidence_ids)
-                self._counts["endpoints_deduplicated"] += 1
+                # Do NOT accumulate a "deduplicated" counter here — it is derived
+                # from set sizes in `_recompute_counts` (P0.1).
                 return False
 
+        # P0.1: give the endpoint its ONE canonical, content-addressed id so the
+        # same URL has the same identity in every store. Only override an id that
+        # is missing or a random uuid-style id (keep operator/importer-assigned
+        # stable ids).
+        try:
+            eid = endpoint.endpoint_id or ""
+            if (not eid) or len(eid) == 36 and eid.count("-") == 4:  # empty or uuid4
+                endpoint.endpoint_id = endpoint.canonical_id()
+        except Exception:
+            if not endpoint.endpoint_id:
+                endpoint.endpoint_id = norm_key
         endpoint.source = source
         if not endpoint.first_seen:
             endpoint.first_seen = datetime.utcnow().isoformat()
         endpoint.last_seen = endpoint.first_seen
         self.endpoints[endpoint.endpoint_id] = endpoint
         self._endpoint_key_index[norm_key] = endpoint.endpoint_id
-        self._counts["endpoints_discovered"] += 1
-        self._counts["endpoints_normalized"] += 1
+        self._recompute_counts()
         return True
+
+    def _recompute_counts(self) -> None:
+        """Derive endpoint counts from actual set sizes so the invariant holds."""
+        unique = len(self.endpoints)
+        raw = self._counts["endpoints_raw_fed"]
+        self._counts["endpoints_unique"] = unique
+        self._counts["endpoints_discovered"] = unique
+        self._counts["endpoints_normalized"] = unique
+        self._counts["endpoints_deduplicated"] = max(0, raw - unique)
+
+    def assert_endpoint_invariants(self) -> bool:
+        """Fail loudly (log ERROR) if endpoint counts are inconsistent (P0.1)."""
+        self._recompute_counts()
+        raw = self._counts["endpoints_raw_fed"]
+        unique = self._counts["endpoints_unique"]
+        dedup = self._counts["endpoints_deduplicated"]
+        transferred = self._counts["endpoints_transferred_to_v2"]
+        ok = (raw >= unique >= 0
+              and dedup == raw - unique
+              and 0 <= transferred <= unique)
+        if not ok:
+            logger.error(
+                "ENDPOINT_INVARIANT_VIOLATION raw_fed=%s unique=%s deduplicated=%s "
+                "transferred_to_v2=%s (require raw>=unique>=0, dedup==raw-unique, "
+                "0<=transferred<=unique)", raw, unique, dedup, transferred)
+        return ok
 
     # --- Parameters ---
 
@@ -201,17 +249,30 @@ class AttackSurfaceState:
     # --- Recon → V2 Transfer Audit (Phase 4) ---
 
     def log_transfer_counts(self) -> None:
+        self._recompute_counts()
         for key, count in self._counts.items():
             logger.info(f"ATTACK_SURFACE_COUNT {key}={count}")
+        self.assert_endpoint_invariants()
 
-    def mark_transferred_to_v2(self, endpoints: int, parameters: int) -> None:
-        self._counts["endpoints_transferred_to_v2"] = endpoints
-        self._counts["parameters_transferred_to_v2"] = parameters
+    def mark_transferred_to_v2(self, new_endpoints: int, parameters: int) -> None:
+        """Record a wire pass. `new_endpoints` is how many were genuinely new in
+        THIS pass; the reported `transferred_to_v2` is the ACTUAL surface size
+        (len of the endpoint set), not the single-pass delta — a later pass that
+        finds everything already present must not overwrite the total with 1-3.
+        """
+        self._recompute_counts()
+        self._counts["endpoints_new_last_transfer"] = new_endpoints
+        self._counts["endpoints_transferred_to_v2"] = len(self.endpoints)
+        self._counts["parameters_transferred_to_v2"] = max(
+            self._counts.get("parameters_transferred_to_v2", 0),
+            parameters,
+        )
         self.log_transfer_counts()
 
     # --- Summary ---
 
     def summary(self) -> Dict[str, Any]:
+        self._recompute_counts()
         return {
             "target": self.target,
             "assets": len(self.assets),

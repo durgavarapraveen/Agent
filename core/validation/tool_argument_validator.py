@@ -31,23 +31,62 @@ class ToolArgumentValidator:
         self._registry = tool_registry
         self._scope = scope_manager
 
+    def _resolve_tool(self, tool_name: str):
+        """Look up a tool across the registry APIs actually in use.
+
+        ToolRegistry exposes get(name) + a `tools` dict and a validated
+        `available_tools` dict. Older call sites assumed get_tool()/
+        get_all_available_tools(); support both so validation never
+        silently rejects everything.
+        """
+        reg = self._registry
+        for getter in ("get_tool", "get"):
+            fn = getattr(reg, getter, None)
+            if callable(fn):
+                try:
+                    tool = fn(tool_name)
+                    if tool is not None:
+                        return tool
+                except Exception:
+                    pass
+        for attr in ("available_tools", "tools"):
+            d = getattr(reg, attr, None)
+            if isinstance(d, dict) and tool_name in d:
+                return d[tool_name]
+        return None
+
+    def _list_available(self) -> List[str]:
+        reg = self._registry
+        fn = getattr(reg, "get_all_available_tools", None)
+        if callable(fn):
+            try:
+                return [t.name if hasattr(t, 'name') else str(t) for t in fn()]
+            except Exception:
+                pass
+        for attr in ("available_tools", "tools"):
+            d = getattr(reg, attr, None)
+            if isinstance(d, dict) and d:
+                return list(d.keys())
+        return []
+
     def validate(self, tool_name: str, target: str,
                  args: Dict[str, Any],
                  capability: str = "",
                  required_args: Optional[List[str]] = None) -> None:
         """Validate tool invocation. Raises ToolArgumentValidationError on failure."""
 
-        if self._registry:
-            tool = self._registry.get_tool(tool_name) if hasattr(self._registry, 'get_tool') else None
+        if self._registry and tool_name:
+            tool = self._resolve_tool(tool_name)
             if tool is None:
-                available = []
-                if hasattr(self._registry, 'get_all_available_tools'):
-                    available = [t.name if hasattr(t, 'name') else str(t)
-                                 for t in self._registry.get_all_available_tools()]
-                raise ToolArgumentValidationError(
-                    f"Tool '{tool_name}' not found. Available: {available[:10]}",
-                    "TOOL_NOT_FOUND",
-                )
+                available = self._list_available()
+                # Only reject when we actually have a populated registry to
+                # compare against; an empty list means the registry hasn't been
+                # introspected yet, so we must not block execution.
+                if available:
+                    raise ToolArgumentValidationError(
+                        f"Tool '{tool_name}' not found. Available: {sorted(available)[:10]}",
+                        "TOOL_NOT_FOUND",
+                    )
 
         if not target or not target.strip():
             raise ToolArgumentValidationError("Target is empty", "INVALID_ARGUMENT")

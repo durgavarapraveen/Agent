@@ -158,6 +158,10 @@ class ToolExecutionStatus(str, Enum):
     INVALID_INVOCATION = "INVALID_INVOCATION"
     EMPTY_RESULT = "EMPTY_RESULT"
     PARTIAL = "PARTIAL"
+    # P1-8: explicit non-execution states so cached/skipped are not
+    # indistinguishable from a fresh empty success.
+    CACHED = "CACHED"
+    SKIPPED_FRESH = "SKIPPED_FRESH"
 
 
 class RetryDecisionType(str, Enum):
@@ -196,7 +200,14 @@ class ToolResult(BaseModel):
     @property
     def success(self) -> bool:
         val = self.status.value if hasattr(self.status, "value") else str(self.status)
-        status_ok = str(val).upper() in ("SUCCESS", "PARTIAL_SUCCESS", "PARTIAL")
+        sval = str(val).upper()
+        # P0.4: CACHED (a prior successful payload) and SKIPPED_FRESH (an
+        # intentional no-op because fresh knowledge already exists) are not
+        # failures — they must not trigger retries — but they are NOT logged as
+        # SUCCESS either; the status field carries the truth.
+        if sval in ("CACHED", "SKIPPED_FRESH"):
+            return True
+        status_ok = sval in ("SUCCESS", "PARTIAL_SUCCESS", "PARTIAL")
         # P0-1: A non-zero exit code can never be SUCCESS. Only accept
         # PARTIAL_SUCCESS/PARTIAL when the caller opted into partial semantics.
         if status_ok and self.exit_code is not None and self.exit_code != 0:
