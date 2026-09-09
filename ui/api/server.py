@@ -92,7 +92,7 @@ def _rate_limit(limit: str):
 # best-effort in-memory; behind a reverse proxy the real primary rate limiter
 # should live at the proxy.
 import time as _time
-from collections import deque as _deque, defaultdict as _defaultdict
+from collections import deque as _deque, defaultdict as _defaultdict, OrderedDict
 
 _ROUTE_LIMITS = {
     # (path_prefix): (max_requests, window_seconds)
@@ -2989,7 +2989,7 @@ async def _ensure_rag():
 # ── RAG ingest progress registry ──────────────────────────────────────────
 # In-memory per-job progress so the UI can show a real percentage while a
 # large PDF/URL is being embedded. Bounded to the most recent jobs.
-_RAG_PROGRESS: "OrderedDict[str, dict]" = __import__("collections").OrderedDict()
+_RAG_PROGRESS: OrderedDict[str, dict] = OrderedDict()
 _RAG_PROGRESS_MAX = 200
 
 
