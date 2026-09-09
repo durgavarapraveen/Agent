@@ -87,8 +87,8 @@ class ScopeAuthority:
             if sm is not None and hasattr(sm, "allowed_domains"):
                 try:
                     sm.allowed_domains.add(d)
-                except Exception:
-                    pass
+                except Exception as e:
+                    raise SystemError(f"Policy enforcement failed: {e}") from e
             tsv = self._target_scope_validator
             if tsv is not None:
                 try:
@@ -96,8 +96,8 @@ class ScopeAuthority:
                         norm = tsv._normalize_target(d) if hasattr(tsv, "_normalize_target") else d
                         if norm not in tsv.authorized_scope:
                             tsv.authorized_scope.append(norm)
-                except Exception:
-                    pass
+                except Exception as e:
+                    raise SystemError(f"Policy enforcement failed: {e}") from e
 
     def add_ip(self, ip: str) -> None:
         with self._lock:
@@ -108,14 +108,14 @@ class ScopeAuthority:
             if sm is not None and hasattr(sm, "allowed_ips"):
                 try:
                     sm.allowed_ips.add(i)
-                except Exception:
-                    pass
+                except Exception as e:
+                    raise SystemError(f"Policy enforcement failed: {e}") from e
             tsv = self._target_scope_validator
             if tsv is not None and hasattr(tsv, "_authorized_ips"):
                 try:
                     tsv._authorized_ips.add(i)
-                except Exception:
-                    pass
+                except Exception as e:
+                    raise SystemError(f"Policy enforcement failed: {e}") from e
 
     # ── The one question every caller asks ────────────────────────────────
     def is_authorized(self, target: str) -> bool:

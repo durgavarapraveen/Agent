@@ -99,8 +99,8 @@ def resolve_request_auth(ctx, session_id: Optional[str]) -> Tuple[str, str, str]
             active = get_active_auth() or {}
             hdr = (active.get("headers") or {}).get("Authorization", "")
             return hdr, "ambient", "ambient"
-    except Exception:
-        pass
+    except Exception as e:
+        raise SystemError(f"Policy enforcement failed: {e}") from e
     return "", "anonymous", "default_anonymous"
 
 

@@ -6,7 +6,7 @@ Ensures tool execution is safe, authorized, and syntactically valid.
 import logging
 from typing import Dict, Any
 from core.common.exceptions import ToolValidationError
-from core.security.authorization import TargetScopeValidator
+from core.security.policy_engine import get_policy_engine
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,9 @@ class ToolInvocationValidator:
         # 2. Extract target if present and check scope
         target = params.get("target") or params.get("url") or params.get("domain") or params.get("host")
         if target:
-            TargetScopeValidator.get().validate(target)
+            decision = get_policy_engine().authorize_target(target)
+            if not decision.allowed:
+                raise ToolValidationError(f"Target '{target}' not authorized: {decision.reason}")
 
         # 3. Validate timeout values
         timeout = params.get("timeout")
@@ -67,16 +69,10 @@ class ToolInvocationValidator:
                 logger.error("TOOL_INVOCATION_REJECTED: command must be string")
                 raise ToolValidationError("Command parameter must be a string")
 
-            # Check safe patterns via PolicyValidator
-            from core.security.policy_validator import PolicyValidator
-            scope = TargetScopeValidator.get().authorized_scope
-            policy = PolicyValidator(scope)
-            cmd_ok, err = policy.validate_command(command)
-            if not cmd_ok:
-                logger.error(f"TOOL_INVOCATION_REJECTED: command rejected by policy: {err.message if err else 'blocked'}")
-                raise ToolValidationError(err.message if err else "Command blocked by security policies")
-
             # Centralized command target validation
-            TargetScopeValidator.get().extract_and_validate_command(command)
+            cmd_decision = get_policy_engine().authorize_command(command)
+            if not cmd_decision.allowed:
+                logger.error(f"TOOL_INVOCATION_REJECTED: command rejected by policy engine: {cmd_decision.reason}")
+                raise ToolValidationError(f"Command blocked by PolicyEngine: {cmd_decision.reason}")
 
         logger.info(f"TOOL_INVOCATION_VALIDATED: tool={tool_name_clean}")

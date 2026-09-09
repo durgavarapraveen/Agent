@@ -117,6 +117,6 @@ class ExecutionAuditor:
             if line.strip():
                 try:
                     return json.loads(line).get("current_hash", GENESIS_HASH)
-                except Exception:
-                    pass
+                except Exception as e:
+                    raise SystemError(f"Policy enforcement failed: {e}") from e
         return GENESIS_HASH

@@ -34,7 +34,8 @@ services:
       - "8900:8900"
 
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      # P0.10: docker.sock mount REMOVED — container escape risk.
+      # Kali container reached via Docker network, not socket.
       - pentesting_reports:/app/reports
       - pentesting_data:/app/data
 

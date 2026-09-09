@@ -113,8 +113,8 @@ class ResourceLimiter:
                 # Virtual memory limit (bytes)
                 mem_bytes = memory_limit_mb * 1024 * 1024
                 resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
-            except Exception:
-                pass
+            except Exception as e:
+                raise SystemError(f"Policy enforcement failed: {e}") from e
 
         preexec_fn = _preexec if os.name != "nt" else None
 

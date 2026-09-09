@@ -1,14 +1,18 @@
-"""LLM-authored security tools.
+"""LLM-authored security tools — P0.4 hardened pipeline.
 
-Lets the LLM define new attack sub-agents in natural language + Python code.
-Every authored tool goes through a critic review (safety + soundness) before
-it's marked approved. Approved tools are callable via `run_authored_tool` on
-subsequent scans.
+Pipeline (P0.4):
+    LLM generation
+     -> AST/static validation    (tool_validator)
+     -> capability analysis      (tool_validator)
+     -> policy validation        (PolicyEngine)
+     -> LLM critic               (advisory only — cannot authorize)
+     -> isolated execution       (ExecutionController / P0.3 sandbox)
+     -> runtime policy enforcement
+     -> ToolRegistry
 
-Safety:
-  - Static banned-token check (same as custom_python sandbox)
-  - Critic LLM must return `approve: true` — verifies scope/side-effects
-  - Execution reuses the custom_python sandbox
+The LLM critic is advisory only. Approval/rejection is determined by the
+deterministic AST + policy pipeline. The critic's opinion is logged but
+never overrides a policy denial.
 """
 from __future__ import annotations
 import json
@@ -111,21 +115,77 @@ async def author_tool(args: Dict[str, Any], ctx) -> str:
     code = str(args.get("code") or "")
     if not name or not code:
         return "[ERROR] author_tool: name and code required"
-    for b in BANNED:
-        if b in code:
-            return f"[ERROR] author_tool: banned token {b!r} in code"
     if len(code) > 8000:
         return "[ERROR] author_tool: code too large (max 8KB)"
 
+    # ── P0.4 pipeline: deterministic validation is the authority ─────────
+    validation = None
+    tool_def = None
+    from core.security.tool_validator import (
+        validate_authored_code, build_tool_definition,
+    )
+    validation = validate_authored_code(code, name=name)
+    if validation.blocked:
+        logger.warning("[author_tool] BLOCKED by validator: %s", validation.blocked_reason)
+        _persist_tool(name, desc, schema, code, "rejected",
+                      {"pipeline": "p0.4_validator",
+                       "blocked_reason": validation.blocked_reason,
+                       "issues": validation.issues})
+        return (f"tool {name!r} REJECTED (validator: {validation.blocked_reason}). "
+                f"issues={validation.issues}")
+    tool_def = build_tool_definition(name, desc, code, validation)
+
+    # ── LLM critic — advisory only, never overrides validator ────────────
     review = await _critic_review(name, desc, schema, code)
-    approved = bool(review.get("approve"))
+    critic_approved = bool(review.get("approve"))
+
+    # Validator is the authority; critic is advisory
+    if validation is not None:
+        approved = validation.valid
+        review_notes = {
+            "pipeline": "p0.4",
+            "validator": validation.to_dict(),
+            "critic_advisory": review,
+            "tool_definition": tool_def.to_dict() if tool_def else None,
+        }
+        if not critic_approved and approved:
+            logger.info("[author_tool] critic disagreed but validator approved %s", name)
+            review_notes["critic_overridden"] = True
+        if critic_approved and not approved:
+            logger.info("[author_tool] critic approved but validator blocked %s", name)
+    else:
+        # Legacy path: critic is the authority (pre-P0.4 fallback)
+        approved = critic_approved
+        review_notes = review
+
+    _persist_tool(name, desc, schema, code,
+                  "approved" if approved else "rejected",
+                  review_notes)
+
+    status = "APPROVED" if approved else "REJECTED"
+    risk = (validation.risk_level.value if validation else
+            review.get("risk_score", "?"))
+    caps = (sorted(c.value for c in validation.capabilities) if validation else [])
+    msg = f"tool {name!r} {status} (risk={risk}"
+    if caps:
+        msg += f", capabilities={caps}"
+    msg += f", issues={review.get('issues', []) if not validation else validation.issues})"
+    if approved:
+        msg += " Call it via run_authored_tool."
+    return msg
+
+
+def _persist_tool(name: str, desc: str, schema: Dict,
+                  code: str, status: str, review_notes: Any) -> None:
+    """Persist authored tool to database."""
     try:
         from core.database.pg_store import DatabaseManager
         with DatabaseManager.get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO authored_tools
-                      (name, description, parameters_schema, code, review_status, review_notes)
+                      (name, description, parameters_schema, code,
+                       review_status, review_notes)
                     VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (name) DO UPDATE SET
                       description = EXCLUDED.description,
@@ -133,16 +193,11 @@ async def author_tool(args: Dict[str, Any], ctx) -> str:
                       code = EXCLUDED.code,
                       review_status = EXCLUDED.review_status,
                       review_notes = EXCLUDED.review_notes
-                """, (name, desc, json.dumps(schema),
-                      code,
-                      "approved" if approved else "rejected",
-                      json.dumps(review)))
+                """, (name, desc, json.dumps(schema), code, status,
+                      json.dumps(review_notes, default=str)))
                 conn.commit()
     except Exception as e:
-        return f"[ERROR] author_tool persist: {e}"
-    return (f"tool {name!r} {'APPROVED' if approved else 'REJECTED'} "
-            f"(risk={review.get('risk_score','?')}, issues={review.get('issues','[]')}). "
-            + ("Call it via run_authored_tool." if approved else ""))
+        logger.error("[author_tool] persist error: %s", e)
 
 
 async def run_authored_tool(args: Dict[str, Any], ctx, tracker=None) -> str:
@@ -160,11 +215,26 @@ async def run_authored_tool(args: Dict[str, Any], ctx, tracker=None) -> str:
             return f"[ERROR] run_authored_tool: {name!r} not found or not approved"
     except Exception as e:
         return f"[ERROR] run_authored_tool DB: {e}"
+
+    code = tool["code"]
+
+    # P0.4: Re-validate at execution time — a tool approved before P0.4
+    # might contain capabilities that are now blocked.
+    from core.security.tool_validator import validate_authored_code
+    validation = validate_authored_code(code, name=name)
+    if validation.blocked:
+        logger.warning("[run_authored_tool] %s blocked at runtime: %s",
+                       name, validation.blocked_reason)
+        return (f"[ERROR] run_authored_tool: {name!r} blocked by runtime "
+                f"validator: {validation.blocked_reason}")
+    if not validation.valid:
+        return (f"[ERROR] run_authored_tool: {name!r} failed runtime "
+                f"validation: {validation.issues}")
+
     tool_args = args.get("args") or {}
-    # Wrap the code so it sees `args` and `target_base`, must set RESULT
     wrapped_code = (
         f"args = {json.dumps(tool_args, default=str)}\n"
-        + tool["code"]
+        + code
     )
     from core.exploitation.custom_probe import run_custom_python
     return await run_custom_python(
