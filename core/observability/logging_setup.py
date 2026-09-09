@@ -51,6 +51,12 @@ class PIIRedactionFilter(logging.Filter):
                     pass
             if isinstance(record.msg, str):
                 record.msg = self._mask(record.msg)
+                # P0.5: Also route through SecretVault for reference-based redaction
+                try:
+                    from core.security.secret_vault import redact_secrets
+                    record.msg = redact_secrets(record.msg)
+                except Exception:
+                    pass
         except Exception:
             # Never let the filter drop a log line — mask failures are
             # non-fatal but should not silence the source line.

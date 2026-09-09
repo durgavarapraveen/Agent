@@ -43,7 +43,19 @@ class FindingStateMachine:
     def mark_validating(self, finding: Finding) -> None:
         self._transition(finding, FindingState.VALIDATING)
 
-    def mark_confirmed(self, finding: Finding, evidence_ids: List[str]) -> None:
+    def mark_confirmed(self, finding: Finding, evidence_ids: List[str],
+                       bypass_gate: bool = False) -> None:
+        if not bypass_gate:
+            try:
+                from core.verification.finding_confirmation_gate import FindingConfirmationGate
+                gate = FindingConfirmationGate()
+                gate.register(finding.finding_id, finding.category or "GENERIC")
+                stage, reason = gate.evaluate(finding.finding_id, finding.to_dict())
+                if stage.value == "rejected":
+                    raise ValueError(
+                        f"P0.6 confirmation gate rejected: {reason}")
+            except ImportError:
+                pass
         self._transition(finding, FindingState.CONFIRMED)
         finding.evidence_ids.extend(evidence_ids)
 

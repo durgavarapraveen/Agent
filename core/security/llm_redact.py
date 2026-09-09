@@ -34,9 +34,21 @@ def _fallback_mask(text: str) -> str:
 
 
 def redact_for_llm(text: Any) -> Any:
-    """Return `text` with credentials/PII masked. Non-strings pass through."""
+    """Return `text` with credentials/PII masked. Non-strings pass through.
+
+    P0.5: Secrets are stored in SecretVault with references, then the
+    remaining text is pattern-masked. The vault allows authorized replay
+    of authenticated requests without the LLM ever seeing raw secrets.
+    """
     if not isinstance(text, str) or not text:
         return text
+    # P0.5: vault-based redaction first (stores secrets, returns refs)
+    try:
+        from core.security.secret_vault import redact_secrets
+        text = redact_secrets(text)
+    except Exception:
+        pass
+    # Legacy pattern masking on anything the vault didn't catch
     try:
         from core.reporting.reporting import mask_sensitive_data
         return mask_sensitive_data(text, enabled=True)

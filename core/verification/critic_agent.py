@@ -165,55 +165,18 @@ class CriticAgent:
     # ------------------------------------------------------------- verify one
 
     async def verify_finding(self, finding: Dict[str, Any]) -> CriticVerdict:
-        """Return the critic's verdict for a single finding. Never raises."""
+        """Return the critic's verdict for a single finding. Never raises.
+
+        P0.6: Heuristic shortcuts no longer auto-confirm. All confirmation
+        candidates are routed through the FindingConfirmationGate which
+        requires deterministic evidence (not LLM wording or status codes).
+        The critic is advisory — it cannot independently confirm a finding.
+        """
         ftype = str(finding.get("type") or finding.get("vuln_type") or "").upper()
 
-        # Cost short-circuit: exploit agent or scanner already proved it.
-        if finding.get("exploited") and finding.get("evidence") and ftype in _STRONG_TOOL_TYPES:
-            return CriticVerdict(
-                verdict=Verdict.CONFIRMED, confidence=0.9,
-                reasoning="Exploit agent produced live proof for a strong-signal finding.",
-                model="heuristic",
-            )
-        # Auto-confirm scanner-produced findings with proof text.
-        _scanner_tools = {"sqlmap", "nuclei", "nikto", "sslscan", "dalfox", "nmap"}
-        if (finding.get("proof") and
-            (str(finding.get("tool") or "").lower() in _scanner_tools or ftype in _STRONG_TOOL_TYPES)):
-            return CriticVerdict(
-                verdict=Verdict.CONFIRMED, confidence=0.85,
-                reasoning=f"Tool '{finding.get('tool', 'scanner')}' produced concrete proof.",
-                model="heuristic",
-            )
-        # Auto-confirm LLM/agentic findings that have concrete HTTP evidence.
-        _agentic_sources = {
-            "exploit_agent", "agentic_executor", "objective_agent",
-            "llm_agent", "central_brain",
-        }
-        source = str(finding.get("source") or finding.get("source_agent") or finding.get("tool") or "").lower()
-        has_concrete_proof = bool(
-            finding.get("proof") or finding.get("evidence")
-            or finding.get("exploited") or finding.get("confirmed")
-        )
-        if source in _agentic_sources and has_concrete_proof and ftype in _STRONG_TOOL_TYPES:
-            return CriticVerdict(
-                verdict=Verdict.CONFIRMED, confidence=0.85,
-                reasoning=f"Agentic executor '{source}' produced concrete evidence for {ftype}.",
-                model="heuristic",
-            )
-        # Auto-confirm any finding with HTTP response proof showing exploitation succeeded.
-        proof_text = str(finding.get("proof") or finding.get("evidence") or "").lower()
-        _exploitation_markers = [
-            "union select", "union+select", "' or 1=1", "admin' --",
-            "extractvalue(", "updatexml(", "load_file(", "into outfile",
-            "xp_cmdshell", "<script>", "alert(", "onerror=",
-            "root:x:0", "/etc/passwd", "uid=0",
-        ]
-        if has_concrete_proof and any(m in proof_text for m in _exploitation_markers):
-            return CriticVerdict(
-                verdict=Verdict.CONFIRMED, confidence=0.90,
-                reasoning="Finding proof contains concrete exploitation markers.",
-                model="heuristic",
-            )
+        gate_result = self._check_confirmation_gate(finding, ftype)
+        if gate_result is not None:
+            return gate_result
 
         # ── Phase 27: SPA catch-all detection ──
         if self._is_spa_false_positive(finding):
@@ -307,6 +270,37 @@ class CriticAgent:
     # --------------------------------------------------------- Phase 27 helpers
 
     @staticmethod
+    def _check_confirmation_gate(self, finding: Dict[str, Any],
+                                ftype: str) -> Optional[CriticVerdict]:
+        """P0.6: Route through deterministic confirmation gate.
+
+        Returns a verdict if the gate can decide (reject LLM-wording-only
+        or status-code-only evidence). Returns None to fall through to
+        LLM critic for advisory review.
+        """
+        try:
+            from core.verification.finding_confirmation_gate import (
+                FindingConfirmationGate, ConfirmationStage,
+                _is_llm_wording_only, _is_status_code_only,
+            )
+            if _is_llm_wording_only(finding):
+                return CriticVerdict(
+                    verdict=Verdict.UNCERTAIN, confidence=0.1,
+                    reasoning="P0.6: evidence is LLM wording only — not confirmable",
+                    missing_evidence=["concrete tool output", "reproduction proof"],
+                    model="p0.6_gate",
+                )
+            if _is_status_code_only(finding):
+                return CriticVerdict(
+                    verdict=Verdict.UNCERTAIN, confidence=0.1,
+                    reasoning="P0.6: evidence is HTTP status code only — not confirmable",
+                    missing_evidence=["response body analysis", "reproduction proof"],
+                    model="p0.6_gate",
+                )
+        except ImportError:
+            pass
+        return None
+
     def _is_spa_false_positive(finding: Dict[str, Any]) -> bool:
         spa_indicators = finding.get("spa_catch_all", False)
         if spa_indicators:

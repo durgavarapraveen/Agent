@@ -122,11 +122,16 @@ def promote_to_finding(obs: Observation, hypothesis: Optional[Hypothesis] = None
     Rejects promotion when the observation kind isn't confirmable and no
     validation proof is supplied. This is the P0-3 firewall between
     "we saw something" and "we found a bug".
+
+    P0.6: status is always UNCONFIRMED at promotion. Confirmation requires
+    passing the FindingConfirmationGate with deterministic evidence.
+    A 200 status or LLM wording is never sufficient.
     """
     kind = (obs.kind or "").lower()
     if not is_confirmable_without_validation(kind) and not validation_proof:
         return None
-    return {
+
+    finding_dict = {
         "title": (hypothesis.vuln_class + " on " + obs.target).strip() if hypothesis else obs.description,
         "type": (hypothesis.vuln_class if hypothesis else obs.kind).upper(),
         "target": obs.target,
@@ -135,7 +140,36 @@ def promote_to_finding(obs: Observation, hypothesis: Optional[Hypothesis] = None
         "details": obs.description,
         "proof": validation_proof or str(obs.evidence),
         "confidence_score": max(obs.confidence, 0.75 if validation_proof else 0.5),
-        "status": "CONFIRMED" if validation_proof else "UNCONFIRMED",
+        "status": "UNCONFIRMED",
         "source": obs.source_tool,
-        "state": LifecycleStage.CONFIRMED.value if validation_proof else LifecycleStage.VALIDATING.value,
+        "state": LifecycleStage.VALIDATING.value,
     }
+
+    if validation_proof:
+        try:
+            from core.verification.finding_confirmation_gate import (
+                FindingConfirmationGate, EvidenceItem, EvidenceType,
+                ConfirmationStage,
+            )
+            gate = FindingConfirmationGate()
+            vuln_class = (hypothesis.vuln_class if hypothesis else obs.kind).upper()
+            fid = obs.obs_id
+            gate.register(fid, vuln_class)
+            gate.add_support_evidence(fid, EvidenceItem(
+                evidence_type=EvidenceType.BODY_CONTAINS_MARKER,
+                source_tool=obs.source_tool,
+                detail=validation_proof[:500],
+            ))
+            gate.add_reproduction_evidence(fid, EvidenceItem(
+                evidence_type=EvidenceType.REPRODUCTION_MATCH,
+                source_tool=obs.source_tool,
+                detail="tool-confirmed reproduction",
+            ))
+            stage, _ = gate.evaluate(fid, finding_dict)
+            if stage == ConfirmationStage.CONFIRMED:
+                finding_dict["status"] = "CONFIRMED"
+                finding_dict["state"] = LifecycleStage.CONFIRMED.value
+        except ImportError:
+            pass
+
+    return finding_dict
