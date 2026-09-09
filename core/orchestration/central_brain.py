@@ -152,6 +152,10 @@ from core.execution.executors.generic import (
     LiveDOMXSSExecutor, LivePostMessageAbuseDetector,
     LiveClickjackingDetector, LiveCSPBypassAttempt,
 )
+from core.execution.executors.differential_research import (
+    DifferentialResearchExecutor, MetamorphicConsistencyExecutor,
+    InvariantOracleExecutor,
+)
 from core.tools.tool_portfolio import ToolPortfolio
 
 # P1c — Evidence / Oracle / Finding
@@ -762,7 +766,16 @@ class CentralBrain(
         self.live_postmsg_executor = LivePostMessageAbuseDetector(timeout_seconds=120)
         self.live_clickjacking_executor = LiveClickjackingDetector(timeout_seconds=90)
         self.live_csp_executor = LiveCSPBypassAttempt(timeout_seconds=90)
+        # ── PHASE 5 — differential / parser / metamorphic / invariant research ──
+        self.differential_research_executor = DifferentialResearchExecutor(timeout_seconds=60)
+        self.metamorphic_executor = MetamorphicConsistencyExecutor(timeout_seconds=60)
+        self.invariant_oracle_executor = InvariantOracleExecutor(timeout_seconds=45)
         self.executor_registry = {
+            # ── PHASE 5 research executors (spec Points A/B/C, P1.4-1.7) ──
+            "differential_representation_01": self.differential_research_executor,
+            "parser_differential_01": self.differential_research_executor,
+            "metamorphic_consistency_01": self.metamorphic_executor,
+            "security_invariant_01": self.invariant_oracle_executor,
             "sqli": self.sqli_executor,
             "sqli_basic_01": self.sqli_executor,
             "sqli_time_based_01": self.sqli_executor,
