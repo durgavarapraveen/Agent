@@ -49,21 +49,23 @@ class ToolGateway:
         8. Handle errors & fallbacks
         """
         
-        # STEP 0 (P0-9): Unified deterministic action gate — schema -> scope ->
-        # precondition -> duplicate -> risk. Rejects malformed / out-of-scope LLM
-        # plans before anything else runs; surfaces duplicate/risk flags.
+        # STEP 0 (P0-1): Unified PolicyEngine gate — single authority for all
+        # authorization decisions. Replaces the direct ActionGate call and adds
+        # structured, auditable PolicyDecision objects.
         try:
-            from core.security.action_gate import ActionGate
-            _ctx = getattr(self, "ctx", None) or getattr(auth_context, "ctx", None)
+            from core.security.policy_engine import get_policy_engine
             _tier = getattr(auth_context, "tier", None) or "POC"
-            _decision = ActionGate.evaluate(invocation, _ctx, _tier)
-            if _decision.flags:
-                logger.info(f"ACTION_GATE: allow={_decision.allowed} "
-                            f"op={invocation.operation} flags={_decision.flags}")
-            if not _decision.allowed:
-                logger.warning(f"ACTION_GATE_DENIED: stage={_decision.stage} "
-                               f"reason={_decision.reason} op={invocation.operation} "
-                               f"target={invocation.target}")
+            _policy_decision = get_policy_engine().authorize_tool(
+                invocation, ctx=getattr(self, "ctx", None) or getattr(auth_context, "ctx", None),
+                tier=_tier,
+            )
+            if not _policy_decision.allowed:
+                logger.warning(
+                    "POLICY_DENIED: action=%s reason=%s code=%s target=%s id=%s",
+                    _policy_decision.action, _policy_decision.reason,
+                    _policy_decision.reason_code, _policy_decision.target,
+                    _policy_decision.action_id,
+                )
                 from core.common.schemas import ErrorInfo, ErrorType
                 return ToolResult(
                     tool=invocation.tool_id or invocation.operation or "unknown",
@@ -72,13 +74,13 @@ class ToolGateway:
                     target=invocation.target,
                     error=ErrorInfo(
                         error_type=ErrorType.SCOPE_VIOLATION,
-                        message=f"Action gate denied at {_decision.stage}: {_decision.reason}",
-                        details={"stage": _decision.stage}),
+                        message=f"Policy denied: {_policy_decision.reason}",
+                        details=_policy_decision.to_dict()),
                 )
         except ImportError:
             pass
         except Exception as _ge:
-            logger.debug(f"[ActionGate] evaluation skipped: {_ge}")
+            logger.debug(f"[PolicyEngine] evaluation skipped: {_ge}")
 
         # STEP 1: Authorization & Scope
         if not await self._authorize(invocation, auth_context):

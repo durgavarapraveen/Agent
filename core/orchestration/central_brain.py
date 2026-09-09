@@ -2158,11 +2158,19 @@ class CentralBrain(
                 logger.debug(f"[TargetHealth] Health recording skipped: {e}")
 
         elif phase == ExecutionPhase.EXPLOITATION.value:
-            # Compliance Gate check
-            check = self.compliance_gate.check_before_exploit(self.ctx.target)
-            if not check.authorized:
-                logger.warning(f"Compliance check failed: {check.reason}. Skipping EXPLOIT phase.")
-                return
+            # P0.1: Unified PolicyEngine gate (delegates to ComplianceGate internally)
+            try:
+                from core.security.policy_engine import get_policy_engine
+                _exploit_decision = get_policy_engine().authorize_exploit(self.ctx.target)
+                if not _exploit_decision.allowed:
+                    logger.warning(f"PolicyEngine denied exploit: {_exploit_decision.reason} (code={_exploit_decision.reason_code}). Skipping EXPLOIT phase.")
+                    return
+            except ImportError:
+                # Fallback to legacy ComplianceGate if PolicyEngine unavailable
+                check = self.compliance_gate.check_before_exploit(self.ctx.target)
+                if not check.authorized:
+                    logger.warning(f"Compliance check failed: {check.reason}. Skipping EXPLOIT phase.")
+                    return
 
             # Hypothesis generation from coverage gaps
             try:
@@ -2346,6 +2354,11 @@ class CentralBrain(
                         self.ctx.harvested_creds.append({
                             "username": s.username, "url": s.url,
                             "login_type": s.login_type, "source": "credential_spray",
+                            # Carry password + live token so _auto_login_with_harvested_creds
+                            # and CredChain can run the authenticated sweep (privesc, IDOR,
+                            # post-exploitation) instead of dropping the session here.
+                            "password": getattr(s, "password", "") or "",
+                            "token": getattr(s, "session_token", "") or "",
                         })
                 else:
                     logger.info("[CredSpray] No default credentials found")
