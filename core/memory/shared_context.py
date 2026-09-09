@@ -261,21 +261,12 @@ class SharedContextV2:
         counted several times under trivially different spellings (scheme case,
         host case, trailing slash, query-parameter order). Used as the dedup key
         for the V1 endpoint map.
+
+        P3: delegates to the single ``canonical_endpoint_key`` so every store
+        (this one, EndpointInventoryV2, …) shares one identity function.
         """
-        try:
-            from urllib.parse import urlsplit, parse_qsl, urlencode
-            m = (method or "GET").upper()
-            sp = urlsplit(url)
-            scheme = (sp.scheme or "https").lower()
-            host = (sp.hostname or "").lower()
-            port = f":{sp.port}" if sp.port and sp.port not in (80, 443) else ""
-            path = sp.path or "/"
-            if len(path) > 1:
-                path = path.rstrip("/")
-            q = urlencode(sorted(parse_qsl(sp.query, keep_blank_values=True)))
-            return f"{m}:{scheme}://{host}{port}{path}" + (f"?{q}" if q else "")
-        except Exception:
-            return f"{(method or 'GET').upper()}:{url}"
+        from core.domain.endpoint import canonical_endpoint_key
+        return canonical_endpoint_key(method, url)
 
     # P1.12: probe artifacts the scanner itself generates — must never become
     # normal attack-surface discoveries.
@@ -367,6 +358,31 @@ class SharedContextV2:
     def get_endpoints(self) -> List:
         with self._state_lock:
             return list(self.endpoints.values())
+
+    # P3: the endpoint store is a canonical-id -> record dict. Pruning/reset must
+    # go through these so the dict contract is never replaced by a bare list
+    # (which silently breaks dedup, iteration-by-value, and DB persistence).
+    def clear_endpoints(self) -> None:
+        """Authoritative reset of the endpoint store (keeps the dict contract)."""
+        with self._state_lock:
+            self.endpoints.clear()
+
+    def drop_endpoints_by_url(self, urls) -> int:
+        """Remove endpoints whose URL is in `urls`. Returns the count removed.
+        The one mutation path for pruning (e.g. dead-liveness sweeps), so callers
+        never reassign ``ctx.endpoints`` to a list."""
+        dead = {str(u) for u in (urls or []) if u}
+        if not dead:
+            return 0
+        with self._state_lock:
+            keep, removed = {}, 0
+            for eid, ep in self.endpoints.items():
+                if self._endpoint_url(ep) in dead:
+                    removed += 1
+                else:
+                    keep[eid] = ep
+            self.endpoints = keep
+            return removed
 
     def add_ports(self, host_or_ports, ports: List[Dict] = None, source: str = None):
         if ports is None:

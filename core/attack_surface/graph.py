@@ -25,6 +25,15 @@ class AttackSurfaceGraph:
         self.edges_count = 0
         
     def add_endpoint(self, endpoint: Endpoint):
+        # P3: key by the ONE canonical identity so the graph's endpoint set cannot
+        # diverge from AttackSurfaceState, which assigns the same canonical id.
+        # Only override a missing or uuid4-style id (keep stable assigned ids).
+        try:
+            eid = getattr(endpoint, "endpoint_id", "") or ""
+            if (not eid) or (len(eid) == 36 and eid.count("-") == 4):
+                endpoint.endpoint_id = endpoint.canonical_id()
+        except Exception:
+            pass
         self.endpoints[endpoint.endpoint_id] = endpoint
         
     def add_request(self, request: CapturedRequest):

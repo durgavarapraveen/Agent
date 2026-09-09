@@ -59,6 +59,7 @@ class ProviderType(Enum):
     """Supported LLM providers"""
     OPENAI = "openai"
     CLAUDE = "claude"
+    CLAUDE_CLI = "claude_cli"
     GEMINI = "gemini"
     DEEPSEEK = "deepseek"
     GROQ = "groq"
@@ -998,6 +999,116 @@ class GroqProvider(LLMProvider):
 
 
 # ═══════════════════════════════════════════════════════════════
+# CLAUDE CLI PROVIDER (uses `claude -p` from Claude Code Pro plan)
+# ═══════════════════════════════════════════════════════════════
+
+class ClaudeCLIProvider(LLMProvider):
+    """Calls the local `claude` CLI in pipe mode — uses your Claude Code Pro subscription."""
+
+    def __init__(
+        self,
+        small_model: str = "claude-haiku-4-5-20251001",
+        large_model: str = "claude-sonnet-4-20250514",
+        budget: Optional[TokenBudget] = None,
+        claude_binary: str = "claude",
+    ):
+        super().__init__(ProviderType.CLAUDE_CLI, budget or TokenBudget())
+        self.small_model = small_model
+        self.large_model = large_model
+        self.claude_binary = claude_binary
+        self.timeout = 300
+
+    async def is_available(self) -> bool:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self.claude_binary, "--version",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=10)
+            return proc.returncode == 0
+        except Exception as e:
+            logger.warning(f"[ClaudeCLI] not available: {e}")
+            return False
+
+    def get_small_model(self) -> str:
+        return self.small_model
+
+    def get_large_model(self) -> str:
+        return self.large_model
+
+    async def _run_claude(self, prompt: str, system: Optional[str],
+                          max_tokens: int, model: str) -> str:
+        cmd = [self.claude_binary, "-p", "--model", model, "--max-turns", "1"]
+        if system:
+            cmd.extend(["--system-prompt", system])
+        cmd.extend(["--output-format", "text"])
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(input=prompt.encode("utf-8")),
+            timeout=self.timeout,
+        )
+        if proc.returncode != 0:
+            err = stderr.decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(f"claude CLI exit {proc.returncode}: {err}")
+        return stdout.decode("utf-8", errors="replace")
+
+    async def generate_response(
+        self, prompt: str, system: Optional[str] = None, max_tokens: int = 1024,
+        temperature: float = 0.3, response_format: Optional[str] = None,
+        tier: TaskTier = TaskTier.SMALL,
+    ) -> LLMResponse:
+        model = self.get_model_for_tier(tier)
+        start_time = datetime.now()
+
+        user_content = prompt
+        if response_format == "json":
+            if system:
+                system += "\nYou MUST respond with ONLY valid JSON. No markdown, no explanation."
+            else:
+                system = "You MUST respond with ONLY valid JSON. No markdown, no explanation."
+            if "json" not in prompt.lower():
+                user_content = prompt + "\n\nRespond in JSON format."
+
+        try:
+            content = await self._run_claude(user_content, system, max_tokens, model)
+            latency_ms = (datetime.now() - start_time).total_seconds() * 1000
+
+            structured = None
+            if response_format == "json" and content:
+                structured = self._parse_json_response(content)
+
+            tokens_est = max(1, len(prompt) // 4) + max(1, len(content) // 4)
+            metric = UsageMetrics(
+                provider="claude_cli", model=model,
+                input_tokens=max(1, len(prompt) // 4),
+                output_tokens=max(1, len(content) // 4),
+                total_tokens=tokens_est, cost_usd=0.0,
+                latency_ms=latency_ms,
+            )
+            self.budget.log_request(metric)
+
+            return LLMResponse(
+                content=content.strip(), structured_output=structured,
+                finish_reason="stop", provider="claude_cli", model=model,
+                cost_usd=0.0, latency_ms=latency_ms,
+                usage={"prompt_tokens": metric.input_tokens, "completion_tokens": metric.output_tokens},
+            )
+        except Exception as e:
+            latency_ms = (datetime.now() - start_time).total_seconds() * 1000
+            logger.error(f"[ClaudeCLI] generate failed: {e}")
+            return LLMResponse(
+                content="", provider="claude_cli", model=model,
+                error=str(e), latency_ms=latency_ms,
+            )
+
+
+# ═══════════════════════════════════════════════════════════════
 # UNIVERSAL HARNESS
 # ═══════════════════════════════════════════════════════════════
 
@@ -1096,6 +1207,14 @@ class UniversalLLMHarness:
                 budget=self.budget
             )
         
+        elif provider_type == ProviderType.CLAUDE_CLI:
+            return ClaudeCLIProvider(
+                small_model=self.provider_config.get("claude_cli_small_model", "claude-haiku-4-5-20251001"),
+                large_model=self.provider_config.get("claude_cli_large_model", "claude-sonnet-4-20250514"),
+                budget=self.budget,
+                claude_binary=self.provider_config.get("claude_binary", "claude"),
+            )
+
         elif provider_type == ProviderType.OLLAMA:
             return OllamaProvider(
                 base_url=self.provider_config.get("ollama_base_url", "http://localhost:11434"),
@@ -1103,7 +1222,7 @@ class UniversalLLMHarness:
                 large_model=self.provider_config.get("ollama_large_model", "llama2"),
                 budget=self.budget
             )
-        
+
         else:
             raise ValueError(f"Unsupported provider: {provider_type}")
     

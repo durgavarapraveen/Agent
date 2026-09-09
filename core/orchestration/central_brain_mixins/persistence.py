@@ -134,8 +134,13 @@ class PersistenceMixin:
                 logger.info(f"  ✓ Persisted technologies for {len(self.ctx.technologies)} hosts")
             
             # ── Endpoints ──
-            if hasattr(self.ctx, 'endpoints') and self.ctx.endpoints:
-                for endpoint in self.ctx.endpoints:
+            # P3: read endpoint RECORDS via the canonical getter. Iterating
+            # ``self.ctx.endpoints`` directly yields the dict's canonical-id KEYS
+            # (e.g. "GET:https://h/x"), which were being persisted as paths.
+            _eps = (self.ctx.get_endpoints() if hasattr(self.ctx, 'get_endpoints')
+                    else list(getattr(self.ctx, 'endpoints', []) or []))
+            if _eps:
+                for endpoint in _eps:
                     if isinstance(endpoint, dict):
                         path = endpoint.get("url", "")
                         method = endpoint.get("method", "GET")
@@ -160,7 +165,7 @@ class PersistenceMixin:
                                 "discovered_at": datetime.now().isoformat()
                             })
                         )
-                logger.info(f"  ✓ Persisted {len(self.ctx.endpoints)} endpoints")
+                logger.info(f"  ✓ Persisted {len(_eps)} endpoints")
             
             # ── Missing Security Headers → Vulnerability Findings ──
             profile = getattr(self.ctx, 'target_profile', None) or {}

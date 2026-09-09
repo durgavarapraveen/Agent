@@ -15,7 +15,11 @@ class EndpointInventoryV2:
     def add_endpoint(self, endpoint: Dict[str, Any]) -> None:
         url = endpoint.get("url", endpoint.get("path", ""))
         method = endpoint.get("method", "GET").upper()
-        dedup_key = f"{method}:{url}"
+        # P3: dedup by the ONE canonical identity (normalizes scheme/host case,
+        # default ports, trailing slash, query order) so this projection's unique
+        # count matches the authoritative stores instead of splitting on spelling.
+        from core.domain.endpoint import canonical_endpoint_key
+        dedup_key = canonical_endpoint_key(method, url)
 
         if dedup_key in self._url_index:
             existing_id = self._url_index[dedup_key]

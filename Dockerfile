@@ -207,7 +207,16 @@ RUN CFLAGS="-std=gnu17" /opt/venv/bin/pip install --no-cache-dir \
 # ============================================================
 # Playwright + Chromium (browser actuator)
 # ============================================================
-RUN playwright install --with-deps chromium
+# Install to a shared, world-readable path (NOT /root/.cache) so the runtime
+# `pentester` user (uid 10001) resolves the browser too. Without this the
+# container runs `playwright install` as root, drops the binary in
+# /root/.cache/ms-playwright, and at runtime pentester looks in
+# /home/pentester/.cache/ms-playwright -> "Executable doesn't exist" ->
+# request_capture / DOM-sink monitor silently skip the SPA. The ENV must
+# persist to runtime so both users agree on the location.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright
 
 # Kali's `httpx-toolkit` package installs the binary at
 # /usr/bin/httpx-toolkit. Alias it as `httpx` for code that shells out
