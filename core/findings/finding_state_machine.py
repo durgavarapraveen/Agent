@@ -3,7 +3,7 @@ Finding state machine — enforces valid state transitions.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 from core.findings.finding import Finding, FindingState
 
