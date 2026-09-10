@@ -1,13 +1,3 @@
-"""
-Compliance reporting.
-
-Builds a per-framework compliance summary from a set of findings: for each
-control in each active framework, how many findings touch it, a pass/fail
-status, and references to the contributing findings (evidence).
-
-A control is FAIL if any finding maps to it, PASS otherwise (i.e. no evidence
-of a violation was found for that control this scan).
-"""
 
 from __future__ import annotations
 
@@ -24,7 +14,7 @@ class ControlResult:
     framework_name: str
     control_id: str
     control_title: str
-    status: str                          # PASS | FAIL
+    status: str
     finding_count: int
     evidence: List[str] = field(default_factory=list)   # finding ids/titles
 
@@ -46,7 +36,6 @@ class ComplianceReporter:
                    or f.get("type") or "finding")
 
     def build(self, findings: List[Dict]) -> Dict:
-        """Return a structured per-framework compliance summary."""
         index = self.mapper.map_findings(findings, self.active)
         by_control = index["by_control"]
 
@@ -80,7 +69,6 @@ class ComplianceReporter:
         }
 
     def render_markdown(self, findings: List[Dict]) -> str:
-        """Human-readable compliance section for scan reports."""
         summary = self.build(findings)
         lines = ["## Compliance Summary", ""]
         for fw, data in summary["frameworks"].items():

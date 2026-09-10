@@ -1,13 +1,3 @@
-"""Fan-out notifier for Slack / PagerDuty / SIEM / generic webhook.
-
-Every send:
-  - Runs with a 5-second HTTP timeout — a slow provider can't stall callers.
-  - Redacts PII / secrets via `core.reporting.reporting.mask_sensitive_data`
-    before the payload leaves the process.
-  - Swallows and logs its own failures — a broken notifier never blocks a scan.
-
-Designed to be called from both async and sync contexts.
-"""
 from __future__ import annotations
 
 import json
@@ -43,7 +33,6 @@ def _post_json(url: str, payload: Dict[str, Any], headers: Optional[Dict] = None
 
 
 def _fanout_async(fns: Iterable) -> None:
-    """Fire every function in its own daemon thread so caller returns fast."""
     for fn in fns:
         t = threading.Thread(target=fn, daemon=True)
         t.start()

@@ -7,9 +7,6 @@ logger = logging.getLogger(__name__)
 class RouteNormalizer:
     @staticmethod
     def normalize_spa_route(url: str) -> Tuple[str, Optional[str]]:
-        """
-        Normalizes a URL into its server-side HTTP path and its client-side SPA route.
-        """
         parsed = urlparse(url)
         http_path = parsed.path if parsed.path else "/"
         

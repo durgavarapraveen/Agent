@@ -1,7 +1,3 @@
-"""
-Error Context Translator with Actionable Recommendations.
-Transforms raw tool stderr/exceptions into concise, classified error prompts with actionable next-step suggestions.
-"""
 
 import logging
 import re
@@ -20,7 +16,6 @@ class ErrorCategory(str, Enum):
 
 
 class ErrorTranslator:
-    """Translates raw tool errors into classified error reports with actionable recommendations."""
 
     # 20+ Tool-specific and general error mappings
     ERROR_MAPPINGS = [
@@ -65,7 +60,6 @@ class ErrorTranslator:
         exit_code: int = 1,
         target: str = ""
     ) -> Dict[str, Any]:
-        """Classify tool error and return structured error response with actionable recommendation."""
         tool_clean = (tool_name or "").lower().strip()
         stderr_clean = (stderr or "").strip()
         raw_text = stderr_clean.lower()

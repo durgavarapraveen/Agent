@@ -1,10 +1,3 @@
-"""
-SecurityHypothesis model (Phase 22).
-
-A hypothesis is a testable claim about a target's vulnerability.
-Generated from attack surface analysis, technology detection, and
-prior experiment results. Each hypothesis spawns one or more experiments.
-"""
 from core.domain.base import DomainModel
 from pydantic import Field
 from typing import Any, Dict, List, Optional

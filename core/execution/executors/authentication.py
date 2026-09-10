@@ -45,11 +45,6 @@ _LOGIN_SUCCESS_PATTERNS = [
 
 def _classify_login_response(status_code: int, body: str,
                              cookie_header: str) -> Dict[str, Any]:
-    """Decide whether the login response actually granted access.
-
-    Returns a dict with `verdict` in {SUCCESS, FAILURE, INCONCLUSIVE} and a
-    `reason` string explaining why.
-    """
     body = body or ""
     cookie_header = cookie_header or ""
 

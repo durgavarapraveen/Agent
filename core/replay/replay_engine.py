@@ -19,10 +19,6 @@ class ReplayEngine:
         self.proxy = proxy
         
     def replay_request(self, request: CapturedRequest, identity: Identity) -> CapturedRequest:
-        """
-        Replays a request on behalf of a specific identity.
-        Injects the correct session tokens/cookies for that identity.
-        """
         req_copy = copy.deepcopy(request)
         
         # 1. Get or create session for the identity
@@ -54,15 +50,6 @@ class ReplayEngine:
         return req_copy
 
     def replay(self, request_node: Any, identity_id: Optional[str] = None) -> Optional[ResponseData]:
-        """
-        Access-control adapter used by MatrixEngine.
-
-        Replays a request as the given identity_id (None = anonymous / no auth) and
-        returns the ResponseData. `request_node` may be a CapturedRequest or a dict
-        with a "request" key holding one. When a real session for identity_id has
-        been pre-loaded (see identity_bridge), live credentials are injected;
-        otherwise the request is sent as-is / anonymously.
-        """
         req = request_node.get("request") if isinstance(request_node, dict) else request_node
         if req is None:
             return None
@@ -94,14 +81,6 @@ class ReplayEngine:
             return None
 
     def replay_with_modifications(self, request: CapturedRequest, identity: Identity, modifications: Dict[str, Any]) -> CapturedRequest:
-        """
-        Applies modifications to the request before replaying it.
-        Modifications dict format:
-        {
-            "query": {"id": "2"},
-            "body": {"name": "Bob"}
-        }
-        """
         req_copy = copy.deepcopy(request)
         
         # Modify query params
@@ -129,15 +108,9 @@ class ReplayEngine:
         return self.replay_request(req_copy, identity)
 
     def validate_response_schema(self, response: ResponseData, expected_status: int) -> bool:
-        """
-        Validates if the response matches expected status structure.
-        """
         return response.status_code == expected_status
 
     def get_response_diff(self, response1: ResponseData, response2: ResponseData) -> Dict[str, Any]:
-        """
-        Calculates diff between two responses.
-        """
         return {
             "status_code_changed": response1.status_code != response2.status_code,
             "status_1": response1.status_code,

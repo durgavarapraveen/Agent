@@ -1,10 +1,6 @@
 from typing import List
 
 class CapabilityMapper:
-    """
-    Maps high-level penetration testing capabilities to 
-    an ordered fallback list of specific CLI tools.
-    """
     def __init__(self):
         self.mapping = {
             "port_scanning": ["masscan", "nmap"],

@@ -1,15 +1,3 @@
-"""P2.7 — track and clean up resources the scan itself created.
-
-The agent creates target state during testing (users, feedback, complaints,
-orders). This ledger records each resource the scan created — parsed from a
-2xx POST/PUT response — and cleans them up at scan completion. It ONLY tracks
-and removes resources the current scan created (never pre-existing target data),
-and every deletion is best-effort and reported.
-
-Generic by design (no target-specific assumptions): a created id is taken from
-the ``Location`` response header or a common id field in the JSON body, and the
-teardown is a REST ``DELETE`` of that resource URL.
-"""
 from __future__ import annotations
 
 import json
@@ -47,7 +35,7 @@ class Mutation:
     resource_url: str      # best-effort deletable URL
     created_at: str
     cleanup_strategy: str = "http_delete"
-    cleanup_status: str = "pending"   # pending|success|failed|skipped
+    cleanup_status: str = "pending"
 
 
 class MutationLedger:
@@ -57,7 +45,6 @@ class MutationLedger:
 
     @staticmethod
     def _extract_id(body_text: str, location: str):
-        """Return (resource_id, location_url) — either may be None."""
         if location:
             rid = location.rstrip("/").split("/")[-1]
             return (rid or None), location
@@ -127,9 +114,6 @@ class MutationLedger:
         return [asdict(m) for m in self._items]
 
     async def cleanup(self, auth_header: str = "", verify_ssl: bool = False) -> Dict[str, int]:
-        """Best-effort teardown: DELETE each scan-created resource. A 2xx or 404
-        (already gone) counts as cleaned. Reports failures; never raises.
-        """
         report = {"total": len(self._items), "cleaned": 0, "failed": 0, "skipped": 0}
         if not self._items:
             return report
@@ -166,7 +150,6 @@ class MutationLedger:
 
 
 def get_ledger(ctx) -> Optional[MutationLedger]:
-    """Fetch (or lazily attach) the per-scan ledger on the shared context."""
     if ctx is None:
         return None
     led = getattr(ctx, "mutation_ledger", None)

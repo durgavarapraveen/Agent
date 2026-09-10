@@ -1,12 +1,3 @@
-"""
-Tool Effectiveness Engine — HexStrike-Style Intelligence Layer.
-
-Provides tool effectiveness scoring, curated attack patterns, and
-Brain-prompt recommendations. The LLM Brain sees these as advisory
-intelligence — it can follow, adapt, or override them.
-
-Inspired by HexStrike AI's IntelligentDecisionEngine + AttackChain.
-"""
 
 import logging
 from typing import Any, Dict, List, Optional
@@ -215,11 +206,9 @@ PHASE_PATTERN_MAP: Dict[str, str] = {
 # ═══════════════════════════════════════════════
 
 class ToolEffectivenessEngine:
-    """Advisory intelligence layer for the LLM Brain."""
 
     @classmethod
     def get_tool_scores(cls, profile: TargetProfile) -> Dict[str, float]:
-        """Get effectiveness scores for all tools given the target type."""
         target_type = profile.target_type.value
         scores = dict(EFFECTIVENESS_MATRIX.get(target_type, {}))
 
@@ -247,7 +236,6 @@ class ToolEffectivenessEngine:
         top_k: int = 8,
         exclude: Optional[set] = None,
     ) -> List[Dict[str, Any]]:
-        """Return top-k tool recommendations ranked by effectiveness."""
         scores = cls.get_tool_scores(profile)
         exclude = exclude or set()
 
@@ -271,7 +259,6 @@ class ToolEffectivenessEngine:
 
     @classmethod
     def recommend_pattern(cls, profile: TargetProfile, phase: str = "recon") -> Optional[Dict[str, Any]]:
-        """Select the best attack pattern for the profile and phase."""
         phase_clean = phase.lower().strip()
 
         # Map phase to pattern
@@ -298,11 +285,6 @@ class ToolEffectivenessEngine:
 
     @classmethod
     def get_brain_recommendations(cls, profile: TargetProfile, phase: str = "recon") -> str:
-        """Format tool intelligence as a compact text block for the Brain prompt.
-
-        This is the key integration point — the output is injected directly into
-        the LLM's prompt so it can make informed tool choices.
-        """
         if profile is None:
             return ""
 
@@ -336,7 +318,6 @@ class ToolEffectivenessEngine:
 
     @classmethod
     def _get_parameter_hint(cls, tool: str, profile: TargetProfile) -> str:
-        """Short hint about optimal parameters for the Brain."""
         ext = _recommend_extensions_short(profile.technologies)
 
         hints = {
@@ -412,7 +393,6 @@ class ToolEffectivenessEngine:
 
 
 def _recommend_extensions_short(technologies: List[TechnologyStack]) -> str:
-    """Compact extension list for parameter hints."""
     exts = set()
     for tech in technologies:
         if tech in (TechnologyStack.PHP, TechnologyStack.WORDPRESS,

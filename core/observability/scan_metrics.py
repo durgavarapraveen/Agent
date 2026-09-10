@@ -1,11 +1,3 @@
-"""
-P3-4: scan efficiency metrics.
-
-Counts LLM calls, tool calls, dupes, WAF blocks, and derived ratios
-(unique_tool_call_ratio, duplicate_finding_ratio, validated_finding_ratio,
-LLM_calls_per_confirmed_finding). Exposed as a plain dict so the report
-builder can embed it directly.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

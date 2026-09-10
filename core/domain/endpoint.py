@@ -14,7 +14,6 @@ class DiscoveryState(str, Enum):
 
 
 class SchemaNode(DomainModel):
-    """Recursive model to define expected response shapes."""
     type_name: str = Field(...)
     properties: Dict[str, 'SchemaNode'] = Field(default_factory=dict)
     is_array: bool = Field(default=False)
@@ -54,13 +53,6 @@ class Endpoint(DomainModel):
         return [m.upper() for m in v]
 
     def normalized_key(self) -> str:
-        """Canonical dedup identity: scheme + host + port + methods + normalized path.
-
-        Host/scheme are lowercased and a trailing slash on a non-root path is
-        stripped, so ``https://H/a`` and ``https://h/a/`` collapse to one row
-        instead of inflating the duplicate tally (P0.1). This is the single
-        identity every store must dedup by.
-        """
         methods = ",".join(sorted(m.upper() for m in self.method_set))
         scheme = (self.scheme or "https").lower()
         host = (self.host or "").lower()
@@ -73,26 +65,11 @@ class Endpoint(DomainModel):
         return f"{scheme}://{host}:{port}/{methods}{path}"
 
     def canonical_id(self) -> str:
-        """Stable content-addressed endpoint id derived from ``normalized_key``.
-
-        Every feed path must use this instead of a random ``uuid4`` so an
-        endpoint has ONE identity across all stores — otherwise the same URL is
-        "new" in one store and "duplicate" in another and the transfer/dedup
-        counts disagree by construction (P0.1).
-        """
         import hashlib
         return "ep_" + hashlib.sha256(self.normalized_key().encode("utf-8")).hexdigest()[:24]
 
 
 def canonical_endpoint_key(method: str, url: str) -> str:
-    """The ONE endpoint identity used to dedup across every store (P0.1/P3).
-
-    Normalizes method + scheme/host case, default ports, trailing slash and
-    query-parameter order so ``https://H/a`` and ``https://h/a/?b=1&a=2`` collapse
-    to a single row. Kept as a module-level function (leaf module, no imports of
-    memory/attack_surface) so SharedContextV2, EndpointInventoryV2 and any other
-    dict-keyed store share the same key instead of each rolling its own.
-    """
     try:
         from urllib.parse import urlsplit, parse_qsl, urlencode
         m = (method or "GET").upper()

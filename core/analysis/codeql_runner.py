@@ -1,17 +1,3 @@
-"""CodeQL runner + LLM code review loop (Phase 3.4 + 3.5).
-
-CodeQL provides *dataflow* analysis. Where semgrep is single-file
-pattern-matching, CodeQL follows values across functions and modules — the
-difference between "this pattern looks unsafe" and "this input reaches this
-sink". Both are used together: semgrep for broad coverage, CodeQL for the
-few files that semgrep flagged as high-risk.
-
-Phase 3.5 (LLM code review) closes the loop: for each finding that the
-static tools produced, hand the offending function to the LLM planner as
-CONTEXT and ask it to design an HTTP-level exploit. The planner is the
-same one that drives the AgenticExecutor, so the discovered exploit lands
-in the same finding pipeline as everything else.
-"""
 from __future__ import annotations
 
 import json
@@ -41,7 +27,6 @@ def _codeql_bin() -> str:
 
 
 def _detect_language(tree: Path) -> Optional[str]:
-    """Cheap heuristic: what's the majority language in this tree?"""
     counts: Dict[str, int] = {}
     for f in tree.rglob("*"):
         if not f.is_file():
@@ -68,8 +53,6 @@ def _detect_language(tree: Path) -> Optional[str]:
 def run_codeql(tree: Path,
                language: Optional[str] = None,
                query_suite: str = "security-and-quality") -> List[Dict[str, Any]]:
-    """Build a CodeQL DB for `tree` and run `<lang>-security-and-quality.qls`.
-    Returns normalised findings. If CodeQL isn't installed, returns []."""
     if not tree or not tree.exists():
         return []
     if not _codeql_available():
@@ -139,9 +122,6 @@ def _sarif_to_findings(sarif: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 async def llm_review_finding(finding: Dict[str, Any],
                              tree: Path) -> Optional[Dict[str, Any]]:
-    """Feed the offending source snippet to the LLM planner and ask for
-    a concrete HTTP-level exploit. Returns the LLM's structured proposal
-    or None if the LLM harness is unavailable."""
     try:
         from agents.llm_harness_adapter import get_llm
         llm = get_llm()

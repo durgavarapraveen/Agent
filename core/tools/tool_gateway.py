@@ -8,17 +8,6 @@ from core.security.resource_limiter import ResourceLimiter
 logger = logging.getLogger(__name__)
 
 class ToolGateway:
-    """
-    Universal tool access point (both A and B paths feed here).
-    
-    Responsibilities:
-    1. Authorization (can user run this tool on this target?)
-    2. Scope validation (is target in authorized scope?)
-    3. Caching (avoid re-running identical tool calls)
-    4. Audit logging (who ran what, when, result)
-    5. Resource limiting (CPU, memory, network)
-    6. Error recovery (call fallback tools)
-    """
     
     def __init__(self, tool_registry, cache_db, audit_logger):
         self.registry = tool_registry
@@ -35,19 +24,6 @@ class ToolGateway:
     
     async def execute(self, invocation: ToolInvocation, 
                      auth_context: AuthContext) -> ToolResult:
-        """
-        Main entry point (used by both Approach A and B).
-        
-        Flow:
-        1. Validate auth & scope
-        2. Check cache
-        3. Check resources
-        4. Execute tool
-        5. Normalize result
-        6. Update cache
-        7. Audit log
-        8. Handle errors & fallbacks
-        """
         
         # STEP 0 (P0-1): Unified PolicyEngine gate — single authority for all
         # authorization decisions. Replaces the direct ActionGate call and adds
@@ -331,7 +307,6 @@ class ToolGateway:
     
     async def _authorize(self, invocation: ToolInvocation, 
                         auth_context: Optional[AuthContext]) -> bool:
-        """Check: user can run this tool on this target"""
         if auth_context is None:
             from core.security.authorization import AuthContext
             allowed_tools = list(self.registry.tools.keys()) if hasattr(self.registry, 'tools') else []
@@ -355,15 +330,11 @@ class ToolGateway:
     
     async def _execute_tool(self, invocation: ToolInvocation,
                            auth_context: AuthContext) -> ToolResult:
-        """Route to ToolRouter (next layer)"""
         return await self.router.route_and_execute(invocation, auth_context)
     
     async def _handle_timeout(self, invocation: ToolInvocation,
                              auth_context: AuthContext,
                              timeout_seconds: int = 0) -> ToolResult:
-        """Handle tool execution timeout. Prefers the actual configured
-        timeout in the error message — previously this hardcoded "300s"
-        regardless of the real cap."""
         from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus, ErrorInfo, ErrorType
         from core.common.error_translator import ErrorTranslator
 
@@ -387,7 +358,6 @@ class ToolGateway:
     
     async def _handle_error(self, invocation: ToolInvocation, 
                            auth_context: AuthContext, error: Exception) -> ToolResult:
-        """Try fallback tool"""
         tool_id = invocation.tool_id or invocation.operation or "unknown"
         error_msg = str(error)
         
@@ -446,13 +416,6 @@ class ToolGateway:
     
     async def _normalize_result(self, result: ToolResult,
                                invocation: ToolInvocation) -> ToolResult:
-        """Reconcile status vs exit_code (P0-1) then hand off untouched.
-
-        Root fix for the `rc=2 ... TOOL_OK` incident: even if the executor
-        reports SUCCESS, a non-zero exit code must downgrade the status
-        to PARTIAL (useful output) or FAILED (no trustworthy output).
-        Timeout/blocked flags always win.
-        """
         try:
             from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus
             ec = getattr(result, "exit_code", None)
@@ -481,11 +444,6 @@ class ToolGateway:
         return result
     
     def _stamp_cached(self, result):
-        """P0.4: mark a returned cache hit as CACHED so it is not recorded as a
-        fresh SUCCESS. A cached success becomes CACHED (still non-failing); a
-        cached non-success keeps its status and only gains a cache_hit flag.
-        The original status is preserved in metadata for audit.
-        """
         try:
             from core.common.schemas import ToolExecutionStatus
             _st = getattr(result, "status", "")
@@ -505,7 +463,6 @@ class ToolGateway:
         return result
 
     def _make_cache_key(self, invocation: ToolInvocation) -> str:
-        """Hash: operation + tool_id + target + params = cache key"""
         import hashlib
         import json
         
@@ -513,7 +470,6 @@ class ToolGateway:
         return hashlib.md5(key.encode()).hexdigest()
 
     def _is_tool_available(self, tool_id: str) -> bool:
-        """Pre-flight check to verify tool is available."""
         if not tool_id:
             return True
         tool_def = self.registry.get(tool_id)

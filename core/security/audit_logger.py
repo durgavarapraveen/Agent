@@ -1,9 +1,3 @@
-"""
-Phase 6 Module 6.2: Immutable Audit Logger (core/audit_logger.py)
-
-Tamper-evident, SHA-256 hash-chained audit logging system with forensic querying,
-integrity verification, and GDPR-compliant anonymization.
-"""
 
 import hashlib
 import json
@@ -38,7 +32,6 @@ MASKING_PATTERNS = {
 
 
 def mask_sensitive_pii(text: str) -> str:
-    """Mask PII (emails, IPs, credit cards) in log outputs."""
     if not text:
         return ""
     s = str(text)
@@ -78,7 +71,6 @@ def mask_sensitive_pii(text: str) -> str:
 
 
 class AuditLogger:
-    """Tamper-evident SHA-256 hash-chained audit logger."""
 
     def __init__(self, log_path: str = "data/audit.log"):
         self.log_path = Path(log_path)
@@ -87,13 +79,11 @@ class AuditLogger:
             self.log_path.touch()
 
     def _calculate_hash(self, previous_hash: str, entry_body: Dict[str, Any]) -> str:
-        """Compute SHA-256 hash: sha256(previous_hash + json_body + salt)."""
         body_json = json.dumps(entry_body, sort_keys=True)
         raw_str = f"{previous_hash}{body_json}{AUDIT_SALT}"
         return hashlib.sha256(raw_str.encode("utf-8")).hexdigest()
 
     def get_last_entry(self) -> Optional[Dict[str, Any]]:
-        """Read the last line from the audit log."""
         if not self.log_path.exists() or self.log_path.stat().st_size == 0:
             return None
 
@@ -107,7 +97,6 @@ class AuditLogger:
             return None
 
     def log_cache_hit(self, cache_key: str, invocation: Any) -> None:
-        """Log when a tool execution was served from cache"""
         self.log_event(
             action="CACHE_HIT",
             target=getattr(invocation, 'target', 'unknown'),
@@ -118,13 +107,11 @@ class AuditLogger:
         )
 
     def log_denial(self, invocation: Any, auth_context: Any):
-        """Log an authorization denial."""
         target = getattr(invocation, 'target', 'unknown')
         tool = getattr(invocation, 'tool_id', getattr(invocation, 'operation', 'unknown'))
         self.log_event("DENY_TOOL", target, f"Denied tool {tool}")
 
     def log_tool_execution(self, invocation: Any, result: Any, auth_context: Any) -> None:
-        """Log a completed tool execution."""
         tool = getattr(invocation, 'tool_id', getattr(invocation, 'operation', 'unknown'))
         target = getattr(invocation, 'target', 'unknown')
         success = getattr(result, 'success', False)
@@ -139,9 +126,6 @@ class AuditLogger:
         )
 
     def log_event(self, action: str, target: str, details: str, user: str = "system@antigravity") -> Dict[str, Any]:
-        """
-        Append a new tamper-evident hash-chained event to audit.log.
-        """
         last_entry = self.get_last_entry()
         if last_entry:
             last_id = last_entry.get("entry_id", 0)
@@ -161,13 +145,23 @@ class AuditLogger:
         except Exception as e:
             raise SystemError(f"Policy enforcement failed: {e}") from e
 
+        # Inject correlation context for end-to-end experiment reconstruction
+        try:
+            from core.observability.correlation import get_context
+            corr_ctx = get_context()
+        except ImportError:
+            corr_ctx = {}
+
         entry_body = {
             "entry_id": entry_id,
             "timestamp": timestamp,
             "user": user,
             "action": action,
             "target": target,
-            "details": details
+            "details": details,
+            "correlation_id": corr_ctx.get("correlation_id", ""),
+            "scan_id": corr_ctx.get("scan_id", ""),
+            "experiment_id": corr_ctx.get("experiment_id", ""),
         }
 
         current_hash = self._calculate_hash(prev_hash, entry_body)
@@ -189,14 +183,6 @@ class AuditLogger:
         return full_entry
 
     def _maybe_rotate(self) -> None:
-        """Rotate `audit.jsonl` when it exceeds `AUDIT_LOG_MAX_BYTES`.
-
-        Renames the file to `audit.jsonl.<epoch>`, then prunes rotated files
-        beyond `AUDIT_LOG_MAX_FILES`. The hash chain continues in the new
-        file — `get_last_entry()` reads only the current file, so the first
-        entry after rotation genesis-anchors to the LAST-written prev-hash,
-        which is preserved by the on-disk file being renamed intact.
-        """
         try:
             p = Path(self.log_path)
             if not p.exists() or p.stat().st_size < AUDIT_LOG_MAX_BYTES:
@@ -220,11 +206,6 @@ class AuditLogger:
             logger.warning("Audit log rotation error: %s", e)
 
     def verify_audit_integrity(self) -> Tuple[bool, Optional[int]]:
-        """
-        Iterate through audit.log, recalculate hash chain, and verify current_hash matches.
-        If tampered, returns (False, tampered_entry_id).
-        If valid, returns (True, None).
-        """
         if not self.log_path.exists() or self.log_path.stat().st_size == 0:
             return True, None
 
@@ -274,12 +255,6 @@ class AuditLogger:
         action: Optional[str] = None,
         mask_pii: bool = True
     ) -> List[Dict[str, Any]]:
-        """
-        Forensic query interface:
-          - host query: target_ip="10.0.0.1"
-          - export query: action="REPORT_EXPORT" or user="alice"
-          - tool query: tool="nuclei"
-        """
         if not self.log_path.exists() or self.log_path.stat().st_size == 0:
             return []
 
@@ -315,11 +290,6 @@ class AuditLogger:
         return matched
 
     def anonymize_audit_entries(self, target_ip: str) -> bool:
-        """
-        GDPR Right-to-be-Forgotten:
-        Replace target and details for matching target_ip with '[REDACTED]',
-        re-calculate current_hash for affected and all subsequent entries to maintain chain integrity.
-        """
         if not self.log_path.exists() or self.log_path.stat().st_size == 0:
             return False
 

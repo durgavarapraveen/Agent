@@ -1,15 +1,3 @@
-"""
-Monitoring & Metrics (Phase 4, Module 3)
-
-Tracks the engagement in real time:
-  - Success rates (agents, exploits, chains)
-  - Timing / performance metrics
-  - Failure alerts
-  - A live self-refreshing HTML dashboard + JSON snapshot
-
-Time is injected via a `clock` callable (defaults to time.time) so the module
-stays testable and deterministic.
-"""
 
 import json
 import logging
@@ -23,7 +11,6 @@ logger = logging.getLogger(__name__)
 
 
 class MetricsTracker:
-    """Collects counters/timers and renders a live dashboard."""
 
     def __init__(self, target: str = "", out_dir: str = None,  # noqa: ARG002 — kept for API compat
                  clock: Callable[[], float] = time.time,

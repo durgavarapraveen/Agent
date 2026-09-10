@@ -1,7 +1,3 @@
-"""
-Result normalizers - Convert raw tool output to structured observations.
-Preserve information during normalization.
-"""
 
 import logging
 import re
@@ -12,13 +8,11 @@ logger = logging.getLogger(__name__)
 
 
 class ResultNormalizer:
-    """Base normalizer - preserve raw output as evidence"""
     
     def __init__(self, tool_result: ToolResult):
         self.result = tool_result
     
     def create_evidence(self) -> Evidence:
-        """Create evidence object from raw output"""
         return Evidence(
             source=self.result.tool,
             raw_output=self.result.stdout,
@@ -29,15 +23,12 @@ class ResultNormalizer:
         )
     
     def normalize(self) -> List[KnowledgeItem]:
-        """Override in subclass"""
         return []
 
 
 class DNSResultNormalizer(ResultNormalizer):
-    """Normalize DNS lookup results"""
     
     def normalize(self) -> List[KnowledgeItem]:
-        """Extract IPs from DNS output"""
         if self.result.status != "success":
             return []
         
@@ -76,10 +67,8 @@ class DNSResultNormalizer(ResultNormalizer):
 
 
 class NmapResultNormalizer(ResultNormalizer):
-    """Normalize nmap port scanning results"""
     
     def normalize(self) -> List[KnowledgeItem]:
-        """Extract open ports and services"""
         if self.result.status != "success":
             return []
         
@@ -113,10 +102,8 @@ class NmapResultNormalizer(ResultNormalizer):
 
 
 class HTTPResultNormalizer(ResultNormalizer):
-    """Normalize HTTP response analysis"""
     
     def normalize(self) -> List[KnowledgeItem]:
-        """Extract HTTP information"""
         if self.result.status != "success":
             return []
         
@@ -159,10 +146,8 @@ class HTTPResultNormalizer(ResultNormalizer):
 
 
 class TLSResultNormalizer(ResultNormalizer):
-    """Normalize SSL/TLS certificate and vulnerability results"""
     
     def normalize(self) -> List[KnowledgeItem]:
-        """Extract TLS information"""
         if self.result.status != "success":
             return []
         
@@ -201,10 +186,8 @@ class TLSResultNormalizer(ResultNormalizer):
 
 
 class TechnologyResultNormalizer(ResultNormalizer):
-    """Normalize technology fingerprinting results (whatweb, etc)"""
     
     def normalize(self) -> List[KnowledgeItem]:
-        """Extract identified technologies"""
         if self.result.status != "success":
             return []
         
@@ -241,7 +224,6 @@ class TechnologyResultNormalizer(ResultNormalizer):
 
 
 class NormalizerFactory:
-    """Factory to select appropriate normalizer"""
     
     NORMALIZERS = {
         "dns_lookup_python": DNSResultNormalizer,
@@ -257,7 +239,6 @@ class NormalizerFactory:
     
     @classmethod
     def get_normalizer(cls, tool_result: ToolResult) -> ResultNormalizer:
-        """Get appropriate normalizer for tool"""
         normalizer_class = cls.NORMALIZERS.get(
             tool_result.tool,
             ResultNormalizer  # Default: preserve only evidence
@@ -266,7 +247,6 @@ class NormalizerFactory:
     
     @classmethod
     def normalize_result(cls, tool_result: ToolResult) -> tuple[Evidence, List[KnowledgeItem]]:
-        """Normalize tool result to evidence + structured knowledge"""
         normalizer = cls.get_normalizer(tool_result)
         evidence = normalizer.create_evidence()
         knowledge = normalizer.normalize()

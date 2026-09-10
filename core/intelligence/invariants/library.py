@@ -1,12 +1,3 @@
-"""
-Built-in security invariants (spec P1.4 / Point F / Point K / Point R).
-
-A security invariant is an assumption that should hold for *every* response
-(or every response of a class). Each check inspects a response snapshot and
-returns a violation detail string, or ``None`` when the invariant holds. The
-patterns are tuned for low false positives — they match unambiguous leakage
-(stack traces, database errors, absolute server paths) rather than guessing.
-"""
 from __future__ import annotations
 
 import re
@@ -92,10 +83,6 @@ def _html_success_has_content_type_options(snap: ResponseSnapshot) -> Optional[s
 
 
 def _html_success_has_frame_protection(snap: ResponseSnapshot) -> Optional[str]:
-    """Point AA: an HTML page a browser will render must declare a framing
-    policy — either ``X-Frame-Options`` or a CSP ``frame-ancestors`` directive —
-    or it is exposed to clickjacking. Only fires when *both* are absent, so a
-    site defending via either mechanism is not flagged."""
     if 200 <= snap.status < 300 and "html" in snap.content_type:
         stable = snap.stable_headers()
         xfo = stable.get("x-frame-options", "")
@@ -107,11 +94,6 @@ def _html_success_has_frame_protection(snap: ResponseSnapshot) -> Optional[str]:
 
 
 def _https_response_has_hsts(snap: ResponseSnapshot) -> Optional[str]:
-    """Point AA: an HTTPS origin should pin the transport with
-    ``Strict-Transport-Security``. HSTS is meaningless over plain HTTP, so this
-    only asserts when the snapshot label shows an https:// origin (the oracle
-    executor labels each snapshot with its request URL); it stays silent — never
-    a false positive — when the scheme cannot be established."""
     if snap.label.startswith("https://") and 200 <= snap.status < 400:
         if "strict-transport-security" not in snap.stable_headers():
             return "HTTPS response missing Strict-Transport-Security (HSTS) header"

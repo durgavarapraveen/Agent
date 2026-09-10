@@ -1,12 +1,3 @@
-"""
-Security-invariant engine (spec P1.4 / Point F / Point K).
-
-Runs the invariant library over collected response snapshots and reports
-violations. This is an *oracle* layer: it consumes responses already gathered
-by executors/recon (no new traffic of its own) and turns broken assumptions
-into evidence-backed observations. It never declares a confirmed vulnerability;
-it hands anomalies to the hypothesis/adjudication pipeline.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -62,9 +53,6 @@ class InvariantEngine:
     @staticmethod
     def check_auth_pair(success: ResponseSnapshot,
                         failure: ResponseSnapshot) -> Optional[InvariantViolation]:
-        """Point K/R: a *failed* auth must not establish a session that a
-        *successful* auth establishes. Violated when the failure response sets a
-        session cookie of the same name the success response sets."""
         def session_cookies(snap: ResponseSnapshot) -> set:
             names = set()
             for k, v in snap.headers.items():

@@ -99,7 +99,6 @@ class CoverageMatrix:
         return nd
 
     def promote_discovered(self, endpoint_id: str, test_id: str) -> None:
-        """When recon discovers a surface, promote NOT_DISCOVERED to NOT_TESTED."""
         ep = self._matrix.get(endpoint_id, {})
         cell = ep.get(test_id)
         if cell and cell["state"] == CoverageState.NOT_DISCOVERED:
@@ -114,7 +113,6 @@ class CoverageMatrix:
         return blocked
 
     def state_counts(self) -> Dict[str, int]:
-        """Raw per-state cell counts across the whole matrix."""
         counts: Dict[str, int] = {}
         for _ep, tests in self._matrix.items():
             for _t, cell in tests.items():
@@ -123,13 +121,6 @@ class CoverageMatrix:
         return counts
 
     def coverage_summary(self) -> Dict[str, Any]:
-        """P1-9: report coverage from EXECUTED cells, not theoretical applicability.
-
-        `applicable` excludes NOT_APPLICABLE / NOT_DISCOVERED. `executed` counts
-        cells that actually reached a terminal or run state (CONFIRMED / REJECTED
-        / INCONCLUSIVE / BLOCKED / RUNNING). `pct_executed` is executed/applicable
-        — the honest number to report, versus the raw applicable headline.
-        """
         counts = self.state_counts()
         total = sum(counts.values())
         na = counts.get(CoverageState.NOT_APPLICABLE.value, 0)

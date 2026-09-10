@@ -8,7 +8,6 @@ from typing import Dict, Optional
 logger = logging.getLogger(__name__)
 
 class Checkpointer:
-    """Handles saving and restoring the autonomous pentest state."""
 
     def __init__(self, checkpoints_dir: str = None):
         from core.common.reports_config import reports_enabled, reports_dir
@@ -19,7 +18,6 @@ class Checkpointer:
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
     def save_checkpoint(self, brain) -> str:
-        """Saves current phase and SharedContext state to JSON. current_phase = the NEXT phase to run on resume."""
         # Opt-out: set CHECKPOINT_TO_FILE=false to skip file checkpoints (resume via
         # --resume depends on them, so leaving them on is recommended).
         if os.getenv("CHECKPOINT_TO_FILE", "true").lower() in ("false", "0", "no", "off"):
@@ -81,7 +79,6 @@ class Checkpointer:
             return ""
 
     def get_latest_checkpoint(self, target: str) -> Optional[str]:
-        """Returns the filepath of the latest checkpoint for a given target, or None."""
         target_slug = target.replace('://', '_').replace('/', '_').replace(':', '_')
         latest_path = self.checkpoints_dir / f"latest_{target_slug}.json"
         if not latest_path.exists():
@@ -97,7 +94,6 @@ class Checkpointer:
         return None
 
     def load_checkpoint(self, filepath: str) -> Dict:
-        """Loads a checkpoint JSON dictionary from a file."""
         try:
             with open(filepath, 'r') as f:
                 state = json.load(f)
@@ -108,7 +104,6 @@ class Checkpointer:
             return {}
 
     def apply_checkpoint(self, brain, state: Dict):
-        """Rehydrates a CentralBrain instance with a loaded state dictionary."""
         try:
             phase_val = state.get("current_phase")
             if phase_val:

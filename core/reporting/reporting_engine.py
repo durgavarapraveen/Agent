@@ -1,12 +1,3 @@
-"""
-Phase 5 Master Orchestrator: Reporting Engine (core/reporting_engine.py)
-
-Orchestrates the entire Phase 5 pipeline:
-1. Aggregate: Load validated findings from Phase 4 database.
-2. Analyze: Run RiskPrioritizer, RemediationEngine, and TrendAnalyzer.
-3. Render: Call CustomReportBuilder for multi-format rendering (PDF, HTML, JSON, MD).
-4. Export: Write report bundle to reports/{scan_id}/ and generate report_summary.txt.
-"""
 
 import logging
 from datetime import datetime
@@ -22,7 +13,6 @@ logger = logging.getLogger(__name__)
 
 
 class ReportingEngine:
-    """Master Phase 5 Reporting Engine."""
 
     def __init__(self, output_dir: str = None):
         from core.common.reports_config import reports_enabled, reports_dir
@@ -45,10 +35,6 @@ class ReportingEngine:
         industry: Optional[str] = None,
         mask_sensitive: bool = True
     ) -> Dict[str, str]:
-        """
-        Execute full Phase 5 pipeline:
-        Aggregate -> Analyze -> Render -> Export
-        """
         if not scan_id:
             scan_id = datetime.now().strftime("scan_%Y%m%d_%H%M%S")
 

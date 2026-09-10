@@ -1,30 +1,3 @@
-"""P0.3 — Isolated Execution Sandbox.
-
-Replaces in-process exec()/eval() with proper process-level isolation.
-Generated code NEVER runs inside the main application process.
-
-Architecture:
-    Agent
-     |
-    ExecutionController
-     |
-    SandboxWorker
-     |
-    Ephemeral isolated container / restricted subprocess
-
-Enforcement:
-    - CPU limit
-    - Memory limit
-    - PID limit
-    - Wall-clock timeout
-    - Filesystem isolation (read-only root, ephemeral workdir)
-    - Restricted environment (no secrets, no host vars)
-    - Restricted network (egress firewall)
-    - No Docker socket
-    - No host filesystem
-    - No host process access
-    - No privileged mode
-"""
 from __future__ import annotations
 
 import asyncio
@@ -45,7 +18,6 @@ logger = logging.getLogger(__name__)
 
 class SandboxMode(str, Enum):
     DOCKER = "docker"
-    SUBPROCESS = "subprocess"
     BLOCKED = "blocked"
 
 
@@ -98,7 +70,6 @@ _SCRUBBED_ENV_KEYS = frozenset({
 
 @dataclass(frozen=True)
 class SandboxConfig:
-    """Resource limits for sandbox execution."""
     memory_mb: int = 256
     cpu_count: float = 1.0
     pid_limit: int = 128
@@ -113,7 +84,6 @@ class SandboxConfig:
 
 @dataclass
 class SandboxResult:
-    """Result of sandboxed code execution."""
     executed: bool = False
     mode: str = "blocked"
     exit_code: Optional[int] = None
@@ -141,11 +111,6 @@ class SandboxResult:
 
 
 class ExecutionController:
-    """Routes all code execution through isolated sandboxes.
-
-    This is the ONLY authorized path for running generated/dynamic code.
-    exec()/eval() in the main process is forbidden for generated code.
-    """
 
     _instance: Optional["ExecutionController"] = None
     _lock = threading.RLock()
@@ -192,14 +157,12 @@ class ExecutionController:
             return self._force_mode
         if self._detect_docker():
             return SandboxMode.DOCKER
-        return SandboxMode.SUBPROCESS
+        return SandboxMode.BLOCKED
 
     # ── Static analysis pre-check ────────────────────────────────────────
 
     @staticmethod
     def lint_code(code: str) -> Optional[str]:
-        """Pre-execution static check. Returns reason if blocked, else None.
-        This is defense-in-depth, NOT the security boundary."""
         import re
         for pattern in _DESTRUCTIVE_PATTERNS_RE:
             if re.search(pattern, code, re.IGNORECASE):
@@ -210,7 +173,6 @@ class ExecutionController:
 
     def _authorize(self, language: str, code_preview: str,
                    target: str = "") -> Optional[str]:
-        """Returns blocking reason or None if authorized."""
         try:
             from core.security.policy_engine import get_policy_engine
             engine = get_policy_engine()
@@ -233,7 +195,6 @@ class ExecutionController:
                       target: str = "", env: Optional[Dict[str, str]] = None,
                       config: Optional[SandboxConfig] = None,
                       input_data: str = "") -> SandboxResult:
-        """Execute code in an isolated sandbox. Returns SandboxResult."""
         cfg = config or self._config
         result = SandboxResult()
 
@@ -262,6 +223,10 @@ class ExecutionController:
         # Select execution mode
         mode = self._select_mode()
         result.mode = mode.value
+        
+        if mode == SandboxMode.BLOCKED:
+            result.blocked_reason = "Docker isolation unavailable"
+            return result
 
         with self._count_lock:
             self._execution_count += 1
@@ -271,18 +236,12 @@ class ExecutionController:
             if mode == SandboxMode.DOCKER:
                 await self._run_docker(code, language, cfg, safe_env,
                                        workdir, result, input_data)
-            elif mode == SandboxMode.SUBPROCESS:
-                await self._run_subprocess(code, language, cfg, safe_env,
-                                           workdir, result, input_data)
-            else:
-                result.blocked_reason = "no execution mode available"
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
 
         return result
 
     def _build_safe_env(self, extra: Optional[Dict[str, str]]) -> Dict[str, str]:
-        """Build a minimal, scrubbed environment for the sandbox."""
         env: Dict[str, str] = {}
         if extra:
             for k, v in extra.items():
@@ -368,73 +327,6 @@ class ExecutionController:
                 proc.kill()
             except Exception:
                 pass
-
-    # ── Subprocess execution (fallback) ──────────────────────────────────
-
-    async def _run_subprocess(self, code: str, language: ExecutionLanguage,
-                              cfg: SandboxConfig, env: Dict[str, str],
-                              workdir: str, result: SandboxResult,
-                              input_data: str = "") -> None:
-        ext = {"python": "py", "bash": "sh", "javascript": "js"}[language.value]
-        script_name = f"run_{result.execution_id}.{ext}"
-        script_path = os.path.join(workdir, script_name)
-
-        with open(script_path, "w", encoding="utf-8") as f:
-            f.write(code)
-
-        runner = {"python": "python", "bash": "bash",
-                  "javascript": "node"}[language.value]
-
-        cmd: List[str] = []
-
-        # On Linux, use resource limits via ulimit wrapper
-        is_linux = platform.system() == "Linux"
-        if is_linux:
-            mem_kb = cfg.memory_mb * 1024
-            cmd = [
-                "bash", "-c",
-                f"ulimit -v {mem_kb} -u {cfg.pid_limit} -t {cfg.timeout_seconds}; "
-                f"exec {runner} {script_path}"
-            ]
-        else:
-            cmd = [runner, script_path]
-
-        # Minimal env — no inheritance from parent
-        safe_env = dict(env)
-        if is_linux:
-            safe_env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
-        else:
-            safe_env["PATH"] = os.environ.get("PATH", "")
-            safe_env["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", "")
-
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                stdin=asyncio.subprocess.PIPE if input_data else asyncio.subprocess.DEVNULL,
-                cwd=workdir,
-                env=safe_env,
-            )
-            stdin_bytes = input_data.encode("utf-8") if input_data else None
-            out, err = await asyncio.wait_for(
-                proc.communicate(input=stdin_bytes),
-                timeout=cfg.timeout_seconds,
-            )
-            result.executed = True
-            result.exit_code = proc.returncode
-            result.stdout = (out or b"")[:cfg.max_output_bytes].decode("utf-8", "ignore")
-            result.stderr = (err or b"")[:cfg.max_output_bytes].decode("utf-8", "ignore")
-        except asyncio.TimeoutError:
-            result.executed = True
-            result.timed_out = True
-            result.exit_code = 124
-            result.stderr = "sandbox timeout"
-            try:
-                proc.kill()
-            except Exception:
-                pass
-
 
 # ── Module-level accessor ────────────────────────────────────────────────
 

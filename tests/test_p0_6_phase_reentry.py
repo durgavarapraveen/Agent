@@ -1,8 +1,3 @@
-"""P0.6 — controlled phase re-entry on dependency events, bounded by budget.
-
-Proves normal completion does NOT re-enter, but a real new-discovery event does,
-and only up to the budget.
-"""
 import pytest
 
 from core.orchestration.phase_reentry import (

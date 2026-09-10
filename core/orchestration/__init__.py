@@ -1,6 +1,3 @@
-"""
-Core Orchestration Subpackage
-"""
 
 import sys
 import importlib

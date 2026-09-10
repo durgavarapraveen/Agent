@@ -1,19 +1,3 @@
-"""SAST unlock (Phase 3.1 + 3.2 + 3.3).
-
-Three responsibilities:
-  1. When the RECON phase discovers an exposed `.git/config` (or `/.svn/`,
-     `/.hg/`, `.env`, `composer.json`, `package.json` + `node_modules/` etc.),
-     clone / extract the source into a per-scan sandbox on our host.
-  2. Fetch webpack `.js.map` sourcemaps and re-hydrate the original TS/JS
-     source tree into the same sandbox.
-  3. Run `semgrep --config auto` on the recovered tree and surface findings
-     as first-class vulnerabilities on the scan ctx.
-
-Every subprocess uses `shlex.quote` and a `--timeout`. Every filesystem
-write goes into `SOURCE_EXTRACT_DIR/<scan_id>/` — the scan_id is sanitised.
-Failure is soft: missing git / missing semgrep / broken remote → log and
-return an empty tree. This module never crashes a scan.
-"""
 from __future__ import annotations
 
 import json
@@ -58,16 +42,6 @@ def _run(cmd: List[str], cwd: Optional[Path] = None,
 # ── Phase 3.1: git / svn / mercurial extraction ────────────────────────
 
 def extract_exposed_git(base_url: str, scan_id: str) -> Optional[Path]:
-    """When `.git/config` is exposed, try three techniques in order:
-
-      1. Direct `git clone` against the raw HTTP endpoint (works if
-         `SmartGit` is active).
-      2. `git-dumper` if installed (walks HTTP listing).
-      3. Fallback: manual walk of `.git/refs/heads/*`, `.git/packed-refs`,
-         and `.git/objects/*` — enough to reconstruct HEAD.
-
-    Returns the extracted tree path or None on total failure.
-    """
     from core.security.egress_firewall import assert_egress_allowed, EgressBlocked
     try:
         assert_egress_allowed(base_url, purpose="source.git")
@@ -125,11 +99,6 @@ def extract_exposed_git(base_url: str, scan_id: str) -> Optional[Path]:
 # ── Phase 3.2: sourcemap rehydration ───────────────────────────────────
 
 def rehydrate_sourcemap(bundle_url: str, scan_id: str) -> Optional[Path]:
-    """Given the URL of a `.js` bundle, try to fetch its adjacent `.map`
-    sourcemap and reconstruct the original files under
-    `<scan_dir>/sourcemap/<host>/...`.
-
-    Returns the reconstructed tree path or None."""
     from core.security.egress_firewall import assert_egress_allowed, EgressBlocked
     try:
         assert_egress_allowed(bundle_url, purpose="source.sourcemap")
@@ -185,8 +154,6 @@ def rehydrate_sourcemap(bundle_url: str, scan_id: str) -> Optional[Path]:
 
 def run_semgrep(tree: Path, rules: str = "auto",
                 timeout: int = 300) -> List[Dict[str, Any]]:
-    """Run `semgrep --config <rules> --json` over `tree`. Returns a
-    normalized list of finding dicts (empty if semgrep is missing)."""
     if not tree or not tree.exists() or not shutil.which("semgrep"):
         return []
     r = _run(["semgrep", "--config", rules, "--json", "--quiet",

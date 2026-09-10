@@ -1,8 +1,3 @@
-"""
-Patch Management Intelligence Module (Phase 2 Module 2.4).
-Audits vendor patch availability, calculates days-since-release, checks workaround databases,
-and computes normalized patch urgency scores (0-100 scale).
-"""
 
 import csv
 import logging
@@ -14,7 +9,6 @@ logger = logging.getLogger(__name__)
 
 
 def parse_date_str(date_str: str) -> datetime:
-    """Parse date string into datetime object with fallbacks."""
     if not date_str:
         return datetime.now()
     for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
@@ -26,7 +20,6 @@ def parse_date_str(date_str: str) -> datetime:
 
 
 class PatchTracker:
-    """Patch status evaluator, workaround provider, and urgency scorer."""
 
     def __init__(self, patches_csv: str = "vendor_patches.csv", workarounds_csv: str = "workarounds.csv"):
         if not os.path.exists(patches_csv) and os.path.exists(os.path.join("data", patches_csv)):
@@ -37,10 +30,6 @@ class PatchTracker:
         self.workarounds_csv = workarounds_csv
 
     def get_patch_status(self, cve_id: str, running_version: str = "1.0.0", published_date_str: str = "") -> Dict[str, Any]:
-        """
-        Check vendor patch availability, compare running_version against fixed_version,
-        and calculate days_since_release.
-        """
         cve_clean = cve_id.strip().upper()
         patch_info = {
             "cve_id": cve_clean,
@@ -87,7 +76,6 @@ class PatchTracker:
         return patch_info
 
     def get_workaround(self, cve_id: str) -> str:
-        """Pull workaround suggestion from workarounds.csv for CVEs."""
         cve_clean = cve_id.strip().upper()
         if os.path.exists(self.workarounds_csv):
             try:
@@ -104,10 +92,6 @@ class PatchTracker:
         return "No known workaround - apply patch immediately."
 
     def compute_patch_urgency(self, cvss_base: float, days_since_patch: int, public_exploit_exists: bool) -> float:
-        """
-        Compute patch_urgency_score = (CVSS_base / 10) * 0.5 + (days_since_patch / 365) * 0.3 + (public_exploit_exists * 0.2).
-        Normalized to 0-100 scale.
-        """
         exploit_val = 1.0 if public_exploit_exists else 0.0
         days_factor = min(days_since_patch / 365.0, 1.0)
         cvss_factor = min(cvss_base / 10.0, 1.0)

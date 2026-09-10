@@ -1,9 +1,3 @@
-"""
-Phase 8 Module 8.3: Failure Recovery Engine (core/recovery_engine.py)
-
-AES-256-GCM encrypted state checkpointing, scan resumption skipping completed tasks,
-graceful degradation fallbacks (LLM, DB, tool missing), and audit trail logging.
-"""
 
 import json
 import logging
@@ -19,7 +13,6 @@ logger = logging.getLogger(__name__)
 
 
 class RecoveryEngine:
-    """Manages state checkpointing, scan resumption, and graceful component degradation."""
 
     def __init__(self, checkpoints_dir: str = "checkpoints", audit_log_path: str = "data/audit.log"):
         self.checkpoints_dir = Path(checkpoints_dir)
@@ -29,10 +22,6 @@ class RecoveryEngine:
         self._periodic_timer: Optional[threading.Timer] = None
 
     def save_checkpoint(self, scan_id: str, state: Dict[str, Any]) -> str:
-        """
-        Serialize scan state (completed modules, partial findings, current target, remaining tasks)
-        and save encrypted file checkpoints/scan_{scan_id}.enc.
-        """
         file_path = self.checkpoints_dir / f"scan_{scan_id}.enc"
         state_payload = {
             "scan_id": scan_id,
@@ -56,10 +45,6 @@ class RecoveryEngine:
         return str(file_path)
 
     def resume_from_checkpoint(self, scan_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Decrypt and load state for scan_id if checkpoint exists.
-        Returns state dict allowing runner to skip already completed tasks.
-        """
         file_path = self.checkpoints_dir / f"scan_{scan_id}.enc"
         if not file_path.exists():
             return None
@@ -81,9 +66,6 @@ class RecoveryEngine:
             return None
 
     def start_periodic_checkpoint_timer(self, scan_id: str, state_supplier: Callable[[], Dict[str, Any]], interval_sec: float = 300.0) -> threading.Timer:
-        """
-        Start daemonized background timer saving checkpoint state every N seconds (default 5 minutes).
-        """
         def _timer_loop():
             try:
                 st = state_supplier()
@@ -103,16 +85,11 @@ class RecoveryEngine:
         return timer
 
     def stop_periodic_checkpoint_timer(self):
-        """Stop periodic background checkpoint timer."""
         if self._periodic_timer:
             self._periodic_timer.cancel()
             self._periodic_timer = None
 
     def fallback_llm_decision(self, prompt_context: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Fallback decision tree when LLM service is unreachable.
-        Returns deterministic rule-based decisions.
-        """
         self.audit_logger.log_event(
             action="FALLBACK_ACTIVATED",
             target=str(prompt_context.get("target", "N/A")),
@@ -135,7 +112,6 @@ class RecoveryEngine:
         }
 
     def buffer_finding_in_memory(self, finding: Dict[str, Any]):
-        """Buffer finding in memory if database connection fails."""
         self.memory_finding_buffer.append(finding)
         self.audit_logger.log_event(
             action="DB_FALLBACK_BUFFERED",
@@ -144,7 +120,6 @@ class RecoveryEngine:
         )
 
     def flush_memory_buffer(self, db_save_func: Callable[[Dict[str, Any]], bool]) -> int:
-        """Flush in-memory findings back to database when connection is restored."""
         flushed_count = 0
         remaining = []
         for item in self.memory_finding_buffer:

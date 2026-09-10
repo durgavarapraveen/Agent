@@ -1,21 +1,3 @@
-"""Retired `kb_*` knowledge store — compatibility shim (P3-3).
-
-The `kb_*` schema was an early prototype that ran ALONGSIDE the canonical
-`scans / vulnerabilities / findings_v2 / recon_data / exploit_results /
-post_exploit_findings` tables and drifted from them (audit #153/#154). Every
-piece of data the old store held is now written through the canonical repos in
-`core/database/pg_store.py` (via `_write_live_results` and the persistence
-mixin), so the `kb_*` writes were pure, drifting duplication.
-
-This module is now a **no-op shim**: it keeps the historical method surface so
-existing callers keep working (and keep getting back the ids they expect), but
-it no longer creates or writes any `kb_*` table, and it no longer emits a
-deprecation warning on every run. Reads return empty — nothing in the codebase
-reads through this store any more (verified: all live call sites are writes).
-
-When the last import of this module is gone, delete the file and drop the
-`kb_*` tables.
-"""
 from __future__ import annotations
 
 import logging
@@ -30,7 +12,6 @@ def _mk(prefix: str, given: str = None) -> str:
 
 
 class KnowledgeStore:
-    """No-op shim over the retired kb_* schema. See module docstring."""
 
     _logged = False
 

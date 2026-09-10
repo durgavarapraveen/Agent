@@ -4,17 +4,12 @@ from typing import Any, List
 logger = logging.getLogger(__name__)
 
 class ToolUseExecutor:
-    """
-    When Claude generates tool_use blocks, this handles them.
-    Routes through same ToolInvocationEngine as DeepSeek does.
-    """
     
     def __init__(self, invocation_engine):
         self.invocation_engine = invocation_engine
     
     async def execute_claude_tool_call(self, tool_name: str, tool_input: dict, 
                                       session_id: str, auth_context: Any) -> dict:
-        """Claude called tool_use block → execute via invocation engine"""
         
         logger.info(f"Executing Claude tool_use for {tool_name}")
         
@@ -35,7 +30,6 @@ class ToolUseExecutor:
         }
     
     async def handle_claude_response(self, response: Any, auth_context: Any, session_id: str) -> List[dict]:
-        """Process Claude response, execute any tool_use blocks"""
         
         results = []
         

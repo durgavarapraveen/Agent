@@ -1,6 +1,3 @@
-"""
-Core Security Subpackage
-"""
 
 import sys
 import importlib

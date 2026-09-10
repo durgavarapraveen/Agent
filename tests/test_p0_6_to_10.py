@@ -1,5 +1,3 @@
-"""P0.6-P0.10 — Finding confirmation gate, evidence chain, reproduction,
-fail-open audit, and docker socket guard."""
 import pytest
 import time
 from unittest.mock import patch, MagicMock

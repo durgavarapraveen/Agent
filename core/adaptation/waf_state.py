@@ -1,11 +1,3 @@
-"""
-P1-1: WAF/rate-limit state machine.
-
-Detecting a block and sleeping longer is NOT strategy adaptation. This
-state machine escalates NORMAL -> CAUTIOUS -> LOW_RATE -> PASSIVE_ONLY
-as blocks accumulate and tells the orchestrator what class of tooling
-is allowed in the current mode.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -68,13 +60,11 @@ class TargetWafState:
 
 
 class WafStateMachine:
-    """Thread-safe per-target WAF mode tracker."""
 
     def __init__(self, block_thresholds=(1, 3, 5), recovery_successes: int = 10,
                  cooloff_seconds: int = 300):
         self._states: Dict[str, TargetWafState] = {}
         self._lock = Lock()
-        # (blocks_to_CAUTIOUS, blocks_to_LOW_RATE, blocks_to_PASSIVE)
         self.thresholds = block_thresholds
         self.recovery_successes = recovery_successes
         self.cooloff_seconds = cooloff_seconds

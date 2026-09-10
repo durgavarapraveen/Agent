@@ -1,20 +1,3 @@
-"""
-AuthSessionManager — real authenticated session for post-auth testing.
-
-Supported auth types (config AUTH_TYPE):
-  form    : POST username/password form fields to AUTH_LOGIN_URL, keep Set-Cookie.
-  json    : POST a JSON credential body to AUTH_LOGIN_URL, extract a token from the
-            JSON response at AUTH_TOKEN_JSON_PATH, send it as a header.
-  bearer  : use a static AUTH_TOKEN as `Authorization: Bearer <token>`.
-  cookie  : use a static AUTH_COOKIE string as the Cookie header.
-
-The manager exposes the live session as headers + cookies for injection into any
-scanner or probe, transparently re-authenticates on 401, and proactively refreshes
-before a known JWT expiry.
-
-Credentials are read from config/env only (AUTH_USERNAME / AUTH_PASSWORD / AUTH_TOKEN)
-— never hardcoded. The session is held in memory and never written to disk.
-"""
 
 from __future__ import annotations
 
@@ -34,7 +17,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class AuthConfig:
     enabled: bool = False
-    auth_type: str = "form"                 # form|json|bearer|cookie
+    auth_type: str = "form"
     login_url: str = ""
     username: str = ""
     password: str = ""
@@ -53,14 +36,6 @@ class AuthConfig:
 
     @classmethod
     def from_credential(cls, cred: Dict[str, Any]) -> "AuthConfig":
-        """
-        Build an AuthConfig from a UI-supplied credential dict, e.g.
-          {"role": "admin", "username": "a", "password": "p", "login_url": "https://.../login"}
-        Optional keys: auth_type, token, cookie, username_field, password_field,
-        token_json_path, header_name, token_prefix, probe_url, extra_fields.
-        The auth_type is inferred when not given: token->bearer, cookie->cookie,
-        login_url+creds->form.
-        """
         auth_type = str(cred.get("auth_type", "")).lower()
         if not auth_type:
             if cred.get("token"):
@@ -128,7 +103,6 @@ class AuthConfig:
 
 
 def _decode_jwt_exp(token: str) -> Optional[float]:
-    """Return the JWT `exp` claim (unix seconds) without verifying the signature."""
     try:
         parts = token.split(".")
         if len(parts) != 3:
@@ -142,7 +116,6 @@ def _decode_jwt_exp(token: str) -> Optional[float]:
 
 
 class AuthSessionManager:
-    """Owns a live authenticated session and injects it into outbound requests."""
 
     def __init__(self, config: Optional[AuthConfig] = None):
         self.config = config or AuthConfig.from_config()
@@ -153,7 +126,6 @@ class AuthSessionManager:
         self._authenticated = False
         self._last_login = 0.0
 
-    # ------------------------------------------------------------------ status
 
     @property
     def enabled(self) -> bool:
@@ -166,10 +138,8 @@ class AuthSessionManager:
     def _jwt_expired(self, skew: int = 30) -> bool:
         return self._jwt_exp is not None and time.time() >= (self._jwt_exp - skew)
 
-    # ------------------------------------------------------------ authenticate
 
     async def authenticate(self) -> bool:
-        """Establish the session. Returns True on success."""
         if not self.config.enabled:
             return False
         t = self.config.auth_type
@@ -266,7 +236,6 @@ class AuthSessionManager:
     # ------------------------------------------------------------- session use
 
     def auth_headers(self) -> Dict[str, str]:
-        """Headers to attach to an authenticated request (includes Cookie)."""
         headers = dict(self.headers)
         headers.update({k: v for k, v in self.csrf_tokens.items() if v})
         if self.cookies:
@@ -274,7 +243,6 @@ class AuthSessionManager:
         return headers
 
     async def is_authenticated(self, probe_url: Optional[str] = None) -> bool:
-        """Probe an authenticated endpoint to confirm the session is live."""
         url = probe_url or self.config.probe_url
         if not url:
             return self._authenticated
@@ -286,7 +254,6 @@ class AuthSessionManager:
             return False
 
     async def ensure_valid(self) -> bool:
-        """Re-authenticate if the JWT is near expiry or the session went stale."""
         if not self.config.enabled:
             return False
         if not self._authenticated or self._jwt_expired():
@@ -294,10 +261,6 @@ class AuthSessionManager:
         return True
 
     async def request(self, method: str, url: str, **kwargs) -> httpx.Response:
-        """
-        Perform an authenticated HTTP request, transparently re-authenticating
-        once on 401/403.
-        """
         await self.ensure_valid()
         headers = {**self.auth_headers(), **kwargs.pop("headers", {})}
         async with httpx.AsyncClient(timeout=self.config.timeout, follow_redirects=True) as client:
@@ -335,17 +298,6 @@ def _role_rank(role: str) -> int:
 
 
 class MultiIdentityAuthManager:
-    """
-    Establishes and maintains a REAL authenticated session per role.
-
-    Fed the credential list the UI sends —
-      [{"role": "admin", "username": "...", "password": "...", "login_url": "..."},
-       {"role": "sales", ...}, ...] —
-    it logs in each role concurrently. Roles that share the same login
-    (same login_url + username + password) reuse a single session instead of
-    authenticating twice. All live sessions are kept so cross-role tests
-    (access control, IDOR, privilege escalation) can compare identities.
-    """
 
     def __init__(self, credentials: List[Dict[str, Any]]):
         self.credentials = credentials or []
@@ -363,7 +315,6 @@ class MultiIdentityAuthManager:
         )
 
     async def authenticate_all(self) -> Dict[str, Any]:
-        """Authenticate every distinct login and map each role to its session."""
         # 1. Deduplicate identical logins so a shared login authenticates once.
         unique: Dict[tuple, List[Dict[str, Any]]] = {}
         for cred in self.credentials:
@@ -406,7 +357,6 @@ class MultiIdentityAuthManager:
         return mgr.auth_headers() if mgr else {}
 
     def default_session(self) -> Optional[AuthSessionManager]:
-        """Highest-privilege authenticated session (fallback for single-session consumers)."""
         authed = [(r, m) for r, m in self.sessions.items() if m.authenticated]
         if not authed:
             authed = list(self.sessions.items())
@@ -416,7 +366,6 @@ class MultiIdentityAuthManager:
         return authed[0][1]
 
     def sessions_map(self) -> Dict[str, Dict[str, Any]]:
-        """Per-role headers/cookies for storage on the shared context."""
         out = {}
         for role, mgr in self.sessions.items():
             out[role] = {

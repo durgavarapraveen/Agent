@@ -1,9 +1,3 @@
-"""OsintBridgeMixin — shapes OSINT context for other subsystems.
-
-Extracts credential/username spray material, builds identity records for
-IDOR/JWT testing, augments auth flows with leaked identities, and produces
-the OSINT context dict the recon builder + reporting layer read.
-"""
 from __future__ import annotations
 import json
 import logging
@@ -16,20 +10,12 @@ logger = logging.getLogger(__name__)
 class OsintBridgeMixin:
     @staticmethod
     def _mask_secret(val: str) -> str:
-        """Redact a secret for logs. Static because it takes no self."""
         s = str(val or "")
         if len(s) <= 4:
             return "•" * len(s)
         return s[:2] + "•" * max(4, len(s) - 4) + s[-2:]
 
     def _osint_spray_material(self):
-        """
-        Turn stored OSINT into credential-spray material:
-          - exact leaked (username, password) pairs from GitHub/breach data
-          - usernames derived from discovered employees (emails + name patterns)
-          - passwords seen in leaks (paired with the derived usernames)
-        Returns (creds, usernames, passwords).
-        """
         g = self.ctx.get
         leaked = g("leaked_credentials", []) or []
         employees = g("discovered_employees", []) or []
@@ -96,8 +82,6 @@ class OsintBridgeMixin:
         return creds[:100], usernames[:50], passwords
 
     def _osint_identities(self) -> dict:
-        """Structured OSINT identities for IDOR/access-control and JWT forgery:
-        emails, usernames, admin/owner candidates, and leaked username:password pairs."""
         creds, users, _pw = self._osint_spray_material()
         g = self.ctx.get
         employees = g("discovered_employees", []) or []
@@ -130,9 +114,6 @@ class OsintBridgeMixin:
         return idents
 
     async def _augment_auth_with_osint(self):
-        """Feed leaked username:password pairs into the auth layer as real identities,
-        then (re)establish sessions so the access-control / IDOR replay engine can test
-        cross-user object access AS those users."""
         idents = self._osint_identities()
         pairs = idents.get("leaked_pairs") or []
         if not pairs:
@@ -171,9 +152,6 @@ class OsintBridgeMixin:
             logger.warning(f"[OSINT-Auth] leaked-identity auth failed (non-fatal): {e}")
 
     def _build_osint_context(self) -> dict:
-        """Surface OSINT intelligence (employees, GitHub leaks, cloud buckets, threat
-        correlations, DNS/mail intel) for the UI. Secrets are masked; the operator
-        sees WHAT leaked and WHERE, not raw credentials in plaintext."""
         g = self.ctx.get
         creds = g("leaked_credentials", []) or []
         masked_creds = []

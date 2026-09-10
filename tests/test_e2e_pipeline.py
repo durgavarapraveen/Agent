@@ -1,15 +1,3 @@
-"""Deterministic end-to-end regression for the data-flow spine.
-
-No network, no LLM, no live tools: fake tool outputs are threaded through the
-REAL SharedContextV2 / AttackSurfaceState / correlation / mutation / redaction
-modules to simulate a full RECON -> ACTIVE_SCANNING -> EXPLOITATION -> REPORTING
-run. It asserts the cross-module invariants the P0/P1 sprints established, so a
-future refactor (e.g. P3 storage consolidation) that breaks the spine fails
-here loudly instead of silently regressing a live scan.
-
-Authorized host is example.com (the process-default scope); seeded explicitly
-so the test is self-contained and order-independent.
-"""
 import asyncio
 
 import pytest

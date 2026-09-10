@@ -10,9 +10,6 @@ class LLMToolProvider:
         return []
 
 class ClaudeAgentLoop:
-    """
-    Claude agentic loop taking advantage of MCP via ToolUseExecutor.
-    """
     
     def __init__(self, tool_use_executor, invocation_engine, max_iterations=15):
         self.executor = tool_use_executor
@@ -20,10 +17,6 @@ class ClaudeAgentLoop:
         self.max_iterations = max_iterations
     
     async def run(self, objective: str, auth_context, session_id: str, tools_list=None):
-        """
-        Main loop for Claude: decides what to do, calls tools via MCP,
-        handles results, and feeds them back until task is done.
-        """
         logger.info(f"Starting Claude loop for session {session_id} with objective: {objective}")
         
         client = Anthropic()

@@ -1,17 +1,3 @@
-"""
-Target Health Manager (Phase 15).
-
-Monitors target health and adapts testing intensity.
-
-States: HEALTHY → DEGRADED → THROTTLED → PAUSED → RECOVERY_CHECK → HEALTHY
-
-Adaptive behavior:
-  HEALTHY         → normal concurrency
-  DEGRADED        → reduce concurrency
-  THROTTLED       → reduce request rate, skip expensive tests
-  PAUSED          → stop active exploitation
-  RECOVERY_CHECK  → low-cost probes only
-"""
 from __future__ import annotations
 
 import logging

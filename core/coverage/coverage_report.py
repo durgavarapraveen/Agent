@@ -2,9 +2,6 @@ from core.coverage.coverage_engine import CoverageEngine
 from core.domain.coverage import TestState
 
 class CoverageReportGenerator:
-    """
-    Generates markdown reports based on CoverageState.
-    """
     def __init__(self, engine: CoverageEngine):
         self.engine = engine
         

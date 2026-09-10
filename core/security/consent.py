@@ -1,19 +1,3 @@
-"""
-Per-Exploit Consent Gate
-
-Before ANY exploitation is attempted, the operator is shown a briefing —
-what the system will do, how it will do it, and which vulnerability/payloads
-it will use — and must explicitly approve. On "no" the exploit is skipped.
-
-Design notes:
-  - Prompts are serialized with an asyncio.Lock so parallel exploit agents do
-    not interleave their questions.
-  - input() runs in a thread executor so it never blocks the event loop.
-  - Non-interactive stdin (EOF) defaults to DENY (fail safe).
-  - AUTO_APPROVE_EXPLOITS=1 (or set_auto_approve(True)) approves automatically
-    for unattended runs; every decision is still logged.
-  - set_prompt() injects a custom prompt fn for tests / alternative UIs.
-"""
 
 import asyncio
 import logging
@@ -49,7 +33,6 @@ class ExploitConsentManager:
     # ── configuration ──
 
     def set_prompt(self, fn: Callable[[str], str]):
-        """Inject a custom prompt: takes the briefing text, returns the raw answer."""
         self._prompt = fn
 
     def set_auto_approve(self, value: bool):

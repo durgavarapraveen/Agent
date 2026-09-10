@@ -1,9 +1,3 @@
-"""
-Context-Aware Payload Catalog (Phase 10).
-
-Payloads are organized by attack type and context (HTML, URL, header, JSON, XML).
-Each payload has metadata for encoding, evasion level, and expected signal.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

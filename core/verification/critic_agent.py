@@ -1,21 +1,3 @@
-"""
-CriticAgent — adversarial finding verifier (Planner–Worker–Critic loop).
-
-The Worker layer (scanners, exploit agent, injection matrix) produces candidate
-findings. The RetestEngine mechanically re-probes them. The CriticAgent adds a
-*semantic* second opinion: an LLM is instructed to argue AGAINST each finding and
-enumerate concrete false-positive scenarios, then deliver a verdict. Findings that
-both the retest layer and the critic reject are quarantined instead of reported,
-which autonomously drives down the false-positive rate without a human in the loop.
-
-Design goals:
-  - Never silently drop a finding. A rejected finding is tagged and downgraded so
-    it stays auditable in the report.
-  - Cost-aware: strong tool-confirmed evidence short-circuits the LLM call.
-  - Fail-open: if the LLM is unavailable or returns garbage, the verdict is
-    UNCERTAIN and the finding is preserved unchanged.
-  - Concurrency-bounded so a large finding set does not stampede the provider.
-"""
 
 from __future__ import annotations
 
@@ -81,7 +63,6 @@ _SYSTEM_PROMPT = (
 
 
 class CriticAgent:
-    """Adversarial LLM verifier for candidate findings."""
 
     def __init__(
         self,
@@ -91,21 +72,12 @@ class CriticAgent:
         reject_threshold: float = 0.85,
         max_tokens: int = 900,
     ):
-        """
-        Args:
-            llm_client: object exposing async generate_json_with_retry(...).
-                        Defaults to the shared LLMClient proxy.
-            max_concurrency: parallel LLM verifications.
-            confirm_threshold: min critic confidence to accept a CONFIRMED verdict.
-            reject_threshold: min critic confidence to act on a FALSE_POSITIVE verdict.
-        """
         self._llm = llm_client
         self._sem = asyncio.Semaphore(max(1, max_concurrency))
         self.confirm_threshold = confirm_threshold
         self.reject_threshold = reject_threshold
         self.max_tokens = max_tokens
 
-    # ------------------------------------------------------------------ LLM
 
     def _get_llm(self):
         if self._llm is not None:
@@ -115,11 +87,9 @@ class CriticAgent:
         self._llm = LLMClient.get()
         return self._llm
 
-    # ------------------------------------------------------------- prompting
 
     @staticmethod
     def _summarize_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract a compact, evidence-focused view of the finding for the prompt."""
         evidence = finding.get("evidence") or finding.get("proof") or {}
         if isinstance(evidence, dict):
             evidence_str = json.dumps(evidence, default=str)[:4000]
@@ -165,13 +135,6 @@ class CriticAgent:
     # ------------------------------------------------------------- verify one
 
     async def verify_finding(self, finding: Dict[str, Any]) -> CriticVerdict:
-        """Return the critic's verdict for a single finding. Never raises.
-
-        P0.6: Heuristic shortcuts no longer auto-confirm. All confirmation
-        candidates are routed through the FindingConfirmationGate which
-        requires deterministic evidence (not LLM wording or status codes).
-        The critic is advisory — it cannot independently confirm a finding.
-        """
         ftype = str(finding.get("type") or finding.get("vuln_type") or "").upper()
 
         gate_result = self._check_confirmation_gate(finding, ftype)
@@ -272,12 +235,6 @@ class CriticAgent:
     @staticmethod
     def _check_confirmation_gate(self, finding: Dict[str, Any],
                                 ftype: str) -> Optional[CriticVerdict]:
-        """P0.6: Route through deterministic confirmation gate.
-
-        Returns a verdict if the gate can decide (reject LLM-wording-only
-        or status-code-only evidence). Returns None to fall through to
-        LLM critic for advisory review.
-        """
         try:
             from core.verification.finding_confirmation_gate import (
                 FindingConfirmationGate, ConfirmationStage,
@@ -352,19 +309,6 @@ class CriticAgent:
     async def verify_findings(
         self, findings: List[Dict[str, Any]], quarantine: bool = True
     ) -> Dict[str, Any]:
-        """
-        Verify a batch of findings concurrently and annotate each in place.
-
-        Each finding gains:
-          - finding["critic"] : the verdict dict
-          - finding["confidence_score"] : nudged up/down by the verdict
-          - finding["status"] : set to "QUARANTINED" when confidently rejected
-                                 (only if quarantine=True and not tool-exploited)
-
-        Returns a summary: {confirmed, false_positive, uncertain, quarantined, findings}.
-        The returned "findings" list excludes quarantined items so callers can report
-        only the surviving set while the originals keep their annotation.
-        """
         if not findings:
             return {"confirmed": 0, "false_positive": 0, "uncertain": 0,
                     "inconclusive": 0, "quarantined": 0, "findings": []}

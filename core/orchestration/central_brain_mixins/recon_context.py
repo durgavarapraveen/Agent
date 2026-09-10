@@ -1,9 +1,3 @@
-"""ReconContextMixin — canonical recon-context snapshotter.
-
-Owns `_build_recon_context` (the unified recon view used by live-results and
-final reports), `_persist_recon_data` (writes it to `recon_data` table), and
-`_write_live_results` (the polling snapshot the UI reads).
-"""
 from __future__ import annotations
 import json
 import logging
@@ -15,9 +9,6 @@ logger = logging.getLogger(__name__)
 
 class ReconContextMixin:
     def _build_recon_context(self) -> dict:
-        """Unified recon view for the UI: ALL subdomains labelled live/dead, the
-        filtered endpoint catalog, technologies, ports, ips, captured requests.
-        Used by both the live-results feed and the final report."""
         subs = list(getattr(self.ctx, "subdomains", []) or [])
         # Merge OSINT-discovered subdomains into the main list
         osint_subs = getattr(self.ctx, "discovered_subdomains", []) or []
@@ -103,8 +94,6 @@ class ReconContextMixin:
         }
 
     def _persist_recon_data(self):
-        """Persist the full recon context to Postgres so the user can see everything
-        recon collected — written live during recon, not just at report time."""
         try:
             from core.database.pg_store import ReconRepo
             ReconRepo.save(self._scan_id, self.ctx.target, self._build_recon_context())
@@ -113,7 +102,6 @@ class ReconContextMixin:
             logger.warning(f"[Recon] recon_data persist failed (non-fatal): {e}")
 
     def _write_live_results(self):
-        """Write structured live results for the UI to poll."""
         try:
             import json as _json
             subs = getattr(self.ctx, "subdomains", []) or []

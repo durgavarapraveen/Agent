@@ -1,13 +1,3 @@
-"""
-Package -> CVE matcher.
-
-Given a package name + version (e.g. lodash@4.17.20), query OSV.dev (and NVD CPE
-as a fallback) and return every matching CVE enriched with CVSS base score,
-EPSS percentile, and KEV status, wrapped in a scored RiskVerdict.
-
-CVSS base scores are computed locally from the v3.1 vector (formula below) to
-avoid a rate-limited NVD round-trip per CVE.
-"""
 
 from __future__ import annotations
 
@@ -40,12 +30,10 @@ _CIA = {"H": 0.56, "L": 0.22, "N": 0.0}
 
 
 def _roundup(x: float) -> float:
-    """CVSS roundup: smallest 1-decimal number >= x."""
     return math.ceil(x * 10) / 10.0
 
 
 def cvss31_base_from_vector(vector: str) -> float:
-    """Compute a CVSS v3.x base score from its vector string. 0.0 on parse failure."""
     if not vector:
         return 0.0
     try:
@@ -81,7 +69,6 @@ def cvss31_base_from_vector(vector: str) -> float:
 
 @dataclass
 class PackageMatch:
-    """All CVEs matching a specific package@version, scored."""
     package: str
     version: str
     ecosystem: str
@@ -102,7 +89,6 @@ class PackageMatch:
 
 
 class CVEMatcher:
-    """Resolves package@version -> scored CVEs via OSV.dev + EPSS + KEV."""
 
     def __init__(self, client: Optional[FeedClient] = None):
         self.client = client or FeedClient()
@@ -149,7 +135,6 @@ class CVEMatcher:
 
     async def match(self, package: str, version: str,
                     ecosystem: str = "") -> PackageMatch:
-        """Return all scored CVEs affecting package@version."""
         eco = self.guess_ecosystem(package, ecosystem)
         vulns = await self._osv_query(package, version, eco)
 

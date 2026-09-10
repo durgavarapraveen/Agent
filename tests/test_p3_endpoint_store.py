@@ -1,12 +1,3 @@
-"""P3 — single-source endpoint store contract.
-
-The endpoint store on SharedContextV2 is a canonical-id -> record DICT. Several
-call sites used to reassign it to a bare list (target_memory liveness sweep,
-js_bundle_analyzer fallback) or iterate it as records when it yields id KEYS
-(DB persistence), so the report store and the DB store could silently disagree.
-These lock the contract: one ingestion funnel (add_endpoints), one read path
-(get_endpoints -> records), dict-preserving mutators for reset/prune.
-"""
 import pytest
 
 from core.memory.shared_context import SharedContextV2

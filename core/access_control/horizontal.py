@@ -1,9 +1,6 @@
 from core.access_control.base import AccessControlTest, AuthorizationOracle
 
 class HorizontalTest(AccessControlTest):
-    """
-    Tests if user_b can access user_a's resources (Horizontal Privilege Escalation).
-    """
     def execute(self, request_node, identities) -> dict:
         results = {}
         

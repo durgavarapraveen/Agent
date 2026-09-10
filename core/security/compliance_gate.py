@@ -1,7 +1,3 @@
-"""
-Compliance Gate Enforcement
-Prevents unauthorized exploitation techniques against out-of-scope targets.
-"""
 
 from dataclasses import dataclass
 from typing import List, Dict, Optional

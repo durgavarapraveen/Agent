@@ -1,15 +1,3 @@
-"""
-ASMMonitor — attack-surface snapshot + delta engine for continuous monitoring.
-
-A snapshot is a normalized, comparable view of everything the scan discovered:
-subdomains, IPs, host:port services, endpoints/URLs, technologies, security
-headers, TLS posture, and finding fingerprints. Snapshots are persisted per
-target under data/asm/<target>/, and each new snapshot is diffed against the
-previous one to produce an ASMDelta describing what changed since last time.
-
-This is the core of the continuous-monitoring product feature: schedule repeated
-runs and surface only the deltas instead of a full report every cycle.
-"""
 
 from __future__ import annotations
 
@@ -53,7 +41,7 @@ class ASMDelta:
     removed_subdomains: List[str] = field(default_factory=list)
     new_ips: List[str] = field(default_factory=list)
     removed_ips: List[str] = field(default_factory=list)
-    new_services: List[str] = field(default_factory=list)       # host:port
+    new_services: List[str] = field(default_factory=list)
     removed_services: List[str] = field(default_factory=list)
     new_endpoints: List[str] = field(default_factory=list)
     removed_endpoints: List[str] = field(default_factory=list)
@@ -72,7 +60,6 @@ class ASMDelta:
         ])
 
     def severity(self) -> str:
-        """Coarse alert level for the delta."""
         crit = [f for f in self.new_findings
                 if str(f.get("severity", "")).upper() in ("HIGH", "CRITICAL")]
         if crit or self.new_services or self.header_regressions:
@@ -101,10 +88,8 @@ class ASMMonitor:
             except Exception:
                 self.webhook_url = None
 
-    # ----------------------------------------------------------- snapshotting
 
     def snapshot_from_context(self, ctx: Any) -> Dict[str, Any]:
-        """Build a normalized snapshot dict from a SharedContext."""
         subdomains = sorted({str(s).lower() for s in getattr(ctx, "subdomains", []) if s})
         ips = sorted({str(i) for i in getattr(ctx, "ips", []) if i})
 
@@ -184,7 +169,6 @@ class ASMMonitor:
             json.dump(snapshot, f, indent=2, default=str)
         return path
 
-    # ------------------------------------------------------------------- diff
 
     def diff(self, old: Optional[Dict[str, Any]], new: Dict[str, Any]) -> ASMDelta:
         target = new.get("target", "")
@@ -228,7 +212,6 @@ class ASMMonitor:
             header_regressions=header_regressions,
         )
 
-    # --------------------------------------------------------------- reporting
 
     def render_delta_md(self, delta: ASMDelta) -> str:
         if delta.is_first_run:
@@ -288,10 +271,8 @@ class ASMMonitor:
         except Exception as e:
             logger.debug(f"[ASM] webhook notify failed: {e}")
 
-    # --------------------------------------------------------------- top-level
 
     async def record_and_diff(self, ctx: Any, notify: bool = True) -> ASMDelta:
-        """Snapshot the context, diff against the previous snapshot, persist, alert."""
         target = getattr(ctx, "target", "unknown")
         snapshot = self.snapshot_from_context(ctx)
         old = self.load_latest(target)

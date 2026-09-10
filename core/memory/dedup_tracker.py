@@ -1,8 +1,3 @@
-"""
-Deduplication Tracker for Repeated Tasks.
-Tracks findings by SHA-256 signature in PostgreSQL, detects delta updates between runs,
-and prevents re-sending duplicate data across multiple agent execution steps.
-"""
 
 import hashlib
 import json
@@ -19,14 +14,12 @@ logger = logging.getLogger(__name__)
 
 
 class DeduplicationTracker:
-    """Thread-safe PostgreSQL-backed deduplication tracker for findings and assets."""
 
     def __init__(self):
         self._lock = threading.Lock()
         self._init_db()
 
     def _init_db(self) -> None:
-        """Verify that the findings_dedup table exists (created by pg_store.py)."""
         with self._lock:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cur:
@@ -38,11 +31,6 @@ class DeduplicationTracker:
                         logger.warning("findings_dedup table does not exist — expected pg_store.py to create it")
 
     def generate_task_key(self, capability: str, target: str, resource: str = "") -> str:
-        """
-        Generate explicit task deduplication key preserving exact target FQDN/subdomain.
-        Format: {capability}:{exact_subdomain_or_target}:{port/resource}
-        Example: port_scanning:millisecond.speshway.com:80
-        """
         cap_clean = (capability or "").lower().strip()
 
         target_str = str(target or "").strip().lower()
@@ -62,7 +50,6 @@ class DeduplicationTracker:
         return f"{cap_clean}:{target_clean}:{res_str}"
 
     def generate_signature(self, tool: str, finding_type: str, data: Any) -> str:
-        """Generate SHA-256 fingerprint signature: tool:finding_type:sha256(data)"""
         tool_clean = (tool or "").lower().strip()
         type_clean = (finding_type or "").lower().strip()
 
@@ -75,7 +62,6 @@ class DeduplicationTracker:
         return f"{tool_clean}:{type_clean}:{data_hash}"
 
     def is_duplicate(self, tool: str, finding_type: str, data: Any) -> bool:
-        """Check if finding signature already exists in deduplication database."""
         sig = self.generate_signature(tool, finding_type, data)
         with self._lock:
             with DatabaseManager.get_connection() as conn:
@@ -85,7 +71,6 @@ class DeduplicationTracker:
                     return row is not None
 
     def register_finding(self, tool: str, finding_type: str, data: Any, task_id: str = "") -> str:
-        """Register a finding. If signature exists, update last_seen and count; otherwise insert new."""
         sig = self.generate_signature(tool, finding_type, data)
         now = datetime.now().isoformat()
         data_repr = str(data)[:300]
@@ -111,11 +96,6 @@ class DeduplicationTracker:
         return sig
 
     def get_delta(self, tool: str, finding_type: str, new_data: List[Any], task_id: str = "") -> Dict[str, Any]:
-        """
-        Calculate delta between new findings and previously registered findings.
-        Registers new findings into the database.
-        Returns dict containing new_items, known_items, counts, and formatted summary string.
-        """
         tool_clean = (tool or "").lower().strip()
         type_clean = (finding_type or "").lower().strip()
 
@@ -158,7 +138,6 @@ class DeduplicationTracker:
         known_count: int,
         task_id: str = ""
     ) -> str:
-        """Format delta analysis into canonical update string."""
         sample_str = ", ".join([str(x) for x in new_items[:3]]) if new_items else "none"
         prev_task = task_id if task_id else "previous_task"
 
@@ -173,7 +152,6 @@ class DeduplicationTracker:
         return "\n".join(lines)
 
     def clear_cache(self, hours: int = 24) -> int:
-        """Purge entries older than specified hours."""
         cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
         with self._lock:
             with DatabaseManager.get_connection() as conn:
@@ -185,7 +163,6 @@ class DeduplicationTracker:
                     return deleted
 
     def reset_all(self) -> None:
-        """Clear all deduplication records from the database."""
         with self._lock:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cur:
@@ -204,7 +181,6 @@ class TaskRecord:
     target: str
 
 class DedupTracker:
-    """Thread-safe, in-memory deduplication tracker for Tasks to prevent redundant execution."""
     
     def __init__(self):
         self._lock = threading.RLock()
@@ -218,10 +194,6 @@ class DedupTracker:
         return hashlib.sha256(data.encode()).hexdigest()
 
     def register_task(self, task_hash: str, task_id: str, capability: str = "", target: str = "") -> Optional[str]:
-        """
-        Registers a task. If it's already active or completed, returns the existing task_id.
-        Otherwise returns None.
-        """
         with self._lock:
             if task_hash in self._completed_tasks:
                 return self._completed_tasks[task_hash].task_id

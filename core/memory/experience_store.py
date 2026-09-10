@@ -7,9 +7,6 @@ from core.memory.database import MemoryDatabase, DatabaseManager
 
 
 class ExperienceStore:
-    """Postgres-backed store of scan experiences. Previously broken: called `.cursor()`
-    on the context manager instead of a connection, and used SQLite `?` placeholders
-    and `INSERT OR REPLACE`. Rewritten to use the pooled `DatabaseManager`."""
 
     def __init__(self, db: MemoryDatabase = None):
         self.db = db

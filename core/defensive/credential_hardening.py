@@ -1,7 +1,3 @@
-"""
-Credential Protection Auditor & Secret Scanning Engine.
-Audits Windows LAPS/Credential Guard, Linux /etc/shadow permissions, and scans source code/configs for leaked secrets.
-"""
 
 import logging
 import math
@@ -46,20 +42,17 @@ class SecretFinding:
 
 
 class SecretScanner:
-    """High-entropy secret scanner for source code, environment files, and configurations."""
 
     def __init__(self, root_dir: str = "."):
         self.root_dir = root_dir
 
     def calculate_entropy(self, text: str) -> float:
-        """Calculate Shannon entropy of a string."""
         if not text:
             return 0.0
         prob = [float(text.count(c)) / len(text) for c in set(text)]
         return -sum(p * math.log2(p) for p in prob)
 
     def scan_directory(self, max_files: int = 500) -> List[Dict[str, Any]]:
-        """Scan directory for secret patterns and high-entropy strings."""
         findings: List[SecretFinding] = []
         scanned_count = 0
 
@@ -99,10 +92,8 @@ class SecretScanner:
 
 
 class CredentialHardeningAuditor:
-    """Audits local OS credential protection mechanisms (SAM, LSASS, /etc/shadow permissions)."""
 
     def audit_shadow_permissions(self, path: str = "/etc/shadow") -> Dict[str, Any]:
-        """Audit /etc/shadow permissions (Linux). Must be owned by root and 0600 or 0640."""
         if not os.path.exists(path):
             return {"status": "not_applicable", "path": path, "reason": "File does not exist (non-Linux)"}
 
@@ -124,10 +115,9 @@ class CredentialHardeningAuditor:
             return {"status": "error", "path": path, "error": str(e)}
 
     def audit_windows_credential_guard(self) -> Dict[str, Any]:
-        """Audit Windows LSASS Protection & Credential Guard state."""
         try:
-            cmd = 'reg query "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa" /v RunAsPPL'
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+            cmd = ["reg", "query", "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa", "/v", "RunAsPPL"]
+            res = subprocess.run(cmd, shell=False, capture_output=True, text=True, timeout=5)
             ppl_enabled = "0x1" in res.stdout
 
             return {

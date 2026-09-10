@@ -53,7 +53,7 @@ class EventType(Enum):
 class Event:
     event_type: EventType
     timestamp: datetime
-    source: str  # agent_id, task_id, etc
+    source: str
     data: Dict[str, Any]
     
     def to_dict(self):
@@ -63,7 +63,6 @@ class Event:
         return d
 
 class EventBus:
-    """Central event bus for system-wide events."""
     
     def __init__(self):
         self.subscribers: Dict[EventType, List[Callable]] = {}
@@ -71,13 +70,11 @@ class EventBus:
         self._lock = asyncio.Lock()
     
     async def subscribe(self, event_type: EventType, callback: Callable):
-        """Subscribe to events of a specific type."""
         if event_type not in self.subscribers:
             self.subscribers[event_type] = []
         self.subscribers[event_type].append(callback)
     
     async def publish(self, event: Event):
-        """Publish an event to all subscribers."""
         async with self._lock:
             self.event_history.append(event)
         
@@ -93,26 +90,21 @@ class EventBus:
                 await asyncio.gather(*tasks, return_exceptions=True)
     
     async def get_events_by_type(self, event_type: EventType) -> List[Event]:
-        """Retrieve events of a specific type."""
         return [e for e in self.event_history if e.event_type == event_type]
     
     async def get_events_by_source(self, source: str) -> List[Event]:
-        """Retrieve events from a specific source."""
         return [e for e in self.event_history if e.source == source]
     
     async def get_execution_timeline(self) -> List[Dict[str, Any]]:
-        """Get a formatted execution timeline."""
         return [e.to_dict() for e in self.event_history]
 
 class EventLogger:
-    """Logs events in a structured way."""
     
     def __init__(self, event_bus: EventBus):
         self.event_bus = event_bus
         self.log_entries = []
     
     async def log_event(self, event_type: EventType, source: str, data: Dict[str, Any]):
-        """Log an event through the event bus."""
         event = Event(
             event_type=event_type,
             timestamp=datetime.now(),
@@ -123,5 +115,4 @@ class EventLogger:
         self.log_entries.append(event)
     
     def get_logs(self) -> List[Dict[str, Any]]:
-        """Get all logs."""
         return [e.to_dict() for e in self.log_entries]

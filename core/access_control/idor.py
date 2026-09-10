@@ -3,10 +3,6 @@ import copy
 import re
 
 class IdorTest(AccessControlTest):
-    """
-    Tests for Insecure Direct Object Reference (IDOR).
-    It mutates an object ID in the request and replays it under the same session.
-    """
     def execute(self, request_node, identities) -> dict:
         results = {}
         

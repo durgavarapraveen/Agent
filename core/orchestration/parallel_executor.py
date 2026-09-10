@@ -1,12 +1,3 @@
-"""
-Parallel Execution Engine (Phase 16).
-
-Executes independent task groups concurrently with:
-- Configurable concurrency limits
-- Target health awareness (backs off when target degrades)
-- Per-task timeout enforcement
-- Result aggregation
-"""
 from __future__ import annotations
 
 import asyncio

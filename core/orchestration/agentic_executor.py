@@ -1,11 +1,3 @@
-"""
-Agentic Executor — LLM-driven tool-calling loop.
-
-Instead of "plan N tasks → execute all → plan again", this gives the LLM
-direct tool access. The LLM sees every result (stdout, stderr, errors),
-reasons about what happened, adapts its strategy, chains discoveries,
-and filters noise — exactly like a human pentester would.
-"""
 
 import json
 import logging
@@ -27,8 +19,6 @@ _SECRET_KEYS = frozenset({
 
 
 def _redact_args(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Shallow-copy args with obvious secret keys masked. The UI receives
-    this; the raw fn_args are not persisted."""
     if not isinstance(args, dict):
         return {"_repr": repr(args)[:400]}
     out: Dict[str, Any] = {}
@@ -51,8 +41,6 @@ def _redact_args(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _preview_result(result: Any, max_chars: int = 4000) -> str:
-    """String preview of the tool return value for the UI. Strips the same
-    secret patterns that mask_sensitive_data covers so nothing leaks through."""
     try:
         if isinstance(result, (bytes, bytearray)):
             s = result.decode("utf-8", errors="replace")
@@ -73,11 +61,6 @@ def _preview_result(result: Any, max_chars: int = 4000) -> str:
 
 
 def _infer_status(result: Any) -> Optional[int]:
-    """Heuristic status code for the tool call:
-      - int found in result string → treat as HTTP status
-      - 'error' / 'failed' / 'traceback' in result → -1
-      - otherwise 0 (OK)
-    """
     try:
         s = result if isinstance(result, str) else json.dumps(result, default=str)
     except Exception:
@@ -294,16 +277,6 @@ You have direct access to security tools running in a Kali Linux container.
 
 
 class AgenticExecutor:
-    """
-    LLM-driven agentic execution loop.
-
-    The LLM gets tools, sees every result, and drives the entire process:
-    - Picks which tool to run and with what args
-    - Reads stdout/stderr and reasons about the output
-    - Adapts strategy based on errors and results
-    - Chains discoveries into new investigations
-    - Filters noise and focuses on what matters
-    """
 
     TOOL_TIMEOUTS = {
         "fierce": 900, "amass": 900, "theharvester": 900,
@@ -343,13 +316,6 @@ class AgenticExecutor:
         max_rounds: int = 15,
         context_hint: str = "",
     ) -> AgenticResult:
-        """
-        Run the agentic loop for a given objective.
-
-        The LLM drives the process — calling tools, analyzing results,
-        adapting strategy, and chaining discoveries until it determines
-        the objective is met or no more useful actions can be taken.
-        """
         self._phase = phase or ""
         self._available_tools = self._probe_tool_availability()
         available_tools_str = ", ".join(sorted(self._available_tools)) if self._available_tools else "none (use http_request for all testing)"
@@ -584,10 +550,6 @@ class AgenticExecutor:
         return self.result
 
     async def _execute_tool_call(self, fn_name: str, fn_args: Dict[str, Any]) -> str:
-        """
-        Bridge between LLM tool calls and actual tool execution.
-        Returns the result as a string the LLM can read.
-        """
         self.result.steps_taken += 1
         # P1.7: record a distinct action signature so the re-prompt loop can
         # detect a round that only repeats prior actions (the duplicate-tool-call
@@ -722,7 +684,6 @@ class AgenticExecutor:
     }
 
     def _build_known_vulns_summary(self) -> str:
-        """Compact summary of already-discovered vulns so LLM doesn't re-find them."""
         vulns = self.ctx.vulnerabilities
         if not vulns:
             return ""
@@ -744,7 +705,6 @@ class AgenticExecutor:
         return "\n".join(lines)
 
     def _probe_tool_availability(self) -> set:
-        """Check which tools are actually available before the loop starts."""
         all_tools = [
             "nmap", "masscan", "subfinder", "amass", "assetfinder", "httpx", "whatweb",
             "wafw00f", "nikto", "nuclei", "sqlmap", "ffuf", "gobuster", "katana", "dalfox",
@@ -915,7 +875,6 @@ class AgenticExecutor:
             return error_msg
 
     async def _extract_recon_from_stdout(self, tool_id: str, stdout: str, target: str, operation: str = ""):
-        """Parse tool stdout and feed subdomains/IPs/technologies/endpoints/ssl into SharedContext."""
         import re
         target_base = target.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0]
         domain_parts = target_base.split(".")
@@ -1002,7 +961,6 @@ class AgenticExecutor:
                     if new_ips:
                         self.ctx.ips = list(existing | ips)
                         logger.info(f"[AgenticExecutor] Extracted {len(new_ips)} IPs from {tool_id}")
-                # Hosts / subdomains
                 harv_subs = set()
                 for h in sections.get("Hosts", []):
                     hostname = h.split(":", 1)[0].lstrip("*.").strip()
@@ -1221,19 +1179,6 @@ class AgenticExecutor:
                         pass
 
     def _parse_theharvester_sections(self, stdout: str) -> dict:
-        """Parse theHarvester's section-based stdout format.
-
-        Sections look like:
-            [*] SECTION_NAME found: N
-            --------------------
-            <line>
-            <line>
-            <blank line ends section>
-
-        Returns dict of {section_name: [values]}. Handles: Hosts, IPs,
-        ASNS, Interesting Urls, LinkedIn Links, LinkedIn users, Emails,
-        People, Sub-domains.
-        """
         import re as _re
         sections = {}
         current = None
@@ -1266,7 +1211,6 @@ class AgenticExecutor:
         return sections
 
     def _regex_extract_recon(self, tool_id, stdout, target_base, re):
-        """Fallback regex-based extraction if LLM call fails."""
         techs = {}
         ports = {}
         for line in stdout.splitlines():
@@ -1296,12 +1240,6 @@ class AgenticExecutor:
             logger.info(f"[AgenticExecutor] Regex fallback extracted {len(all_ports)} ports from {tool_id}")
 
     async def _llm_extract_recon(self, tool_id: str, stdout: str, target_base: str):
-        """Send tool output to LLM for clean per-subdomain data extraction.
-
-        Skip LLM entirely for tools where regex is authoritative (httpx, nmap, subfinder,
-        assetfinder) — they emit line-oriented output the regex path parses correctly and
-        the LLM call just burns tokens. Also skip on empty/tiny output.
-        """
         import re as _re
         REGEX_AUTHORITATIVE = {"httpx", "nmap", "masscan", "subfinder", "assetfinder", "dig", "amass"}
         if tool_id in REGEX_AUTHORITATIVE:
@@ -1549,8 +1487,6 @@ RULES:
             return f"[ERROR] HTTP request failed: {e}"
 
     async def _chain_login_after_mass_assign(self, register_url: str, register_body, register_resp) -> None:
-        """After a successful admin-role self-register, log in with those creds
-        so the captured JWT is a fresh admin session usable by downstream tests."""
         try:
             import json as _json, re as _re
             from urllib.parse import urlparse as _up
@@ -1591,14 +1527,6 @@ RULES:
             logger.debug(f"[AgenticExecutor] chain-login failed: {_e}")
 
     def _harvest_emails_and_hashes(self, url: str, resp_text: str) -> None:
-        """Scan HTTP response bodies for emails and password hashes.
-
-        Fills the gap where the crawler fetches /rest/memories, /api/Users,
-        /api/Feedbacks (which leak emails + MD5/bcrypt hashes) but only
-        theHarvester/whois stdout was ever regex-scanned. CredentialSpray reads
-        ctx.discovered_employees and ctx.leaked_credentials so seeding them
-        from live responses expands its attack surface.
-        """
         if not resp_text:
             return
         try:
@@ -1659,8 +1587,6 @@ RULES:
                               response_status: int = 0, response_snippet: str = "",
                               username: str = "", password: str = "",
                               role: str = "") -> None:
-        """Record a successful auth bypass / login into the auth_bypasses table so
-        the UI can show 'Access Gained' with the exact payload and proof-of-entry."""
         try:
             scan_id = getattr(self, "scan_id", None) or getattr(self.ctx, "scan_id", None) or ""
             if not scan_id:
@@ -1679,17 +1605,6 @@ RULES:
 
     def _capture_auth_from_response(self, url: str, resp, req_method: str = "POST",
                                      req_body: str = "") -> None:
-        """Extract a JWT/bearer from a successful auth response and cache it per host.
-
-        Recognises Juice-Shop-style {"authentication":{"token":"..."}} and generic
-        {"access_token":"..."} / {"token":"..."} / Set-Cookie: token=<jwt>. The
-        first bearer found for a host is kept for the rest of the scan so any
-        subsequent request to that host is authenticated automatically.
-
-        When a token IS captured, also persists a proof-of-entry row into the
-        auth_bypasses table so the UI can display 'Access Gained' with the exact
-        payload/technique.
-        """
         try:
             from urllib.parse import urlparse as _up
             netloc = _up(url).netloc.lower()
@@ -2567,9 +2482,6 @@ RULES:
     )
 
     def _infer_tool_and_confirmation(self, finding: Dict[str, Any]) -> tuple:
-        """Look at evidence/details/title to attribute the tool that produced a
-        finding, and decide whether the tool's own output implies a confirmed
-        vulnerability. Returns (tool_name, is_confirmed)."""
         blob = " ".join([
             str(finding.get("evidence", "")),
             str(finding.get("details", "")),
@@ -2731,7 +2643,6 @@ RULES:
     })
 
     def _ingest_to_shared_context(self):
-        """Push all findings back into shared context."""
         for finding in self.result.findings:
             ftype = finding.get("type", "").lower().strip()
 
@@ -2826,10 +2737,6 @@ RULES:
         )
 
     def _route_osint_findings(self):
-        """When the phase is OSINT (or the finding is OSINT-shaped), mirror findings
-        into the OSINT ctx fields that `_build_osint_context()` reads. Otherwise
-        every OSINT finding lands only in result.findings and the OSINT summary
-        panels stay at zero."""
         import re as _re
 
         phase_l = (getattr(self, "_phase", "") or "").lower()

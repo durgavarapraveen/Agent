@@ -16,31 +16,6 @@ REQUIRED_INPUTS = ("injection_url", "injectable_param", "payloads")
 
 
 def _classify_reflection(body: str, payload: str) -> Dict[str, Any]:
-    """Context-aware XSS reflection analysis.
-
-    Naive `payload in body` (the previous implementation) missed real XSS in
-    HTML-attribute / JS-string / URL contexts where the payload is entity-
-    encoded but still executable, and false-positived on any page that echoed
-    the payload back in a safe context (e.g. inside `<textarea>` or a JSON
-    blob).
-
-    We now return a small dict describing WHERE and HOW the payload appeared:
-
-        {
-          "reflected": bool,          # any form of reflection
-          "raw":        bool,          # exact bytes reflected as-is
-          "html_encoded": bool,        # `<` → `&lt;` etc.
-          "js_string":  bool,          # inside a JS string literal
-          "attribute":  bool,          # inside an HTML attribute value
-          "textarea":   bool,          # inside a <textarea> (usually safe)
-          "json_only":  bool,          # only inside application/json content
-          "likely_exploitable": bool,  # heuristic — see below
-        }
-
-    `likely_exploitable` = raw reflection outside a safe container (textarea,
-    JSON, HTML comment), OR HTML-encoded reflection inside an unquoted
-    attribute (still exploitable via broken-out event handlers).
-    """
     if not payload or not body:
         return {"reflected": False, "raw": False, "html_encoded": False,
                 "js_string": False, "attribute": False, "textarea": False,

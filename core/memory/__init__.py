@@ -1,6 +1,3 @@
-"""
-Core Memory Subpackage
-"""
 
 import sys
 import importlib

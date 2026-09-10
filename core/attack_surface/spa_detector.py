@@ -1,16 +1,3 @@
-"""
-SPA Catch-All Detection (Phase 8).
-
-Before trusting directory/path fuzzing results, detect if the target
-serves an SPA catch-all (e.g., Angular/React router returning the same
-shell for all paths).
-
-Algorithm:
-1. Request a random nonexistent path
-2. Record: status, content_length, title, response_hash
-3. Compare fuzz results against baseline
-4. If responses match → SPA_CATCH_ALL, not real endpoints
-"""
 from __future__ import annotations
 
 import hashlib
@@ -27,7 +14,6 @@ class SPADetector:
         self._baselines: Dict[str, Dict[str, Any]] = {}
 
     def create_baseline_path(self) -> str:
-        """Generate a random path guaranteed not to exist."""
         return f"/__spa_detect_{uuid.uuid4().hex[:12]}"
 
     def record_baseline(self, host: str, status: int,

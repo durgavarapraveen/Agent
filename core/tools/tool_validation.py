@@ -1,7 +1,3 @@
-"""
-Tool Invocation Validator layer.
-Ensures tool execution is safe, authorized, and syntactically valid.
-"""
 
 import logging
 from typing import Dict, Any
@@ -12,7 +8,6 @@ logger = logging.getLogger(__name__)
 
 
 class ToolInvocationValidator:
-    """Validates tool invocation requests before execution"""
 
     FORBIDDEN_TOOLS = {"bash", "sh", "cmd", "powershell", "zsh"}
 
@@ -20,7 +15,6 @@ class ToolInvocationValidator:
         self.registry = registry
 
     def validate(self, tool_name: str, params: Dict[str, Any]) -> None:
-        """Validate invocation parameters and authorization"""
         tool_name_clean = tool_name.lower().strip()
         logger.info(f"TOOL_INVOCATION_REQUESTED: tool={tool_name_clean}")
 

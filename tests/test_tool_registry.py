@@ -1,6 +1,3 @@
-"""Smoke test: ToolRegistry registers its defaults, including the P2-8
-structured HTTP ops and the shell tools the router selects by capability.
-"""
 from __future__ import annotations
 
 import pytest
@@ -22,7 +19,6 @@ def test_registry_registers_defaults() -> None:
 
 
 def test_structured_http_ops_registered() -> None:
-    """P2-8: HTTP ops must be first-class tools the router can pick."""
     from core.tools.tool_registry import ToolRegistry
     reg = ToolRegistry()
 
@@ -41,7 +37,6 @@ def test_structured_http_ops_registered() -> None:
 
 
 def test_tool_router_resolves_capability_to_tool() -> None:
-    """`http_fetch` capability must resolve to at least one tool."""
     from core.tools.tool_registry import ToolRegistry
     from core.tools.tool_router import ToolRouter
     router = ToolRouter(ToolRegistry())

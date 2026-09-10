@@ -1,4 +1,3 @@
-"""PHASE 5 — parser-differential engine (offline, simulated parsers)."""
 import re
 import urllib.parse
 
@@ -7,7 +6,6 @@ from core.intelligence.parser_differential.engine import _MARKER_A, _MARKER_B
 
 
 class FakeServer:
-    """Configurable HTTP parser simulator that echoes the value it 'acts on'."""
 
     def __init__(self, precedence="first", body_overrides_query=False,
                  double_decode=False, case_insensitive_names=False, param="q"):
@@ -90,7 +88,6 @@ def test_dup_param_rule_reported_as_info():
 
 
 def test_non_reflective_order_sensitivity_uses_structural_fallback():
-    """A WAF-like server that blocks one duplicate ordering but not the mirror."""
     def probe(url, method="GET", headers=None, data=None):
         q = urllib.parse.urlsplit(url).query
         # Block when marker A appears before marker B in a duplicated param.

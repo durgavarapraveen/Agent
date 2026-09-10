@@ -1,16 +1,3 @@
-"""P0.7 — Evidence chain integrity.
-
-Every finding must carry a tamper-evident evidence chain linking:
-  observation -> hypothesis -> validation -> evidence -> finding
-
-The chain is:
-  1. Immutable once sealed (frozen dataclass entries)
-  2. Hash-linked (each entry references the previous hash)
-  3. Timestamped with monotonic + wall clock
-  4. Source-attributed (tool, phase, agent)
-
-No finding may reach CONFIRMED without a valid chain.
-"""
 from __future__ import annotations
 
 import hashlib
@@ -79,7 +66,6 @@ _GENESIS_HASH = "0" * 24
 
 
 class EvidenceChain:
-    """Append-only hash-linked evidence chain for a single finding."""
 
     def __init__(self, finding_id: str):
         self.finding_id = finding_id
@@ -170,7 +156,6 @@ class EvidenceChain:
 
 
 class EvidenceChainRegistry:
-    """Global registry of evidence chains, keyed by finding_id."""
 
     _instance: Optional["EvidenceChainRegistry"] = None
 

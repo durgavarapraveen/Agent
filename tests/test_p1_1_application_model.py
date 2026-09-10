@@ -1,4 +1,3 @@
-"""P1.1 — ApplicationModel tests."""
 import pytest
 import threading
 from unittest.mock import MagicMock, patch
@@ -106,7 +105,6 @@ class TestTechnologies:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Endpoints + Parameters + Schemas
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestEndpoints:
@@ -129,7 +127,6 @@ class TestEndpoints:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Identities + Roles + Sessions
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestIdentitiesRolesSessions:
@@ -230,7 +227,6 @@ class TestDataFlows:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Sinks (Client + Server)
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestSinks:
@@ -276,7 +272,6 @@ class TestDependencies:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Caches + Queues
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestCachesQueues:

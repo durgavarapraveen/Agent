@@ -1,15 +1,3 @@
-"""P2.8 — minimize sensitive data before it enters the LLM context.
-
-Reuses the ``mask_sensitive_data`` scrubber (AWS/GitHub/JWT/Bearer/password/
-email/card/SSN/PEM …) that already runs on logs, and applies it to every string
-leaving for the model: prompts, system text, and tool-result bodies. If the
-reporting module can't be imported, a minimal built-in regex set is used.
-
-Scope note: the agent authenticates via explicit session tokens (P0.2), not by
-copying tokens out of LLM-visible text, so scrubbing response bodies does not
-impair exploitation — the model still learns *that* a secret leaked (the redacted
-marker remains), just not the raw value.
-"""
 from __future__ import annotations
 
 import re
@@ -34,12 +22,6 @@ def _fallback_mask(text: str) -> str:
 
 
 def redact_for_llm(text: Any) -> Any:
-    """Return `text` with credentials/PII masked. Non-strings pass through.
-
-    P0.5: Secrets are stored in SecretVault with references, then the
-    remaining text is pattern-masked. The vault allows authorized replay
-    of authenticated requests without the LLM ever seeing raw secrets.
-    """
     if not isinstance(text, str) or not text:
         return text
     # P0.5: vault-based redaction first (stores secrets, returns refs)
@@ -57,7 +39,6 @@ def redact_for_llm(text: Any) -> Any:
 
 
 def redact_messages(messages: List[Dict]) -> List[Dict]:
-    """Redact the `content` of each chat message (shallow-copied)."""
     out = []
     for m in messages or []:
         if isinstance(m, dict) and isinstance(m.get("content"), str):

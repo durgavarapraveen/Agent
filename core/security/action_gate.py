@@ -1,16 +1,3 @@
-"""ActionGate — one deterministic pipeline every tool invocation passes through
-before execution (P0-9).
-
-Stages, in order (first failure stops and denies):
-
-    schema -> scope -> precondition -> duplicate -> risk -> ALLOW
-
-The LLM proposes actions; this gate — not the LLM — is the authority on whether
-an action may run. Scope/schema failures DENY (an out-of-scope or malformed plan
-never executes). Duplicate/risk are advisory flags surfaced in the decision and
-logs (caching/tiering handle the actual optimization/authorization downstream),
-so enabling the gate cannot wrongly block legitimate work.
-"""
 from __future__ import annotations
 
 import logging

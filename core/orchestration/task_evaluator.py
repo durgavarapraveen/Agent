@@ -1,8 +1,3 @@
-"""
-Task Evaluator.
-Validates task completion against strict objective criteria before marking tasks as SUCCEEDED.
-Prevents unconfirmed / fake findings from polluting shared context and reports.
-"""
 
 import logging
 import re
@@ -20,7 +15,6 @@ class CompletionStatus(str, Enum):
 
 
 class TaskCompletionEvaluator:
-    """Evaluates task completion against TaskSpec success criteria."""
 
     @classmethod
     def evaluate(cls, spec: Any = None, tool_results: Optional[List[Any]] = None, agent_result: Any = None, **kwargs) -> Tuple[CompletionStatus, str]:
@@ -46,7 +40,6 @@ class TaskCompletionEvaluator:
 
 
 class TaskEvaluator:
-    """Evaluates task execution results against strict objective criteria."""
 
     @classmethod
     def evaluate_task(
@@ -57,10 +50,6 @@ class TaskEvaluator:
         findings: List[Dict[str, Any]],
         shared_context: Any
     ) -> Tuple[bool, str, List[Dict[str, Any]]]:
-        """
-        Validate task completion.
-        Returns: (passed: bool, proof_or_reason: str, validated_findings: List[Dict])
-        """
         vuln_type = (vuln_type or "").lower().strip()
         obj_lower = (objective or "").lower().strip()
 

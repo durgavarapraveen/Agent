@@ -1,7 +1,3 @@
-"""
-Technology-Matched Nuclei Vulnerability Runner.
-Maps detected technologies to official Nuclei template tags and executes non-blocking scans.
-"""
 
 import asyncio
 import json
@@ -62,7 +58,6 @@ VALID_GENERIC_TAGS = {
 
 
 class NucleiRunner:
-    """Asynchronous Nuclei vulnerability scanner with technology-based tag filtering."""
 
     def __init__(self, binary_path: Optional[str] = None):
         self.binary_path = binary_path or shutil.which("nuclei") or "nuclei"
@@ -72,9 +67,6 @@ class NucleiRunner:
         self.last_status: str = "unknown"
 
     def find_templates_for(self, tech: str) -> str:
-        """
-        Map a detected technology name to official Nuclei template tags.
-        """
         tech_clean = (tech or "").strip().lower()
         for key, tags in TECH_TAG_MAP.items():
             if key in tech_clean:
@@ -92,10 +84,6 @@ class NucleiRunner:
         tech_tags: Union[List[str], str],
         timeout: int = 60
     ) -> List[Dict[str, Any]]:
-        """
-        Execute nuclei non-blockingly using asyncio.create_subprocess_exec.
-        CLI flags: -u <target> -tags <tags> -jsonl -silent -severity low,medium,high,critical
-        """
         if isinstance(tech_tags, list):
             valid_tags = [str(t).strip() for t in tech_tags if str(t).strip()]
             tags_str = ",".join(valid_tags)
@@ -186,7 +174,6 @@ class NucleiRunner:
         return findings
 
     def _parse_json_finding(self, target: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Map raw nuclei JSON output line into a standardized Finding dictionary."""
         info = data.get("info", {})
         template_id = data.get("template-id") or data.get("template_id") or info.get("name") or "generic"
         title = info.get("name") or template_id
@@ -224,10 +211,6 @@ class NucleiRunner:
         }
 
     async def scan_context_technologies(self, ctx: Any, timeout: int = 60) -> List[Dict[str, Any]]:
-        """
-        Inspect technologies in SharedContext and run technology-matched scans.
-        Registers all parsed findings into SharedContext.
-        """
         all_findings = []
         tech_dict = getattr(ctx, "technologies", {}) or {}
 

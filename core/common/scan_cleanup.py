@@ -1,14 +1,3 @@
-"""Per-scan cleanup — remove temporary files a scan leaves behind.
-
-When a scan completes (or is cancelled), we sweep:
-  1. `/tmp/` inside the Kali container — screenshots, spray probes, sqlmap
-     sessions, nuclei caches, custom-template scratch, etc.
-  2. Host-side scratch — `tempfile.mkdtemp(prefix="ag_*")` dirs, per-scan
-     `loot/<scan_id>/`, per-scan `data/asm/<target>/` outputs older than the
-     retention window.
-
-Everything is opt-out: `SCAN_CLEANUP_ENABLED=0` disables the sweep.
-"""
 from __future__ import annotations
 
 import logging
@@ -52,11 +41,6 @@ KALI_TMP_PATTERNS = (
 
 
 def cleanup_kali_container(container: str = None) -> dict:
-    """Remove per-scan temp files inside the Kali container.
-
-    Returns a small summary dict {removed_paths, freed_bytes_estimate, errors}.
-    Safe to call even when no container is available.
-    """
     from agents.kali_executor import KaliDockerExecutor
 
     if not _cleanup_enabled():
@@ -68,26 +52,32 @@ def cleanup_kali_container(container: str = None) -> dict:
 
     removed = []
     errors = []
-    # Use a single bash -c so glob expansion + rm happens in-container.
-    globs = " ".join(f'"{p}"' for p in KALI_TMP_PATTERNS)
-    cmd = (
-        f'bash -c "shopt -s nullglob; for p in {globs}; do '
-        f'if [ -e \\"$p\\" ]; then rm -rf \\"$p\\" && echo \\"$p\\"; fi; done"'
-    )
-    try:
-        result = subprocess.run(
-            f'docker exec {container} {cmd}',
-            shell=True, capture_output=True, encoding="utf-8",
-            errors="replace", timeout=30,
-        )
-        if result.returncode == 0:
-            removed = [line for line in (result.stdout or "").splitlines() if line.strip()]
-        else:
-            errors.append(f"docker exec rc={result.returncode}: {result.stderr[:200]}")
-    except subprocess.TimeoutExpired:
-        errors.append("cleanup command timed out")
-    except Exception as e:
-        errors.append(str(e))
+
+    for pattern in KALI_TMP_PATTERNS:
+        base_dir = os.path.dirname(pattern)
+        name_pat = os.path.basename(pattern)
+
+        cmd = [
+            "docker", "exec", container,
+            "find", base_dir, "-maxdepth", "1", "-name", name_pat,
+            "-exec", "rm", "-rf", "{}", "+"
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                shell=False, capture_output=True, encoding="utf-8",
+                errors="replace", timeout=30,
+            )
+            if result.returncode == 0:
+                removed.append(pattern)
+            else:
+                # 'find' returns an error if base_dir doesn't exist. Ignore that.
+                if "No such file or directory" not in (result.stderr or ""):
+                    errors.append(f"docker exec rc={result.returncode}: {result.stderr[:200]}")
+        except subprocess.TimeoutExpired:
+            errors.append(f"cleanup timed out for {pattern}")
+        except Exception as e:
+            errors.append(str(e))
 
     logger.info(f"[ScanCleanup] Kali container: removed {len(removed)} path(s), "
                 f"errors={len(errors)}")
@@ -102,12 +92,6 @@ HOST_MKDTEMP_PREFIXES = ("ag_screenshot_", "detonate_")
 
 
 def cleanup_host_scratch(scan_id: str = "") -> dict:
-    """Remove host-side scratch: temp dirs from `tempfile.mkdtemp` and any
-    per-scan directories under `loot/`, `data/scratch/`.
-
-    Only removes items younger than 7 days OR directly named by `scan_id` —
-    we deliberately don't wipe old scan artefacts unless explicitly asked.
-    """
     if not _cleanup_enabled():
         return {"skipped": True, "reason": "SCAN_CLEANUP_ENABLED=0"}
 
@@ -148,7 +132,6 @@ def cleanup_host_scratch(scan_id: str = "") -> dict:
 # ── Aggregate entry-point ──────────────────────────────────────────────
 
 def cleanup_after_scan(scan_id: str = "", container: str = None) -> dict:
-    """Full post-scan sweep. Safe to call at completion, cancel, or timeout."""
     if not _cleanup_enabled():
         return {"skipped": True, "reason": "SCAN_CLEANUP_ENABLED=0"}
     return {

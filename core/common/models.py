@@ -48,7 +48,7 @@ class AttackPathStatus(Enum):
 @dataclass
 class Evidence:
     evidence_id: str = field(default_factory=lambda: str(uuid4()))
-    type: str = ""  # http_response, header, status_code, source_code, tool_output, etc
+    type: str = ""
     content: Any = None
     tool_name: Optional[str] = None
     timestamp: datetime = field(default_factory=datetime.now)
@@ -95,7 +95,7 @@ class Task:
     description: str = ""
     objective: str = ""
     capability: str = ""  # e.g., "recon", "api_analysis", "authentication_analysis"
-    priority: int = 5  # 1-10
+    priority: int = 5
     status: TaskStatus = TaskStatus.PENDING
     parent_task_id: Optional[str] = None
     created_by: str = ""
@@ -179,8 +179,7 @@ class AgentInfo:
 
 @dataclass
 class CentralAgentDecision:
-    """Structured decision output from Central Agent."""
-    decision_type: str  # CREATE_TASK, APPROVE_TASK, REJECT_TASK, REPLAN, CONTINUE, WAIT, COMPLETE, REQUEST_TOOL, REQUEST_VALIDATION
+    decision_type: str
     reason: str = ""
     tasks: List[Task] = field(default_factory=list)
     approved_tasks: List[str] = field(default_factory=list)
@@ -193,8 +192,7 @@ class CentralAgentDecision:
 
 @dataclass
 class AgentResult:
-    """Standard result format returned by agents."""
-    status: str = "completed"  # completed, failed, partial
+    status: str = "completed"
     summary: str = ""
     discoveries: List[Dict[str, Any]] = field(default_factory=list)
     findings: List[Finding] = field(default_factory=list)

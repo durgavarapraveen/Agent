@@ -1,14 +1,3 @@
-"""P0.8 — Reproduction validation gate.
-
-A finding may only be marked CONFIRMED if it can be reproduced
-deterministically. This module validates that:
-  1. A reproduction request exists (method + URL + optional body)
-  2. The reproduction target is in scope (PolicyEngine)
-  3. The reproduction evidence matches expected indicators
-  4. The reproduction is idempotent (same result on retry)
-
-Findings that fail reproduction are downgraded to INCONCLUSIVE.
-"""
 from __future__ import annotations
 
 import hashlib
@@ -137,7 +126,6 @@ def validate_scope(url: str, method: str = "GET") -> Tuple[bool, str]:
 
 
 class ReproductionGate:
-    """Gate that validates finding reproducibility before confirmation."""
 
     def __init__(self, min_attempts: int = 2, min_success_ratio: float = 0.5):
         self._min_attempts = min_attempts

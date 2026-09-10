@@ -1,9 +1,3 @@
-"""
-Phase 6 Module 6.3: Data Retention Policy Engine (core/retention_policy.py)
-
-Auto-deletion of 90-day scan artifacts and 365-day PII records, encrypted ZIP archiving,
-cascade GDPR customer data deletion, and monthly deletion proof compliance reports.
-"""
 
 import csv
 import hashlib
@@ -12,7 +6,7 @@ import os
 import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Set
 
 from core.security.encryption import encrypt
 from core.security.audit_logger import AuditLogger
@@ -26,7 +20,6 @@ GRACE_PERIOD_DAYS = 30
 
 
 class RetentionPolicy:
-    """Manages automated data retention, encrypted archiving, and GDPR cascade deletion."""
 
     def __init__(self, reports_dir: str = None, archives_dir: str = "archives",  # noqa: ARG002
                  db_path: str = None, audit_log_path: str = "data/audit.log"):
@@ -40,6 +33,7 @@ class RetentionPolicy:
         self.archives_dir = Path(archives_dir)
         self.archives_dir.mkdir(parents=True, exist_ok=True)
         self.audit_logger = AuditLogger(log_path=audit_log_path)
+        self._legal_holds: Set[str] = set()  # scan IDs under legal hold
 
     def archive_scan_data(self, scan_dir: Path) -> Path:
         scan_id = scan_dir.name
@@ -68,6 +62,10 @@ class RetentionPolicy:
         if self.reports_dir.exists():
             for folder in self.reports_dir.iterdir():
                 if folder.is_dir():
+                    scan_id = folder.name
+                    if scan_id in self._legal_holds:
+                        logger.info("[RetentionPolicy] Skipping %s — under legal hold", scan_id)
+                        continue
                     mtime = datetime.fromtimestamp(folder.stat().st_mtime)
                     if mtime < scans_cutoff:
                         try:
@@ -148,3 +146,22 @@ class RetentionPolicy:
             writer.writerow(headers)
             writer.writerow(row)
         return str(out_path)
+
+    def set_legal_hold(self, scan_id: str) -> None:
+        self._legal_holds.add(scan_id)
+        self.audit_logger.log_event(
+            action="LEGAL_HOLD_SET", target=scan_id,
+            details=f"Legal hold placed on scan {scan_id}",
+        )
+        logger.info("[RetentionPolicy] Legal hold set for scan=%s", scan_id)
+
+    def release_legal_hold(self, scan_id: str) -> None:
+        self._legal_holds.discard(scan_id)
+        self.audit_logger.log_event(
+            action="LEGAL_HOLD_RELEASED", target=scan_id,
+            details=f"Legal hold released for scan {scan_id}",
+        )
+        logger.info("[RetentionPolicy] Legal hold released for scan=%s", scan_id)
+
+    def is_held(self, scan_id: str) -> bool:
+        return scan_id in self._legal_holds

@@ -1,10 +1,3 @@
-"""Smoke test: the orchestrator can be constructed and its main entry
-points are wired.
-
-Catches API renames like `CentralBrain.run()` -> `CentralBrain.run_main_loop()`
-that repeatedly broke the historical suite, without paying the cost of a
-real scan (which needs LLM + tools + network).
-"""
 from __future__ import annotations
 
 import inspect
@@ -28,7 +21,6 @@ def test_central_brain_entry_points_present() -> None:
 
 
 def test_shared_context_v2_lock_present() -> None:
-    """Guards the SharedContextV2._state_lock rename that broke matrix_engine."""
     from core.memory.shared_context import SharedContextV2
     ctx = SharedContextV2("http://example.com")
     assert hasattr(ctx, "_state_lock"), "SharedContextV2._state_lock is required"

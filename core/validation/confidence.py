@@ -1,8 +1,3 @@
-"""
-Finding confidence scoring & calibration module (Phase 4 Module 4.4).
-Empirical base confidence matrix, dynamic contextual adjustment factors (WAF, Exploit, Retest, Baseline),
-historical FP verdict learning, and auto-validation thresholds.
-"""
 
 from __future__ import annotations
 
@@ -44,7 +39,7 @@ BASE_CONFIDENCE_MATRIX = {
 
 @dataclass
 class ConfidenceVerdict:
-    level: str  # HIGH | MEDIUM | LOW
+    level: str
     score: int
     evidence: List[str] = field(default_factory=list)
     needs_review: bool = False  # True when level == LOW
@@ -59,7 +54,6 @@ class ConfidenceVerdict:
 
 
 def assess(*, version_match_exact: bool = False, reachable: bool = False, epss: float = 0.0, kev_match: bool = False) -> ConfidenceVerdict:
-    """Compute a confidence verdict from evidence signals."""
     score = 0
     evidence: List[str] = []
 
@@ -148,7 +142,6 @@ def gate(findings: List[Dict]) -> Dict[str, List[Dict]]:
 
 
 class ConfidenceCalibrator:
-    """Confidence calibration engine with empirical matrix, dynamic modifiers, and FP history learning."""
 
     def __init__(self):
         self._init_db()
@@ -171,7 +164,6 @@ class ConfidenceCalibrator:
             logger.error(f"[ConfidenceCalibrator] DB init error: {e}")
 
     def record_fp_verdict(self, finding_type: str, confidence_score: float, verdict: str):
-        """Record user feedback verdict (FP or TP) for offline confidence learning."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -184,7 +176,6 @@ class ConfidenceCalibrator:
             logger.debug(f"[ConfidenceCalibrator] Record verdict error: {e}")
 
     def get_historical_fp_penalty(self, finding_type: str) -> float:
-        """If a specific finding_type consistently gets flagged as FP by users (>=80% FP), apply penalty -0.15."""
         f_clean = finding_type.strip().upper()
         try:
             with DatabaseManager.get_connection() as conn:
@@ -201,10 +192,6 @@ class ConfidenceCalibrator:
         return 0.0
 
     def calibrate(self, finding: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        Calibrate finding confidence using BASE_CONFIDENCE_MATRIX, contextual modifiers, and FP learning.
-        Formula: adjusted_confidence = base * (1 + sum(modifiers)), capped at [0.10, 0.99].
-        """
         context = context or {}
         vuln_type = str(finding.get("type") or finding.get("vuln_type") or finding.get("title") or "MISCONFIGURATION").upper()
 

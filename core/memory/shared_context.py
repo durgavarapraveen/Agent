@@ -13,16 +13,6 @@ logger = logging.getLogger(__name__)
 
 
 class SharedContextV2:
-    """
-    Central memory and state orchestrator for Pentest V2.
-    Single source of truth for all runtime state.
-
-    Concurrency: `add_vulnerability`, `add_subdomain`, `add_technology`,
-    `add_endpoint`, `add_captured_request`, and similar mutators run inside
-    `asyncio.gather(...)` in the exploitation phase. Each guards its
-    read-modify-write against `self._state_lock` (RLock, so a mutator can
-    call another mutator without deadlocking).
-    """
     def __init__(self, target: str = None, scope: Dict = None):
         self._state_lock = threading.RLock()
         self._dynamic_keys: set = set()
@@ -72,7 +62,7 @@ class SharedContextV2:
         # P1.9: browser/Chromium capability. A capture failure due to a missing
         # browser is UNAVAILABLE, NOT "no client-side requests" — downstream must
         # not read it as negative security evidence.
-        self.browser_status: str = "UNKNOWN"          # UNKNOWN|AVAILABLE|UNAVAILABLE
+        self.browser_status: str = "UNKNOWN"
         self.browser_status_reason: str = ""
         # P1.15: observed serving layer per host (EDGE/ORIGIN/APPLICATION),
         # learned from response headers, so findings can be attributed correctly.
@@ -214,7 +204,6 @@ class SharedContextV2:
                 pass
 
     def _mirror_confirmed_exploit(self, vuln: Dict):
-        """Record a confirmed finding as an exploit_results row (deduped)."""
         proof = vuln.get("proof") or ""
         loc = vuln.get("location") or vuln.get("target") or ""
         dedup_key = (proof or loc).lower()
@@ -257,14 +246,6 @@ class SharedContextV2:
 
     @staticmethod
     def canonical_endpoint_id(method: str, url: str) -> str:
-        """P0-7: one stable identity for an endpoint so the same endpoint is not
-        counted several times under trivially different spellings (scheme case,
-        host case, trailing slash, query-parameter order). Used as the dedup key
-        for the V1 endpoint map.
-
-        P3: delegates to the single ``canonical_endpoint_key`` so every store
-        (this one, EndpointInventoryV2, …) shares one identity function.
-        """
         from core.domain.endpoint import canonical_endpoint_key
         return canonical_endpoint_key(method, url)
 
@@ -291,7 +272,6 @@ class SharedContextV2:
 
     @classmethod
     def _endpoint_origin(cls, url: str, source: str) -> str:
-        """Classify how an endpoint was obtained (P1.12)."""
         s = (source or "").lower()
         if cls._is_synthetic_url(url) or any(k in s for k in ("synthetic", "spa_probe", "baseline", "404probe")):
             return "SYNTHETIC"
@@ -304,7 +284,6 @@ class SharedContextV2:
         return "DISCOVERED"
 
     def _endpoint_in_scope(self, ep) -> bool:
-        """P0-5: only endpoints on authorised hosts may enter the attack surface."""
         url = self._endpoint_url(ep)
         if not url:
             return True  # relative/path-only endpoints belong to the target
@@ -363,14 +342,10 @@ class SharedContextV2:
     # go through these so the dict contract is never replaced by a bare list
     # (which silently breaks dedup, iteration-by-value, and DB persistence).
     def clear_endpoints(self) -> None:
-        """Authoritative reset of the endpoint store (keeps the dict contract)."""
         with self._state_lock:
             self.endpoints.clear()
 
     def drop_endpoints_by_url(self, urls) -> int:
-        """Remove endpoints whose URL is in `urls`. Returns the count removed.
-        The one mutation path for pruning (e.g. dead-liveness sweeps), so callers
-        never reassign ``ctx.endpoints`` to a list."""
         dead = {str(u) for u in (urls or []) if u}
         if not dead:
             return 0
@@ -419,9 +394,6 @@ class SharedContextV2:
     # ── P2-6: response baseline store ──────────────────────────────────────
     def record_baseline(self, method: str, url: str, status: int,
                         length: int, content_type: str = "") -> None:
-        """Store the FIRST clean response per (method, canonical endpoint) so
-        later probes can compare deltas (status/length) instead of interpreting
-        a single response in isolation."""
         try:
             key = self.canonical_endpoint_id(method, url)
             store = getattr(self, "response_baselines", None)
@@ -524,8 +496,6 @@ class SharedContextV2:
                 self._dynamic_keys = {key}
 
     def dynamic_data(self) -> Dict[str, Any]:
-        """Return everything added dynamically via update() (OSINT and other recon
-        intelligence), so it can be serialized to the report/UI and shared."""
         keys = getattr(self, "_dynamic_keys", set())
         out = {}
         for k in keys:
@@ -571,10 +541,6 @@ class SharedContextV2:
         return context
 
     def build_llm_context(self, task: str, params: Dict[str, Any], memory_retriever=None, tool_learning=None) -> Dict[str, Any]:
-        """
-        Builds a structured prompt context specifically bounded by limits.
-        NEVER includes raw logs.
-        """
         context = {
             "task": task,
             "target_summary": self.target_summary,

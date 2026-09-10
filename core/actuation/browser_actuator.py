@@ -1,13 +1,3 @@
-"""
-BrowserActuator — headless Chromium (Playwright) inside the Kali container,
-usable against ANY authorized target: a deployed/public URL is reached directly;
-only a localhost target is rewritten to a container-reachable host.
-
-Client-side actions (DOM XSS, CSP, SPA routes, client-side logic) need a real
-browser executing the app's JavaScript. A batch of actions runs in ONE session
-(state preserved), returning a compact observation the agent reasons over. Targets
-are scope-validated before navigation.
-"""
 
 from __future__ import annotations
 
@@ -111,7 +101,6 @@ class BrowserActuator:
         return out
 
     async def run_actions(self, actions: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Execute a batch of browser actions in one Chromium session (in-scope only)."""
         for a in actions:
             if a.get("action") == "navigate" and not self._in_scope(a.get("url", "")):
                 return {"error": "navigation target out of authorized scope", "blocked": True}

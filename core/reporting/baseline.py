@@ -1,8 +1,3 @@
-"""
-Baseline Normalization Module (Phase 4 Module 4.3).
-Captures baseline state (first scan mode), filters known-good noise, respects whitelist overrides,
-hashes responses (SHA-256), and detects baseline drift (>20% deviation).
-"""
 
 import hashlib
 import json
@@ -24,7 +19,6 @@ def sha256_hash(data: str) -> str:
 
 
 class BaselineManager:
-    """Manages baseline capture, noise filtering, whitelist matching, and drift detection."""
 
     def __init__(self, db_path: str = None, whitelist_file: str = WHITELIST_FILE):
         if not os.path.exists(whitelist_file) and os.path.exists(os.path.join("data", whitelist_file)):

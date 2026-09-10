@@ -1,8 +1,3 @@
-"""
-DynamicAgent - Generic LLM-driven agent.
-No hardcoded logic. LLM decides what tool to run, reads output, repeats.
-Gets ONLY the context the brain decided is relevant.
-"""
 
 import logging
 from typing import Dict, List, Optional
@@ -66,13 +61,6 @@ RULES:
 
 
 class DynamicAgent:
-    """
-    LLM-driven agent. Brain spawns it with:
-    - objective: what to accomplish
-    - tools: which tools it can use
-    - context: ONLY relevant data (brain decides what to share)
-    - max_steps: safety limit
-    """
 
     def __init__(
         self,
@@ -104,13 +92,6 @@ class DynamicAgent:
                         "ssl_inspect", "port_check", "browser")
 
     def _normalize_command(self, tool: str, command: str) -> str:
-        """Ensure the command starts with the tool binary.
-
-        The LLM sometimes returns only the arguments (e.g. tool='httpx',
-        command='-u https://... -status-code'), which then runs as
-        `bash -c "-u ..."` -> 'bash: - : invalid option'. Prefix the tool name
-        when the first token isn't already the tool.
-        """
         if not command:
             return command
         if tool in self._RAW_SHELL_TOOLS:
@@ -123,7 +104,6 @@ class DynamicAgent:
         return f"{tool} {command.strip()}"
 
     async def execute_tool(self, tool_name: str, params: dict):
-        """Execute tool with smart failure handling"""
         
         # Defensive check
         if not self.tools:
@@ -208,7 +188,6 @@ class DynamicAgent:
  
 
     async def execute(self):
-        """Execute objective via CapabilityResolver and ExecutionPlanner on the Tool Intelligence platform"""
         from core.orchestration.capability_worker import CapabilityWorker
         from core.common.normalizer import PlannerResponseNormalizer
         from core.orchestration.task_evaluator import TaskCompletionEvaluator, CompletionStatus
@@ -298,7 +277,6 @@ class DynamicAgent:
         }
     
     def _build_step_prompt(self, step: int) -> str:
-        """Build prompt for next step"""
         # Format history as ReAct observations (Action -> Observation)
         history_str = ""
         if self.history:
@@ -350,7 +328,6 @@ RULES:
         return prompt
 
     def _store_results(self, results: Dict):
-        """Parse agent results and store in shared context"""
         data = results.get("data", {})
 
         # Auto-store common data types

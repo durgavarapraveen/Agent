@@ -2,9 +2,6 @@ from core.coverage.test_definition import SecurityTestDefinition, ApplicabilityR
 from typing import Dict, List
 
 class SecurityTestCatalog:
-    """
-    Registry of all generic security tests.
-    """
     def __init__(self):
         self.tests: Dict[str, SecurityTestDefinition] = {}
         self._load_defaults()

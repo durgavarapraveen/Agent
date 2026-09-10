@@ -1,6 +1,3 @@
-"""
-Core Intelligence Subpackage
-"""
 
 import sys
 import importlib

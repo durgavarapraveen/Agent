@@ -1,15 +1,3 @@
-"""P0.10 — Docker socket removal guard.
-
-Ensures that:
-  1. /var/run/docker.sock is never mounted into the web container
-  2. DOCKER_HOST env var does not point to the socket
-  3. Docker communication uses TCP (network) not socket
-  4. Runtime check blocks if socket is detected
-
-The web container communicates with the Kali container via the
-Docker API over TCP or via the `docker-compose exec` network path,
-never through a raw socket mount.
-"""
 from __future__ import annotations
 
 import logging

@@ -1,27 +1,3 @@
-"""P0.5 — Secret Isolation Vault.
-
-HTTP captures, checkpoints, logs, findings, and agent state must not
-casually contain passwords, session cookies, Authorization headers, JWTs,
-API keys, CSRF tokens, OAuth codes, or other secrets.
-
-This module provides:
-  - SecretVault: reference-based secret storage (secrets in, refs out)
-  - redact_secrets(): replace secrets in text with <SECRET_REF:id> tokens
-  - inject_secrets(): restore refs back to raw values (explicit capability)
-  - Configurable retention with auto-expiry
-  - Integration points for logging, LLM prompts, and checkpoints
-
-Usage:
-    from core.security.secret_vault import get_vault
-
-    vault = get_vault()
-    ref = vault.store("Bearer eyJhbGci...", category="authorization")
-    # ref == "<SECRET_REF:a1b2c3d4>"
-
-    # In logs/prompts/checkpoints, use ref instead of raw value.
-    # To retrieve (requires explicit capability):
-    raw = vault.retrieve(ref)
-"""
 from __future__ import annotations
 
 import hashlib
@@ -127,19 +103,12 @@ _SECRET_PATTERNS: List[Tuple[re.Pattern, SecretCategory]] = [
 
 
 def _fingerprint(value: str) -> str:
-    """Content-based fingerprint to deduplicate identical secrets."""
     return hashlib.sha256(value.encode("utf-8", "ignore")).hexdigest()[:16]
 
 
 # ── Secret Vault ─────────────────────────────────────────────────────────
 
 class SecretVault:
-    """Reference-based secret storage. Secrets go in, refs come out.
-
-    Raw secret values are stored in memory only. References like
-    <SECRET_REF:a1b2c3d4> replace them in logs, prompts, and checkpoints.
-    Retrieval requires explicit call — no accidental leakage.
-    """
 
     _instance: Optional["SecretVault"] = None
     _lock = threading.RLock()
@@ -167,7 +136,6 @@ class SecretVault:
     def store(self, secret: str,
               category: "SecretCategory | str" = SecretCategory.OTHER,
               retention: Optional[float] = None) -> str:
-        """Store a secret and return its reference string."""
         if not secret or not isinstance(secret, str):
             return ""
         if isinstance(category, str):
@@ -215,11 +183,6 @@ class SecretVault:
     # ── Retrieve ─────────────────────────────────────────────────────────
 
     def retrieve(self, ref_or_id: str) -> Optional[str]:
-        """Retrieve a raw secret by its reference or ref_id.
-
-        This is the ONLY way to get raw secrets back. Callers must have
-        explicit authorization — this is NOT for casual access.
-        """
         ref_id = ref_or_id
         m = _REF_PATTERN.search(ref_or_id)
         if m:
@@ -240,11 +203,6 @@ class SecretVault:
     # ── Redact ───────────────────────────────────────────────────────────
 
     def redact(self, text: str) -> str:
-        """Replace all detected secrets in text with vault references.
-
-        Secrets are stored in the vault and replaced with <SECRET_REF:id>.
-        This is the primary integration point for logging and LLM prompts.
-        """
         if not text or not isinstance(text, str):
             return text or ""
 
@@ -261,11 +219,6 @@ class SecretVault:
 
     def redact_dict(self, data: Dict[str, Any],
                     sensitive_keys: Optional[Set[str]] = None) -> Dict[str, Any]:
-        """Redact secret values in a dictionary (shallow copy).
-
-        Keys matching sensitive_keys have their values vault-stored.
-        All string values are pattern-scanned regardless.
-        """
         if not data or not isinstance(data, dict):
             return data or {}
 
@@ -296,11 +249,6 @@ class SecretVault:
     # ── Inject (restore) ─────────────────────────────────────────────────
 
     def inject(self, text: str) -> str:
-        """Replace all <SECRET_REF:id> tokens with raw secret values.
-
-        Use ONLY when the raw secret is needed for an authorized operation
-        (e.g., replaying an authenticated HTTP request against in-scope target).
-        """
         if not text or not isinstance(text, str):
             return text or ""
 
@@ -311,7 +259,6 @@ class SecretVault:
         return _REF_PATTERN.sub(_replace, text)
 
     def inject_dict(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Restore all secret references in a dictionary."""
         if not data or not isinstance(data, dict):
             return data or {}
         out = {}
@@ -334,7 +281,6 @@ class SecretVault:
     # ── Housekeeping ─────────────────────────────────────────────────────
 
     def _evict_expired(self) -> int:
-        """Remove expired entries. Returns count evicted."""
         now = time.monotonic()
         expired_ids = [
             eid for eid, e in self._entries.items()
@@ -347,7 +293,6 @@ class SecretVault:
         return len(expired_ids)
 
     def clear(self) -> None:
-        """Wipe all secrets from the vault."""
         with self._vlock:
             self._entries.clear()
             self._by_fingerprint.clear()
@@ -396,7 +341,6 @@ _SENSITIVE_KEYS: Set[str] = {
 
 
 def _categorize_key(key: str) -> SecretCategory:
-    """Map a dictionary key name to a secret category."""
     k = key.lower()
     if any(p in k for p in ("password", "passwd", "pwd")):
         return SecretCategory.PASSWORD
@@ -424,15 +368,12 @@ def get_vault() -> SecretVault:
 
 
 def redact_secrets(text: str) -> str:
-    """Convenience: redact all secrets in text using the global vault."""
     return get_vault().redact(text)
 
 
 def redact_secrets_dict(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Convenience: redact secrets in a dict using the global vault."""
     return get_vault().redact_dict(data)
 
 
 def inject_secrets(text: str) -> str:
-    """Convenience: restore secret refs. Requires explicit authorization."""
     return get_vault().inject(text)

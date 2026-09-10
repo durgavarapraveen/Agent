@@ -1,8 +1,3 @@
-"""
-Deterministic Capability Workers.
-Executes capability-specific workflows using ToolAdapters and RetryPolicy.
-No LLM calls occur in the execution loop.
-"""
 
 import logging
 import re
@@ -19,7 +14,6 @@ logger = logging.getLogger(__name__)
 
 
 class CapabilityWorker:
-    """Deterministic worker that executes capability workflows"""
 
     def __init__(self, agent_id: str, tool_registry: Any, shared_context: Any):
         self.agent_id = agent_id
@@ -34,10 +28,6 @@ class CapabilityWorker:
         objective: str,
         params: Optional[Dict[str, Any]] = None
     ) -> AgentResult:
-        """
-        Execute deterministic workflow for the requested capability.
-        Returns canonical AgentResult.
-        """
         params = params or {}
         logger.info(f"CAPABILITY_SELECTED: capability={capability.value} target={target} agent_id={self.agent_id}")
 
@@ -103,7 +93,6 @@ class CapabilityWorker:
         )
 
     def _get_tool_chain_for_capability(self, capability: CapabilityType, objective: str = "") -> List[str]:
-        """Dynamically resolve prioritized list of tools for each capability via CapabilityResolver"""
         from core.orchestration.capability_resolver import CapabilityResolver
         resolver = CapabilityResolver()
         resolved_profiles = resolver.resolve_tools(capability=capability.value, objective=objective)
@@ -119,7 +108,6 @@ class CapabilityWorker:
         task_id: str,
         params: Dict[str, Any]
     ) -> ToolResult:
-        """Execute a single tool with deterministic RetryPolicy and PartialResult handling"""
         from core.tools.tool_knowledge_store import ToolKnowledgeStore
         store = ToolKnowledgeStore.get_instance()
         from urllib.parse import urlparse
@@ -231,7 +219,6 @@ class CapabilityWorker:
         target: str,
         raw_res: Dict[str, Any]
     ) -> ToolResult:
-        """Process tool output into ToolResult, applying deduplication, significance filtering, token compression, and error translation."""
         from core.common.config import get_config
         from core.memory.dedup_tracker import DeduplicationTracker
         from core.common.error_translator import ErrorTranslator
@@ -375,7 +362,6 @@ class CapabilityWorker:
         target: str,
         output: str
     ) -> Dict[str, Any]:
-        """Extract structured findings deterministically from text/JSON/XML output"""
         import json
         import xml.etree.ElementTree as ET
 
@@ -537,7 +523,6 @@ class CapabilityWorker:
         return data
 
     def _record_extracted_data(self, data: Dict[str, Any], tool_name: str, target: str) -> None:
-        """Store extracted findings in SharedContext and per-tool dict"""
         if not self.ctx:
             return
 

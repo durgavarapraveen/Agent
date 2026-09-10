@@ -19,9 +19,6 @@ class CoverageEngine:
         self.applicability_engine = ApplicabilityEngine()
         
     def initialize(self, target_endpoints: List[Endpoint]) -> CoverageStateV2:
-        """
-        Calculates baseline applicability across known endpoints.
-        """
         all_tests = self.catalog.get_all_tests()
         
         applicable_count = 0
@@ -92,10 +89,6 @@ class CoverageEngine:
         print(f"COVERAGE_UPDATE test={test_id} endpoint={endpoint_id} status={status.value}")
 
     def mark_tested(self, test_id: str, endpoint_id: Optional[str], status: TestState, evidence: SecurityEvidence = None):
-        """
-        Mark a test completely finished for an endpoint. 
-        Note: DO NOT mark the global test as CONFIRMED/REJECTED unless all endpoints are complete.
-        """
         # Endpoint specific updates
         if endpoint_id:
             if endpoint_id in self.state.endpoint_coverage_map and test_id in self.state.endpoint_coverage_map[endpoint_id]:
@@ -121,11 +114,6 @@ class CoverageEngine:
                 print(f"COVERAGE_UPDATE test={test_id} status={status.value}")
 
     def _recalculate_global_state(self, test_id: str):
-        """
-        Recalculates the global test state based on its children endpoints.
-        Rule: A scanner returning zero findings must never mark a vulnerability class 
-        as complete globally unless all applicable endpoints are explicitly REJECTED/CONFIRMED.
-        """
         applicable_endpoints = []
         for ep_id, test_map in self.state.endpoint_coverage_map.items():
             if test_id in test_map and test_map[test_id].status != TestState.NOT_APPLICABLE:

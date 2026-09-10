@@ -1,9 +1,3 @@
-"""
-Differential testing subsystem (spec PHASE 5 / Point A / P1.5).
-
-Send supposedly-equivalent requests, compare the responses, surface every
-divergence as an anomaly for the hypothesis pipeline.
-"""
 from core.intelligence.differential.comparison import (
     Divergence,
     ResponseSnapshot,

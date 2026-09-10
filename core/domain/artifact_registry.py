@@ -1,12 +1,3 @@
-"""P1.3 — canonical ArtifactRegistry.
-
-Recon discovers API schemas (OpenAPI/Swagger/GraphQL), robots, sitemaps and
-auth metadata, but the API importer used to re-probe a hardcoded path list in
-isolation and report "no API schema discovered" even after recon had already
-found one. This registry is the shared handoff: every discovered artifact is
-recorded here, and the importer consumes registered artifacts before falling
-back to its own probing.
-"""
 from __future__ import annotations
 
 import hashlib
@@ -59,7 +50,7 @@ class Artifact:
     artifact_type: str
     url: str
     source: str = ""
-    status: str = "discovered"      # discovered | verified
+    status: str = "discovered"
     content_hash: str = ""
     body: str = ""
     in_scope: bool = True
@@ -118,8 +109,6 @@ class ArtifactRegistry:
 
 
 def harvest_from_ctx(ctx) -> ArtifactRegistry:
-    """Scan already-discovered ctx state (endpoints, captured requests, assets)
-    for artifact URLs and register them, so the importer can consume them."""
     reg = getattr(ctx, "artifact_registry", None)
     if reg is None:
         reg = ArtifactRegistry()

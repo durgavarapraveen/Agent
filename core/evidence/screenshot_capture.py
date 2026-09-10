@@ -1,7 +1,3 @@
-"""
-Evidence Screenshot Capture — takes screenshots of vulnerable pages
-as visual proof for the pentesting report.
-"""
 
 import base64
 import logging
@@ -28,7 +24,6 @@ class ScreenshotResult:
 
 
 class ScreenshotCapture:
-    """Captures screenshots of vulnerable pages as evidence."""
 
     def __init__(self, output_dir: str = None, scan_id: str = None):
         from core.common.reports_config import reports_enabled, reports_dir
@@ -48,7 +43,6 @@ class ScreenshotCapture:
         self._browser_available: Optional[bool] = None
 
     def _check_browser(self) -> bool:
-        """Check if a headless browser is available in the Kali container."""
         if self._browser_available is not None:
             return self._browser_available
 
@@ -81,12 +75,10 @@ class ScreenshotCapture:
         return False
 
     def _sanitize_filename(self, text: str) -> str:
-        """Create a safe filename from finding title."""
         safe = re.sub(r'[^\w\-.]', '_', text)[:80]
         return safe.strip('_') or 'screenshot'
 
     def _capture_with_chrome(self, url: str, output_file: str, timeout: int = 15) -> bool:
-        """Capture screenshot using headless Chrome/Chromium."""
         from agents.kali_executor import KaliDockerExecutor
 
         docker_path = f"/tmp/{os.path.basename(output_file)}"
@@ -111,8 +103,8 @@ class ScreenshotCapture:
             import subprocess
             try:
                 subprocess.run(
-                    f"docker cp {container}:{docker_path} {output_file}",
-                    shell=True, capture_output=True, timeout=10
+                    ["docker", "cp", f"{container}:{docker_path}", output_file],
+                    shell=False, capture_output=True, timeout=10
                 )
                 return Path(output_file).exists()
             except Exception:
@@ -121,7 +113,6 @@ class ScreenshotCapture:
         return False
 
     def _capture_with_cutycapt(self, url: str, output_file: str, timeout: int = 15) -> bool:
-        """Capture screenshot using CutyCapt."""
         from agents.kali_executor import KaliDockerExecutor
 
         docker_path = f"/tmp/{os.path.basename(output_file)}"
@@ -137,8 +128,8 @@ class ScreenshotCapture:
                 import subprocess
                 try:
                     subprocess.run(
-                        f"docker cp {container}:{docker_path} {output_file}",
-                        shell=True, capture_output=True, timeout=10
+                        ["docker", "cp", f"{container}:{docker_path}", output_file],
+                        shell=False, capture_output=True, timeout=10
                     )
                     return Path(output_file).exists()
                 except Exception:
@@ -146,7 +137,6 @@ class ScreenshotCapture:
         return False
 
     def _capture_with_curl(self, url: str, output_file: str, timeout: int = 10) -> bool:
-        """Fallback: save raw HTML response as text evidence."""
         from agents.kali_executor import KaliDockerExecutor
 
         cmd = f'curl -s -L -k --max-time {timeout} "{url}" | head -c 50000'
@@ -161,7 +151,6 @@ class ScreenshotCapture:
         return False
 
     def capture_screenshot(self, url: str, finding_title: str, timeout: int = 15) -> ScreenshotResult:
-        """Capture a screenshot of a URL."""
         result = ScreenshotResult(finding_title=finding_title, url=url)
         safe_name = self._sanitize_filename(finding_title)
         ts = int(time.time())
@@ -219,7 +208,6 @@ class ScreenshotCapture:
         return result
 
     def capture_findings(self, findings: List[Dict], max_screenshots: int = 20) -> List[ScreenshotResult]:
-        """Capture screenshots for a list of findings, prioritized by severity."""
         severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
         sorted_findings = sorted(
             findings,
@@ -253,7 +241,6 @@ class ScreenshotCapture:
         return self.results
 
     def get_evidence_summary(self) -> Dict:
-        """Get summary of all captured evidence."""
         return {
             "total_attempted": len(self.results),
             "successful": len([r for r in self.results if r.success]),

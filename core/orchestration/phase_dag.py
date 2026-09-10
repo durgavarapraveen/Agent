@@ -1,18 +1,3 @@
-"""
-P0-4: dependency-aware phase scheduler.
-
-Replaces `for phase in configured_phases: execute(phase)` with a graph
-walk that only picks the next phase when every prerequisite has been
-satisfied by the SharedContext (real evidence, not just a completed list).
-
-Legacy 4-phase model:
-  RECON -> ACTIVE_SCANNING -> EXPLOITATION -> REPORTING
-Extended 20-phase model (P0-4 doc): AUTHORIZATION .. REPORTING.
-
-The DAG is defined in terms of the legacy names so existing call sites
-keep working, but adds `prereq_predicates` so a phase is only "ready"
-once the context proves the prior phase's outputs exist.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -75,14 +60,6 @@ def default_dag() -> Dict[str, PhaseNode]:
 
 
 class PhaseScheduler:
-    """Dependency-aware next-phase picker.
-
-    Usage:
-        sched = PhaseScheduler(default_dag(), allowed={"RECON", "REPORTING"})
-        while (p := sched.next_ready(ctx, completed)):
-            run(p)
-            completed.add(p)
-    """
 
     def __init__(self, dag: Dict[str, PhaseNode], allowed: Optional[Set[str]] = None):
         self.dag = dag
@@ -100,7 +77,6 @@ class PhaseScheduler:
         return None
 
     def blocked_reasons(self, ctx, completed: Set[str]) -> Dict[str, str]:
-        """Explain why each not-yet-run phase can't start (for logs)."""
         out: Dict[str, str] = {}
         for name, node in self.dag.items():
             if name in completed or name not in self.allowed:

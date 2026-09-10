@@ -1,8 +1,3 @@
-"""
-Vulnerability Intelligence Feeds Module (Phase 2 Module 2.1).
-Queries NIST NVD API v2.0, EPSS API, GitHub Security Advisories, and CISA KEV catalog for real-time CVE lookup and exploit intelligence.
-Strictly offline_mode support, rate-limited (1 req/sec) external calls, and local SQLite feed storage.
-"""
 
 import difflib
 import json
@@ -37,14 +32,12 @@ def _enforce_rate_limit():
 
 @dataclass
 class FeedResult:
-    """Container for feed item results."""
     data: Any = field(default_factory=dict)
     stale: bool = False
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
 class VulnerabilityDatabase:
-    """PostgreSQL database manager for NVD CVEs, GitHub Advisories, and Zero-Day Hints."""
 
     def __init__(self):
         self._init_db()
@@ -155,7 +148,6 @@ class VulnerabilityDatabase:
 
 
 class FeedClient:
-    """Async & synchronous multi-source vulnerability intelligence feed client with offline mode support."""
 
     def __init__(self, timeout: int = 5, api_key: Optional[str] = None, offline_mode: bool = True):
         self.timeout = timeout
@@ -166,7 +158,6 @@ class FeedClient:
         self.cisa_kev_cache: Optional[Dict[str, Any]] = None
 
     def sync_nvd_feed(self, force: bool = False):
-        """Fetch/update NVD feed with gzip decompression & 1 req/sec rate limit."""
         if self.offline_mode:
             logger.info("[FeedClient] offline_mode=True; skipping NVD live sync.")
             return
@@ -175,7 +166,6 @@ class FeedClient:
         logger.info("[FeedClient] Syncing NVD JSON feed...")
 
     def fetch_github_advisories(self, ecosystem: str = "pip"):
-        """Fetch GitHub Security Advisories API and insert package_vulnerabilities."""
         if self.offline_mode:
             logger.info("[FeedClient] offline_mode=True; skipping GitHub advisories sync.")
             return
@@ -184,7 +174,6 @@ class FeedClient:
         logger.info(f"[FeedClient] Fetching GitHub Security Advisories for {ecosystem}...")
 
     def search_cve_for_software(self, software: str, version: str) -> List[Dict[str, Any]]:
-        """Legacy helper for software search in feeds."""
         soft_clean = (software or "").strip().lower()
         ver_clean = (version or "").strip().lower()
         cache_key = f"{soft_clean}:{ver_clean}"
@@ -262,16 +251,11 @@ class FeedClient:
 
 
 class ServiceMatcher:
-    """Fuzzy matching engine for services & zero-day anomaly candidate detector."""
 
     def __init__(self, db: Optional[VulnerabilityDatabase] = None):
         self.db = db or VulnerabilityDatabase()
 
     def match_service_to_cve(self, service_name: str, version: str) -> List[Dict[str, Any]]:
-        """
-        Perform fuzzy matching (using difflib.get_close_matches) for service names.
-        Return sorted list of CVEs by CVSS score descending.
-        """
         all_cves = self.db.get_all_cves()
         if not all_cves:
             # Seed mock CVE data for local offline testing if DB empty
@@ -296,9 +280,6 @@ class ServiceMatcher:
         return matched_cves
 
     def detect_zero_day_candidate(self, service_name: str, version: str, status_code: int, payload: str, banner: str = "") -> Optional[Dict[str, Any]]:
-        """
-        Flag finding as 0-day_candidate when an anomaly occurs on a service with no known CVEs.
-        """
         matched = self.match_service_to_cve(service_name, version)
         # Anomaly criteria: HTTP 500 on payload OR SSH banner with no matching CVE
         if not matched and (status_code == 500 or "SSH" in banner):

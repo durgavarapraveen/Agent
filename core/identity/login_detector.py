@@ -11,14 +11,8 @@ class LoginType(Enum):
     UNKNOWN = "unknown"
 
 class LoginDetector:
-    """
-    Heuristically determines the type of login mechanism.
-    """
     
     def detect(self, page_content: str, url: str) -> LoginType:
-        """
-        Analyzes a URL or page source to determine the login type.
-        """
         login_type = LoginType.UNKNOWN
         
         if "oauth" in url.lower() or "authorize" in url.lower():

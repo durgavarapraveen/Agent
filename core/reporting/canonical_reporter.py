@@ -1,11 +1,3 @@
-"""
-Canonical State Reporter (Phase 37).
-
-All report data derives from canonical stores — never from fragmented
-counters or ad-hoc state. This module assembles the complete scan
-summary from AttackSurfaceState, FindingStore, CoverageEngine,
-EvidenceStore, and LearningEngine.
-"""
 from __future__ import annotations
 
 import json
@@ -132,12 +124,6 @@ class CanonicalReporter:
         return {}
 
     def save_json(self, path: str = None, scan_id: str = None) -> str:
-        """Persist the canonical report.
-
-        When REPORTS_ENABLED=1 → writes JSON to disk and returns the path.
-        Otherwise, if `scan_id` is provided, persists into `scan_artifacts`
-        under kind=`canonical_summary` and returns `db:scan_artifacts:<id>`.
-        Returns "" when neither path is available."""
         from core.common.reports_config import reports_enabled, reports_dir
         summary = self.generate_summary()
         body = json.dumps(summary, indent=2, default=str)

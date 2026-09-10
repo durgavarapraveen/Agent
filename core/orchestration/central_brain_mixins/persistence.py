@@ -1,8 +1,3 @@
-"""PersistenceMixin — Postgres writers moved out of CentralBrain.
-
-Persists recon findings, captured requests, vulnerabilities, exploit results,
-and post-exploit findings via `core.database.pg_store` repositories.
-"""
 from __future__ import annotations
 import json
 import logging
@@ -14,7 +9,6 @@ logger = logging.getLogger(__name__)
 
 class PersistenceMixin:
     async def _persist_recon_findings(self):
-        """Save recon discoveries to knowledge store."""
         try:
             logger.info("Persisting recon findings...")
             
@@ -214,7 +208,6 @@ class PersistenceMixin:
             logger.error(traceback.format_exc())
     
     async def _persist_captured_requests(self):
-        """Save captured HTTP requests to disk for replay."""
         try:
             if not self.ctx.captured_requests:
                 logger.debug("No captured requests to persist")
@@ -235,10 +228,6 @@ class PersistenceMixin:
             logger.error(f"Failed to persist captured requests: {e}")
 
     async def _llm_probe_finding_sweep(self):
-        """LLM safety-net: review exploit-intent probes the deterministic oracle
-        did not classify, and materialize any missed vulnerabilities before
-        persistence. Ensures ambiguous-but-real findings still reach the DB.
-        """
         obs = getattr(self.ctx, "probe_observations", None) or []
         if not obs:
             return
@@ -319,7 +308,6 @@ class PersistenceMixin:
             logger.info(f"[ProbeSweep] LLM triage recovered {added} missed finding(s) from {len(pending)} probes")
 
     async def _persist_vulnerabilities(self):
-        """Save vulnerability findings to knowledge store."""
         try:
             # LLM safety-net over unclassified probes before we persist.
             try:
@@ -360,7 +348,6 @@ class PersistenceMixin:
             logger.error(f"Failed to persist vulnerabilities: {e}")
 
     async def _persist_exploit_results(self):
-        """Save exploitation results to knowledge store."""
         try:
             if not self.ctx.exploit_results:
                 logger.debug("No exploit results to persist")
@@ -400,7 +387,6 @@ class PersistenceMixin:
             logger.error(f"Failed to persist exploit results: {e}")
 
     async def _persist_post_exploit_findings(self):
-        """Save post-exploitation findings (privesc, lateral, persistence, MITRE)."""
         try:
             findings = []
             

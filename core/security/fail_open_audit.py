@@ -1,17 +1,3 @@
-"""P0.9 — Fail-open audit.
-
-Scans the security infrastructure for fail-open conditions:
-  - PolicyEngine denials that silently pass
-  - NetworkBroker bypasses
-  - Sandbox fallbacks to unsafe execution
-  - Tool validation bypasses
-  - Secret vault leaks
-  - Evidence chain gaps
-  - Missing authorization checks
-
-Each check returns a structured finding. The audit runs at startup
-and can be triggered on-demand.
-"""
 from __future__ import annotations
 
 import logging

@@ -1,7 +1,3 @@
-"""
-Custom Nuclei Template Generator — creates target-specific nuclei templates
-from discovered vulnerability patterns for future scanning.
-"""
 
 import logging
 import os
@@ -16,14 +12,6 @@ logger = logging.getLogger(__name__)
 
 
 def _yaml_str(value: str) -> str:
-    """Quote a value for safe YAML embedding.
-
-    Templates are generated from finding-derived strings; without escaping,
-    a title containing `:` or a proof containing `\\n---\\n` could break the
-    template's structure or inject an unintended matcher. We prefer the
-    PyYAML dumper when available and fall back to a conservative double-
-    quoted string with `"`/`\\` escaped.
-    """
     if value is None:
         return '""'
     try:
@@ -38,7 +26,6 @@ def _yaml_str(value: str) -> str:
 
 
 class NucleiTemplateGenerator:
-    """Generates custom nuclei YAML templates from discovered findings."""
 
     def __init__(self, output_dir: str = None, scan_id: str = None):
         from core.common.reports_config import reports_enabled, reports_dir
@@ -52,7 +39,6 @@ class NucleiTemplateGenerator:
         self.generated: List[str] = []
 
     def _safe_id(self, text: str) -> str:
-        """Create a nuclei-safe template ID."""
         safe = re.sub(r'[^a-z0-9-]', '-', text.lower())
         safe = re.sub(r'-+', '-', safe).strip('-')[:60]
         return safe or "custom-check"
@@ -61,7 +47,6 @@ class NucleiTemplateGenerator:
         return (severity or "info").lower()
 
     def _extract_path(self, url: str) -> str:
-        """Extract path from URL."""
         try:
             parsed = urlparse(url)
             return parsed.path or "/"
@@ -69,7 +54,6 @@ class NucleiTemplateGenerator:
             return "/"
 
     def generate_missing_header_template(self, finding: Dict) -> Optional[str]:
-        """Generate template for missing security header."""
         title = finding.get("title", "")
         header_match = re.search(r'(?:missing\s+)?(\S+(?:-\S+)*)\s*header', title, re.IGNORECASE)
         if not header_match:
@@ -113,7 +97,6 @@ http:
         return template
 
     def generate_info_disclosure_template(self, finding: Dict) -> Optional[str]:
-        """Generate template for information disclosure."""
         target = finding.get("target") or finding.get("location") or ""
         path = self._extract_path(target)
         title = finding.get("title", "Information Disclosure")
@@ -160,7 +143,6 @@ http:
         return template
 
     def generate_endpoint_check_template(self, finding: Dict) -> Optional[str]:
-        """Generate template for exposed endpoint/admin panel."""
         target = finding.get("target") or finding.get("location") or ""
         path = self._extract_path(target)
         if path == "/":
@@ -201,7 +183,6 @@ http:
         return template
 
     def generate_default_creds_template(self, finding: Dict) -> Optional[str]:
-        """Generate template for default credentials check."""
         target = finding.get("target") or finding.get("location") or ""
         path = self._extract_path(target)
         title = finding.get("title", "")
@@ -275,7 +256,6 @@ http:
         return template
 
     def generate_cors_template(self, finding: Dict) -> Optional[str]:
-        """Generate template for CORS misconfiguration."""
         target = finding.get("target") or finding.get("location") or ""
         path = self._extract_path(target)
         template_id = self._safe_id(f"custom-cors-{path}")
@@ -311,7 +291,6 @@ http:
         return template
 
     def generate_from_finding(self, finding: Dict) -> Optional[str]:
-        """Generate appropriate template based on finding type."""
         vuln_type = (finding.get("type") or "").upper()
         title_lower = (finding.get("title") or "").lower()
 
@@ -329,7 +308,6 @@ http:
             return self.generate_endpoint_check_template(finding)
 
     def generate_all(self, findings: List[Dict], max_templates: int = 50) -> List[str]:
-        """Generate templates for all applicable findings."""
         generated_paths = []
         seen_ids = set()
         count = 0
@@ -377,5 +355,4 @@ http:
         return generated_paths
 
     def get_template_dir(self) -> str:
-        """Return the path to custom templates for nuclei -t flag."""
         return str(self.output_dir)

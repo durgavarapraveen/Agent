@@ -1,18 +1,3 @@
-"""P0.2 — Network Broker.
-
-Centralized, governed network access layer. Every outbound HTTP request from
-scan tools routes through here. Provides:
-
-  - DNS resolution with rebinding protection (resolve-then-connect, pinned IP)
-  - Redirect revalidation (every hop re-checked against scope + private IP)
-  - Hostname canonicalization (IDN/punycode, IPv4-mapped IPv6, encoded IPs)
-  - Private/reserved/loopback/link-local IP blocking
-  - Request budget enforcement
-  - Audit logging of every request
-
-Architecture:
-    Agent -> ToolGateway -> PolicyEngine -> NetworkBroker -> Network
-"""
 from __future__ import annotations
 
 import asyncio
@@ -37,12 +22,24 @@ _MAX_REDIRECTS = 10
 _DEFAULT_TIMEOUT = 30.0
 _DEFAULT_REQUEST_BUDGET = 10_000
 
+@dataclass(frozen=True)
+class EgressEvidence:
+    url: str
+    dns_answers: List[str]
+    chosen_ip: str
+    port: int
+    protocol: str
+    policy_decision: str
+    redirect_chain: List[str]
+    timestamp: float = field(default_factory=time.time)
+    
+    def log(self):
+        logger.info(f"[EgressTelemetry] {self.policy_decision} | URL={self.url} IP={self.chosen_ip} PORT={self.port} PROTO={self.protocol} DNS={self.dns_answers} CHAIN={self.redirect_chain}")
 
 # ── Data models ──────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class ResolvedTarget:
-    """DNS resolution result with pinned IPs for rebinding protection."""
     hostname: str
     canonical: str
     ips: Tuple[str, ...]
@@ -57,7 +54,6 @@ class ResolvedTarget:
 
 @dataclass(frozen=True)
 class NetworkDecision:
-    """Result of a network authorization check."""
     allowed: bool
     url: str
     reason: str
@@ -68,8 +64,6 @@ class NetworkDecision:
 # ── IP classification ────────────────────────────────────────────────────
 
 def _is_dangerous_ip(ip_str: str) -> bool:
-    """True if IP is private, loopback, link-local, reserved, multicast,
-    unspecified, or in carrier-grade NAT (100.64.0.0/10)."""
     try:
         addr = ipaddress.ip_address(ip_str)
     except ValueError:
@@ -103,7 +97,6 @@ def _is_dangerous_ip(ip_str: str) -> bool:
 
 
 def _is_localhost_name(hostname: str) -> bool:
-    """Check for localhost aliases including non-obvious ones."""
     h = hostname.lower().strip().strip("[]")
     if h in _LOCALHOST_NAMES:
         return True
@@ -124,7 +117,6 @@ def _is_localhost_name(hostname: str) -> bool:
 # ── Hostname canonicalization ────────────────────────────────────────────
 
 def canonicalize_hostname(hostname: str) -> str:
-    """Normalize hostname: lowercase, strip brackets/whitespace, handle IDN."""
     h = (hostname or "").strip().lower().strip("[]")
     if not h:
         return ""
@@ -141,8 +133,6 @@ def canonicalize_hostname(hostname: str) -> str:
 
 
 def parse_url_target(url: str) -> Tuple[str, str, int, str]:
-    """Extract (scheme, host, port, path) from a URL.
-    Returns canonicalized hostname."""
     parsed = urlparse(url)
     scheme = (parsed.scheme or "https").lower()
     host = canonicalize_hostname(parsed.hostname or "")
@@ -154,9 +144,6 @@ def parse_url_target(url: str) -> Tuple[str, str, int, str]:
 # ── DNS resolver with rebinding protection ───────────────────────────────
 
 class DNSResolver:
-    """Resolve-then-connect: resolves hostname to IPs, pins them, and all
-    subsequent connections use the pinned IPs. Prevents DNS rebinding where
-    a hostname resolves to a safe IP on check but an internal IP on connect."""
 
     def __init__(self, cache_ttl: float = 60.0):
         self._cache: Dict[str, ResolvedTarget] = {}
@@ -164,7 +151,6 @@ class DNSResolver:
         self._cache_ttl = cache_ttl
 
     def resolve(self, hostname: str) -> ResolvedTarget:
-        """Resolve hostname and cache the result. Uses pinned IPs."""
         canonical = canonicalize_hostname(hostname)
         if not canonical:
             return ResolvedTarget(hostname=hostname, canonical="", ips=())
@@ -215,7 +201,6 @@ class DNSResolver:
             self._cache.clear()
 
     async def resolve_async(self, hostname: str) -> ResolvedTarget:
-        """Async wrapper — runs blocking DNS in executor."""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self.resolve, hostname)
 
@@ -223,7 +208,6 @@ class DNSResolver:
 # ── Request budget ───────────────────────────────────────────────────────
 
 class RequestBudget:
-    """Track and limit total requests per scan session."""
 
     def __init__(self, max_requests: int = _DEFAULT_REQUEST_BUDGET):
         self._max = max_requests
@@ -231,7 +215,6 @@ class RequestBudget:
         self._lock = threading.Lock()
 
     def consume(self) -> bool:
-        """Returns True if request is within budget."""
         with self._lock:
             if self._count >= self._max:
                 return False
@@ -256,13 +239,6 @@ class RequestBudget:
 # ── Network Broker ───────────────────────────────────────────────────────
 
 class NetworkBroker:
-    """Centralized network access with DNS rebinding protection, redirect
-    revalidation, and scope enforcement.
-
-    Every scan-originated HTTP request should go through this broker.
-    Infrastructure traffic (LLM API calls, OSINT feeds) is handled
-    separately by the EgressFirewall allowlist.
-    """
 
     _instance: Optional["NetworkBroker"] = None
     _lock = threading.RLock()
@@ -299,13 +275,6 @@ class NetworkBroker:
     # ── Core authorization ──────────────────────────────────────────────
 
     def check_url(self, url: str) -> NetworkDecision:
-        """Full authorization check for an outbound URL:
-        1. Parse and canonicalize
-        2. Check localhost aliases
-        3. Resolve DNS and pin IPs
-        4. Verify all IPs are non-dangerous
-        5. Check target scope via EgressFirewall
-        """
         if not url or not url.strip():
             return NetworkDecision(
                 allowed=False, url=url or "",
@@ -376,7 +345,6 @@ class NetworkBroker:
         )
 
     async def check_url_async(self, url: str) -> NetworkDecision:
-        """Async version of check_url."""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self.check_url, url)
 
@@ -385,8 +353,6 @@ class NetworkBroker:
     def validate_redirect(self, original_url: str,
                           redirect_url: str,
                           hop: int = 0) -> NetworkDecision:
-        """Validate a redirect target. Every hop is re-checked against scope
-        and private IP blocking. Prevents redirect-to-internal attacks."""
         if hop >= self._max_redirects:
             return NetworkDecision(
                 allowed=False, url=redirect_url,
@@ -410,8 +376,6 @@ class NetworkBroker:
 
     def verify_no_rebind(self, hostname: str,
                          previous: ResolvedTarget) -> NetworkDecision:
-        """Re-resolve and verify IPs haven't changed (DNS rebinding check).
-        Call this before using a cached connection if TTL is near expiry."""
         fresh = self._resolver.resolve(hostname)
 
         if set(fresh.ips) != set(previous.ips):
@@ -435,18 +399,42 @@ class NetworkBroker:
 
     # ── Governed HTTP client factory ────────────────────────────────────
 
-    def create_client(self, **kwargs) -> Any:
-        """Create an httpx.AsyncClient that routes all requests through
-        the broker's authorization checks. Uses pinned IPs from DNS
-        resolution to prevent TOCTOU rebinding."""
+    def create_client(self, redirect_chain: Optional[List[str]] = None, **kwargs) -> Any:
         try:
             import httpx
+            import httpcore
         except ImportError:
-            raise RuntimeError("httpx required for NetworkBroker.create_client")
+            raise RuntimeError("httpx and httpcore required for NetworkBroker.create_client")
 
         broker = self
         max_redir = self._max_redirects
         timeout_val = kwargs.pop("timeout", self._timeout)
+        current_chain = redirect_chain or []
+
+        class PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
+            def __init__(self, original: httpcore.AsyncNetworkBackend):
+                self._original = original
+
+            async def connect_tcp(self, host: str, port: int, timeout: Optional[float] = None, local_address: Optional[str] = None, **kwargs) -> httpcore.AsyncNetworkStream:
+                canonical = canonicalize_hostname(host)
+                with broker._resolver._lock:
+                    cached = broker._resolver._cache.get(canonical)
+                
+                if cached and cached.ips:
+                    ip = cached.ips[0]
+                    logger.debug(f"[NetworkBroker] Pinned TCP connection: {host} -> {ip}")
+                    host_to_connect = ip
+                else:
+                    host_to_connect = host
+                    logger.warning(f"[NetworkBroker] Pinned TCP connection failed to find cached IP for {host}, falling back to default resolution")
+                    
+                return await self._original.connect_tcp(host_to_connect, port, timeout=timeout, local_address=local_address, **kwargs)
+                
+            async def connect_unix_socket(self, path: str, timeout: Optional[float] = None, **kwargs) -> httpcore.AsyncNetworkStream:
+                return await self._original.connect_unix_socket(path, timeout=timeout, **kwargs)
+                
+            async def sleep(self, seconds: float) -> None:
+                return await self._original.sleep(seconds)
 
         class GovernedTransport(httpx.AsyncBaseTransport):
             def __init__(self, inner: httpx.AsyncBaseTransport):
@@ -455,6 +443,22 @@ class NetworkBroker:
             async def handle_async_request(self, request):
                 url_str = str(request.url)
                 decision = broker.check_url(url_str)
+                
+                scheme, host, port, path = parse_url_target(url_str)
+                dns_answers = list(decision.resolved.ips) if decision.resolved else []
+                chosen_ip = dns_answers[0] if dns_answers else ""
+                
+                evidence = EgressEvidence(
+                    url=url_str,
+                    dns_answers=dns_answers,
+                    chosen_ip=chosen_ip,
+                    port=port,
+                    protocol=scheme,
+                    policy_decision=decision.reason_code or ("ALLOWED" if decision.allowed else "DENIED"),
+                    redirect_chain=list(current_chain)
+                )
+                evidence.log()
+                
                 if not decision.allowed:
                     from core.security.egress_firewall import EgressBlocked
                     raise EgressBlocked(
@@ -462,9 +466,12 @@ class NetworkBroker:
                     )
                 return await self._inner.handle_async_request(request)
 
-        transport = GovernedTransport(
-            httpx.AsyncHTTPTransport(retries=1)
-        )
+        base_transport = httpx.AsyncHTTPTransport(retries=1)
+        # Monkeypatch the pool's network backend with our pinning wrapper
+        if hasattr(base_transport, "_pool") and hasattr(base_transport._pool, "_network_backend"):
+            base_transport._pool._network_backend = PinnedNetworkBackend(base_transport._pool._network_backend)
+            
+        transport = GovernedTransport(base_transport)
 
         return httpx.AsyncClient(
             transport=transport,
@@ -476,8 +483,6 @@ class NetworkBroker:
     async def request(self, method: str, url: str,
                       follow_redirects: bool = True,
                       **kwargs) -> Any:
-        """Make a governed HTTP request with redirect revalidation.
-        Returns httpx.Response."""
         import httpx
 
         decision = self.check_url(url)
@@ -485,14 +490,21 @@ class NetworkBroker:
             from core.security.egress_firewall import EgressBlocked
             raise EgressBlocked(f"NetworkBroker: {decision.reason}")
 
-        client = self.create_client()
+        redirect_chain: List[str] = []
+        
         try:
             current_url = url
             for hop in range(self._max_redirects + 1):
-                resp = await client.request(method, current_url, **kwargs)
+                # Create client fresh for each hop so telemetry captures the updated chain
+                client = self.create_client(redirect_chain=list(redirect_chain))
+                try:
+                    resp = await client.request(method, current_url, **kwargs)
+                finally:
+                    await client.aclose()
 
                 if follow_redirects and resp.is_redirect and resp.has_redirect_location:
                     next_url = str(resp.next_request.url)
+                    redirect_chain.append(current_url)
                     redir_decision = self.validate_redirect(
                         current_url, next_url, hop,
                     )
@@ -513,8 +525,8 @@ class NetworkBroker:
 
             from core.security.egress_firewall import EgressBlocked
             raise EgressBlocked(f"NetworkBroker: max redirects exceeded for {url}")
-        finally:
-            await client.aclose()
+        except Exception:
+            raise
 
 
 # ── Module-level accessor ────────────────────────────────────────────────

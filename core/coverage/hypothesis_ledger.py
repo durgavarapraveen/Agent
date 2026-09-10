@@ -1,20 +1,8 @@
-"""HypothesisLedger — terminal-state tracking for probe hypotheses (P1-5).
-
-The LLM re-prompt loop tends to re-test the same (endpoint, vulnerability-class)
-pair many times (JWT, login, basket IDOR, change-password …), wasting tool
-calls and tokens. This ledger gives each hypothesis a small state machine:
-
-    OPEN -> TESTING -> CONFIRMED | NEGATIVE | INCONCLUSIVE
-
-Once a pair reaches a terminal state (CONFIRMED / NEGATIVE) or exhausts its
-attempt budget, `should_run` returns False and the probe layer short-circuits
-instead of re-executing. State is per-scan, held on the SharedContext.
-"""
 from __future__ import annotations
 
 import re
 import threading
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Any
 from urllib.parse import urlsplit
 
 # Coarse vulnerability-class inference from a hypothesis sentence. Order matters
@@ -77,8 +65,6 @@ class HypothesisLedger:
         return (_endpoint_key(url), infer_vuln_class(hypothesis))
 
     def should_run(self, url: str, hypothesis: str) -> Tuple[bool, str]:
-        """Return (allowed, reason). False when the pair is terminal or the
-        attempt budget is exhausted."""
         k = self.key(url, hypothesis)
         with self._lock:
             st = self._states.get(k)
@@ -90,24 +76,50 @@ class HypothesisLedger:
                 return False, f"attempt budget exhausted ({st['attempts']})"
             return True, "retry"
 
-    def record(self, url: str, hypothesis: str, outcome: str) -> None:
-        """outcome: CONFIRMED | NEGATIVE | INCONCLUSIVE | TESTING."""
+    def record_hypothesis(self, url: str, hypothesis: str, prerequisites: list[str], expected_observation: str) -> None:
+        """observation -> hypothesis -> prerequisites -> experiment (init)"""
         k = self.key(url, hypothesis)
         with self._lock:
-            st = self._states.get(k) or {"state": "OPEN", "attempts": 0}
-            st["attempts"] += 1
-            # Don't let a later INCONCLUSIVE override a terminal verdict.
-            if st["state"] not in _TERMINAL:
-                st["state"] = outcome
+            st = self._states.get(k) or {"state": "OPEN", "attempts": 0, "confidence": 0.0}
+            st["prerequisites"] = prerequisites
+            st["expected_observation"] = expected_observation
             self._states[k] = st
 
-    def snapshot(self) -> Dict[str, str]:
+    def record_experiment_outcome(self, url: str, hypothesis: str, outcome: str, confidence_delta: float) -> None:
+        """experiment -> observation -> oracle -> confidence update"""
+        k = self.key(url, hypothesis)
         with self._lock:
-            return {f"{ep}|{cls}": v["state"] for (ep, cls), v in self._states.items()}
+            st = self._states.get(k) or {"state": "OPEN", "attempts": 0, "confidence": 0.0}
+            st["attempts"] += 1
+            st["confidence"] += confidence_delta
+            
+            # Bound confidence
+            st["confidence"] = max(0.0, min(1.0, st["confidence"]))
+            
+            if st["state"] not in _TERMINAL:
+                if outcome in _TERMINAL:
+                    st["state"] = outcome
+                elif st["confidence"] >= 0.9:
+                    st["state"] = "CONFIRMED"
+                elif st["attempts"] >= self.max_attempts and st["confidence"] < 0.3:
+                    st["state"] = "NEGATIVE"
+                    
+            self._states[k] = st
+
+    def record(self, url: str, hypothesis: str, outcome: str) -> None:
+        # Legacy compat
+        self.record_experiment_outcome(url, hypothesis, outcome, 0.0)
+
+    def snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            return {f"{ep}|{cls}": {
+                "state": v["state"], 
+                "confidence": v.get("confidence", 0.0),
+                "attempts": v.get("attempts", 0)
+            } for (ep, cls), v in self._states.items()}
 
 
 def get_ledger(ctx) -> Optional[HypothesisLedger]:
-    """Fetch (or lazily create) the ledger on a SharedContext."""
     if ctx is None:
         return None
     led = getattr(ctx, "hypothesis_ledger", None)

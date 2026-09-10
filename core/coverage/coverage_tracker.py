@@ -1,11 +1,3 @@
-"""
-Coverage Tracker — Per-Test Metadata (Strix Pattern #2).
-
-Replaces simple counters with detailed per-test-attempt tracking.
-Each attempt records WHAT was tested, HOW, and WHY it failed.
-
-Inspired by Strix's coverage ledger with 5 outcomes and dedup.
-"""
 from __future__ import annotations
 
 import hashlib
@@ -78,7 +70,6 @@ class CoverageTracker:
         self._output_dir = Path(output_dir) if output_dir else None
 
     def record(self, attempt: TestAttempt) -> str:
-        """Record a test attempt. Returns the test_id."""
         with self._lock:
             if not attempt.test_id:
                 raw = f"{attempt.category}|{attempt.endpoint}|{attempt.parameter}|{attempt.payload}|{attempt.attempt_number}"
@@ -102,14 +93,12 @@ class CoverageTracker:
         return self.get_attempts(failure_reason=reason)
 
     def get_retryable(self) -> List[TestAttempt]:
-        """Tests that failed with transient/retryable errors."""
         retryable = {FailureReason.RATE_LIMITED, FailureReason.TIMEOUT,
                      FailureReason.TRANSIENT_ERROR, FailureReason.WAF_BLOCKED}
         with self._lock:
             return [a for a in self._attempts if a.failure_reason in retryable]
 
     def get_never_attempted(self, planned_tests: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        """Given planned tests, return those never attempted."""
         attempted_keys = set()
         with self._lock:
             for a in self._attempts:
@@ -136,7 +125,6 @@ class CoverageTracker:
         return counts
 
     def real_coverage(self, total_planned: int) -> Dict[str, Any]:
-        """Calculate honest coverage metrics."""
         with self._lock:
             confirmed = sum(1 for a in self._attempts if a.outcome == TestOutcome.CONFIRMED)
             no_issue = sum(1 for a in self._attempts if a.outcome == TestOutcome.NO_ISSUE_FOUND)

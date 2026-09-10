@@ -1,12 +1,3 @@
-"""P1.13 — evidence-based finding confidence classification.
-
-A finding's confidence must reflect the EVIDENCE, not a raw status code. In
-particular an HTTP 500 (or 502/503/504/406) on its own is never proof of a
-vulnerability — a prototype-pollution or stored-XSS submission that merely
-errors is INCONCLUSIVE until impact is demonstrated.
-
-Labels: SUSPECTED, LIKELY, CONFIRMED, NEGATIVE, INCONCLUSIVE, BLOCKED.
-"""
 from __future__ import annotations
 
 import re
@@ -32,9 +23,6 @@ class FindingConfidence(str, Enum):
 
 
 def _only_status_evidence(vuln: Dict) -> bool:
-    """True when the sole evidence is a noisy HTTP status with no demonstrated
-    impact — i.e. the finding leans on a 500/406 rather than a concrete result.
-    """
     proof = str(vuln.get("proof") or vuln.get("details") or "")
     codes = {int(x) for x in re.findall(r"\bHTTP\s*[/]?[0-9.]*\s*(\d{3})\b", proof)}
     for k in ("http_status", "status_code", "status"):
@@ -52,7 +40,6 @@ def _only_status_evidence(vuln: Dict) -> bool:
 
 
 def classify(vuln: Dict) -> str:
-    """Return a FindingConfidence label for a vulnerability dict."""
     st = str(vuln.get("status", "")).upper()
     rep = str(vuln.get("reproducibility_status", "")).upper()
 

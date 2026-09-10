@@ -1,8 +1,3 @@
-"""
-Quality Gate Master Orchestrator (Phase 4 Master Engine).
-Wraps CentralBrain execution flow after Phase 3 LLM analysis.
-Sequential pipeline: Filter (ML & signatures) -> Retest (idempotent probes) -> Baseline (noise filtering) -> Calibrate (confidence scoring & auto-accept).
-"""
 
 import logging
 from typing import Dict, List, Any
@@ -16,7 +11,6 @@ logger = logging.getLogger(__name__)
 
 
 class QualityGate:
-    """Phase 4 Master Quality Assurance & Detection Validation Pipeline."""
 
     def __init__(self, db_path: str = "quality_gate.sqlite"):
         self.fp_filter = FalsePositiveFilter()
@@ -31,13 +25,6 @@ class QualityGate:
         raw_findings: List[Dict[str, Any]],
         first_scan_mode: bool = False
     ) -> Dict[str, Any]:
-        """
-        Orchestrates:
-          1. Filter: Pass all raw findings through fp_filter -> removes false positives.
-          2. Retest: Run retest_engine.process_finding_retest() on surviving findings -> updates confidence & reproducibility.
-          3. Baseline: Run baseline_manager.filter_noise_and_detect_drift() -> removes baseline noise & whitelist matches.
-          4. Calibrate: Run calibrator.calibrate() -> assigns final scores & auto-accept/manual review flags.
-        """
         logger.info(f"[QualityGate] Processing {len(raw_findings)} raw findings for target '{target}' (Scan ID: {scan_id})")
 
         # 1. False Positive Reduction

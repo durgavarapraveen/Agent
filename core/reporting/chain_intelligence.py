@@ -1,18 +1,3 @@
-"""Post-scan attack chain intelligence.
-
-Takes the raw findings + Access Gained + captured requests + LLM phase
-summaries and asks the LLM to compose them into first-class attack chains:
-
-  SQLi(/rest/products/search)
-    → Users table dump (7 rows)
-    → MD5 crack (admin=admin123)
-    → Login as admin (JWT captured)
-    → IDOR replay on /rest/basket/{id}
-    → Cross-user data exfil
-
-Stored as `attack_chains` rows (existing table) — each row is one chain
-with nodes = finding refs, edges = "enables" relations, plus a narrative.
-"""
 from __future__ import annotations
 import json
 import logging
@@ -85,8 +70,6 @@ Return ONLY the JSON array. No markdown."""
 
 
 async def synthesize_chains(scan_id: str) -> List[Dict]:
-    """Ask LLM to compose chains from the scan artefacts. Store to
-    attack_chains table. Returns the chains."""
     inputs = _collect_chain_inputs(scan_id)
     if len(inputs["vulnerabilities"]) < 2:
         return []

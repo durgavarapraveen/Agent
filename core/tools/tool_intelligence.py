@@ -1,7 +1,3 @@
-"""
-Tool Intelligence Model & Target Context.
-Defines dynamic metadata profiles for tools and normalized target contexts.
-"""
 
 from datetime import datetime
 from typing import Dict, Any, List, Optional
@@ -14,7 +10,6 @@ logger = logging.getLogger(__name__)
 
 
 class TargetContext(BaseModel):
-    """Normalized target context used across tool invocations and intelligence modules"""
     raw: str
     url: Optional[str] = None
     hostname: Optional[str] = None
@@ -25,7 +20,6 @@ class TargetContext(BaseModel):
 
     @classmethod
     def from_target(cls, target: str) -> "TargetContext":
-        """Parse raw target string into normalized context"""
         if not target:
             return cls(raw="")
         
@@ -95,17 +89,16 @@ class TargetContext(BaseModel):
 
 
 class ToolProfile(BaseModel):
-    """Dynamic metadata profile for any tool in the intelligence platform"""
     id: str = Field(default_factory=lambda: "")
     name: str
     description: str = ""
-    source: str = "local"  # local, github, mcp, plugin, custom
+    source: str = "local"
     version: Optional[str] = "1.0.0"
     capabilities: List[str] = Field(default_factory=list)
     input_schema: Dict[str, Any] = Field(default_factory=dict)
     output_schema: Dict[str, Any] = Field(default_factory=dict)
     adapter: Optional[str] = None
-    risk_level: str = "low"  # low, medium, high, critical
+    risk_level: str = "low"
     trust_score: float = 0.90  # 0.0 to 1.0
     performance_score: float = 0.85  # 0.0 to 1.0
     success_rate: float = 0.90  # 0.0 to 1.0
@@ -122,7 +115,6 @@ class ToolProfile(BaseModel):
             self.id = f"tool_{self.name.lower().strip()}"
 
     def update_performance(self, success: bool, duration: float, findings_count: int = 0) -> None:
-        """Update metrics after tool execution"""
         self.total_executions += 1
         if success:
             self.successful_executions += 1

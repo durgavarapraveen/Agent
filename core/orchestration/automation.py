@@ -1,17 +1,3 @@
-"""
-Automation Rules (Phase 4, Module 4)
-
-A small event-driven rules engine over SharedContext:
-  - Auto-escalate when RCE / shell is found
-  - Auto-chain vulnerabilities
-  - Auto-report after exploitation
-  - Scheduled scanning (daily/weekly) config
-  - Remediation tracking
-
-Rules are evaluated against the context and return recommended actions. The
-engine itself performs no destructive work; the brain decides which recommended
-actions to carry out via existing managers.
-"""
 
 import logging
 from dataclasses import dataclass, field
@@ -40,7 +26,7 @@ class RemediationItem:
     vuln_id: str
     title: str
     severity: str
-    status: str = "open"            # open | in_progress | remediated | accepted
+    status: str = "open"
     owner: str = ""
     note: str = ""
     updated: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -50,7 +36,6 @@ class RemediationItem:
 
 
 class AutomationEngine:
-    """Evaluates automation rules and tracks remediation."""
 
     def __init__(self, ctx):
         self.ctx = ctx
@@ -84,7 +69,6 @@ class AutomationEngine:
     # ── evaluation ──
 
     def evaluate(self) -> List[Dict]:
-        """Return the list of actions whose conditions are newly satisfied."""
         actions = []
         for r in self.rules:
             if r.once and r.fired:
@@ -112,7 +96,6 @@ class AutomationEngine:
     @staticmethod
     def schedule_config(target: str, cadence: str = "weekly",
                         hour: int = 3, minute: int = 17) -> Dict:
-        """Produce a cron-style schedule spec for recurring scans."""
         cadence = cadence.lower()
         cron = {
             "daily":  f"{minute} {hour} * * *",
@@ -128,7 +111,6 @@ class AutomationEngine:
     # ── remediation tracking ──
 
     def sync_remediation(self):
-        """Create/refresh a remediation item for each known vulnerability."""
         for v in self.ctx.vulnerabilities:
             vid = str(v.get("id", v.get("title", "")))
             if not vid:

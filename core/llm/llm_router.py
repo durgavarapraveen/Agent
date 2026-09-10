@@ -1,9 +1,3 @@
-"""LLM task router — routes typed tasks through the canonical UniversalLLMHarness
-so the shared LLM budget governor + provider fallback logic apply.
-
-Historical note: this used to hit https://api.deepseek.com/v1/chat/completions
-directly with `requests`, bypassing the harness/budget entirely. It now routes
-via `agents.llm_harness_adapter.get_llm()`. Public API is preserved."""
 import asyncio
 import json
 import logging
@@ -23,7 +17,6 @@ class LLMRouter:
         self.model = model
 
     def _fallback_heuristic(self, task_type: str, candidates: List[Any]) -> Dict[str, Any]:
-        """Safe local degradation when the LLM is unreachable."""
         logger.warning(f"Using local fallback heuristic for {task_type}")
         if task_type == "hypothesis_ranking":
             ranked = []
@@ -38,15 +31,6 @@ class LLMRouter:
         return {}
 
     def _run_async(self, coro, timeout: float = 180.0):
-        """Bridge to the async harness from a sync API.
-
-        Timeout defaults to 180s (matches DeepSeek client timeout). Previously
-        the join used a silent 60s ceiling and returned `None`, causing the
-        caller to fall back to the deterministic heuristic even when a valid
-        LLM response was only slightly delayed. On timeout we now raise
-        `TimeoutError` so the caller can distinguish "provider slow" from
-        "provider returned nothing useful."
-        """
         try:
             loop = asyncio.get_event_loop()
         except RuntimeError:
@@ -81,7 +65,6 @@ class LLMRouter:
 
     def route_task(self, task_type: str, context: Dict[str, Any],
                     candidates: List[Any]) -> LLMResponse:
-        """Route the typed task through the harness; return LLMResponse."""
         instruction_map = {
             "hypothesis_ranking": (
                 "Rank the following hypotheses by likelihood of success (0.0 to 1.0). "

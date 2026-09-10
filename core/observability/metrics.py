@@ -1,14 +1,7 @@
-"""Prometheus metrics.
-
-Zero hard dependency on `prometheus_client`. When it's installed, every
-recorded metric is a real Prometheus object; when it isn't, every operation
-is a no-op (still safe to call). The `/api/metrics` endpoint in `ui/api/server.py`
-returns the exposition format when available, or 501 otherwise.
-"""
 from __future__ import annotations
 
 try:
-    from prometheus_client import (
+    from prometheus_client import (  # type: ignore
         Counter, Gauge, Histogram, CollectorRegistry, REGISTRY,
         generate_latest, CONTENT_TYPE_LATEST,
     )
@@ -24,8 +17,6 @@ except ImportError:  # pragma: no cover
 
 
 class _Noop:
-    """Duck-typed replacement for Counter/Gauge/Histogram when
-    prometheus_client is missing. All operations are silent no-ops."""
 
     def __init__(self, *a, **kw): pass
     def labels(self, *a, **kw): return self
@@ -139,9 +130,44 @@ HTTP_REQUEST = _counter(
     labelnames=("method", "route", "status_class"),
 )
 
+# ── SLO metrics (reliability + security) ─────────────────────────────
+POLICY_DECISIONS = _counter(
+    "antigravity_policy_decisions_total",
+    "Policy engine decisions, labeled by verdict (allow/deny) and action type.",
+    labelnames=("verdict", "action"),
+)
+POLICY_DECISION_LATENCY = _histogram(
+    "antigravity_policy_decision_duration_seconds",
+    "Latency of policy engine evaluation.",
+    buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0),
+)
+EVIDENCE_INTEGRITY_CHECKS = _counter(
+    "antigravity_evidence_integrity_checks_total",
+    "Evidence graph integrity verifications, labeled by result.",
+    labelnames=("result",),
+)
+SECRET_OPERATIONS = _counter(
+    "antigravity_secret_operations_total",
+    "Secret lifecycle operations (store, retrieve, rotate, expire, delete).",
+    labelnames=("operation", "category"),
+)
+TENANT_BOUNDARY_VIOLATIONS = _counter(
+    "antigravity_tenant_boundary_violations_total",
+    "Attempted cross-tenant data access. Should always be 0.",
+)
+EXPERIMENT_RECONSTRUCTION_SUCCESS = _counter(
+    "antigravity_experiment_reconstructions_total",
+    "End-to-end experiment reconstructions, labeled by success/failure.",
+    labelnames=("result",),
+)
+REDACTION_EVENTS = _counter(
+    "antigravity_redaction_events_total",
+    "Secret redaction events across logs, evidence, and reports.",
+    labelnames=("source",),
+)
+
 
 def render() -> tuple[bytes, str]:
-    """Return `(body_bytes, content_type)` for the `/api/metrics` endpoint."""
     if not _AVAILABLE:
         return b"# prometheus_client not installed\n", "text/plain"
     return generate_latest(REGISTRY), CONTENT_TYPE_LATEST

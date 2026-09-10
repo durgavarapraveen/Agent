@@ -1,9 +1,3 @@
-"""
-Error Classification — Transient vs Permanent (Strix Pattern #3).
-
-Classifies tool execution errors and applies recovery strategies.
-Inspired by Strix's _is_transient_model_error with exponential backoff.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -244,7 +238,6 @@ class ErrorClassifier:
 
 
 class RetryExecutor:
-    """Wraps tool execution with classified-error-aware retry logic."""
 
     def __init__(self, classifier: Optional[ErrorClassifier] = None):
         self._classifier = classifier or ErrorClassifier()

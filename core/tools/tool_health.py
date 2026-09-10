@@ -1,11 +1,3 @@
-"""
-P1-7: formal ToolHealthManager.
-
-Tool health is validated BEFORE scanning: binary present, dependencies
-ok, minimal execution test passes. Broken tools go into COOLDOWN and
-the router picks replacements immediately instead of wasting an LLM
-round attempting a known-broken invocation.
-"""
 from __future__ import annotations
 
 import logging
@@ -44,7 +36,7 @@ class ToolHealth:
     # P0.3: a tool absent from the host PATH is NOT unavailable if the Kali/
     # Docker backend can run it. Track the backend explicitly.
     kali_available: Optional[bool] = None       # None = not yet determinable
-    execution_backend: str = "unknown"          # local | kali | none | unknown
+    execution_backend: str = "unknown"
 
     @property
     def local_available(self) -> bool:
@@ -95,11 +87,6 @@ class ToolHealthManager:
 
     def probe(self, tool: str, container: str = "",
               version_arg: str = "--version") -> ToolHealth:
-        """Cheap probe: binary exists + a quick `--version` run.
-
-        Deeper dependency checks are tool-specific and can be plugged in
-        by callers via `mark_dependency_failed`.
-        """
         health = self._states.get(tool) or ToolHealth(tool=tool, container=container)
         health.binary_exists = bool(shutil.which(tool))
         if not health.binary_exists:
@@ -185,7 +172,6 @@ class ToolHealthManager:
             return self._states.get(tool)
 
     def pick_replacement(self, tool: str) -> Optional[str]:
-        """First available replacement for a broken tool."""
         for alt in DEFAULT_REPLACEMENTS.get(tool, []):
             h = self._states.get(alt) or self.probe(alt)
             if h.is_available():

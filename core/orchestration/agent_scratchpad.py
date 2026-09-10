@@ -1,26 +1,3 @@
-"""Shared inter-agent scratchpad — Postgres-backed message board.
-
-Motivated by the OpenAI-Hugging Face incident (July 2026): agents that share
-a persistent write medium spontaneously form a "message board" and become
-force-multipliers. We build the same primitive DELIBERATELY here, with:
-
-  - explicit scope (topic + scan_id namespaced),
-  - structured protocol (kind ∈ {'note','tool','result','dm','finding'}),
-  - never crosses scan_id boundaries,
-  - all reads/writes gated by the ScopeAuthority target check,
-  - every entry auto-expires with the scan.
-
-Table `agent_scratchpad` is additive; created lazily on first use. Nothing
-outside this module writes to it.
-
-Usage from an agent:
-
-    from core.orchestration.agent_scratchpad import Scratchpad
-    pad = Scratchpad(scan_id="abc123", agent_id="exploit:preview")
-    pad.post("note", topic="sqli_probe", body={"url": "...", "payload": "'"})
-    for msg in pad.tail(topic="sqli_probe", since_ms=60000):
-        ...
-"""
 from __future__ import annotations
 
 import json
@@ -38,7 +15,6 @@ _MAX_BODY_BYTES = 64 * 1024  # 64 KiB per entry — enough for a JSON finding
 
 
 def _get_db_manager():
-    """Import lazily so this module can be imported in envs without psycopg2."""
     try:
         from core.database.pg_store import DatabaseManager
         return DatabaseManager
@@ -48,7 +24,6 @@ def _get_db_manager():
 
 
 def _ensure_table() -> None:
-    """Create the scratchpad table on first use. Idempotent."""
     dbm = _get_db_manager()
     if dbm is None:
         return
@@ -79,7 +54,6 @@ def _ensure_table() -> None:
 
 
 def _sanitize_id(s: str, maxlen: int = 128) -> str:
-    """scan_id / agent_id / topic must be short, printable, no wild chars."""
     if not s:
         return ""
     return re.sub(r"[^\w.:@\-/]", "_", str(s))[:maxlen]
@@ -98,10 +72,6 @@ class ScratchpadEntry:
 
 
 class Scratchpad:
-    """Per-scan handle. Every read and write is scoped to `scan_id` — an
-    agent cannot see or write entries from another scan. That guarantee is
-    the only thing preventing an agent from posting messages that outlive
-    the scan or leak into a parallel one."""
 
     def __init__(self, scan_id: str, agent_id: str):
         self.scan_id = _sanitize_id(scan_id) or "unscoped"
@@ -142,8 +112,6 @@ class Scratchpad:
 
     def tail(self, topic: str = "", kind: Optional[str] = None,
              since_id: int = 0, limit: int = 100) -> List[ScratchpadEntry]:
-        """Return newest-first up to `limit` entries in this scan, optionally
-        filtered by topic / kind / since_id."""
         clauses = ["scan_id = %s", "id > %s"]
         args: List[Any] = [self.scan_id, since_id]
         if topic:
@@ -172,7 +140,6 @@ class Scratchpad:
         return out
 
     def inbox(self, since_id: int = 0, limit: int = 100) -> List[ScratchpadEntry]:
-        """DMs addressed to this agent."""
         dbm = _get_db_manager()
         if dbm is None:
             return []
@@ -194,16 +161,13 @@ class Scratchpad:
 
     def request(self, topic: str, body: Dict[str, Any],
                 to_agent: str = "") -> Optional[int]:
-        """Convenience: post a 'note' asking for help / a file / a token."""
         return self.post("note", {"request": True, **body},
                          topic=topic, to_agent=to_agent)
 
     def announce_finding(self, finding: Dict[str, Any]) -> Optional[int]:
-        """Publish a confirmed finding so other agents can chain off it."""
         return self.post("finding", finding, topic=str(finding.get("type", "misc")))
 
     def clear_scan(self) -> int:
-        """Wipe every entry for this scan. Called on scan completion."""
         dbm = _get_db_manager()
         if dbm is None:
             return 0

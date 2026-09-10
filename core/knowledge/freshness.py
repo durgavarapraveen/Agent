@@ -1,13 +1,3 @@
-"""
-P1-2: knowledge freshness — stop repeating completed reconnaissance.
-
-Before invoking an idempotent tool the orchestrator asks
-`has_fresh_result(target, operation)`; if the store has a recent enough
-result, the tool call is skipped and the cached evidence is reused.
-
-Backed by an in-memory dict for the current run and (optionally) the
-existing `core.tools.tool_cache.ToolCache` for cross-run persistence.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

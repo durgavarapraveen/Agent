@@ -1,11 +1,3 @@
-"""
-P1-4: replace the generic objective with a target-specific plan.
-
-Given a normalized target summary (asset class, tech stack, endpoints,
-params, auth state), emit a prioritized list of vulnerability classes
-worth investigating. The planner uses this instead of a static
-"try every tool" checklist.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -22,7 +14,7 @@ class TargetSummary:
     technologies: List[str] = field(default_factory=list)
     endpoints: List[str] = field(default_factory=list)
     parameters: List[str] = field(default_factory=list)
-    auth_state: str = "unknown"   # anonymous | partial | authenticated
+    auth_state: str = "unknown"
     exposed_files: List[str] = field(default_factory=list)
     api_bases: List[str] = field(default_factory=list)
 
@@ -99,7 +91,6 @@ def build_plan(summary: TargetSummary) -> List[PlanItem]:
 
 
 def render_plan(plan: List[PlanItem]) -> str:
-    """Compact human-readable form for LLM context injection."""
     lines: List[str] = []
     cur_pri = None
     for item in plan:

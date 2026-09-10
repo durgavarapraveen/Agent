@@ -1,19 +1,3 @@
-"""Shared subdomain-takeover heuristic.
-
-A real takeover requires TWO conditions:
-  1. The response contains an "unclaimed service" fingerprint.
-  2. DNS points at a third-party host anyone can claim (dangling CNAME
-     into `*.herokuapp.com`, `*.s3.amazonaws.com`, `*.github.io`, etc.).
-
-Fingerprint-only matches produce false positives whenever the target simply
-returns a stock error page:
-  - Heroku's "Application Error" page (sleeping/crashed dyno) — served
-    with `herokucdn.com` links but the app IS claimed, just not running.
-  - S3 access-denied on a private but claimed bucket.
-  - GitHub Pages 404 on a claimed repository whose Pages branch is empty.
-
-`evaluate()` is the single entry point used by every detector.
-"""
 from __future__ import annotations
 
 import logging
@@ -111,12 +95,6 @@ class TakeoverVerdict:
 
 @lru_cache(maxsize=1024)
 def _resolve_cname(hostname: str) -> Optional[str]:
-    """Return the terminal CNAME target for `hostname`, or None if the record
-    is a direct A/AAAA record (no CNAME chain, nothing to hijack).
-
-    Uses `dnspython` when available and falls back to the stdlib. Cached so
-    the same host resolved multiple times per scan does not hammer DNS.
-    """
     if not hostname:
         return None
     hostname = hostname.strip(".").lower()
@@ -150,15 +128,6 @@ def _matches_any(needles: tuple[str, ...], body_lower: str) -> bool:
 
 def evaluate(response_body: str, hostname: str,
              status_code: Optional[int] = None) -> TakeoverVerdict:
-    """Evaluate whether the (body, hostname) pair is a real takeover.
-
-    Two-clause rule:
-      1. body carries an unclaimed-service fingerprint AND does not carry a
-         known-false-positive marker;
-      2. hostname resolves to a CNAME whose suffix matches the SAME provider.
-
-    Returns a `TakeoverVerdict` — read `.is_takeover` for the boolean result.
-    """
     body_lower = (response_body or "").lower()
     if not body_lower:
         return TakeoverVerdict(False, reason="empty response body")

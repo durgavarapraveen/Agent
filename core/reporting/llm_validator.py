@@ -1,7 +1,3 @@
-"""
-LLM-Powered Finding Validator — uses the LLM to analyze each finding's
-evidence and assign a confidence score before reporting.
-"""
 
 import asyncio
 import json
@@ -12,7 +8,6 @@ logger = logging.getLogger(__name__)
 
 
 class LLMFindingValidator:
-    """Uses LLM to validate findings and assess confidence."""
 
     def __init__(self, max_concurrent: int = 3):
         self.max_concurrent = max_concurrent
@@ -20,7 +15,6 @@ class LLMFindingValidator:
         self.validation_results: List[Dict] = []
 
     async def _get_llm(self):
-        """Get or initialize the LLM client."""
         from agents.llm_client import LLMClient
         client = LLMClient.get()
         if client is None:
@@ -31,7 +25,6 @@ class LLMFindingValidator:
         return client
 
     async def validate_finding(self, finding: Dict) -> Dict:
-        """Validate a single finding using LLM analysis."""
         async with self._semaphore:
             llm = await self._get_llm()
             if not llm:
@@ -190,8 +183,6 @@ class LLMFindingValidator:
                 return finding
 
     async def _validate_batch(self, batch: List) -> List[Dict]:
-        """Validate up to N findings in ONE LLM call. Returns a list of verdict
-        dicts aligned with the input batch."""
         async with self._semaphore:
             llm = await self._get_llm()
             if not llm:
@@ -228,16 +219,6 @@ class LLMFindingValidator:
     async def validate_findings(self, findings: List[Dict],
                                  max_findings: int = 50,
                                  batch_size: int = 10) -> List[Dict]:
-        """Validate findings via BATCHED LLM calls (10 findings per prompt).
-
-        Token-savings changes vs previous 1-per-call design:
-          1. Skip already-tool-confirmed findings (nuclei/sqlmap/nmap/dalfox/
-             nikto with `confirmed=True` or `source` in tool set) — the tool
-             evidence IS the validation, extra LLM check is wasteful.
-          2. Batch remaining findings into groups of 10 per prompt so the
-             ~500-token instruction preamble is amortised across a batch.
-          3. Skip INFO severity by default — they're context, not exploits.
-        """
         if not findings:
             return findings
 
@@ -318,7 +299,6 @@ class LLMFindingValidator:
         return result
 
     def get_summary(self) -> Dict:
-        """Get validation summary."""
         if not self.validation_results:
             return {"validated": 0}
 

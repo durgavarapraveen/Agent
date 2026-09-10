@@ -1,21 +1,3 @@
-"""P0.1 — Unified Policy Engine.
-
-Single authority for ALL authorization decisions. Every security-sensitive
-execution path routes through here. Delegates to existing validators internally
-but provides one API surface with structured, auditable decisions.
-
-Architecture:
-    Caller → PolicyEngine.authorize_*() → PolicyDecision
-                 ↓ (internal)
-        TargetScopeValidator   (host/IP scope)
-        ScopeAuthority         (composite scope facade)
-        ActionGate             (pre-execution tool pipeline)
-        ComplianceGate         (technique authorization)
-        AuthorizationService   (identity/action policies)
-        CommandPolicyValidator  (command safety)
-        EgressFirewall         (network egress)
-        PolicyVerdict          (LLM vs CODE boundary)
-"""
 from __future__ import annotations
 
 import logging
@@ -65,7 +47,6 @@ class DenyReason(str, Enum):
 
 @dataclass(frozen=True)
 class PolicyDecision:
-    """Immutable, structured authorization decision."""
     allowed: bool
     action: str
     reason: str
@@ -111,7 +92,6 @@ def _deny(action: str, reason: str, code: DenyReason,
 # ── Audit logger ────────────────────────────────────────────────────────────
 
 class PolicyAuditLogger:
-    """Structured audit trail for every policy decision."""
 
     def log(self, decision: PolicyDecision) -> None:
         if decision.allowed:
@@ -130,11 +110,6 @@ class PolicyAuditLogger:
 # ── Policy Engine ───────────────────────────────────────────────────────────
 
 class PolicyEngine:
-    """Single authority for all authorization decisions.
-
-    Fail-closed on every error path. No `except: pass` on security checks.
-    Returns structured PolicyDecision for every call.
-    """
 
     _instance: Optional["PolicyEngine"] = None
     _lock = threading.RLock()
@@ -160,6 +135,8 @@ class PolicyEngine:
         self._audit = audit or PolicyAuditLogger()
         from core.security.platform_contract import get_contract
         self._contract = get_contract()
+        from core.security.authorization_authority import AuthorizationAuthority
+        self._auth_authority = AuthorizationAuthority.get()
 
     # ── helpers ──────────────────────────────────────────────────────────
 
@@ -185,16 +162,40 @@ class PolicyEngine:
     def _get_scope_authority(self):
         from core.security.scope_facade import get_scope_authority
         return get_scope_authority()
+        
+    # ── authorize_contract ───────────────────────────────────────────────
+    
+    def authorize_contract(self, contract) -> PolicyDecision:
+        action = "authorize_contract"
+        
+        # 1. Cryptographic Verification
+        try:
+            contract.verify()
+        except Exception as e:
+            return self._emit(_deny(
+                action, f"Contract signature/expiry validation failed: {e}",
+                DenyReason.POLICY_ERROR, target=contract.target
+            ))
+            
+        # 2. Authorization Authority validation
+        allowed, reason = self._auth_authority.authorize_execution(
+            auth_id=contract.authorization_ref,
+            target=contract.target,
+            capability=contract.capability,
+            identity=contract.identity
+        )
+        
+        if not allowed:
+            return self._emit(_deny(
+                action, f"Authorization Authority denied contract: {reason}",
+                DenyReason.TARGET_OUT_OF_SCOPE, target=contract.target
+            ))
+            
+        return self._emit(_allow(action, target=contract.target))
 
     # ── authorize_target ─────────────────────────────────────────────────
 
     def authorize_target(self, target: str) -> PolicyDecision:
-        """Check if a target (host/IP/URL) is within authorized scope.
-
-        Delegates to TargetScopeValidator (the most widely used validator)
-        and ScopeAuthority (the composite facade). Both must agree.
-        Fails closed on any error.
-        """
         action = PolicyAction.TARGET.value
         if not target or not target.strip():
             return self._emit(_deny(
@@ -238,11 +239,6 @@ class PolicyEngine:
 
     def authorize_network(self, url_or_host: str,
                           purpose: str = "scan") -> PolicyDecision:
-        """Check if outbound network access to a destination is allowed.
-
-        Delegates to NetworkBroker (DNS rebinding protection, redirect
-        revalidation, private IP blocking) with EgressFirewall fallback.
-        """
         action = PolicyAction.NETWORK.value
         if not url_or_host:
             return self._emit(_deny(
@@ -304,11 +300,6 @@ class PolicyEngine:
 
     def authorize_tool(self, invocation, ctx=None,
                        tier: str = "POC") -> PolicyDecision:
-        """Pre-execution gate for tool invocations.
-
-        Runs ActionGate pipeline (schema→scope→precondition→duplicate→risk).
-        Also checks ComplianceGate for technique authorization.
-        """
         action = PolicyAction.TOOL.value
         target = (getattr(invocation, "target", None)
                   or (getattr(invocation, "params", None) or {}).get("target", ""))
@@ -373,10 +364,6 @@ class PolicyEngine:
 
     def authorize_exploit(self, target: str, technique: str = "auto",
                           tier: str = "POC") -> PolicyDecision:
-        """Full exploit authorization: target scope + technique + tier.
-
-        Delegates to ComplianceGate and AuthorizationManager.
-        """
         action = PolicyAction.EXPLOIT.value
 
         # 1) Target must be in scope
@@ -441,7 +428,6 @@ class PolicyEngine:
 
     def authorize_command(self, command: str,
                           target: str = None) -> PolicyDecision:
-        """Validate a shell command for safety before execution."""
         action = PolicyAction.COMMAND.value
         if not command or not isinstance(command, str):
             return self._emit(_deny(
@@ -500,7 +486,6 @@ class PolicyEngine:
 
     def authorize_subprocess(self, executable: str, args: List[str] = None,
                               target: str = None) -> PolicyDecision:
-        """Gate for subprocess/exec calls. Validates command safety + scope."""
         action = PolicyAction.SUBPROCESS.value
         full_cmd = f"{executable} {' '.join(args or [])}"
         return self.authorize_command(full_cmd, target=target)
@@ -509,7 +494,6 @@ class PolicyEngine:
 
     def authorize_browser_request(self, url: str,
                                    purpose: str = "crawl") -> PolicyDecision:
-        """Gate for browser/actuator HTTP requests."""
         action = PolicyAction.BROWSER.value
         if not url:
             return self._emit(_deny(
@@ -522,7 +506,6 @@ class PolicyEngine:
     def authorize_resource(self, resource_type: str, resource_id: str,
                             identity: str = None,
                             action_name: str = None) -> PolicyDecision:
-        """Gate for resource access (filesystem, DB, etc.)."""
         action = PolicyAction.RESOURCE.value
 
         # Delegate to AuthorizationService if identity/action provided
@@ -554,7 +537,6 @@ class PolicyEngine:
 
     def authorize_identity_action(self, target: str, identity: str,
                                    action_name: str) -> PolicyDecision:
-        """Check if an identity is authorized for an action on a target."""
         action = PolicyAction.IDENTITY_ACTION.value
         try:
             from core.security.authorization_service import AuthorizationService
@@ -585,5 +567,4 @@ class PolicyEngine:
 # ── Module-level accessor ───────────────────────────────────────────────────
 
 def get_policy_engine() -> PolicyEngine:
-    """Use this everywhere. Single import, single authority."""
     return PolicyEngine.get()

@@ -1,18 +1,3 @@
-"""
-ReviewQueue — human-facing record of what the agent did, for the UI.
-
-Two things a human needs to see after an autonomous run:
-
-  1. SUCCESS  — objectives the agent actually exploited/demonstrated. Surfaced so a
-     human can verify and showcase them (screenshots, reporting, client demo).
-  2. NEEDS_MANUAL — objectives the agent attempted but could NOT exploit ("the LLM
-     fell hard"). Surfaced WITH the context it gathered — what it tried, the last
-     responses, and machine-suggested next steps — so a human can pick it up and
-     pentest it manually.
-
-Records are persisted to data/review_queue/queue.json and served to the UI via the
-API. This is not report data — it is the live worklist for the human operator.
-"""
 
 from __future__ import annotations
 
@@ -34,7 +19,6 @@ STATUS_PARTIAL = "PARTIAL"
 
 
 def _pg():
-    """Return the Postgres ReviewRepo if the DB is reachable, else None (JSON fallback)."""
     try:
         from core.database.pg_store import ReviewRepo
         # cheap reachability check
@@ -46,8 +30,6 @@ def _pg():
 
 
 class ReviewQueue:
-    """Primary store is Postgres (review_queue table); a JSON file is used only when
-    the database is unreachable, so records are never lost."""
 
     def __init__(self, queue_file: Path = _QUEUE_FILE):
         self.queue_file = Path(queue_file)
@@ -84,7 +66,6 @@ class ReviewQueue:
         history: Optional[List[Dict[str, Any]]] = None,
         scan_id: str = "",
     ) -> Dict[str, Any]:
-        """Append a review record. Returns it."""
         now = time.time()
         rec = {
             "id": uuid.uuid4().hex[:12],
@@ -150,7 +131,6 @@ class ReviewQueue:
         }
 
     def resolve(self, record_id: str, note: str = "") -> bool:
-        """Mark a manual-followup as handled by the human (removes from active queue)."""
         repo = _pg()
         if repo is not None:
             try:

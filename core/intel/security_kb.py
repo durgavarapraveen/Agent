@@ -1,13 +1,3 @@
-"""LLM-callable security knowledge base — thin wrapper around the existing
-`SecurityRAGPipeline` (pgvector + embeddings).
-
-Exposes ONE tool schema `query_security_kb(topic, tech_stack)` that queries
-the shared RAG store. Also seeds a curated pentest excerpt corpus into the
-same store on first call (dedup'd by content hash inside the pipeline).
-
-No parallel index, no duplicated storage — everything lives in `rag_documents`
-next to the operator's own ingested files / URLs / scan findings.
-"""
 from __future__ import annotations
 import asyncio
 import logging
@@ -94,8 +84,6 @@ _SEEDED = False
 
 
 async def _ensure_seeded():
-    """Merge curated pentest excerpts into the RAG store — deduped by content
-    hash inside the pipeline, so re-running is a no-op."""
     global _SEEDED
     if _SEEDED:
         return
@@ -118,8 +106,6 @@ async def _ensure_seeded():
 
 
 def query_kb(topic: str, tech_stack: str = "", top_k: int = _KB_TOP_K) -> str:
-    """Synchronous LLM tool. Uses the existing SecurityRAGPipeline for
-    embedding-based retrieval. Falls back to a helpful message on error."""
     query = (topic + " " + tech_stack).strip()
     if not query:
         return "[ERROR] query_security_kb: topic required"
@@ -167,7 +153,6 @@ def query_kb(topic: str, tech_stack: str = "", top_k: int = _KB_TOP_K) -> str:
 
 
 async def query_kb_async(topic: str, tech_stack: str = "", top_k: int = _KB_TOP_K) -> str:
-    """Async variant — called by AgenticExecutor's async loop directly."""
     query = (topic + " " + tech_stack).strip()
     if not query:
         return "[ERROR] query_security_kb: topic required"

@@ -1,10 +1,3 @@
-"""
-P2-6: evidence confidence model.
-
-Every observation carries a confidence in [0, 1] derived from four
-signals: source reliability, parser reliability, validation state,
-recency, and corroboration count.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -42,7 +35,6 @@ class ConfidenceInputs:
 
 
 def compute(inp: ConfidenceInputs) -> float:
-    """Weighted geometric-ish combine; result clipped to [0, 1]."""
     src = SOURCE_RELIABILITY.get((inp.source or "").lower(), 0.5)
     par = PARSER_RELIABILITY.get((inp.parser or "").lower(), 0.5)
     validation = 1.0 if inp.validated else 0.5

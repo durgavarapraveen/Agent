@@ -4,9 +4,6 @@ from typing import Callable, Dict
 import re
 
 class ApplicabilityEngine:
-    """
-    Evaluates abstract applicability rules against tangible domain entities.
-    """
     def __init__(self):
         self.registry: Dict[str, Callable[[Endpoint, ApplicabilityRule], bool]] = {
             "login_endpoint_exists": self._check_login_endpoint,

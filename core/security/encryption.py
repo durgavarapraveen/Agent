@@ -1,9 +1,3 @@
-"""
-Phase 6 Module 6.4: Encryption at Rest & Crypto Engine (core/encryption.py)
-
-AES-256-GCM authenticated encryption/decryption, environment key management,
-key rotation, transparent database BLOB encryption, and PII masking.
-"""
 
 import base64
 import os
@@ -33,12 +27,9 @@ MASKING_PATTERNS = {
 
 
 class EncryptionKeyMissingError(RuntimeError):
-    """Raised when neither ENCRYPTION_KEY nor a dev-key fallback is available."""
-
+    pass
 
 def _load_or_create_dev_key() -> bytes:
-    """Load a machine-local dev encryption key. Only invoked in explicit dev mode.
-    Persists to `.antigravity/dev_encryption_key` (chmod 600 where supported)."""
     import secrets
     from pathlib import Path
     _repo_root = Path(__file__).resolve().parents[2]
@@ -64,13 +55,6 @@ def _load_or_create_dev_key() -> bytes:
 
 
 def get_encryption_key(env_var_name: str = "ENCRYPTION_KEY") -> bytes:
-    """
-    Load 256-bit (32 bytes) master key from environment variable.
-    Supports raw strings or base64-encoded strings.
-
-    Raises EncryptionKeyMissingError when unset unless the caller is in explicit
-    dev mode (ANTIGRAVITY_ENV=development + ENCRYPTION_KEY_DEV_UNSAFE=1).
-    """
     key_str = os.getenv(env_var_name) or os.getenv("ENCRYPTION_KEY_CURRENT")
     if not key_str:
         env_mode = os.getenv("ANTIGRAVITY_ENV", "development").strip().lower()
@@ -87,11 +71,13 @@ def get_encryption_key(env_var_name: str = "ENCRYPTION_KEY") -> bytes:
 
     try:
         # Try base64 decode first
-        decoded = base64.b64decode(key_str)
+        # ensure proper padding for base64
+        padded = key_str + "=" * ((4 - len(key_str) % 4) % 4)
+        decoded = base64.b64decode(padded)
         if len(decoded) == 32:
             return decoded
-    except Exception as e:
-        raise SystemError(f"Policy enforcement failed: {e}") from e
+    except Exception:
+        pass
 
     raw_bytes = key_str.encode("utf-8")
     if len(raw_bytes) == 32:
@@ -104,12 +90,6 @@ def get_encryption_key(env_var_name: str = "ENCRYPTION_KEY") -> bytes:
 
 
 def encrypt(data: bytes, key: Optional[bytes] = None) -> bytes:
-    """
-    AES-256-GCM authenticated encryption:
-      - 12-byte random nonce
-      - Ciphertext + 16-byte authentication tag
-    Returns nonce + ciphertext_with_tag concatenated.
-    """
     if not isinstance(data, bytes):
         data = str(data).encode("utf-8")
 
@@ -121,10 +101,6 @@ def encrypt(data: bytes, key: Optional[bytes] = None) -> bytes:
 
 
 def decrypt(encrypted_data: bytes, key: Optional[bytes] = None) -> bytes:
-    """
-    AES-256-GCM decryption:
-      - Split nonce (first 12 bytes) and ciphertext_with_tag
-    """
     if len(encrypted_data) < 28:
         raise ValueError("Invalid encrypted data length (minimum 28 bytes required).")
 
@@ -136,28 +112,19 @@ def decrypt(encrypted_data: bytes, key: Optional[bytes] = None) -> bytes:
 
 
 def re_encrypt_data(encrypted_data: bytes, old_key: bytes, new_key: bytes) -> bytes:
-    """
-    Decrypt data using old_key and re-encrypt using new_key (Key Rotation).
-    """
     plaintext = decrypt(encrypted_data, key=old_key)
     return encrypt(plaintext, key=new_key)
 
 
 def encrypt_finding_value(value: str, key: Optional[bytes] = None) -> bytes:
-    """Transparent application-layer encryption wrapper for database BLOB columns."""
     return encrypt(value.encode("utf-8"), key=key)
 
 
 def decrypt_finding_value(blob: bytes, key: Optional[bytes] = None) -> str:
-    """Transparent application-layer decryption wrapper for database BLOB columns."""
     return decrypt(blob, key=key).decode("utf-8", errors="ignore")
 
 
 def mask_sensitive(text: str) -> str:
-    """
-    PII Redaction Engine:
-    Replaces matched emails, credit cards, IPs, and AWS keys using MASKING_PATTERNS.
-    """
     if not text:
         return ""
     s = str(text)

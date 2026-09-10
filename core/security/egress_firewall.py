@@ -1,22 +1,3 @@
-"""Egress firewall — enforced BOTH at Docker network layer (Phase 6.4) AND
-in-process at every HTTP client we launch (defence in depth).
-
-Motivated by the OpenAI-HF incident: agents in a sandbox found a novel way
-(SSRF → Artifactory) to reach the public internet, then found HF credentials
-and reached HF. A Docker `--network internal` alone would not have caught
-this because Artifactory was in the same VPC. We enforce a second layer here:
-every outbound HTTP request from any of our tools passes through
-`assert_egress_allowed()` and dies if the destination isn't in
-`TargetScopeValidator`.
-
-Usage:
-    from core.security.egress_firewall import assert_egress_allowed
-    assert_egress_allowed(url)   # raises EgressBlocked if not allowed
-
-Docker helper (Phase 6.4):
-    render_docker_network_policy(target_hosts) -> shell snippet to create
-    an iptables-backed docker network that only reaches target IPs.
-"""
 from __future__ import annotations
 
 import contextlib
@@ -33,8 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class EgressBlocked(Exception):
-    """Raised when an outbound HTTP call would leave authorised scope."""
-
+    pass
 
 # When set, outbound requests on the current async task/thread are user-initiated
 # RAG knowledge ingestion of an arbitrary PUBLIC URL — legitimately outside scan
@@ -46,11 +26,6 @@ _RAG_INGEST_BYPASS: contextvars.ContextVar[bool] = contextvars.ContextVar(
 
 @contextlib.contextmanager
 def rag_ingest_egress():
-    """Scope in which RAG ingestion may fetch arbitrary public URLs.
-
-        with rag_ingest_egress():
-            await fetch_url_text(url)
-    """
     token = _RAG_INGEST_BYPASS.set(True)
     try:
         yield
@@ -59,8 +34,6 @@ def rag_ingest_egress():
 
 
 def _is_internal_address(host: str) -> bool:
-    """True if host is (or resolves to) a loopback/private/link-local/reserved
-    address. Used to keep the RAG bypass from reaching internal services."""
     h = (host or "").strip().lower().strip("[]")
     if not h:
         return True
@@ -101,7 +74,6 @@ _LOOPBACK_PREFIXES = ("127.", "0.", "::1", "localhost")
 #   - Package registries (rare, but nuclei-templates auto-update etc.)
 # These are NOT scan targets; SSRF finding them wouldn't matter because
 # they don't accept anonymous auth from the scan. Extend via env var
-# EGRESS_INFRA_ALLOWLIST=host1.com,host2.com
 _INFRA_ALLOWLIST = {
     # LLM providers
     "api.deepseek.com", "api.groq.com", "api.openai.com",
@@ -172,13 +144,6 @@ def _extract_host(url_or_host: str) -> Optional[str]:
 
 
 def assert_egress_allowed(url_or_host: str, purpose: str = "http") -> None:
-    """Fail-closed egress check. Raises `EgressBlocked` if:
-      - target has no host,
-      - target is neither loopback nor in TargetScopeValidator's scope.
-
-    Loopback is explicitly allowed so in-container helpers, MCP servers,
-    and preview_start dev-servers keep working.
-    """
     host = _extract_host(url_or_host)
     if not host:
         raise EgressBlocked(f"egress denied: no host in {url_or_host!r}")
@@ -207,8 +172,6 @@ def assert_egress_allowed(url_or_host: str, purpose: str = "http") -> None:
 
 
 def resolve_target_ips(hosts: Iterable[str]) -> Set[str]:
-    """Return the union of every IP each host resolves to. Used to build the
-    iptables allowlist for the Docker network policy."""
     ips: Set[str] = set()
     for h in hosts or []:
         h = (h or "").strip()
@@ -226,13 +189,6 @@ def resolve_target_ips(hosts: Iterable[str]) -> Set[str]:
 
 def render_docker_network_policy(target_hosts: List[str],
                                  network_name: str = "antigravity_scan") -> str:
-    """Emit a shell snippet that, when run on the Docker host, creates a
-    custom network with an iptables egress policy that ONLY allows the
-    scan's authorised targets. Loopback + DNS + our internal Postgres /
-    Redis containers are always allowed.
-
-    Operator runs this once per scan on the host running docker.
-    """
     ips = sorted(resolve_target_ips(target_hosts))
     allowed = " ".join(sorted(set(ips + ["8.8.8.8", "1.1.1.1"])))  # DNS
     hosts_joined = " ".join(target_hosts)
@@ -258,9 +214,6 @@ def render_docker_network_policy(target_hosts: List[str],
 
 
 def install_httpx_guard() -> None:
-    """Monkey-patch httpx.AsyncClient / httpx.Client to run every request
-    through `assert_egress_allowed`. Idempotent — safe to call at every
-    process start. Missing httpx = no-op."""
     try:
         import httpx
     except Exception:

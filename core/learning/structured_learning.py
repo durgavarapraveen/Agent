@@ -1,12 +1,3 @@
-"""
-Structured Learning Engine (Phase 31).
-
-Records and retrieves lessons from experiment outcomes to improve
-future hypothesis generation, payload selection, and test prioritization.
-
-Each learning record captures: what was tested, the outcome, why it
-succeeded/failed, and what to do differently next time.
-"""
 from __future__ import annotations
 
 import logging

@@ -1,6 +1,3 @@
-"""
-Finding Correlation Engine — chains related findings into attack narratives.
-"""
 
 import logging
 from typing import Dict, List, Optional, Tuple, Set
@@ -19,7 +16,7 @@ class AttackChain:
     impact: str
     findings: List[Dict] = field(default_factory=list)
     steps: List[str] = field(default_factory=list)
-    likelihood: float = 0.0  # 0.0-1.0
+    likelihood: float = 0.0
     # P1.5: provenance for the chain — whether every member was CONFIRMED and
     # whether an evidence dependency (not just a type/host coincidence) links
     # the steps. A chain built under strict mode has both True.
@@ -159,14 +156,12 @@ SEVERITY_ORDER = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
 
 
 class CorrelationEngine:
-    """Analyzes findings and identifies attack chains between related vulnerabilities."""
 
     def __init__(self):
         self.chains: List[AttackChain] = []
         self._chain_counter = 0
 
     def _normalize_type(self, vuln_type: str) -> str:
-        """Normalize vulnerability type for matching."""
         if not vuln_type:
             return ""
         t = vuln_type.upper().strip()
@@ -208,8 +203,6 @@ class CorrelationEngine:
 
     @staticmethod
     def _is_confirmed(f: Dict) -> bool:
-        """A finding counts as CONFIRMED via any of the three signals the
-        pipeline uses (P1.5)."""
         if f.get("confirmed") is True:
             return True
         for k in ("status", "reproducibility_status"):
@@ -219,11 +212,6 @@ class CorrelationEngine:
 
     @staticmethod
     def _evidence_link(up: Dict, down: Dict) -> bool:
-        """True only when `down` has an evidence dependency on `up` — not just a
-        type/host coincidence (P1.5). Conservative, to never merge unrelated
-        findings: requires either an explicit id/parent reference, or a concrete
-        artifact string from `up`'s evidence reappearing in `down`'s evidence.
-        """
         import re as _re
         down_text = " ".join(str(down.get(k, "")) for k in
                              ("proof", "details", "depends_on", "evidence",
@@ -240,7 +228,6 @@ class CorrelationEngine:
         return bool(up_tokens and any(t in down_text for t in up_tokens))
 
     def _same_scope(self, finding_a: Dict, finding_b: Dict) -> bool:
-        """Check if two findings are in the same scope (same host)."""
         def _host(f):
             for key in ("target", "location", "url"):
                 val = f.get(key, "")
@@ -254,7 +241,6 @@ class CorrelationEngine:
         return host_a == host_b
 
     def _finding_matches_slot(self, finding: Dict, type_slot: Tuple[str, ...]) -> bool:
-        """Check if a finding matches any of the types in a rule slot."""
         vuln_type = self._normalize_type(finding.get("type") or finding.get("vuln_type") or "")
         title_upper = (finding.get("title") or "").upper()
 
@@ -266,7 +252,6 @@ class CorrelationEngine:
         return False
 
     def _compute_likelihood(self, findings: List[Dict], rule: Dict) -> float:
-        """Compute likelihood score based on finding confidence and status."""
         base = 0.3
         boost = rule.get("likelihood_boost", 0.2)
 
@@ -287,7 +272,6 @@ class CorrelationEngine:
         return min(score, 1.0)
 
     def _highest_severity(self, findings: List[Dict], rule_severity: str) -> str:
-        """Return the highest severity between findings and the rule's declared severity."""
         max_sev = SEVERITY_ORDER.get(rule_severity.upper(), 0)
         for f in findings:
             sev = SEVERITY_ORDER.get((f.get("severity") or "INFO").upper(), 0)
@@ -301,15 +285,6 @@ class CorrelationEngine:
     def correlate(self, findings: List[Dict],
                   confirmed_only: bool = False,
                   require_evidence_link: bool = False) -> List[AttackChain]:
-        """Analyze findings and identify attack chains.
-
-        P1.5 strict mode (opt-in, backward compatible):
-          * ``confirmed_only`` — only CONFIRMED findings may form a chain.
-          * ``require_evidence_link`` — a multi-step chain is created only when
-            an evidence dependency links the steps (not just type + host), so
-            unrelated findings are never merged.
-        Default behaviour (both False) is unchanged.
-        """
         self.chains = []
         self._chain_counter = 0
 
@@ -410,7 +385,6 @@ class CorrelationEngine:
         return self.chains
 
     def get_summary(self) -> Dict:
-        """Get a summary of correlated attack chains."""
         if not self.chains:
             return {"total_chains": 0, "chains": []}
 
@@ -442,7 +416,6 @@ class CorrelationEngine:
         }
 
     def get_findings(self) -> List[Dict]:
-        """Convert high-value chains into vulnerability findings."""
         findings = []
         for chain in self.chains:
             if chain.likelihood < 0.3:

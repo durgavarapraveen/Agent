@@ -1,15 +1,3 @@
-"""Target-agnostic endpoint discovery.
-
-Rather than hardcoding paths like `/rest/user/login` (Juice-Shop specific),
-every probe asks this module: "give me the login endpoints for this scan".
-It reads what the crawler + captured requests actually found and classifies
-each URL by role via generic keyword matching. A minimal fallback set of
-industry-standard paths (`/login`, `/api/login`, `/oauth/token`, …) applies
-only when discovery returned nothing.
-
-Works for ANY web target — Django, Rails, Spring, ASP.NET, custom stacks —
-because it operates on discovered surface, not on framework assumptions.
-"""
 from __future__ import annotations
 import re
 from typing import Any, Dict, List, Set
@@ -64,7 +52,6 @@ _ROLE_KEYWORDS: Dict[str, List[str]] = {
 
 
 def _base_or_scheme(ctx, path: str) -> str:
-    """Turn a bare path into a full URL using the scan's base host."""
     if path.startswith(("http://", "https://")):
         return path
     t = getattr(ctx, "target", "") or ""
@@ -78,9 +65,6 @@ def _base_or_scheme(ctx, path: str) -> str:
 
 
 def _lower_paths_from_ctx(ctx) -> Set[str]:
-    """Collect every URL discovered by ANY tool — crawler, captured requests,
-    ffuf/gobuster/dirsearch/nikto directory bruteforce, katana crawl —
-    lower-cased, as bare `scheme://host/path` (no query)."""
     out: Set[str] = set()
     # 1. Captured HTTP requests + LLM-planned endpoint catalog
     for src in ("captured_requests", "endpoint_catalog"):
@@ -145,8 +129,6 @@ def _base_url(ctx) -> str:
 def discover_endpoints(ctx, role: str, *,
                         include_fallback: bool = True,
                         max_results: int = 50) -> List[str]:
-    """Return every discovered URL that matches `role`, plus a generic
-    fallback list if none were found and `include_fallback=True`."""
     discovered = _lower_paths_from_ctx(ctx)
     matched = [u for u in discovered if _matches_role(u, role)]
     if matched:
@@ -160,8 +142,6 @@ def discover_endpoints(ctx, role: str, *,
 
 
 def discover_authenticated_endpoints(ctx, *, limit: int = 40) -> List[str]:
-    """Union of user_profile + admin endpoints — anything a Bearer token
-    would touch to prove/disprove authorization gaps."""
     return list(dict.fromkeys(
         discover_endpoints(ctx, "user_profile") +
         discover_endpoints(ctx, "admin")
@@ -169,8 +149,6 @@ def discover_authenticated_endpoints(ctx, *, limit: int = 40) -> List[str]:
 
 
 def discover_json_post_endpoints(ctx, *, limit: int = 40) -> List[str]:
-    """Every URL the crawler saw as a POST/PUT/PATCH — the attack surface for
-    prototype-pollution / mass-assignment / SSRF-body probes."""
     out: Set[str] = set()
     for r in (getattr(ctx, "captured_requests", None) or []):
         if not isinstance(r, dict):
@@ -183,9 +161,6 @@ def discover_json_post_endpoints(ctx, *, limit: int = 40) -> List[str]:
 
 
 def looks_like_captcha_response(text: str) -> bool:
-    """Detect a captcha challenge in ANY response body — used to pivot
-    from 'captcha required' → find the captcha issuer endpoint on the same
-    host without hardcoding paths."""
     if not text:
         return False
     sig = re.compile(
@@ -196,9 +171,6 @@ def looks_like_captcha_response(text: str) -> bool:
 
 
 def looks_like_captcha_disclosure(json_body: Any) -> Dict[str, Any]:
-    """Detect a response that leaks a captcha's ANSWER in cleartext (Juice-
-    Shop-style, but the pattern generalises to any weak captcha service that
-    returns {captchaId, answer} in JSON). Returns the parsed hint dict or {}."""
     if not isinstance(json_body, dict):
         return {}
     answer = (json_body.get("answer") or json_body.get("solution")

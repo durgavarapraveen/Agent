@@ -1,10 +1,3 @@
-"""
-Context Compression & Token Optimization Module (Phase 3 Module 3.4).
-Provides endpoint filtering, tech stack compression, quick vuln pattern detection,
-exact token estimation via tiktoken (with fallback), deduplication, tool output trimming,
-finding rank prioritization, dynamic threshold compression (70%),
-and emergency 90% warning degradation logging.
-"""
 
 import json
 import logging
@@ -43,7 +36,6 @@ STRIPPED_FINDINGS_LOG = "logs/stripped_findings_audit.log"
 
 
 class TokenOptimizer:
-    """Optimize data sent to LLM to reduce token usage and manage token budgeting."""
 
     # Safe patterns to filter out (no vulns here)
     SAFE_PATTERNS = {
@@ -95,7 +87,6 @@ class TokenOptimizer:
             self.encoding = None
 
     def count_tokens(self, text: str) -> int:
-        """Count tokens using DeepSeek V4 tokenizer > tiktoken > char estimate."""
         if not text:
             return 0
         ds = _get_ds_tokenizer()
@@ -106,7 +97,6 @@ class TokenOptimizer:
         return max(1, len(text) // 4)
 
     def trim_tool_output(self, output: str, max_lines: int = 10) -> str:
-        """Trim tool execution output to the last N lines where errors/summaries are printed."""
         if not output:
             return ""
         lines = output.strip().splitlines()
@@ -115,11 +105,6 @@ class TokenOptimizer:
         return f"[... truncated {len(lines) - max_lines} lines ...]\n" + "\n".join(lines[-max_lines:])
 
     def rank_findings(self, findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Rank findings by:
-          1. Severity (Critical > High > Medium > Low)
-          2. Exploitability (Public exploit > PoC > Theoretical)
-        """
         sev_map = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
         exploit_map = {"PUBLIC EXPLOIT": 3, "POC": 2, "THEORETICAL": 1}
 
@@ -136,9 +121,6 @@ class TokenOptimizer:
         return sorted(findings, key=_key, reverse=True)
 
     def deduplicate_and_filter_findings(self, findings: List[Dict[str, Any]], min_confidence: float = 0.30) -> List[Dict[str, Any]]:
-        """
-        Deduplicate identical findings and filter out findings with confidence < min_confidence (30%).
-        """
         seen_keys = set()
         deduped = []
 
@@ -161,10 +143,6 @@ class TokenOptimizer:
         return deduped
 
     def compress_prompt_context(self, prompt: str, findings: List[Dict[str, Any]], tool_outputs: Dict[str, str]) -> Dict[str, Any]:
-        """
-        Calculates token budget. If tokens > 70%, triggers compression.
-        If tokens > 90%, raises TokenLimitWarning, strips all but top 5 findings, and logs stripped findings.
-        """
         # Trim tool outputs first
         trimmed_tool_outputs = {k: self.trim_tool_output(v, 10) for k, v in tool_outputs.items()}
 
@@ -230,10 +208,6 @@ class TokenOptimizer:
         }
 
     def compress_context(self, context_str: str) -> str:
-        """
-        Compresses a full SharedContext summary string down to reduce token usage.
-        Replaces massive raw text with a condensed format.
-        """
         token_count = self.count_tokens(context_str)
         token_ratio = token_count / float(self.token_limit)
         
@@ -273,11 +247,6 @@ class TokenOptimizer:
     # Static utility methods preserved for backward compatibility
     @staticmethod
     def filter_endpoints(endpoints: List[Dict]) -> List[Dict]:
-        """
-        SAFE endpoint filtering (60-70% reduction, 0% analysis loss)
-        - ALWAYS KEEP: /api/*, endpoints with parameters, /admin, /auth, /upload
-        - SAFE TO FILTER: static files (.js, .css, .jpg), /health, /ping, /docs
-        """
         filtered = []
         DANGEROUS_PATHS = {
             '/api/', '/admin/', '/upload', '/file', '/download',
@@ -311,7 +280,6 @@ class TokenOptimizer:
 
     @staticmethod
     def compress_tech_stack(technologies: Dict[str, List[str]]) -> str:
-        """Compress technology stack to key frameworks only."""
         tech_list = []
         for tech_list_per_domain in technologies.values():
             if not isinstance(tech_list_per_domain, list):
@@ -335,7 +303,6 @@ class TokenOptimizer:
 
     @staticmethod
     def detect_quick_vulns(endpoints: List[Dict]) -> List[Dict]:
-        """Detect obvious vulnerability patterns without LLM calls."""
         vulns = []
         seen_types = set()
 
@@ -366,7 +333,6 @@ class TokenOptimizer:
 
     @staticmethod
     def build_optimized_analysis_prompt(endpoints: List[Dict], technologies: str, quick_vulns: List[Dict]) -> str:
-        """Build concise prompt for LLM analysis."""
         prompt = f"Analyze for HIGH severity vulnerabilities only.\n\nTECH STACK: {technologies}\n\nENDPOINTS:\n"
         for ep in endpoints[:20]:
             prompt += f"  - {ep.get('url', '')}\n"

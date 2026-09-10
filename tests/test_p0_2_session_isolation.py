@@ -1,11 +1,3 @@
-"""P0.2 regression tests — session isolation / anonymous-by-default auth.
-
-Proves:
-  1. admin session cannot leak into an anonymous request
-  2. low-priv session cannot become admin automatically
-  3. a newly captured JWT does not change unrelated (undeclared) tests
-  4. parallel tests do not share mutable auth state accidentally
-"""
 import os
 import importlib
 

@@ -1,22 +1,3 @@
-"""
-BudgetGovernor — graded economic controller for LLM spend.
-
-The harness TokenBudget already tracks $ spent and refuses a request that cannot
-be afforded. That is binary. The governor adds policy so an autonomous run degrades
-gracefully instead of hard-stopping:
-
-  spent < downgrade_pct        -> full quality (LARGE reasoning allowed)
-  downgrade_pct <= spent < hard_pct -> route LARGE tasks to the SMALL/cheap model
-  spent >= hard_pct            -> block further LLM calls entirely
-
-It also supports per-phase spend caps (e.g. cap EXPLOITATION at 40% of budget) and
-emits telemetry for reporting.
-
-Config (.env):
-  BUDGET_GOVERNOR_ENABLED=true
-  LLM_DOWNGRADE_PCT=0.70       # start routing LARGE->SMALL here
-  LLM_HARD_STOP_PCT=1.00       # block all LLM calls at/after this
-"""
 
 from __future__ import annotations
 
@@ -35,10 +16,6 @@ class BudgetGovernor:
         downgrade_pct: float = 0.70,
         hard_stop_pct: float = 1.00,
     ):
-        """
-        Args:
-            budget: a TokenBudget (has .spent_usd, .max_budget_usd, .can_afford()).
-        """
         self.budget = budget
         self.downgrade_pct = float(downgrade_pct)
         self.hard_stop_pct = float(hard_stop_pct)
@@ -50,7 +27,6 @@ class BudgetGovernor:
         self._warned_downgrade = False
         self._warned_hardstop = False
 
-    # ------------------------------------------------------------- accounting
 
     @property
     def max_budget(self) -> float:
@@ -68,7 +44,6 @@ class BudgetGovernor:
     # ------------------------------------------------------------ tier policy
 
     def adjust_tier(self, tier: TaskTier) -> TaskTier:
-        """Downgrade LARGE reasoning to SMALL once the budget crosses the threshold."""
         pct = self.pct_spent()
         if pct >= self.downgrade_pct and getattr(tier, "value", tier) == TaskTier.LARGE.value:
             self._downgrades += 1
@@ -80,7 +55,6 @@ class BudgetGovernor:
         return tier
 
     def allow_request(self, estimated_tokens: int = 0, provider: str = "", model: str = "") -> bool:
-        """Return False when the hard stop is reached or the request is unaffordable."""
         pct = self.pct_spent()
         if pct >= self.hard_stop_pct:
             self._blocks += 1
@@ -103,7 +77,6 @@ class BudgetGovernor:
                 return True
         return True
 
-    # -------------------------------------------------------------- phases
 
     def set_phase_cap(self, phase: str, cap_usd: float) -> None:
         self._phase_caps[phase] = float(cap_usd)
@@ -115,7 +88,6 @@ class BudgetGovernor:
     def phase_spend(self, phase: str) -> float:
         return self.spent - self._phase_spend_start.get(phase, self.spent)
 
-    # ------------------------------------------------------------- telemetry
 
     def telemetry(self) -> Dict[str, Any]:
         return {
@@ -134,7 +106,6 @@ _GOVERNOR: Optional[BudgetGovernor] = None
 
 
 def get_budget_governor(budget: Any = None) -> Optional[BudgetGovernor]:
-    """Return (creating if needed) the process-wide governor bound to a budget."""
     global _GOVERNOR
     if _GOVERNOR is not None:
         return _GOVERNOR

@@ -17,12 +17,6 @@ class SessionManager:
         return self.sessions.get(identity_id)
 
     def create_session(self, identity: Identity) -> Session:
-        """
-        Real sessions are established by AuthSessionManager / MultiIdentityAuthManager
-        and pre-loaded into `self.sessions` by identity_bridge.build_replay_sessions.
-        This manager never fabricates credentials: if no real session exists for the
-        identity, it refuses rather than inventing a mock cookie/token.
-        """
         raise ValueError(
             f"No live session for identity '{identity.identity_id}'. "
             f"Provide credentials for this role so a real session is established "
@@ -30,9 +24,6 @@ class SessionManager:
         )
 
     def validate_session(self, session: Session) -> bool:
-        """
-        Validates if the session is still active.
-        """
         if not session.valid:
             return False
             
@@ -40,9 +31,6 @@ class SessionManager:
         return True
 
     def refresh_session(self, session: Session) -> Session:
-        """
-        Attempts to refresh an expired session.
-        """
         logger.info(f"Refreshing session for {session.identity_id}")
         identity = self.identity_store.get_identity(session.identity_id)
         if not identity:

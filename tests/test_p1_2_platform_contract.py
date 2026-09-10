@@ -1,13 +1,3 @@
-"""Tests for Issue 1.2 — Platform security contract.
-
-Validates:
-1. Contract singleton behavior
-2. Fail-closed enforcement
-3. No silent fallback to weaker behavior
-4. Contract violation cannot be suppressed
-5. Compliance checker detects violations
-6. All security-sensitive modules import and enforce the contract
-"""
 import ast
 import sys
 from pathlib import Path
@@ -320,7 +310,6 @@ class TestEnforcementLog:
 
 
 class TestSecurityModulesImportContract:
-    """Verify that security-sensitive modules can be checked for compliance."""
 
     SECURITY_MODULES = [
         "core/security/policy_engine.py",
@@ -342,7 +331,6 @@ class TestSecurityModulesImportContract:
 
     @pytest.mark.parametrize("module_path", SECURITY_MODULES)
     def test_no_bare_except_pass(self, module_path):
-        """Security modules must not have bare 'except: pass' that could swallow ContractViolation."""
         path = PROJECT_ROOT / module_path
         if not path.exists():
             pytest.skip(f"{module_path} not found")

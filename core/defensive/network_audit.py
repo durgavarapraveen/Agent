@@ -1,7 +1,3 @@
-"""
-Defensive Network Audit & Internal Exposure Scanner.
-Audits SMB/service exposure, identity/trust paths, and multi-subnet pivot points.
-"""
 
 import logging
 import socket
@@ -14,9 +10,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ExposureFinding:
-    category: str  # smb_exposure, identity_trust, pivot_risk
+    category: str
     title: str
-    severity: str  # LOW, MEDIUM, HIGH, CRITICAL
+    severity: str
     description: str
     host: str
     details: Dict[str, Any] = field(default_factory=dict)
@@ -35,16 +31,11 @@ class ExposureFinding:
 
 
 class NetworkAuditor:
-    """Audits internal network exposure, SMB signing/protocols, and pivot risks."""
 
     def __init__(self, target_host: str = "localhost"):
         self.target_host = target_host
 
     def audit_smb_exposure(self, host: Optional[str] = None) -> List[ExposureFinding]:
-        """
-        Audit SMB configuration for legacy protocols (SMBv1), SMB Signing enforcement,
-        and public administrative share accessibility.
-        """
         target = host or self.target_host
         findings: List[ExposureFinding] = []
 
@@ -63,8 +54,11 @@ class NetworkAuditor:
 
         # 2. Check PowerShell SMB Configuration (Windows Native Check)
         try:
-            cmd = "powershell -Command \"Get-SmbServerConfiguration | Select-Object EnableSMB1Protocol, RequireSecuritySignature | ConvertTo-Json\""
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+            cmd = [
+                "powershell", "-Command",
+                "Get-SmbServerConfiguration | Select-Object EnableSMB1Protocol, RequireSecuritySignature | ConvertTo-Json"
+            ]
+            res = subprocess.run(cmd, shell=False, capture_output=True, text=True, timeout=10)
             if res.returncode == 0 and res.stdout.strip():
                 import json
                 data = json.loads(res.stdout)
@@ -98,10 +92,6 @@ class NetworkAuditor:
         return findings
 
     def audit_pivot_risks(self) -> List[ExposureFinding]:
-        """
-        Scan routing tables and network interfaces to detect dual-homed hosts
-        or enabled packet forwarding.
-        """
         findings: List[ExposureFinding] = []
         try:
             # Check local network interfaces
@@ -130,7 +120,6 @@ class NetworkAuditor:
         return findings
 
     def run_full_audit(self) -> List[Dict[str, Any]]:
-        """Run all internal network and exposure audits."""
         all_findings = []
         all_findings.extend([f.to_dict() for f in self.audit_smb_exposure()])
         all_findings.extend([f.to_dict() for f in self.audit_pivot_risks()])

@@ -1,27 +1,3 @@
-"""Issue 1.2 — Platform Security Contract.
-
-The single, authoritative, normative security contract for the entire platform.
-Every security-sensitive module MUST import and enforce this contract.
-
-This module is the ONLY source of truth for:
-  - Authorization requirements
-  - Target scope rules
-  - Execution capabilities and limits
-  - Data classification levels
-  - Secret handling policy
-  - Isolation boundaries
-  - Rate/budget controls
-  - Logging requirements
-  - Evidence integrity rules
-  - Fail-closed behavior
-  - Human approval boundaries
-
-Design principles:
-  1. Fail-closed: every check defaults to DENY on error.
-  2. No silent fallback: weaker behavior raises ContractViolation.
-  3. Auditable: every enforcement produces a structured record.
-  4. Testable: contract tests verify no bypass is possible.
-"""
 from __future__ import annotations
 
 import functools
@@ -43,10 +19,6 @@ CONTRACT_VERSION = "1.0.0"
 # ── Exceptions ────────────────────────────────────────────────────────────
 
 class ContractViolation(Exception):
-    """Raised when any security contract invariant is violated.
-
-    This exception MUST NOT be caught and suppressed silently.
-    """
     def __init__(self, rule: str, detail: str, context: Optional[Dict] = None):
         self.rule = rule
         self.detail = detail
@@ -55,7 +27,6 @@ class ContractViolation(Exception):
 
 
 class ContractNotEnforced(ContractViolation):
-    """Raised when a required contract check is bypassed or missing."""
     pass
 
 
@@ -88,7 +59,6 @@ class ApprovalLevel(str, Enum):
 
 @dataclass(frozen=True)
 class AuthorizationRule:
-    """Every action MUST have authorization before execution."""
     require_scope_check: bool = True
     require_policy_decision: bool = True
     fail_on_missing_scope: bool = True
@@ -97,7 +67,6 @@ class AuthorizationRule:
 
 @dataclass(frozen=True)
 class TargetScopeRule:
-    """All operations MUST be constrained to authorized targets."""
     require_explicit_scope: bool = True
     allow_scope_expansion: bool = False
     require_ip_validation: bool = True
@@ -109,7 +78,6 @@ class TargetScopeRule:
 
 @dataclass(frozen=True)
 class ExecutionRule:
-    """Dynamic code execution MUST be sandboxed."""
     require_sandbox: bool = True
     require_ast_validation: bool = True
     block_destructive_patterns: bool = True
@@ -123,7 +91,6 @@ class ExecutionRule:
 
 @dataclass(frozen=True)
 class SecretHandlingRule:
-    """Secrets MUST be stored as references, never in plaintext in logs/state."""
     require_vault_storage: bool = True
     redact_in_logs: bool = True
     redact_in_llm_prompts: bool = True
@@ -135,7 +102,6 @@ class SecretHandlingRule:
 
 @dataclass(frozen=True)
 class IsolationRule:
-    """Execution environments MUST be isolated from host and each other."""
     require_process_isolation: bool = True
     require_network_isolation: bool = True
     require_filesystem_isolation: bool = True
@@ -146,7 +112,6 @@ class IsolationRule:
 
 @dataclass(frozen=True)
 class BudgetRule:
-    """Operations MUST respect rate and budget limits."""
     max_requests_per_scan: int = 10_000
     max_concurrent_requests: int = 50
     max_scan_duration_seconds: int = 7200
@@ -156,7 +121,6 @@ class BudgetRule:
 
 @dataclass(frozen=True)
 class LoggingRule:
-    """All security-relevant operations MUST be logged."""
     log_all_policy_decisions: bool = True
     log_all_network_requests: bool = True
     log_all_tool_executions: bool = True
@@ -168,7 +132,6 @@ class LoggingRule:
 
 @dataclass(frozen=True)
 class EvidenceRule:
-    """Findings MUST have verifiable evidence chains."""
     require_evidence_chain: bool = True
     require_reproduction_steps: bool = True
     require_confidence_score: bool = True
@@ -178,7 +141,6 @@ class EvidenceRule:
 
 @dataclass(frozen=True)
 class FailClosedRule:
-    """On ANY error in security checks, the system MUST deny."""
     deny_on_scope_error: bool = True
     deny_on_policy_error: bool = True
     deny_on_network_error: bool = True
@@ -189,7 +151,6 @@ class FailClosedRule:
 
 @dataclass(frozen=True)
 class HumanApprovalRule:
-    """Certain operations MUST require human approval."""
     tier_approval: Dict[str, str] = field(default_factory=lambda: {
         OperationTier.PASSIVE.value: ApprovalLevel.AUTOMATIC.value,
         OperationTier.ACTIVE_SAFE.value: ApprovalLevel.POLICY_CHECK.value,
@@ -203,11 +164,6 @@ class HumanApprovalRule:
 
 @dataclass(frozen=True)
 class PlatformSecurityContract:
-    """The single normative security contract for the platform.
-
-    Every security-sensitive component MUST enforce these rules.
-    No module may silently weaken any rule.
-    """
     version: str = CONTRACT_VERSION
     authorization: AuthorizationRule = field(default_factory=AuthorizationRule)
     target_scope: TargetScopeRule = field(default_factory=TargetScopeRule)
@@ -252,7 +208,6 @@ def reset_contract_for_tests() -> None:
 
 @dataclass
 class EnforcementRecord:
-    """Structured record of a contract enforcement check."""
     rule: str
     passed: bool
     detail: str
@@ -289,8 +244,6 @@ def clear_enforcement_log() -> None:
 # ── Contract enforcement decorators ───────────────────────────────────────
 
 def require_authorization(func: F) -> F:
-    """Decorator: the wrapped function MUST have a PolicyDecision or
-    perform an authorization check before executing."""
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         contract = get_contract()
@@ -346,7 +299,6 @@ def require_authorization(func: F) -> F:
 
 
 def require_scope_check(func: F) -> F:
-    """Decorator: the wrapped function MUST validate target scope."""
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         contract = get_contract()
@@ -407,7 +359,6 @@ def require_scope_check(func: F) -> F:
 
 
 def require_sandbox(func: F) -> F:
-    """Decorator: the wrapped function runs dynamic code and MUST use sandbox."""
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         contract = get_contract()
@@ -428,7 +379,6 @@ def require_sandbox(func: F) -> F:
 
 
 def fail_closed(func: F) -> F:
-    """Decorator: any exception in the wrapped security check causes DENY."""
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         caller = f"{func.__module__}.{func.__qualname__}"
@@ -463,7 +413,6 @@ def fail_closed(func: F) -> F:
 
 
 def audit_action(rule_name: str) -> Callable[[F], F]:
-    """Decorator: log an enforcement record for every call."""
     def decorator(func: F) -> F:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -494,7 +443,6 @@ def audit_action(rule_name: str) -> Callable[[F], F]:
 # ── Contract validation helpers ───────────────────────────────────────────
 
 def validate_network_access(url: str, purpose: str = "scan") -> None:
-    """Validate that outbound network access is authorized per contract."""
     contract = get_contract()
 
     if contract.target_scope.block_private_ips:
@@ -522,7 +470,6 @@ def validate_network_access(url: str, purpose: str = "scan") -> None:
 
 
 def validate_secret_handling(value: str, context: str = "") -> None:
-    """Validate that a value doesn't contain unredacted secrets."""
     contract = get_contract()
     if not contract.secret_handling.redact_in_logs:
         return
@@ -551,7 +498,6 @@ def validate_secret_handling(value: str, context: str = "") -> None:
 
 
 def validate_execution_sandbox(code: str) -> None:
-    """Validate that code intended for execution passes static checks."""
     contract = get_contract()
     if not contract.execution.block_destructive_patterns:
         return
@@ -567,7 +513,6 @@ def validate_execution_sandbox(code: str) -> None:
 
 
 def get_approval_level(tier: OperationTier) -> ApprovalLevel:
-    """Get the required approval level for an operation tier."""
     contract = get_contract()
     level_str = contract.human_approval.tier_approval.get(
         tier.value, ApprovalLevel.HUMAN_REQUIRED.value
@@ -586,10 +531,6 @@ class ComplianceResult:
 
 
 def check_module_compliance(module_path: str) -> List[ComplianceResult]:
-    """Check if a module complies with the platform contract.
-
-    Used by CI to verify no module silently bypasses security.
-    """
     import ast
     from pathlib import Path
 

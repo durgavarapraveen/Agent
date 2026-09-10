@@ -6,9 +6,6 @@ class LLMContextBuilder:
         self.shared_context = shared_context
         
     def build_for_hypothesis_ranking(self, endpoint_id: str, coverage_gaps: list) -> Dict[str, Any]:
-        """
-        Builds tightly scoped context limited to ~4000 tokens.
-        """
         params = {
             "endpoint_id": endpoint_id
         }
@@ -23,10 +20,6 @@ class LLMContextBuilder:
         return context
 
     def _trim_to_tokens(self, context: dict, max_tokens: int) -> dict:
-        """
-        Heuristic trim for large lists in context.
-        Assuming 1 token ~ 4 chars of JSON string.
-        """
         import json
         while len(json.dumps(context)) // 4 > max_tokens:
             trimmed_something = False

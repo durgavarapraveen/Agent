@@ -1,16 +1,3 @@
-"""
-Differential testing engine (spec Point A / P1.5).
-
-    Input A -> representation 1 -> Output A
-    Input A -> representation 2 -> Output B
-    A != B  =>  potential parsing / authorisation / protocol inconsistency.
-
-The engine is deterministic and network-agnostic: it takes a set of requests
-that *should* be equivalent, sends them via an injected probe, and reports
-every divergence. It never mutates target state beyond issuing the requests it
-is given, and it never labels a divergence a confirmed vulnerability — it emits
-anomalies for the hypothesis/adjudication pipeline.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -50,7 +37,6 @@ class DifferentialResult:
 
 
 class DifferentialEngine:
-    """Compare responses across a set of supposedly-equivalent requests."""
 
     def __init__(self, probe: ProbeFn, ignore_statuses: Optional[set] = None,
                  **compare_kwargs: Any) -> None:
@@ -61,7 +47,6 @@ class DifferentialEngine:
         self._compare_kwargs = compare_kwargs
 
     def run(self, requests: List[HttpRequest]) -> DifferentialResult:
-        """Send every request and compare each against the baseline (first)."""
         snapshots = [send(self._probe, r) for r in requests]
         # Drop requests that never reached the target (status 0) so a single
         # network blip is not misread as a divergence, plus any status the
@@ -87,7 +72,6 @@ class DifferentialEngine:
         auth_headers: Optional[Dict[str, str]] = None,
         include_multipart: bool = False,
     ) -> DifferentialResult:
-        """Differential across GET/form/json (+multipart) representations."""
         variants = representation_variants(
             base_url, params, auth_headers=auth_headers,
             include_multipart=include_multipart)

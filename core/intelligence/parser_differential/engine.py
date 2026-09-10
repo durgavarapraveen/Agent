@@ -1,13 +1,3 @@
-"""
-Parser-differential analysis engine (spec Point C / P1.7).
-
-Sends benign parser-ambiguity probes, observes which marker the server acted on,
-and reports when the server surfaced a value a conservative parser should have
-ignored, or when duplicate-parameter ordering changes the response. Reflection
-analysis only runs when the parameter is actually echoed; otherwise the engine
-falls back to structural response comparison so it never invents a finding from
-an unreflected value.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

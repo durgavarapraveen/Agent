@@ -1,9 +1,3 @@
-"""Compare two scans of the same target — surface new / resolved / regressed
-vulnerabilities. Enables monitoring-mode use case.
-
-A finding matches across scans by (category, host, title_key) — same dedup
-rule the persistence layer uses.
-"""
 from __future__ import annotations
 import hashlib
 from typing import Any, Dict, List
@@ -11,7 +5,6 @@ from urllib.parse import urlparse
 
 
 def _key(v: Dict) -> str:
-    """Cross-scan match key — category + host + short title hash."""
     from core.database.pg_store import _vuln_category, _host_only, _normalize_location
     title = str(v.get("title") or "").lower().strip()
     cat = _vuln_category(title) or "unknown"
@@ -22,8 +15,6 @@ def _key(v: Dict) -> str:
 
 
 def compare_scans(scan_a: str, scan_b: str) -> Dict[str, Any]:
-    """`scan_a` = older (baseline), `scan_b` = newer (current).
-    Returns new / resolved / regressed lists + summary counts."""
     from core.database.pg_store import VulnRepo, ScanRepo, DatabaseManager
     import psycopg2.extras
 

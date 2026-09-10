@@ -1,7 +1,3 @@
-"""
-Document ingestion for the RAG pipeline.
-Supports: PDF, text/markdown, HTML, web URLs, and online search.
-"""
 
 import hashlib
 import logging
@@ -27,7 +23,6 @@ PARENT_CHUNK_OVERLAP = 200
 
 
 def chunk_text(text: str, max_chars: int = MAX_CHUNK_CHARS, overlap: int = CHUNK_OVERLAP) -> List[str]:
-    """Split text into overlapping chunks at paragraph/sentence boundaries."""
     if not text or not text.strip():
         return []
     paragraphs = re.split(r"\n{2,}", text.strip())
@@ -49,7 +44,6 @@ def chunk_text(text: str, max_chars: int = MAX_CHUNK_CHARS, overlap: int = CHUNK
 
 
 def _sub_split(text: str, size: int, overlap: int) -> List[str]:
-    """Sentence-aware character split for the child pass."""
     if len(text) <= size:
         return [text]
     sentences = re.split(r"(?<=[.!?])\s+", text)
@@ -73,12 +67,6 @@ def chunk_parent_child(text: str,
                        parent_overlap: int = PARENT_CHUNK_OVERLAP,
                        child_size: int = CHILD_CHUNK_CHARS,
                        child_overlap: int = CHILD_CHUNK_OVERLAP) -> List[Dict[str, Any]]:
-    """Split into parents (retrieval context) + children (search targets).
-
-    Returns a flat list of children; each carries its `parent_idx` and the
-    full `parent_content`. This matches the storage layout used by
-    `SecurityRAGPipeline._store_chunk`.
-    """
     parents = chunk_text(text, max_chars=parent_size, overlap=parent_overlap)
     out: List[Dict[str, Any]] = []
     for pi, p in enumerate(parents):
@@ -97,7 +85,6 @@ def content_hash(text: str) -> str:
 
 
 def extract_text_from_file(file_path: str) -> str:
-    """Extract text from PDF, .txt, .md, .csv, .json files."""
     path = Path(file_path)
     suffix = path.suffix.lower()
 
@@ -146,7 +133,6 @@ def _extract_pdf(path: Path) -> str:
 
 
 def _strip_html(html: str) -> str:
-    """Remove HTML tags, scripts, styles."""
     html = re.sub(r"<script[^>]*>.*?</script>", " ", html, flags=re.DOTALL | re.IGNORECASE)
     html = re.sub(r"<style[^>]*>.*?</style>", " ", html, flags=re.DOTALL | re.IGNORECASE)
     html = re.sub(r"<[^>]+>", " ", html)
@@ -155,7 +141,6 @@ def _strip_html(html: str) -> str:
 
 
 async def fetch_url_text(url: str, timeout: float = 30.0) -> str:
-    """Fetch a URL and extract readable text."""
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         r = await client.get(url, headers={
             "User-Agent": "Mozilla/5.0 (SecurityRAG/1.0; Knowledge Ingestion)",
@@ -175,7 +160,6 @@ async def fetch_url_text(url: str, timeout: float = 30.0) -> str:
 
 
 async def web_search(query: str, max_results: int = 5) -> List[Dict[str, str]]:
-    """Search the web using duckduckgo-search package (no API key needed)."""
     import asyncio
     results = []
 
@@ -226,7 +210,6 @@ async def web_search(query: str, max_results: int = 5) -> List[Dict[str, str]]:
 
 
 async def search_and_extract(query: str, max_results: int = 3, max_chars_per_page: int = 5000) -> List[Dict[str, Any]]:
-    """Search the web and extract text from top results."""
     search_results = await web_search(query, max_results=max_results)
     extracted = []
     for sr in search_results:

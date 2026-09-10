@@ -7,19 +7,11 @@ class SessionRefreshRequired(Exception):
     pass
 
 class SessionRefreshHandler:
-    """
-    Attempts to refresh an expired session without doing a full relogin.
-    """
     
     def __init__(self, session_manager: SessionManager):
         self.session_manager = session_manager
         
     def refresh(self, identity_id: str) -> bool:
-        """
-        Attempt to reuse an existing valid auth header for the identity. Returns
-        True when the session still carries an Authorization header (reusable),
-        False when a full relogin is required. No fabricated tokens.
-        """
         session = self.session_manager.get_session(identity_id)
         if not session:
             return False

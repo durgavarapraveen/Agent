@@ -1,14 +1,3 @@
-"""
-P2-1: Attack Surface Graph.
-
-Domain -> Subdomain -> LiveService -> Technology
-                                    -> Endpoint -> Parameter
-                                                -> AuthRequirement
-                                                -> Hypothesis -> Evidence
-
-An in-memory graph the orchestrator maintains alongside the SharedContext.
-Nothing here calls out to the network — pure structure.
-"""
 from __future__ import annotations
 
 from collections import defaultdict

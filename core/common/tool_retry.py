@@ -1,10 +1,3 @@
-"""Expert-mode tool invocation wrapper: retry-on-timeout with longer budget,
-then fall back to an alternate tool for the same capability.
-
-Applied to every ToolGateway.execute call so a Kali tool timeout no longer
-declares the whole finding lost — we escalate the timeout, then walk the
-portfolio's fallback chain (e.g. sqlmap → nuclei → custom_mutator).
-"""
 from __future__ import annotations
 import logging
 from typing import Any, Optional
@@ -33,13 +26,6 @@ def _is_timeout_result(result: Any) -> bool:
 async def execute_with_expert_retry(gateway, invocation, auth_context,
                                      base_timeout: int = 60,
                                      fallback_tool_ids: Optional[list] = None) -> Any:
-    """Execute a tool invocation, escalating the timeout on failure, then
-    walking the portfolio's fallback chain for the same capability.
-
-    `fallback_tool_ids`: alternate tool_ids ordered by preference (e.g. after
-    sqlmap timeouts, try ["nuclei", "custom_mutator"]). Pulled from the
-    tool_portfolio when not supplied.
-    """
     original_timeout = getattr(invocation, "timeout_seconds", None) or base_timeout
     original_tool = getattr(invocation, "tool_id", "")
 

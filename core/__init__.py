@@ -1,7 +1,3 @@
-"""
-AntiGravity Core Package
-Structured domain subpackages with native multi-path discovery and backward compatibility.
-"""
 
 import os
 import sys

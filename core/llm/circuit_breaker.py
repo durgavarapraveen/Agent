@@ -1,28 +1,3 @@
-"""Per-provider / per-model / per-phase circuit breaker for LLM calls.
-
-Keeps the provider fallback chain honest: if one provider's `deepseek-reasoner`
-model has failed 3 times in the last 60 s during the EXPLOIT phase, subsequent
-requests for `(deepseek, deepseek-reasoner, exploit)` fast-fail with
-`CircuitOpen` for the next 60 s so the harness moves on immediately instead
-of adding another round-trip on each call.
-
-Independent of `core/intelligence/_provider_gate.py` which is scoped to OSINT
-feeds. Both use the same failure-window + cooldown pattern, but LLM policy
-is far more restrictive (planning stalls are extremely visible to operators).
-
-Usage:
-
-    from core.llm.circuit_breaker import get_llm_breaker, CircuitOpen
-    breaker = get_llm_breaker("deepseek", "deepseek-reasoner", phase="exploit")
-    if breaker.is_open():
-        raise CircuitOpen(str(breaker))
-    try:
-        result = await client.generate(...)
-        breaker.record_success()
-    except Exception:
-        breaker.record_failure()
-        raise
-"""
 from __future__ import annotations
 
 import logging
@@ -35,7 +10,6 @@ logger = logging.getLogger(__name__)
 
 
 class CircuitOpen(RuntimeError):
-    """Raised when a caller tries to use an open circuit."""
 
 
 _STREAK_TRIP = int(os.environ.get("LLM_BREAKER_STREAK", "3"))
@@ -92,7 +66,5 @@ def get_llm_breaker(provider: str, model: str, phase: str = "any") -> _Breaker:
 
 
 def snapshot() -> list[Tuple[str, bool, int]]:
-    """Returns `(key, is_open, streak)` per breaker — for a /debug/breakers
-    admin endpoint or ops dashboard."""
     with _BREAKERS_LOCK:
         return [(b.key, b.is_open(), b._streak) for b in _BREAKERS.values()]

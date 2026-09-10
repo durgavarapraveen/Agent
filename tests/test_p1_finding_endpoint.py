@@ -1,5 +1,3 @@
-"""P1.12 (endpoint origin/synthetic), P1.13 (finding confidence),
-P1.14 (root-cause endpoint grouping)."""
 import pytest
 
 from core.memory.shared_context import SharedContextV2 as SharedContext

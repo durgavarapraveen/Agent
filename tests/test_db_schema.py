@@ -1,8 +1,3 @@
-"""Smoke test: pg_store schema migrates cleanly against Postgres.
-
-Skipped when Postgres is not reachable (dev laptops without docker).
-CI provides Postgres via services: block in .github/workflows/ci.yml.
-"""
 from __future__ import annotations
 
 import os
@@ -32,7 +27,6 @@ pytestmark = pytest.mark.skipif(not _pg_reachable(),
 
 
 def test_pg_init_schema_idempotent() -> None:
-    """_init_schema must be safe to call twice; second call is a no-op."""
     from core.database.pg_store import _init_schema
     _init_schema()
     _init_schema()

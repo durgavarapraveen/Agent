@@ -1,9 +1,3 @@
-"""
-Phase 5 Module 5.4: Trend Analyzer Engine (core/trend_analyzer.py)
-
-Privacy-safe scan history SQLite storage, MTTD & Remediation Rate calculators,
-recurring vulnerability detection, and predictive trend analysis using scipy linregress.
-"""
 
 import json
 import logging
@@ -15,13 +9,11 @@ logger = logging.getLogger(__name__)
 
 
 class TrendAnalyzer:
-    """Performs historical trend analysis, MTTD/remediation rate computation, and predictive linregress trend analysis using PostgreSQL."""
 
     def __init__(self):
         self._init_db()
 
     def _init_db(self):
-        """Create privacy-safe aggregated scan history table."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -57,7 +49,6 @@ class TrendAnalyzer:
         vulnerabilities: List[Dict[str, Any]],
         avg_confidence: float = 0.85
     ) -> Dict[str, Any]:
-        """Record privacy-safe scan summary metrics (no raw PII/payloads)."""
         counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
         total_risk = 0.0
 
@@ -88,7 +79,6 @@ class TrendAnalyzer:
         return self._update_lifecycle(target_name, vulnerabilities)
 
     def _update_lifecycle(self, target_name: str, vulnerabilities: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Track finding discovery and remediation across scans."""
         now = datetime.now().isoformat()
         current_keys = set()
         recurring_flagged = []
@@ -151,10 +141,6 @@ class TrendAnalyzer:
         return {"recurring_vulnerabilities": recurring_flagged}
 
     def compute_mttd_and_remediation_rate(self, target_name: str) -> Dict[str, Any]:
-        """
-        Compute MTTD = average(days_between_first_seen_and_remediated)
-        Compute remediation_rate = (remediated_findings / total_findings_previous_scan) * 100
-        """
         conn = DatabaseManager.get_connection()
         try:
             with conn.cursor() as cursor:
@@ -200,10 +186,6 @@ class TrendAnalyzer:
             conn.close()
 
     def predict_future_trends(self, target_name: str, scan_limit: int = 6) -> Dict[str, Any]:
-        """
-        Use scipy.stats.linregress to fit total_findings vs scan_sequence_number over last N scans.
-        Generates predictive text and Matplotlib base64 trend graph.
-        """
         conn = DatabaseManager.get_connection()
         scan_records = []
         try:

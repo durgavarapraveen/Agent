@@ -1,17 +1,3 @@
-"""
-Finding deduplication across scan runs.
-
-Each finding is fingerprinted as
-    sha256(cve_id + file_path + function_name + package_version)
-and tracked in a SQLite `findings_history` table. On each scan a finding is
-classified as:
-  - new        : fingerprint never seen before
-  - recurring  : seen in a previous scan and still present
-  - resolved   : previously seen but absent from the current scan
-
-Recurring findings are suppressed from the main report UNLESS their severity
-changed since last seen (a regression/escalation worth surfacing).
-"""
 
 from __future__ import annotations
 
@@ -32,11 +18,6 @@ RESOLVED = "resolved"
 
 
 def generate_dedup_key(capability: str, target: str, resource: str = "") -> str:
-    """
-    Generate explicit deduplication key preserving exact target FQDN/subdomain.
-    Format: {capability}:{exact_subdomain_or_target}:{port/resource}
-    Example: port_scanning:millisecond.speshway.com:80
-    """
     cap_clean = (capability or "").lower().strip()
     target_str = str(target or "").strip().lower()
     if "://" in target_str:
@@ -56,7 +37,6 @@ def generate_dedup_key(capability: str, target: str, resource: str = "") -> str:
 def fingerprint(cve_id: str = "", file_path: str = "",
                 function_name: str = "", package_version: str = "",
                 target: str = "", title: str = "", vuln_type: str = "") -> str:
-    """Stable SHA-256 fingerprint for a finding."""
     target_clean = (target or "").strip().lower()
     if "://" in target_clean:
         target_clean = target_clean.split("://", 1)[1]
@@ -78,7 +58,7 @@ def fingerprint(cve_id: str = "", file_path: str = "",
 @dataclass
 class DedupResult:
     fingerprint: str
-    status: str                  # new | recurring | resolved
+    status: str
     severity: str = ""
     prev_severity: str = ""
     severity_changed: bool = False
@@ -97,7 +77,6 @@ class DedupResult:
 
 
 class DedupStore:
-    """Tracks finding fingerprints across scans in PostgreSQL."""
 
     def __init__(self):
         self._init()
@@ -130,7 +109,6 @@ class DedupStore:
         return t
 
     def classify(self, finding: Dict, scan_id: str) -> DedupResult:
-        """Classify one finding for the current scan and update history."""
         target_val = finding.get("target") or finding.get("host") or finding.get("domain") or ""
         target_norm = self._normalize_target(target_val)
         title_val = finding.get("title") or finding.get("name") or ""
@@ -177,13 +155,6 @@ class DedupStore:
                     suppressed=not changed, first_seen=first_seen, last_seen=now)
 
     def mark_resolved(self, scan_id: str, target: str = None) -> List[str]:
-        """Findings not seen in this scan_id are resolved. Scoped by target so
-        that a scan against target B does NOT mark target A's findings as resolved.
-
-        `target` MUST be supplied when there are historical findings for other
-        targets in the DB. If it is None, we log a warning and skip the sweep
-        rather than performing a dangerous global mark.
-        """
         if not target:
             logger.warning(
                 "mark_resolved called without target; skipping to avoid cross-target "
@@ -208,15 +179,6 @@ class DedupStore:
 
     def process_scan(self, findings: List[Dict], scan_id: str,
                      include_recurring: bool = False, target: str = None) -> Dict:
-        """Classify a full scan's findings and compute resolved set.
-
-        Returns {'results': [DedupResult...], 'report': [findings kept],
-                 'suppressed_findings': [suppressed findings],
-                 'suppressed': N, 'resolved': [fingerprints]}.
-
-        If include_recurring=True, recurring findings are still included in the
-        report (marked as recurring) instead of being suppressed.
-        """
         results, report, suppressed_findings = [], [], []
         suppressed = 0
         for f in findings:

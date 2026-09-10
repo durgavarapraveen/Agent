@@ -1,11 +1,3 @@
-"""
-P2-5: endpoint normalization.
-
-Collapse http/https + trailing slash + query-string variance into a
-single canonical (route, method, parameters) record. Two URLs that
-represent the same route under two different query strings are one
-endpoint, not two.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -73,7 +65,6 @@ def normalize_url(url: str) -> CanonicalEndpoint:
 
 
 class EndpointDedupe:
-    """Merge URL variants into a canonical set keyed by (host, port, route)."""
 
     def __init__(self):
         self._items: Dict[Tuple[str, Optional[int], str], CanonicalEndpoint] = {}

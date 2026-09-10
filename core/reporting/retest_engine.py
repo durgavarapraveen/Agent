@@ -1,9 +1,3 @@
-"""
-Automated Finding Retest & Reproducibility Engine (Phase 4 Module 4.2).
-Executes strictly idempotent, read-only re-probes (TCP socket connect, HTTP HEAD / Range: 0-0, banner grabbing),
-updates finding confidence/reproducibility status, enforces rate limiting (10 req/s),
-and performs regression detection against baseline snapshots (baseline_findings.json).
-"""
 
 import asyncio
 import json
@@ -39,7 +33,6 @@ REGRESSION_REPORT_FILE = str(_RETEST_DIR / "regression_report.md")
 
 
 class RetestEngine:
-    """Read-only revalidation engine, rate limiter, and regression baseline differ."""
 
     def __init__(self, timeout: int = 5, rate_limit_per_sec: int = 10,
                  scope_validator: Optional[TargetScopeValidator] = None,
@@ -52,11 +45,9 @@ class RetestEngine:
         self.auth_headers = auth_headers or {}
 
     def _rate_limit_delay(self):
-        """Enforce maximum 10 re-probes per second per target."""
         time.sleep(1.0 / float(self.rate_limit_per_sec))
 
     async def _single_probe(self, url: str, method: str = "GET", headers: Optional[Dict[str, str]] = None, body_data: Optional[bytes] = None) -> Tuple[int, str]:
-        """Perform a single HTTP probe asynchronously."""
         merged_headers = dict(self.auth_headers)
         merged_headers.update(headers or {})
 
@@ -75,7 +66,6 @@ class RetestEngine:
             return 0, ""
 
     def revalidate_port_finding(self, target_ip: str, port: int) -> bool:
-        """Port-based findings: TCP connect socket check to confirm port is open."""
         self.scope_validator.validate(target_ip)
         self._rate_limit_delay()
         try:
@@ -85,10 +75,6 @@ class RetestEngine:
             return False
 
     def revalidate_http_finding(self, url: str, expected_status: int = 200) -> Tuple[bool, int]:
-        """
-        HTTP-based findings: Send single HEAD request (or GET with Range: bytes=0-0)
-        to exact endpoint to check response code match without re-running exploits.
-        """
         self.scope_validator.validate(url)
         self._rate_limit_delay()
         # Return code:
@@ -105,7 +91,6 @@ class RetestEngine:
             return False, -1
 
     def revalidate_banner_finding(self, target_ip: str, port: int, expected_banner: str = "") -> Tuple[bool, str]:
-        """Banner-based findings: Grab service banner with 5s timeout to confirm version hasn't changed."""
         self.scope_validator.validate(target_ip)
         self._rate_limit_delay()
         try:
@@ -123,11 +108,6 @@ class RetestEngine:
             return False, "__NETWORK_ERROR__"
 
     def process_finding_retest(self, finding: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Revalidate finding based on type.
-        Adjusts confidence: +5% (capped at 0.95) if reproducible; downgrades to LOW / NOT REPRODUCIBLE if failed;
-        flags PATCHED if banner version changed.
-        """
         conf_score = float(finding.get("confidence_score", 0.75))
         cve_or_title = str(finding.get("cve_id") or finding.get("title") or "Unknown")
         target = str(finding.get("target") or finding.get("url") or "127.0.0.1")
@@ -194,13 +174,6 @@ class RetestEngine:
         return finding
 
     def perform_regression_analysis(self, current_findings: List[Dict[str, Any]], baseline_path: str = BASELINE_FILE) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        Diff current findings against baseline_findings.json:
-        - Present in new but not old -> NEW_VULNERABILITY
-        - Present in old but not new -> REMEDIATED
-        - Present in both -> PERSISTENT
-        Outputs regression_report.md summarizing delta.
-        """
         old_findings = []
         if os.path.exists(baseline_path):
             try:
@@ -280,14 +253,6 @@ class RetestEngine:
         attempts: int = 3,
         min_success_threshold: int = 2
     ) -> Tuple[bool, int]:
-        """
-        Perform multi-attempt validation calls to verify finding reproducibility.
-        Requires at least min_success_threshold successful attempts (default 2/3).
-        Findings from tool-based scanners (nikto, nuclei, sslscan) are auto-confirmed
-        since they were already validated by the tool itself.
-        Exploit-derived findings (SQLi, XSS, etc.) use payload replay if available.
-        Agentic executor findings with live evidence are auto-confirmed.
-        """
         ftype = str(finding.get("type") or "").upper()
         if ftype in self._AUTO_CONFIRM_TYPES:
             return True, attempts
@@ -342,7 +307,6 @@ class RetestEngine:
     async def _reproduce_exploit_finding(
         self, finding: Dict[str, Any], attempts: int, min_success_threshold: int
     ) -> Tuple[bool, int]:
-        """Replay the actual exploit payload for injection/exploit-type findings."""
         evidence = finding.get("evidence") or finding.get("proof") or {}
         payload = finding.get("payload") or finding.get("post_data") or (evidence.get("payload") if isinstance(evidence, dict) else "")
 
@@ -409,10 +373,6 @@ class RetestEngine:
         attempts: int = 3,
         min_success_threshold: int = 2
     ) -> List[Dict[str, Any]]:
-        """
-        Retest all candidate findings, setting status='CONFIRMED' or status='UNCONFIRMED'.
-        Logs explicit warnings for unconfirmed findings without dropping them.
-        """
         logger.info(f"RETEST_ENGINE_START: retesting {len(findings)} findings ({attempts} attempts each)")
 
         for f in findings:

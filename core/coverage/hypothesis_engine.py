@@ -1,14 +1,3 @@
-"""
-Hypothesis Engine (Phase 22).
-
-Generates testable hypotheses from the attack surface by analyzing:
-- Discovered endpoints and parameters
-- Detected technologies
-- Prior experiment results (feedback loops)
-- Coverage gaps
-
-Each hypothesis maps to one or more SecurityTest entries and spawns experiments.
-"""
 from __future__ import annotations
 
 import logging
@@ -180,13 +169,6 @@ class HypothesisEngine:
 
     @staticmethod
     def _ep_field(ep_data, name, default):
-        """Read a field whether ep_data is a dict or an Endpoint-like object.
-
-        surface.endpoints values are normally dicts, but some code paths insert
-        Endpoint objects. The previous `.get` call raised
-        `'Endpoint' object has no attribute 'get'` and aborted hypothesis
-        generation. This accessor tolerates both shapes.
-        """
         if isinstance(ep_data, dict):
             return ep_data.get(name, default)
         if hasattr(ep_data, "to_dict"):

@@ -1,14 +1,3 @@
-"""
-Autonomous Pentesting Agent - Entry Point
-
-Single target:
-  python main.py --target example.com
-  python main.py --target example.com --auth auth.txt --tier SHALLOW
-
-Multiple targets:
-  python main.py --targets example.com,app2.io,api.service.com
-  python main.py --targets-file targets.txt --tier POC
-"""
 
 import argparse
 import asyncio
@@ -68,8 +57,6 @@ _LOG_FMT = '[%(asctime)s] %(name)s - %(levelname)s - %(message)s'
 
 
 class _AnsiResetFormatter(logging.Formatter):
-    """Reset terminal color after each line so stray ANSI codes from tool
-    output (e.g. sslscan's green) don't bleed into following lines."""
 
     def format(self, record):
         s = super().format(record)
@@ -79,7 +66,7 @@ class _AnsiResetFormatter(logging.Formatter):
 _console = logging.StreamHandler(sys.stdout)
 _console.setFormatter(_AnsiResetFormatter(_LOG_FMT))
 
-_file = logging.FileHandler("pentest.log", encoding="utf-8")   # FULL, untruncated
+_file = logging.FileHandler("pentest.log", encoding="utf-8")
 _file.setFormatter(logging.Formatter(_LOG_FMT))
 
 logging.basicConfig(level=logging.INFO, handlers=[_console, _file])
@@ -88,7 +75,6 @@ logger = logging.getLogger(__name__)
 async def run_single(target: str, auth_file: str = None, tier: str = "POC",
                      resume: bool = False, phases: list = None, credentials: dict = None,
                      scan_id: str = None):
-    """Single target pentest"""
     auth_document = ""
     if auth_file:
         auth_path = Path(auth_file)
@@ -139,7 +125,6 @@ async def run_single(target: str, auth_file: str = None, tier: str = "POC",
 
 
 async def run_multi(targets: list, auth_file: str = None):
-    """Multi-target parallel pentest"""
     auth_document = ""
     if auth_file:
         auth_path = Path(auth_file)

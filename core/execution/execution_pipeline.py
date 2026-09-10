@@ -109,17 +109,6 @@ class ExecutionPipelineV2:
 
     @staticmethod
     def _authorize_target(experiment: SecurityExperiment) -> Tuple[bool, Optional[str]]:
-        """Enforce scope authorization for THIS specific experiment before firing.
-
-        Called from `_execute` before every executor invocation. Historically,
-        `ExecutorBase.validate_target()` was declared but never invoked anywhere
-        in `core/` — all ~85 offensive executors ran without a per-request scope
-        check. This is the single choke point that closes that gap.
-
-        Prefers the unified `ScopeAuthority` façade (which fans out to every
-        wired back-end). Falls back to the legacy `TargetScopeValidator` if the
-        façade isn't wired yet, so nothing regresses on partial deployments.
-        """
         # Extract a URL/host from wherever the experiment carries it.
         params = experiment.input_parameters or {}
         candidate = (

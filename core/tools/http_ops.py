@@ -1,13 +1,3 @@
-"""
-P2-8: structured HTTP operations.
-
-The tool gateway blocks arbitrary shell pipelines (correctly). These
-composable operations give the agent everything it used to reach for a
-shell for, without weakening the gateway.
-
-All operations return dicts of structured facts, never raw process
-output the LLM has to re-parse.
-"""
 from __future__ import annotations
 
 import json
@@ -120,7 +110,6 @@ def extract_regex(text: str, pattern: str, flags: int = 0) -> List[str]:
 
 
 def parse_html(html: str) -> Dict[str, Any]:
-    """Very small structured summary — no external deps."""
     out: Dict[str, Any] = {"title": "", "forms": [], "meta": {}, "text_sample": ""}
     m = re.search(r"<title[^>]*>([^<]{0,300})</title>", html or "", re.I | re.S)
     if m:
@@ -150,7 +139,6 @@ def parse_json(text: str) -> Optional[Any]:
 
 
 def compare_responses(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
-    """Diff two http_get responses at a semantic level (status + size + body-hash)."""
     import hashlib
     def _h(t: str) -> str:
         return hashlib.sha256((t or "").encode("utf-8", "ignore")).hexdigest()[:16]
@@ -166,7 +154,6 @@ def compare_responses(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def extract_headers(text: str) -> Dict[str, str]:
-    """Parse a raw HTTP response header block into a dict."""
     out: Dict[str, str] = {}
     for line in (text or "").splitlines():
         if ":" not in line:

@@ -1,13 +1,3 @@
-"""
-AgentActivityLog — read-only timeline of what the agent did during a scan.
-
-Records every significant action: tool execution, finding discovery, retest
-results, critic verdicts, exploit attempts, phase transitions.  The human
-sees WHAT was tested, HOW it was tested, and WHAT output was produced.
-
-This is NOT the ReviewQueue (human worklist).  This is a passive, read-only
-audit trail of agent behaviour.
-"""
 
 from __future__ import annotations
 
@@ -44,7 +34,6 @@ def _pg():
 
 
 class AgentActivityLog:
-    """Append-only activity log backed by Postgres (file fallback if DB unreachable)."""
 
     def __init__(self):
         self._lock = threading.Lock()

@@ -1,10 +1,3 @@
-"""
-SecurityExperiment model (Phase 21).
-
-An experiment is a concrete, executable test plan that maps a hypothesis
-to a specific endpoint + identity + capability + payloads. It owns its
-own lifecycle and evidence chain.
-"""
 from __future__ import annotations
 
 import uuid

@@ -1,9 +1,3 @@
-"""
-Phase 5 Module 5.2: Risk Prioritization Engine (core/risk_prioritizer.py)
-
-Computes exploitability scores, business impact multipliers, combined risk scores (0–10 scale),
-groups findings into risk tiers, and generates ordered remediation roadmaps.
-"""
 
 import logging
 from pathlib import Path
@@ -13,14 +7,6 @@ logger = logging.getLogger(__name__)
 
 
 def compute_exploitability_score(finding: Dict[str, Any]) -> float:
-    """
-    Compute exploitability score (0–100):
-      - public_exploit_available -> +40 points
-      - easy_to_chain -> +30 points
-      - no_authentication_required -> +20 points
-      - complex_attack_vector -> -10 points
-    Cap between [0, 100].
-    """
     score = 0.0
 
     # Public exploit check
@@ -52,10 +38,6 @@ def compute_exploitability_score(finding: Dict[str, Any]) -> float:
 
 
 def compute_business_impact(finding: Dict[str, Any], config_path: str = "data/business_impact_config.yaml") -> float:
-    """
-    Read business_impact_config.yaml and compute normalized impact score (0–1 scale).
-    Formula: max(impact_multipliers) / 10.0
-    """
     path = Path(config_path)
     multipliers = {
         "data_exposed": 10,
@@ -109,17 +91,11 @@ def compute_business_impact(finding: Dict[str, Any], config_path: str = "data/bu
 
 
 class RiskPrioritizer:
-    """Prioritizes findings based on exploitability, CVSS, and business impact."""
 
     def __init__(self, config_path: str = "data/business_impact_config.yaml"):
         self.config_path = config_path
 
     def calculate_risk_score(self, finding: Dict[str, Any]) -> float:
-        """
-        Calculate combined risk score:
-          final_risk_score = (CVSS_base_score / 10) * (exploitability_score / 100) * business_impact * 10
-        Capped at [0.0, 10.0].
-        """
         # Determine CVSS base score (default based on severity if cvss not provided)
         cvss = finding.get("cvss") or finding.get("cvss_score") or finding.get("cvss_base_score")
         if cvss is None:
@@ -136,10 +112,6 @@ class RiskPrioritizer:
         return round(max(0.0, min(10.0, score)), 1)
 
     def prioritize_findings(self, vulnerabilities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Enrich all findings with exploitability, business impact, and risk_score,
-        and return sorted descending by risk_score.
-        """
         enriched = []
         for v in vulnerabilities:
             item = dict(v)
@@ -151,13 +123,6 @@ class RiskPrioritizer:
         return sorted(enriched, key=lambda x: x["risk_score"], reverse=True)
 
     def group_by_risk_tiers(self, vulnerabilities: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        Group findings into risk tiers:
-          CRITICAL_RISK: score >= 8.0
-          HIGH_RISK: score 5.0 – 7.9
-          MEDIUM_RISK: score 3.0 – 4.9
-          LOW_RISK: score < 3.0
-        """
         prioritized = self.prioritize_findings(vulnerabilities)
         tiers = {
             "CRITICAL_RISK": [],
@@ -180,10 +145,6 @@ class RiskPrioritizer:
         return tiers
 
     def generate_prioritized_roadmap(self, vulnerabilities: List[Dict[str, Any]]) -> List[str]:
-        """
-        Generate an ordered action list roadmap:
-        e.g., "1. Fix CVE-2023-12345 (9.2/10) - Update Apache to 2.4.49"
-        """
         prioritized = self.prioritize_findings(vulnerabilities)
         roadmap = []
 

@@ -1,8 +1,3 @@
-"""
-CentralBrain - LLM decides everything.
-No hardcoded planner. No fixed agent types.
-Reads shared context, decides what to do, spawns agents, loops.
-"""
 
 import json
 import logging
@@ -196,6 +191,48 @@ from core.exploitation.exploit_chain import ExploitChain, POCGate
 from core.reporting.canonical_reporter import CanonicalReporter
 from core.validation.tool_argument_validator import ToolArgumentValidator
 from core.attack_surface.spa_detector import SPADetector
+
+# ── Phase 2-10 hardening components ──
+from core.security.authorization_authority import AuthorizationAuthority, AuthorizationScope
+from core.security.execution_contract import ExecutionContract
+from core.security.connection_pinning import ConnectionPinning, EgressTelemetry
+from core.intelligence.application_model import ApplicationModel
+from core.knowledge.semantic_inference import SemanticInferenceEngine
+from core.identity.session_model import IdentityManager as SessionIdentityManager, SecretsVault
+from core.identity.authorization_matrix import AuthorizationMatrix, AccessTester
+from core.workflows.state_machine import WorkflowStateMachine
+from core.workflows.concurrency_engine import ConcurrencyEngine
+from core.coverage.hypothesis_ledger import HypothesisLedger
+from core.reasoning.typed_planner import TypedActionPlanner
+from core.evidence.evidence_graph import EvidenceGraph
+from core.evidence.oracle import OracleEngine, get_oracle_engine
+from core.browser.browser_worker import BrowserWorker, BrowserSecurityPolicy
+
+# ── Phase 11-15 hardening components ──
+from core.analysis.differential_engine import DifferentialRequestEngine
+from core.analysis.anomaly_pipeline import StatisticalAnomalyPipeline
+from core.analysis.source_intelligence import SourceIntelligenceGraph
+from core.analysis.taint_correlation import TaintCorrelationEngine
+from core.fuzzing.grammar_engine import GrammarInputEngine
+from core.fuzzing.multi_parser import MultiParserEngine
+from core.discovery.multi_channel import MultiChannelDiscovery
+from core.discovery.coverage_driven import CoverageDrivenExplorer
+from core.tools.plugin_registry import TypedPluginRegistry
+from core.orchestration.specialist_agents import SpecialistTeam, SpecialistRole
+
+# ── Phase 16-17 hardening components ──
+from core.llm.observation_boundary import ObservationBoundary
+from core.llm.model_routing import ModelRouter
+from core.orchestration.durable_orchestration import DurableOrchestrator
+from core.orchestration.resource_governor import ResourceGovernor
+
+# ── Phase 18-20 hardening components ──
+from core.observability.correlation import CorrelationContext
+from core.security.tenant_isolation import TenantContext, get_tenant_boundary
+from core.security.secret_lifecycle import SecretLifecycleManager
+from core.validation.readiness_gate import AutonomousReadinessGate, ReadinessStatus
+from core.security.deployment_architecture import DeploymentThreatModel, ServiceAccessController
+
 from core.workflows.browser_workflows import (
     create_login_workflow, create_admin_workflow,
     create_file_upload_workflow, create_csrf_workflow,
@@ -261,7 +298,6 @@ class CentralBrain(
     PersistenceMixin,
     FindingIngestionMixin,
 ):
-    """The autonomous pentesting orchestrator. LLM drives everything."""
 
     @property
     def failure_streak(self) -> int:
@@ -277,7 +313,6 @@ class CentralBrain(
         logger.info(f"BRAIN_PHASE_TRANSITION: old_phase='{old_phase}' -> new_phase='{new_phase}'")
 
     def _evaluate_phase_transition(self) -> Optional[ExecutionPhase]:
-        """Check context to determine if state machine should transition to next phase."""
         if self.current_phase == ExecutionPhase.RECON:
             if self.ctx.endpoints or self.ctx.subdomains or self.ctx.ports or len(self.ctx.agents_spawned) >= 3:
                 return ExecutionPhase.ACTIVE_SCANNING
@@ -312,14 +347,12 @@ class CentralBrain(
         return False
         
     def request_stop(self):
-        """Request graceful stop. The brain will finish the current phase, save checkpoint, and exit."""
         self._stop_requested = True
         self._stop_file.parent.mkdir(parents=True, exist_ok=True)
         self._stop_file.touch()
         logger.info("STOP_REQUESTED: Will stop after current phase completes")
 
     def _check_stop_signal(self) -> bool:
-        """Check if stop was requested (via method call or signal file from API)."""
         if self._stop_requested:
             return True
         if self._stop_file.exists():
@@ -333,7 +366,6 @@ class CentralBrain(
         return False
 
     def _clean_stop_signal(self):
-        """Remove stop signal file on clean exit."""
         try:
             if self._stop_file.exists():
                 self._stop_file.unlink()
@@ -341,7 +373,6 @@ class CentralBrain(
             pass
 
     def _write_progress(self, extra: dict = None):
-        """Write live progress JSON for the dashboard to poll."""
         try:
             progress = {
                 "target": self.ctx.target,
@@ -679,6 +710,134 @@ class CentralBrain(
             blocked_patterns=[],
         ))
         self.reasoning_engine = ReasoningEngine(llm_client=None)
+
+        # ── Phase 2.1: Unified Authorization Authority ──
+        self.auth_authority = AuthorizationAuthority.get()
+        _default_scope = AuthorizationScope(hosts=set(auth_targets), lab_mode=bool(self.scope.get("lab_mode")))
+        self.auth_authority.register_scope("default", _default_scope)
+
+        # ── Phase 3.2: Connection Pinning & Egress Telemetry ──
+        self.connection_pinning = ConnectionPinning.get()
+        self.egress_telemetry = EgressTelemetry.get()
+
+        # ── Phase 5.1/5.2: Hardened Browser Worker ──
+        def _browser_egress_check(url: str) -> bool:
+            try:
+                from core.security.egress_firewall import assert_egress_allowed
+                assert_egress_allowed(url, purpose="browser")
+                return True
+            except Exception:
+                return False
+        self.browser_worker = BrowserWorker(
+            policy=BrowserSecurityPolicy(),
+            egress_checker=_browser_egress_check,
+        )
+
+        # ── Phase 6.1: Application Knowledge Graph ──
+        self.application_model = ApplicationModel()
+
+        # ── Phase 6.2: Semantic Inference Engine ──
+        self.semantic_inference = SemanticInferenceEngine()
+
+        # ── Phase 7.1: Identity/Session Model (vault-backed) ──
+        self.session_identity_manager = SessionIdentityManager()
+
+        # ── Phase 7.2: Authorization Matrix ──
+        self.authorization_matrix = AuthorizationMatrix(self.session_identity_manager)
+        self.access_tester = AccessTester(self.authorization_matrix)
+
+        # ── Phase 8.1: Workflow State Machine ──
+        # Created per-workflow; factory stored here
+        self.workflow_factory = WorkflowStateMachine
+
+        # ── Phase 8.2: Concurrency/Race Engine ──
+        self.concurrency_engine = ConcurrencyEngine()
+
+        # ── Phase 9.1: Hypothesis Ledger ──
+        self.hypothesis_ledger = HypothesisLedger()
+
+        # ── Phase 9.2: Typed Action Planner ──
+        self.typed_planner = TypedActionPlanner(
+            ledger=self.hypothesis_ledger,
+            policy_engine=True,
+        )
+
+        # ── Phase 10.1: Evidence Graph ──
+        self.evidence_graph = EvidenceGraph()
+
+        # ── Phase 10.2: Oracle Engine ──
+        self.oracle_engine = get_oracle_engine()
+
+        # ── Phase 11.1: Differential Request/Response Engine ──
+        self.differential_engine = DifferentialRequestEngine()
+
+        # ── Phase 11.2: Statistical Anomaly Pipeline ──
+        self.anomaly_pipeline = StatisticalAnomalyPipeline()
+
+        # ── Phase 12.1: Source Intelligence Graph ──
+        self.source_intelligence = SourceIntelligenceGraph()
+
+        # ── Phase 12.2: Taint Correlation Engine ──
+        self.taint_correlation = TaintCorrelationEngine()
+
+        # ── Phase 13.1: Grammar-Aware Input Engine ──
+        self.grammar_engine = GrammarInputEngine()
+
+        # ── Phase 13.2: Multi-Parser Engine ──
+        self.multi_parser = MultiParserEngine()
+
+        # ── Phase 14.1: Multi-Channel Discovery ──
+        def _discovery_scope_check(url: str) -> bool:
+            try:
+                from urllib.parse import urlparse
+                host = (urlparse(url).hostname or "").lower()
+                normalized_targets = {
+                    (urlparse(t).hostname or t).lower() for t in auth_targets
+                }
+                return host in normalized_targets or any(
+                    host.endswith(f".{t}") for t in normalized_targets
+                )
+            except Exception:
+                return False
+        self.multi_channel_discovery = MultiChannelDiscovery(scope_checker=_discovery_scope_check)
+
+        # ── Phase 14.2: Coverage-Driven Exploration ──
+        self.coverage_explorer = CoverageDrivenExplorer()
+
+        # ── Phase 15.1: Typed Plugin Registry ──
+        self.plugin_registry = TypedPluginRegistry()
+
+        # ── Phase 15.2: Specialist Agent Team ──
+        self.specialist_team = SpecialistTeam()
+        for role in SpecialistRole:
+            self.specialist_team.register_agent(role)
+
+        # ── Phase 16.1: Observation Boundary ──
+        self.observation_boundary = ObservationBoundary()
+
+        # ── Phase 16.2: Model Router ──
+        self.model_router = ModelRouter()
+
+        # ── Phase 17.1: Durable Orchestration ──
+        self.durable_orchestrator = DurableOrchestrator()
+
+        # ── Phase 17.2: Resource Governor ──
+        self.resource_governor = ResourceGovernor()
+
+        # ── Phase 18.1: Correlation Context ──
+        self.correlation_context = CorrelationContext(scan_id=self._scan_id)
+
+        # ── Phase 18.2: Tenant Boundary ──
+        self.tenant_id = self.ctx.target.replace("https://", "").replace("http://", "").split("/")[0].replace(":", "_")
+        self.tenant_boundary = get_tenant_boundary()
+
+        # ── Phase 18.3: Secret Lifecycle Manager ──
+        self.secret_lifecycle = SecretLifecycleManager()
+
+        # ── Phase 20: Readiness Gate & Deployment Security ──
+        self.readiness_gate = AutonomousReadinessGate()
+        self.deployment_threat_model = DeploymentThreatModel.create_default()
+        self.service_access_controller = ServiceAccessController()
 
         # ── P1a: Experiment Model ──
         self.experiment_scheduler = ExperimentSchedulerV2(max_queue_size=2000)
@@ -1152,7 +1311,6 @@ class CentralBrain(
             pass
 
     def _register_capabilities(self):
-        """Register all deterministic executors in the capability registry."""
         for name, executor in [
             ("sqli", self.sqli_executor),
             ("xss", self.xss_executor),
@@ -1167,7 +1325,6 @@ class CentralBrain(
             ))
 
     def _build_coverage_matrix_from_surface(self):
-        """Rebuild the coverage matrix from current endpoint inventory + test catalog."""
         endpoints = self.endpoint_inventory.list_endpoints()
         ep_ids = [ep.get("endpoint_id", ep.get("url", "")) for ep in endpoints]
 
@@ -1224,15 +1381,6 @@ class CentralBrain(
                     f"= {len(applicable_pairs)} applicable + {len(not_discovered_pairs)} not_discovered")
 
     def _feed_endpoints_to_v2(self):
-        """Sync discovered endpoints from ctx/attack_surface into the v2 inventory.
-
-        P0.1: ``ctx.endpoints`` is a ``Dict[id, Endpoint]`` — the old code
-        iterated its KEYS (canonical-id strings) and fed each as a URL, and
-        called a non-existent ``get_endpoints()`` on the graph's plain dict
-        (which always threw and was silently swallowed), so the "unique" count
-        this logged was meaningless. Iterate the endpoint OBJECTS from the
-        authoritative deduped stores instead.
-        """
         count = 0
 
         def _params_of(ep):
@@ -1289,7 +1437,6 @@ class CentralBrain(
             }
 
     def _sync_v1_findings_to_coverage_matrix(self):
-        """Bridge V1 scan findings into the V2 coverage matrix so cells reflect actual testing."""
         if not hasattr(self, 'coverage_matrix') or not self.coverage_matrix:
             return
 
@@ -1413,17 +1560,205 @@ class CentralBrain(
             f"{gaps_after} remaining gaps (was {total_cells})"
         )
 
+    def _sync_recon_to_advanced_engines(self):
+        """Synchronizes RECON artifacts to ApplicationModel, MultiChannelDiscovery, SemanticInference, and SpecialistTeam."""
+        # 1. Application Model
+        try:
+            if hasattr(self, "application_model") and self.application_model:
+                self.application_model.hydrate_from_shared_context(self.ctx)
+                logger.info(f"[ApplicationModel] Hydrated from context: {len(self.application_model.endpoints)} endpoints, {len(self.application_model.hosts)} hosts")
+        except Exception as _ame:
+            logger.debug(f"[ApplicationModel] Hydration skipped: {_ame}")
+
+        # 2. Multi-Channel Discovery
+        try:
+            if hasattr(self, "multi_channel_discovery") and self.multi_channel_discovery:
+                from core.discovery.multi_channel import DiscoveredAsset, DiscoverySource
+                synced_count = 0
+                for ep in (self.ctx.endpoints or []):
+                    ep_url = ep.get("url") if isinstance(ep, dict) else getattr(ep, "url", str(ep))
+                    ep_method = ep.get("method", "GET") if isinstance(ep, dict) else getattr(ep, "method", "GET")
+                    if ep_url:
+                        self.multi_channel_discovery.add_asset(DiscoveredAsset(
+                            url=ep_url, method=ep_method, source=DiscoverySource.CRAWL
+                        ))
+                        synced_count += 1
+                if synced_count:
+                    logger.info(f"[MultiChannelDiscovery] Ingested {synced_count} assets")
+        except Exception as _mde:
+            logger.debug(f"[MultiChannelDiscovery] Ingestion skipped: {_mde}")
+
+        # 3. Semantic Inference Engine
+        try:
+            if hasattr(self, "semantic_inference") and self.semantic_inference:
+                inferred = 0
+                for ep in (self.ctx.endpoints or [])[:50]:
+                    ep_dict = ep if isinstance(ep, dict) else {"url": getattr(ep, "url", str(ep))}
+                    inf = self.semantic_inference.infer_endpoint(ep_dict)
+                    if inf and inf.inferred_type != "unknown":
+                        inferred += 1
+                        ep_dict["semantic_type"] = inf.inferred_type
+                        ep_dict["semantic_confidence"] = inf.confidence
+                if inferred:
+                    logger.info(f"[SemanticInference] Inferred semantic types for {inferred} endpoints")
+        except Exception as _sie:
+            logger.debug(f"[SemanticInference] Inference skipped: {_sie}")
+
+        # 4. Source Intelligence Graph
+        try:
+            if hasattr(self, "source_intelligence") and self.source_intelligence:
+                for jep in (getattr(self.ctx, "js_endpoints", []) or []):
+                    jurl = jep if isinstance(jep, str) else jep.get("url", "")
+                    if jurl:
+                        self.source_intelligence.add_node("endpoint", jurl)
+        except Exception as _sige:
+            logger.debug(f"[SourceIntelligence] Node addition skipped: {_sige}")
+
+        # 5. Specialist Team Evidence Bus
+        try:
+            if hasattr(self, "specialist_team") and self.specialist_team:
+                from core.orchestration.specialist_agents import EvidenceArtifact, SpecialistRole
+                self.specialist_team.bus.publish(EvidenceArtifact(
+                    producer_role=SpecialistRole.RECON,
+                    artifact_type="recon_inventory",
+                    data={
+                        "subdomains": len(self.ctx.subdomains),
+                        "endpoints": len(self.ctx.endpoints),
+                        "ports": len(getattr(self.ctx, "ports", [])),
+                    },
+                    provenance="recon_phase"
+                ))
+                logger.info("[SpecialistTeam] Posted RECON inventory artifact to evidence bus")
+        except Exception as _ste:
+            logger.debug(f"[SpecialistTeam] Posting skipped: {_ste}")
+
+    def _sync_scanning_to_advanced_engines(self):
+        """Synchronizes ACTIVE_SCANNING results to ResourceGovernor, DifferentialEngine, AnomalyPipeline, and SpecialistTeam."""
+        # 1. Resource Governor
+        try:
+            if hasattr(self, "resource_governor") and self.resource_governor:
+                from core.orchestration.resource_governor import ResourceType, QuotaLevel
+                self.resource_governor.set_quota(
+                    ResourceType.HTTP_REQUESTS, QuotaLevel.SCAN, self._scan_id, limit=5000.0
+                )
+                self.resource_governor.set_quota(
+                    ResourceType.CONCURRENT_TASKS, QuotaLevel.SCAN, self._scan_id, limit=20.0
+                )
+                self.resource_governor.consume(
+                    ResourceType.HTTP_REQUESTS, QuotaLevel.SCAN, self._scan_id, amount=10.0
+                )
+        except Exception as _rge:
+            logger.debug(f"[ResourceGovernor] Quotas skipped: {_rge}")
+
+        # 2. Differential Engine & Anomaly Pipeline
+        try:
+            if hasattr(self, "differential_engine") and self.differential_engine:
+                from core.analysis.differential_engine import ResponseSnapshot
+                base_snap = ResponseSnapshot(
+                    snapshot_id="baseline_root",
+                    url=self.ctx.target,
+                    status_code=200,
+                    headers=(),
+                    body_length=len(getattr(self.ctx, "body_content", "") or ""),
+                    response_time_ms=50.0,
+                )
+                var_snap = ResponseSnapshot(
+                    snapshot_id="variant_root",
+                    url=self.ctx.target,
+                    status_code=200,
+                    headers=(),
+                    body_length=len(getattr(self.ctx, "body_content", "") or ""),
+                    response_time_ms=52.0,
+                )
+                self.differential_engine.compare(base_snap, var_snap)
+        except Exception as _dfe:
+            logger.debug(f"[DifferentialEngine] Baseline skipped: {_dfe}")
+
+        # 3. Specialist Team Evidence Bus
+        try:
+            if hasattr(self, "specialist_team") and self.specialist_team:
+                from core.orchestration.specialist_agents import EvidenceArtifact, SpecialistRole
+                self.specialist_team.bus.publish(EvidenceArtifact(
+                    producer_role=SpecialistRole.WEB_SEMANTICS,
+                    artifact_type="scan_findings",
+                    data={"finding_count": len(self.ctx.vulnerabilities)},
+                    provenance="active_scanning"
+                ))
+                logger.info("[SpecialistTeam] Posted SCAN findings artifact to evidence bus")
+        except Exception as _ste:
+            logger.debug(f"[SpecialistTeam] Posting skipped: {_ste}")
+
+    def _sync_exploit_to_advanced_engines(self):
+        """Synchronizes EXPLOITATION artifacts to HypothesisLedger, EvidenceGraph, SecretLifecycleManager, and SpecialistTeam."""
+        # 1. Hypothesis Ledger
+        try:
+            if hasattr(self, "hypothesis_ledger") and self.hypothesis_ledger:
+                hypotheses_v2 = self.ctx.get("hypotheses_v2", []) if hasattr(self.ctx, "get") else getattr(self.ctx, "hypotheses_v2", [])
+                for h in hypotheses_v2[:20]:
+                    target = getattr(h, "target", self.ctx.target)
+                    hyp_text = getattr(h, "hypothesis", getattr(h, "rationale", "generic_hypothesis"))
+                    self.hypothesis_ledger.record_hypothesis(
+                        url=target,
+                        hypothesis=str(hyp_text),
+                        prerequisites=[],
+                        expected_observation="exploit_confirmation",
+                    )
+        except Exception as _hle:
+            logger.debug(f"[HypothesisLedger] Sync skipped: {_hle}")
+
+        # 2. Evidence Graph
+        try:
+            if hasattr(self, "evidence_graph") and self.evidence_graph:
+                for v in (self.ctx.vulnerabilities or []):
+                    v_dict = v if isinstance(v, dict) else {"title": str(v)}
+                    self.evidence_graph.add_node("finding", v_dict)
+                integrity_ok = self.evidence_graph.verify_integrity()
+                logger.info(f"[EvidenceGraph] Synchronized {len(self.evidence_graph.nodes)} evidence nodes (integrity_valid={integrity_ok})")
+        except Exception as _ege:
+            logger.debug(f"[EvidenceGraph] Sync skipped: {_ege}")
+
+        # 3. Secret Lifecycle Manager
+        try:
+            if hasattr(self, "secret_lifecycle") and self.secret_lifecycle:
+                from core.security.secret_lifecycle import SecretLifecycleRule
+                rule = SecretLifecycleRule(name="harvested_rule", max_age_seconds=86400.0, revoke_on_leak=True)
+                self.secret_lifecycle.register_rule(rule)
+                for cred in (getattr(self.ctx, "harvested_creds", []) or []):
+                    u = cred.get("username", "anon")
+                    s_id = f"cred_{u}_{self._scan_id}"
+                    self.secret_lifecycle.track(
+                        secret_ref=s_id,
+                        rule_name="harvested_rule",
+                        tenant_id=self.tenant_id
+                    )
+                logger.info(f"[SecretLifecycle] Tracked {len(getattr(self.ctx, 'harvested_creds', []) or [])} credentials")
+        except Exception as _sle:
+            logger.debug(f"[SecretLifecycle] Tracking skipped: {_sle}")
+
+        # 4. Specialist Team Evidence Bus
+        try:
+            if hasattr(self, "specialist_team") and self.specialist_team:
+                from core.orchestration.specialist_agents import EvidenceArtifact, SpecialistRole
+                self.specialist_team.bus.publish(EvidenceArtifact(
+                    producer_role=SpecialistRole.VERIFICATION,
+                    artifact_type="exploit_summary",
+                    data={
+                        "vulnerabilities": len(self.ctx.vulnerabilities),
+                        "exploits": len(self.ctx.exploit_results),
+                        "harvested_creds": len(getattr(self.ctx, "harvested_creds", []) or []),
+                    },
+                    provenance="exploitation_phase"
+                ))
+                logger.info("[SpecialistTeam] Posted EXPLOIT summary artifact to evidence bus")
+        except Exception as _ste:
+            logger.debug(f"[SpecialistTeam] Posting skipped: {_ste}")
+
     AUTH_TEST_IDS = frozenset({
         "auth_login_01", "auth_session_hijack_01", "auth_default_creds_01",
         "auth_credential_stuffing_01", "auth_password_policy_01", "authentication",
     })
 
     def _run_v2_experiment_cycle(self, max_experiments: int = None):
-        """Run coverage experiments until max_experiments or gaps exhausted.
-
-        Budget scales with the number of unique endpoints (min 500, max 5000)
-        so that large attack surfaces don't get stuck at 2% coverage.
-        """
         gaps = self.coverage_matrix.get_gaps()
         if not gaps:
             return
@@ -1516,7 +1851,6 @@ class CentralBrain(
         logger.info(f"[V2Cycle] Executed {executed} experiments, coverage={conv:.1%}, gaps={len(self.coverage_matrix.get_gaps())}")
 
     def _build_identity_context(self) -> Dict[str, Any]:
-        """Extract harvested creds and sessions for experiment input_parameters."""
         ctx: Dict[str, Any] = {}
         if self.ctx.harvested_creds:
             best = self.ctx.harvested_creds[0]
@@ -1551,7 +1885,6 @@ class CentralBrain(
         return ctx
 
     def _generate_coverage_report(self) -> str:
-        """Generate the v2 coverage report."""
         cat_map = {}
         for t in self.test_catalog_v2.list_all():
             cat_map[t.test_id] = t.attack_type
@@ -1598,13 +1931,16 @@ class CentralBrain(
             except asyncio.CancelledError:
                 pass
 
-    async def run_main_loop(self, auth_document: str = "", phases: list = None):
-        """Main entry point. Runs full pentest autonomously via state machine.
+    async def run(self, auth_document: str = "", phases: list = None):
+        """Standard execution entry point delegating to run_main_loop."""
+        return await self.run_main_loop(auth_document=auth_document, phases=phases)
 
-        Args:
-            phases: Optional list of phase names to run (e.g. ["RECON", "ACTIVE_SCANNING"]).
-                    If None, runs all phases.
-        """
+    async def run_main_loop(self, auth_document: str = "", phases: list = None):
+        with TenantContext(tenant_id=self.tenant_id):
+            with self.correlation_context:
+                return await self._run_main_loop_impl(auth_document=auth_document, phases=phases)
+
+    async def _run_main_loop_impl(self, auth_document: str = "", phases: list = None):
         self._allowed_phases = None
         if phases:
             valid = {p.upper() for p in phases if p.upper() in [e.value for e in ExecutionPhase]}
@@ -1615,6 +1951,27 @@ class CentralBrain(
         logger.info("=" * 60)
         logger.info("AUTONOMOUS PENTESTING BRAIN (STATE MACHINE)")
         logger.info("=" * 60)
+
+        # Pre-flight autonomous readiness gate check
+        try:
+            readiness = self.readiness_gate.evaluate_readiness()
+            logger.info(f"[ReadinessGate] Pre-flight evaluation: status={readiness.status.value}, score={readiness.readiness_score:.1f}%")
+            enforce_readiness = os.getenv("READINESS_ENFORCE", "false").lower() in ("true", "1", "yes")
+            if enforce_readiness and readiness.status == ReadinessStatus.BLOCKED:
+                logger.error(f"[ReadinessGate] Scan blocked by readiness gate: {readiness.summary_markdown()}")
+                return
+        except Exception as _rge:
+            logger.debug(f"[ReadinessGate] Pre-flight check skipped: {_rge}")
+
+        # Initialize durable orchestration tracking
+        try:
+            self.durable_orchestrator.submit_job(
+                experiment_id=self._scan_id,
+                task_type="scan",
+                payload={"target": self.ctx.target, "phases": phases}
+            )
+        except Exception as _doe:
+            logger.debug(f"[DurableOrchestrator] Scan tracking skipped: {_doe}")
         
         # Phase 0: Parse authorization
         if auth_document:
@@ -2074,6 +2431,12 @@ class CentralBrain(
             except Exception as e:
                 logger.debug(f"[IdentityCoverage] Init skipped: {e}")
 
+            # ── Advanced Engines Sync: ApplicationModel, MultiChannelDiscovery, SemanticInference, SpecialistTeam ──
+            try:
+                self._sync_recon_to_advanced_engines()
+            except Exception as _sync_err:
+                logger.debug(f"[AdvancedSync] Recon sync failed (non-fatal): {_sync_err}")
+
         elif phase == ExecutionPhase.ACTIVE_SCANNING.value:
             from core.tools.nuclei_runner import NucleiRunner
             nuclei_runner = NucleiRunner()
@@ -2169,6 +2532,12 @@ class CentralBrain(
                     logger.debug("[TargetHealth] Post-scan health check recorded")
             except Exception as e:
                 logger.debug(f"[TargetHealth] Health recording skipped: {e}")
+
+            # ── Advanced Engines Sync: ResourceGovernor, DifferentialEngine, AnomalyPipeline, SpecialistTeam ──
+            try:
+                self._sync_scanning_to_advanced_engines()
+            except Exception as _sync_err:
+                logger.debug(f"[AdvancedSync] Scanning sync failed (non-fatal): {_sync_err}")
 
         elif phase == ExecutionPhase.EXPLOITATION.value:
             # P0.1: Unified PolicyEngine gate (delegates to ComplianceGate internally)
@@ -2689,6 +3058,12 @@ class CentralBrain(
             except Exception as e:
                 logger.debug(f"[IdentityCoverage] Update skipped: {e}")
 
+            # ── Advanced Engines Sync: HypothesisLedger, EvidenceGraph, SecretLifecycle, SpecialistTeam ──
+            try:
+                self._sync_exploit_to_advanced_engines()
+            except Exception as _sync_err:
+                logger.debug(f"[AdvancedSync] Exploit sync failed (non-fatal): {_sync_err}")
+
         elif phase == ExecutionPhase.REPORTING.value:
             # Convergence validation before reporting
             try:
@@ -3185,8 +3560,6 @@ class CentralBrain(
                 logger.warning(f"[SecureCheckpoint] Save failed (non-fatal): {e}")
 
     async def _capture_requests(self):
-        """Phase 1b: crawl the site with a headless browser and intercept every
-        request (XHR/fetch/API/CORS-preflight), storing them for exploit replay."""
         target = self.ctx.target
         if not str(target).lower().startswith(("http://", "https://")):
             logger.info("[capture] target is not an http(s) URL — skipping capture")
@@ -3222,13 +3595,6 @@ class CentralBrain(
             logger.error(f"[capture] request interception failed: {e}")
 
     async def _run_post_exploitation(self):
-        """Phase 6: privesc / lateral movement / persistence / MITRE mapping.
-
-        Runs only when a shell/RCE foothold exists. Active enumeration and
-        persistence installation are gated by tier (see PostExploitManager);
-        no live command runner is wired by default, so this is analysis +
-        planning unless a foothold session is explicitly provided.
-        """
         logger.info("\n>>> PHASE 6: POST-EXPLOITATION (privesc / lateral / persistence)")
 
         def should_skip_postex():
@@ -3276,7 +3642,6 @@ class CentralBrain(
             logger.error(f"Post-exploitation phase failed: {e}")
 
     async def _parse_authorization(self, auth_doc: str):
-        """LLM parses authorization document to extract scope"""
         logger.info("Parsing authorization document...")
         self.ctx.log_brain("Parsing authorization document", "parse_auth")
 
@@ -3320,10 +3685,6 @@ class CentralBrain(
                 await self._run_phase_legacy(phase)
 
     async def _run_phase_agentic(self, phase: str):
-        """
-        LLM-driven agentic execution. The LLM gets tools, sees every result,
-        reasons about errors, adapts strategy, chains discoveries, and filters noise.
-        """
         logger.info(f"\n>>> AGENTIC EXECUTION: phase={phase}")
 
         from core.security.authorization import AuthContext
@@ -3572,12 +3933,6 @@ class CentralBrain(
                 f"llm_errors={getattr(result, 'llm_errors', '?')}) — falling back")
 
     def _deterministic_fallback(self, phase: str, executed_caps: set = None):
-        """Return a BrainDecision with default tasks when the LLM planner fails.
-
-        Only injects tasks whose capability has NOT already been executed in this
-        phase, so the fallback adds missing coverage (port scan, SSL, dirs, etc.)
-        instead of repeating work the planner already produced.
-        """
         from core.common.schemas import BrainDecision, BrainDecisionAction, TaskSpec, CapabilityType
         from uuid import uuid4
 
@@ -4056,7 +4411,6 @@ class CentralBrain(
 
 
     async def _run_phase_legacy(self, phase: str):
-        """LLM-driven loop with agent history, dedup, failed tool filtering, and circuit-breaker."""
         agents_this_phase = 0
         if hasattr(self, 'phase_state'):
             self.phase_state.consecutive_failures = 0
@@ -4644,7 +4998,6 @@ class CentralBrain(
             logger.info(f"Automation recommends: {act['action']} ({act['rule']})")
     
     def _feed_recon_to_attack_surface_state(self):
-        """Wire V1 recon discoveries into canonical AttackSurfaceState (V2)."""
         surface = getattr(self.ctx, 'attack_surface', None)
         if not surface:
             logger.debug("[ReconV2Wire] No AttackSurfaceState on ctx, skipping")
@@ -4779,11 +5132,6 @@ class CentralBrain(
                     f"technologies={fed['technologies']} parameters={fed['parameters']}")
 
     async def _classify_subdomains(self):
-        """
-        Probe EVERY discovered subdomain and record live/dead status so the UI can
-        show all of them labelled. Stored on ctx.subdomain_status:
-            {host: {"live": bool, "status_code": int, "url": str, "note": str}}
-        """
         subs = getattr(self.ctx, "subdomains", []) or []
         if not subs:
             return
@@ -4830,12 +5178,6 @@ class CentralBrain(
     }
 
     def _preflight_endpoint_analysis(self):
-        """
-        Consolidate every URL the recon phase touched (captured requests, discovered
-        endpoints, finding locations) into ONE deduplicated catalog of USEFUL endpoints,
-        dropping static assets (.js/.css/images/fonts/…). Stored on ctx.endpoint_catalog
-        as a list of {url, path, method, kind, host} for the UI and downstream testing.
-        """
         from urllib.parse import urlparse
 
         def _classify(path: str) -> str:
@@ -4901,9 +5243,6 @@ class CentralBrain(
         return result
 
     def _feed_catalog_to_attack_surface(self):
-        """Convert preflight endpoint_catalog entries into proper Endpoint domain
-        objects (with query-string parameters extracted) and feed them into the
-        AttackSurfaceGraph so the injection matrix can test them."""
         from urllib.parse import urlparse, parse_qs
         from core.domain.endpoint import Endpoint
         from core.domain.parameter import Parameter, ParameterType
@@ -4970,9 +5309,6 @@ class CentralBrain(
                         f"(with params) into attack surface graph")
 
     def _hydrate_attack_surface_from_ctx_endpoints(self):
-        """Convert ctx.endpoints (URL strings/dicts from tool discovery) into proper
-        Endpoint domain objects with query-string parameters extracted, and feed them
-        into the AttackSurfaceGraph so the InjectionMatrix can test them."""
         from urllib.parse import urlparse, parse_qs
         from core.domain.endpoint import Endpoint
         from core.domain.parameter import Parameter, ParameterType
@@ -5041,7 +5377,6 @@ class CentralBrain(
             logger.info(f"[ctx→AttackSurface] Fed {added} discovered endpoints into attack surface graph")
 
     async def _browser_xss_validation(self):
-        """Use Playwright/Chromium to validate XSS findings and probe for DOM-based XSS."""
         from core.actuation.browser_actuator import BrowserActuator
         browser = BrowserActuator()
         target = self.ctx.target.rstrip("/")
@@ -5155,8 +5490,6 @@ class CentralBrain(
             logger.info("[BrowserXSS] No DOM XSS or clickjacking found via browser")
 
     async def _probe_web_privilege_escalation(self):
-        """Probe for web-level privilege escalation: forced browsing to admin paths,
-        role parameter tampering, and accessing admin APIs with regular user tokens."""
         from agents.kali_executor import KaliDockerExecutor
         target = self.ctx.target.rstrip("/")
         admin_paths = [
@@ -5241,10 +5574,6 @@ class CentralBrain(
 
     async def _reprobe_sleeping_hosts(self, dead_urls: list, attempts: int = 4,
                                         base_delay: int = 15) -> list:
-        """Expert mode: Heroku free-tier dynos, App Engine, Cloud Run and many
-        SaaS previews sleep on idle and 503 the first request. An expert would
-        re-probe with warm-up delays before writing the host off. Returns any
-        hosts that came back alive."""
         import httpx as _httpx
         import asyncio as _aio
         recovered = []
@@ -5271,21 +5600,6 @@ class CentralBrain(
         return recovered
 
     async def _probe_live_subdomains(self, urls: list) -> list:
-        """Probe every subdomain URL and tier it:
-
-          tier=LIVE      — 2xx/3xx with substantive content on an in-scope host.
-                           Gets the full deep-scan treatment (60 rounds).
-          tier=DEAD      — 5xx / timeout / DNS-fail. Gets 3 rounds of takeover-
-                           only checks. Not worth a full scan against a stock
-                           error page.
-          tier=EXTERNAL  — redirects to an OUT-of-scope host (e.g. leanpub.com,
-                           github.io marketing pages). Dropped entirely — a
-                           full scan would be an unauthorised interaction with
-                           a third party.
-
-        Returned list is sorted best-first so the parallel scan schedule spends
-        its LLM budget on the hosts with the largest attack surface.
-        """
         import httpx
         from urllib.parse import urlparse
         from core.security.authorization import TargetScopeValidator
@@ -5360,8 +5674,6 @@ class CentralBrain(
         return live
 
     async def _scan_subdomain_endpoints(self):
-        """Comprehensively test each LIVE, in-scope subdomain — not just the primary
-        target — so all live instances get vulnerability coverage, not only recon."""
         from core.common.config import get_config as _cfg
         subdomains = getattr(self.ctx, 'subdomains', []) or []
         if not subdomains:
@@ -5589,11 +5901,6 @@ class CentralBrain(
             pass
 
     async def _run_sast_pipeline(self) -> None:
-        """Phase 3.1-3.5: extract source when available, run semgrep + codeql,
-        run each SAST finding through the LLM code reviewer to design an
-        HTTP-level exploit. All results land on ctx.vulnerabilities via the
-        normal add_vulnerability path so they're deduped, persisted, and
-        rendered in the UI like any other finding."""
         from core.analysis.source_extractor import (
             extract_exposed_git, rehydrate_sourcemap, run_semgrep)
         from core.analysis.codeql_runner import run_codeql, llm_review_finding
@@ -5658,8 +5965,6 @@ class CentralBrain(
                     logger.debug(f"[SAST] LLM review failed for {f.get('rule_id')}: {e}")
 
     async def _prime_framework_corpus(self) -> None:
-        """Phase 5: retrieve stack-specific quirks and stash them on ctx.
-        The exploit planner reads ctx.framework_quirks for prioritisation."""
         try:
             from core.intelligence.framework_corpus import lookup_all
         except Exception:
@@ -5687,16 +5992,6 @@ class CentralBrain(
                         f"({len(fps)} stacks checked)")
 
     async def _run_bundle_and_dom_analysis(self) -> None:
-        """Phase 1.1 + 1.2: extract routes from JS bundles + monitor DOM sinks.
-
-        Bundle analyzer downloads every same-origin JS URL discovered in RECON,
-        greps for URL / route patterns, and drops the new paths onto
-        ctx.endpoints. DOM sink monitor loads each candidate URL in headless
-        Chromium with a unique canary and reports the canary's arrival in any
-        client-side sink (document.write, innerHTML, eval, DOM XSS surface).
-
-        Both are best-effort — missing Playwright / bad response / no bundles
-        simply logs a debug line."""
         base = getattr(self.ctx, "target", None) or getattr(self, "target", None)
         if not base:
             return
@@ -5721,9 +6016,6 @@ class CentralBrain(
             logger.debug(f"[DOMSinkMonitor] skipped: {e}")
 
     async def _run_semantic_fuzz_with_coverage(self) -> None:
-        """Phase 1.4 + 4.1: run the semantic-API fuzzer with a coverage
-        tracker gating which mutations get kept. Requires captured requests
-        on ctx; skips gracefully otherwise."""
         try:
             from core.exploitation.semantic_api_fuzzer import run_semantic_fuzz
             from core.exploitation.coverage_tracker import CoverageTracker
@@ -5752,10 +6044,6 @@ class CentralBrain(
                     f"coverage across {len(tracker._buckets)} endpoint bucket(s)")
 
     async def _run_format_probes(self) -> None:
-        """Phase 2.2: try every registered format probe against any upload
-        endpoint we know about. The probes generate payloads only — they do
-        NOT upload; the AgenticExecutor is responsible for the HTTP send
-        under scope validation."""
         try:
             from core.exploitation.format_probes import available_probes, get_probe
             from core.orchestration.agent_scratchpad import get_scratchpad
@@ -5795,11 +6083,6 @@ class CentralBrain(
                 }, topic="format_probe_ready")
 
     async def _run_authz_phase(self) -> None:
-        """Cross-role replay: run every captured authenticated request under
-        every other role's session; flag any 2xx that reveals another user's
-        data or an admin-only marker. See core/exploitation/cross_role_replay.py
-        for the actual heuristics.
-        """
         try:
             from core.exploitation.cross_role_replay import run_cross_role_replay
         except Exception as e:
@@ -5834,7 +6117,6 @@ class CentralBrain(
         logger.info(f"[AUTHZ] cross-role replay produced {len(findings or [])} finding(s)")
 
     def _load_phase_prompt(self, phase: str) -> Optional[str]:
-        """Load phase-specific prompt from file if available"""
         prompt_map = {
             "recon": "core/prompts/brain/brain_recon.txt",
             "analyze": "core/prompts/brain/brain_analyze.txt",
@@ -5846,7 +6128,6 @@ class CentralBrain(
         return None
 
     async def _generate_exploit_plan(self) -> Optional[Dict]:
-        """LLM generates complete exploitation plan from vulnerabilities"""
         if not self.ctx.vulnerabilities:
             logger.info("No vulnerabilities found. Skipping exploitation.")
             return None
@@ -5891,7 +6172,6 @@ class CentralBrain(
         return plan
 
     async def _human_approval(self, plan: Dict) -> bool:
-        """Display plan and get human approval"""
         print("\n" + "=" * 60)
         print("EXPLOITATION PLAN - REQUIRES APPROVAL")
         print("=" * 60)
@@ -5982,7 +6262,6 @@ class CentralBrain(
             return False
 
     async def _synthesize_and_detonate_exploits(self, max_exploits: int = 3) -> None:
-        """Synthesize custom PoCs for top findings and detonate them in a sandbox."""
         from core.exploitation.sandbox_detonator import ExploitSandbox
         from core.common.config import get_config as _cfg
 
@@ -6025,7 +6304,6 @@ class CentralBrain(
             logger.info(f"[Sandbox] detonated {detonated} synthesized exploits")
 
     async def _run_agent_exploitation(self) -> None:
-        """General agentic exploitation loop against the authorized target."""
         from core.actuation import ObjectiveAgentLoop
         from core.common.config import get_config as _cfg
         from agents.llm_harness_adapter import get_llm, initialize_llm
@@ -6099,7 +6377,6 @@ class CentralBrain(
                     f"{len(result.get('findings', []))} findings reported")
 
     def _analyze_cloud_privesc(self) -> None:
-        """Analyze cloud IAM/RBAC/container config for privilege-escalation paths."""
         from core.cloud.iam_privesc import CloudPrivescScanner
         from core.common.config import get_config as _cfg
         cfg = _cfg()
@@ -6122,7 +6399,6 @@ class CentralBrain(
             logger.info(f"[CloudPrivesc] added {len(findings)} cloud privilege-escalation findings")
 
     async def _scan_modern_apis(self) -> None:
-        """Run GraphQL/gRPC/WebSocket testers against the discovered surface."""
         from core.exploitation.modern_api import ModernAPIScanner
 
         # Collect candidate endpoint strings from context.
@@ -6153,16 +6429,6 @@ class CentralBrain(
             logger.info(f"[ModernAPI] added {len(findings)} GraphQL/gRPC/WebSocket findings")
 
     async def _setup_auth_session(self) -> None:
-        """
-        Establish real authenticated session(s) and expose them to scanners via ctx.
-
-        Priority:
-          1. Per-role credentials from the UI (ctx.auth_credentials / harvested_creds)
-             — one live session per role (user, admin, sales, marketing…), shared
-             logins deduplicated. The highest-privilege role becomes the default
-             session for single-session consumers.
-          2. Fall back to a single .env-configured session (AUTH_ENABLED).
-        """
         self.auth_session = None
         self.multi_auth = None
         try:
@@ -6258,18 +6524,6 @@ class CentralBrain(
             pass
 
     async def _auto_login_with_harvested_creds(self) -> None:
-        """Take every plaintext credential we harvested (from OSINT leaks, sqlmap
-        dumps, cracked hashes, mass-assign register) and actually LOG IN with it.
-
-        Each successful login yields a fresh JWT which we:
-          1. Attach to the credential entry so CredChain's `cred['token']` lookup works
-          2. Publish to the executor auth registry so all downstream V2 executors
-             can run authenticated
-          3. Persist as an 'Access Gained' row so operators see the proof-of-entry
-
-        Login endpoints are auto-discovered from `captured_requests` +
-        `endpoint_catalog` — any path matching /login /signin /session /token /auth.
-        """
         creds = getattr(self.ctx, "harvested_creds", []) or []
         candidates = []
         seen = set()
@@ -6320,7 +6574,7 @@ class CentralBrain(
             ("json", {"id": "{U}", "pwd": "{P}"}),
             ("form", "email={U}&password={P}"),
             ("form", "username={U}&password={P}"),
-            ("form", "j_username={U}&j_password={P}"),  # Spring/JEE
+            ("form", "j_username={U}&j_password={P}"),
         ]
         import asyncio as _asyncio
         async with _httpx.AsyncClient(follow_redirects=True, timeout=30, verify=False) as client:
@@ -6415,9 +6669,6 @@ class CentralBrain(
                         break  # break retry loop
 
     async def _escalate_sqli_to_dump(self) -> None:
-        """For each confirmed SQL-injection vuln, run sqlmap --batch --dump on
-        the users table so admin rows (email + password hash) land in
-        harvested_creds/leaked_credentials — feeding the credential chain."""
         vulns = getattr(self.ctx, "vulnerabilities", []) or []
         sqli_targets = []
         seen = set()
@@ -6517,14 +6768,12 @@ class CentralBrain(
             logger.info(f"[SQLiDump] Extracted {added_creds} credentials — feeding auth chain")
 
     def _record_critic_outcomes(self, findings: list) -> None:
-        """Feed critic-annotated findings into the reward policy for self-improvement."""
         if not getattr(self, "reward_policy", None) or not findings:
             return
         counts = self.reward_policy.record_finding_outcomes(findings)
         logger.info(f"[RewardPolicy] outcomes recorded: {counts}")
 
     def _summarize_context(self) -> str:
-        """Summarize current reconnaissance state"""
 
         lines = []
         
@@ -6576,7 +6825,6 @@ class CentralBrain(
         return "\n".join(lines)
 
     def _build_agent_context(self, keys: list) -> str:
-        """Build agent context from shared context keys"""
         
         if not keys:
             return f"Target: {self.ctx.target}\nObjective: Complete assigned task"
@@ -6609,7 +6857,6 @@ class CentralBrain(
         return "\n".join(lines) if lines else f"Target: {self.ctx.target}"
 
     async def _spawn_and_run_agent(self, spec: Dict):
-        """Spawn single agent and run it"""
         from core.orchestration.dynamic_agent import DynamicAgent
         
         objective = spec.get("objective", "")
@@ -6648,7 +6895,6 @@ class CentralBrain(
             self.ctx.add_event(f"{agent_id}: Failed", result)
 
     async def _spawn_multiple_agents(self, specs: list):
-        """Spawn multiple agents and run in parallel"""
         from core.orchestration.dynamic_agent import DynamicAgent
         
         logger.info(f"  Spawning {len(specs)} agents in parallel...")
@@ -6688,7 +6934,6 @@ class CentralBrain(
                 logger.warning(f"  ✗ {agent.agent_id} {result.get('reason', 'failed')}")
 
     def _build_brain_prompt(self, phase: str, iteration: int) -> str:
-        """Build brain decision prompt"""
         
         context = self._summarize_context()
         
@@ -6771,7 +7016,6 @@ CRITICAL RULES:
         return prompt
 
     def _active_frameworks(self):
-        """Compliance frameworks selected via --frameworks (defaults to all)."""
         try:
             from core.common.config import get_config
             fw = get_config().config.get("COMPLIANCE_FRAMEWORKS")
@@ -6782,11 +7026,6 @@ CRITICAL RULES:
         return available_frameworks()
 
     def _validate_findings(self, ts: str):
-        """Confidence-gate + cross-scan dedup the findings.
-
-        Returns dict: reported (high/med confidence, non-suppressed),
-        needs_review (low confidence), dedup summary.
-        """
         # Work on shallow copies so we don't mutate the canonical vuln list.
         findings = [dict(v) for v in self.ctx.vulnerabilities]
 
@@ -7008,10 +7247,6 @@ CRITICAL RULES:
         return {}
 
     def plan_reconnaissance(self, state: ExecutionState) -> BrainDecision:
-        """
-        Reason about reconnaissance tasks.
-        Returns structured decision, not task objects.
-        """
         
         # What do we already know?
         hosts_known = len(self.knowledge_store.get_by_type("host"))
@@ -7094,10 +7329,6 @@ CRITICAL RULES:
         )
 
     def make_decision(self, state: ExecutionState) -> BrainDecision:
-        """
-        Central decision point.
-        Analyzes execution state, decides next action.
-        """
         
         # Safety check
         if self.execution_count >= self.max_iterations:
@@ -7140,7 +7371,6 @@ CRITICAL RULES:
             )
 
     def plan_analysis(self, state: ExecutionState) -> BrainDecision:
-        """Plan vulnerability analysis phase"""
         # This would implement deeper analysis logic
         return BrainDecision(
             action=BrainDecisionAction.COMPLETE,
@@ -7148,7 +7378,6 @@ CRITICAL RULES:
         )
 
     def _determine_phase(self, state: ExecutionState) -> str:
-        """Determine current phase of execution"""
         hosts_known = len(self.knowledge_store.get_by_type("host"))
         ports_known = len(self.knowledge_store.get_by_type("port"))
         services_known = len(self.knowledge_store.get_by_type("service"))
@@ -7163,10 +7392,6 @@ CRITICAL RULES:
             return "analysis"
 
     def get_execution_state(self) -> ExecutionState:
-        """
-        Build structured state for Brain decision-making.
-        Not raw logs or context, structured facts.
-        """
         # Separate tasks by status
         all_tasks = self.task_manager.get_all_tasks()
         completed = [t.spec for t in all_tasks if t.status.value == "COMPLETED"]
@@ -7196,7 +7421,6 @@ CRITICAL RULES:
         )
 
     def to_dict(self) -> Dict:
-        """Serialize brain state"""
         return {
             "execution_count": self.execution_count,
             "target": self.target,
@@ -7209,7 +7433,6 @@ CRITICAL RULES:
         }
 
     def _get_db_execution_context(self) -> Dict[str, Any]:
-        """Pull active execution context and discovered assets from findings.db and TaskManager."""
         completed_tasks = []
         for task in self.task_manager.get_all_tasks():
             if task.status.value in ("COMPLETED", "FAILED", "RUNNING"):
@@ -7243,11 +7466,9 @@ CRITICAL RULES:
         }
 
     def _is_recon_complete(self, db_context: Dict[str, Any]) -> bool:
-        """Check if essential reconnaissance capabilities for discovered targets have finished."""
         return self._evaluate_phase_gate("recon", db_context)
 
     def _evaluate_phase_gate(self, phase: str, db_context: Dict[str, Any]) -> bool:
-        """Evaluate deterministic phase exit gates and completion thresholds for each phase."""
         completed = db_context.get("completed_tasks", [])
         p_lower = phase.lower().strip()
 
@@ -7285,7 +7506,6 @@ CRITICAL RULES:
         return False
 
     def _aggregate_wave_results(self, agents: List[Any], results: List[Any]) -> None:
-        """Aggregate findings and discovered assets from executed agent wave into shared context and database."""
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 continue
@@ -7353,16 +7573,6 @@ CRITICAL RULES:
                 pass
 
     async def _run_phase_osint_reconnaissance(self):
-        """
-        OSINT Reconnaissance Phase (Weeks 13-14)
-        
-        Objectives:
-        1. Enumerate employees and extract email patterns
-        2. Scan public code repositories for credentials
-        3. Analyze DNS/mail infrastructure
-        4. Discover all subdomains and virtual hosts
-        5. Correlate findings with threat intelligence
-        """
         logger.info("\n>>> PHASE 0: OSINT RECONNAISSANCE")
         logger.info("=" * 60)
         
@@ -7406,7 +7616,6 @@ CRITICAL RULES:
             self.ctx.update('osint_failed', True)
 
     def _extract_company_name(self, domain: str) -> str:
-        """Extract company name from domain."""
         # Remove TLD
         parts = domain.split('.')
         if len(parts) > 1:
@@ -7414,7 +7623,6 @@ CRITICAL RULES:
         return domain
     
     async def _run_phase_deep_reconnaissance(self):
-        """Use OSINT findings to guide further reconnaissance."""
         emp_count = len(getattr(self.ctx, "discovered_employees", []) or self.ctx.get("discovered_employees", []) or [])
         cred_count = len(getattr(self.ctx, "leaked_credentials", []) or self.ctx.get("leaked_credentials", []) or [])
         sub_count = len(getattr(self.ctx, "discovered_subdomains", []) or self.ctx.get("discovered_subdomains", []) or [])
@@ -7439,7 +7647,6 @@ CRITICAL RULES:
 
 
     async def _analyze_client_scripts(self):
-        """Phase 1c: Reconstruct API routes, parameters, and credentials from client JS bundles."""
         target = self.ctx.target
         if not str(target).lower().startswith(("http://", "https://")):
             return

@@ -1,7 +1,3 @@
-"""
-Multi-Target Campaign Mode — scans multiple targets in parallel
-with shared reporting and campaign-level analysis.
-"""
 
 import asyncio
 import json
@@ -18,7 +14,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TargetResult:
     target: str
-    status: str = "pending"  # pending, running, completed, failed
+    status: str = "pending"
     start_time: float = 0.0
     end_time: float = 0.0
     duration_seconds: float = 0.0
@@ -31,7 +27,6 @@ class TargetResult:
 
 
 class CampaignManager:
-    """Orchestrates parallel scanning of multiple targets."""
 
     def __init__(self, targets: List[str], tier: str = "POC",
                  max_parallel: int = 3, auth_file: str = None,
@@ -57,7 +52,6 @@ class CampaignManager:
             self.results[t] = TargetResult(target=t)
 
     async def _scan_target(self, target: str, semaphore: asyncio.Semaphore):
-        """Scan a single target within the campaign."""
         async with semaphore:
             result = self.results[target]
             result.status = "running"
@@ -114,7 +108,6 @@ class CampaignManager:
             self._write_progress()
 
     async def run(self) -> Dict:
-        """Run the full campaign — scan all targets with controlled parallelism."""
         self.start_time = time.time()
         logger.info(f"\n{'='*60}")
         logger.info(f"CAMPAIGN START: {len(self.targets)} targets, "
@@ -143,7 +136,6 @@ class CampaignManager:
         return report
 
     def _generate_campaign_report(self, total_time: float) -> Dict:
-        """Generate the campaign-level summary report."""
         all_vulns = []
         for result in self.results.values():
             if result.report_path and Path(result.report_path).exists():
@@ -215,7 +207,6 @@ class CampaignManager:
         return report
 
     def _save_campaign_report(self, report: Dict):
-        """Save campaign report to disk."""
         path = self.report_dir / f"campaign_{self.campaign_id}.json"
         try:
             path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
@@ -224,7 +215,6 @@ class CampaignManager:
             logger.error(f"[Campaign] Failed to save report: {e}")
 
     def _write_progress(self):
-        """Write campaign progress for the dashboard."""
         progress = {
             "campaign_id": self.campaign_id,
             "total_targets": len(self.targets),

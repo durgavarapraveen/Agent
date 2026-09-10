@@ -1,9 +1,3 @@
-"""Smoke test: RAG pipeline round-trip.
-
-Ingests a synthetic doc, retrieves against a related query, checks it comes
-back. Uses whichever embedder path is available — API if configured, else
-MiniLM local, else the test skips (never a false pass via hash-bag).
-"""
 from __future__ import annotations
 
 import asyncio

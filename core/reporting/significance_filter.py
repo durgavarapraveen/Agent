@@ -1,7 +1,3 @@
-"""
-Significance Filter Layer.
-Filters raw tool findings to keep high-impact security findings while removing noise.
-"""
 
 import logging
 from typing import Any, Dict
@@ -11,14 +7,9 @@ logger = logging.getLogger(__name__)
 
 
 class SignificanceFilter:
-    """Filter raw extracted security findings for LLM token optimization."""
 
     @classmethod
     def filter(cls, tool_name: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Filter extracted tool findings by significance.
-        Returns cleaned/filtered dataset preserving all critical findings.
-        """
         if not isinstance(data, dict):
             return data
 

@@ -1,26 +1,3 @@
-"""
-EscalationGate — async approval queue for high-impact autonomous actions.
-
-The gate decides whether an action may proceed:
-
-  * risk at or below AUTO_APPROVE_MAX_RISK  -> AUTO_APPROVED immediately.
-  * higher risk, interactive TTY (attended)  -> classic y/n prompt.
-  * higher risk, UNATTENDED_MODE             -> parked as PENDING in a JSON queue;
-    an operator resolves it via the resolver CLI, the REST API, or a generic
-    webhook callback. If no decision arrives within the timeout, a configurable
-    safe default is applied (deny by default).
-
-State lives in data/approvals/queue.json so decisions survive across processes
-(the running agent polls the file; the resolver writes to it).
-
-Config (.env):
-  UNATTENDED_MODE=false
-  AUTO_APPROVE_MAX_RISK=MEDIUM          # LOW|MEDIUM|HIGH|CRITICAL
-  ESCALATION_TIMEOUT_SECONDS=1800
-  ESCALATION_DEFAULT_ON_TIMEOUT=deny    # deny|approve
-  ESCALATION_POLL_SECONDS=5
-  ESCALATION_WEBHOOK_URL=               # optional outbound notification
-"""
 
 from __future__ import annotations
 
@@ -88,7 +65,6 @@ class ApprovalDecision:
 
 
 class EscalationGate:
-    """File-backed approval queue with a safe unattended default."""
 
     def __init__(
         self,
@@ -124,7 +100,6 @@ class EscalationGate:
         self.queue_file = Path(queue_file)
         self._lock = asyncio.Lock()
 
-    # ------------------------------------------------------------------ config
 
     @staticmethod
     def _cfg():
@@ -165,7 +140,6 @@ class EscalationGate:
         target: str = "",
         timeout_seconds: Optional[int] = None,
     ) -> ApprovalDecision:
-        """Request approval for an action. Returns a resolved ApprovalDecision."""
         risk = RiskLevel.parse(risk_level, RiskLevel.HIGH)
         details = details or {}
         req_id = uuid.uuid4().hex[:12]
@@ -293,7 +267,6 @@ _GATE: Optional[EscalationGate] = None
 
 
 def get_escalation_gate() -> EscalationGate:
-    """Process-wide singleton gate."""
     global _GATE
     if _GATE is None:
         _GATE = EscalationGate()

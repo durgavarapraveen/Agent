@@ -1,13 +1,3 @@
-"""
-Threat Intelligence Module (Weeks 13-14)
-Integrates public threat feeds:
-- Shodan queries (if API available)
-- Censys certificate intelligence
-- abuse.ch feeds (malware, phishing, botnet)
-- Public IP/domain reputation feeds
-
-Real-time correlation with discovered assets.
-"""
 
 import json
 import logging
@@ -27,7 +17,6 @@ logger = logging.getLogger(__name__)
 # malicious IP reputation, or empty results to blind the pentesting decisioner.
 #
 # Opt-out for local dev / broken corporate MITM proxies:
-#   THREAT_INTEL_INSECURE_TLS=1
 import os as _os_ti
 if _os_ti.getenv("THREAT_INTEL_INSECURE_TLS", "").strip() == "1":
     logger.warning(
@@ -49,22 +38,20 @@ BOTNET_C2_URL = "https://botnet-c2.abuse.ch"
 
 @dataclass
 class ThreatIndicator:
-    """Threat intelligence indicator."""
-    type: str  # ip, domain, url, email, hash
+    type: str
     value: str
-    threat_type: str  # malware, phishing, botnet, c2, exploit_kit
-    severity: str  # critical, high, medium, low
+    threat_type: str
+    severity: str
     sources: List[str]  # Which feeds detected this
     first_seen: str
     last_seen: str
     description: str
-    confidence: float  # 0-1
+    confidence: float
 
 
 @dataclass
 class ReputationScore:
-    """IP/domain reputation assessment."""
-    asset: str  # IP or domain
+    asset: str
     overall_score: float  # 0-100, higher = more malicious
     detection_engines: int  # How many engines flagged it
     threat_types: List[str]  # Types of threats
@@ -76,11 +63,10 @@ class ReputationScore:
 
 @dataclass
 class CompromisedService:
-    """Compromised service detection."""
     service_name: str
     ip_address: str
     port: int
-    threat_type: str  # malware, botnet, c2, etc
+    threat_type: str
     confirmed: bool
     source: str  # Which feed detected it
     remediation_advice: str
@@ -88,13 +74,11 @@ class CompromisedService:
 
 
 class ThreatIntelDatabase:
-    """PostgreSQL database for threat intelligence."""
 
     def __init__(self):
         self._init_db()
 
     def _init_db(self):
-        """Initialize threat intelligence schema."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -177,7 +161,6 @@ class ThreatIntelDatabase:
             logger.error(f"ThreatIntelDatabase init failed: {e}")
 
     def save_threat_indicator(self, indicator: ThreatIndicator) -> bool:
-        """Save threat indicator."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -199,7 +182,6 @@ class ThreatIntelDatabase:
             return False
 
     def save_reputation_score(self, score: ReputationScore) -> bool:
-        """Save reputation score."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -222,7 +204,6 @@ class ThreatIntelDatabase:
             return False
 
     def save_compromised_service(self, service: CompromisedService) -> bool:
-        """Save compromised service."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -243,7 +224,6 @@ class ThreatIntelDatabase:
             return False
 
     def get_threat_indicators_for_asset(self, asset: str) -> List[ThreatIndicator]:
-        """Get threat indicators for an asset."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -263,7 +243,6 @@ class ThreatIntelDatabase:
             return []
 
     def get_threat_indicators_by_source(self, source_name: str) -> List[ThreatIndicator]:
-        """Get threat indicators containing a specific source from cache."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -283,7 +262,6 @@ class ThreatIntelDatabase:
             return []
 
     def get_critical_threats(self) -> List[ThreatIndicator]:
-        """Get all critical threat indicators."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -304,13 +282,11 @@ class ThreatIntelDatabase:
 
 
 class AbuseChIntelligence:
-    """abuse.ch threat feeds integration."""
 
     def __init__(self, db: ThreatIntelDatabase):
         self.db = db
 
     async def query_phishing_army(self) -> List[ThreatIndicator]:
-        """Query Phishing Army feed for malicious URLs with OpenPhish fallback."""
         indicators = []
         logger.info("[AbuseChIntelligence] Querying Phishing feed...")
         
@@ -369,7 +345,6 @@ class AbuseChIntelligence:
         return indicators
 
     async def query_malware_bazon(self) -> List[ThreatIndicator]:
-        """Query URLhaus for recent malware delivery URLs with static JSON fallback."""
         indicators = []
         logger.info("[AbuseChIntelligence] Querying URLhaus for malware...")
         
@@ -425,7 +400,6 @@ class AbuseChIntelligence:
         return indicators
 
     async def query_botnet_c2(self) -> List[ThreatIndicator]:
-        """Query Botnet C2 tracker for command and control servers."""
         indicators = []
         logger.info("[AbuseChIntelligence] Querying Botnet C2 feed...")
         
@@ -463,19 +437,16 @@ class AbuseChIntelligence:
 
     @staticmethod
     def _is_ip(value: str) -> bool:
-        """Check if value is an IP address."""
         import re
         return bool(re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', value))
 
 
 class PublicFeedsIntegration:
-    """Integration with public threat feeds."""
 
     def __init__(self, db: ThreatIntelDatabase):
         self.db = db
 
     async def check_ip_reputation(self, ip_address: str) -> Optional[ReputationScore]:
-        """Check IP reputation from multiple sources."""
         logger.info(f"[PublicFeeds] Checking reputation for IP: {ip_address}")
         
         threat_types = []
@@ -500,7 +471,6 @@ class PublicFeedsIntegration:
         return score
 
     async def check_domain_reputation(self, domain: str) -> Optional[ReputationScore]:
-        """Check domain reputation."""
         logger.info(f"[PublicFeeds] Checking reputation for domain: {domain}")
         
         score = ReputationScore(
@@ -518,7 +488,6 @@ class PublicFeedsIntegration:
         return score
 
     async def check_url_safety(self, url: str) -> bool:
-        """Check if URL is safe."""
         logger.info(f"[PublicFeeds] Checking URL safety: {url}")
         
         # Would query VirusTotal, URLhaus, etc.
@@ -527,7 +496,6 @@ class PublicFeedsIntegration:
 
 
 class ThreatIntelligenceEngine:
-    """Main threat intelligence orchestrator."""
 
     def __init__(self):
         self.db = ThreatIntelDatabase()
@@ -535,7 +503,6 @@ class ThreatIntelligenceEngine:
         self.public_feeds = PublicFeedsIntegration(self.db)
 
     async def load_threat_feeds(self) -> Dict[str, int]:
-        """Load all threat intelligence feeds."""
         logger.info("[ThreatIntelligenceEngine] Loading threat feeds...")
         
         feed_results = {}
@@ -554,7 +521,6 @@ class ThreatIntelligenceEngine:
         return feed_results
 
     async def correlate_with_findings(self, discovered_assets: Dict) -> List[Dict]:
-        """Correlate discovered assets with threat intelligence."""
         logger.info("[ThreatIntelligenceEngine] Correlating findings with threat intel...")
         
         correlations = []
@@ -591,7 +557,6 @@ class ThreatIntelligenceEngine:
         return correlations
 
     def generate_threat_summary(self) -> Dict:
-        """Generate threat intelligence summary."""
         critical_threats = self.db.get_critical_threats()
         
         return {

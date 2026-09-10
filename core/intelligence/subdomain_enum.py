@@ -1,14 +1,3 @@
-"""
-Advanced Subdomain & Virtual Host Enumeration (Weeks 13-14)
-Comprehensive attack surface mapping via:
-- Certificate Transparency logs (crt.sh)
-- CDN analysis for origin IP discovery
-- Cloud storage enumeration (AWS S3, Google Cloud Storage)
-- Virtual host detection (DNS rebinding, host header fuzzing)
-- SNI certificate analysis
-
-Discovers 100+ subdomains per domain and maps complete attack surface.
-"""
 
 import json
 import logging
@@ -45,7 +34,6 @@ CENSYS_CERTIFICATES_URL = "https://censys.io/api/v1/certificates"
 
 @dataclass
 class Subdomain:
-    """Discovered subdomain."""
     name: str
     domain: str
     ip_addresses: List[str]
@@ -58,14 +46,13 @@ class Subdomain:
     status_code: Optional[int]  # HTTP status
     title: Optional[str]  # Page title
     technologies: List[str]
-    source: str  # crt.sh, dns_query, passive_scan
-    confidence: float  # 0-1
+    source: str
+    confidence: float
     discovered_date: str
 
 
 @dataclass
 class VirtualHost:
-    """Virtual host discovered via host header fuzzing."""
     host_header: str
     target_ip: str
     status_code: int
@@ -78,9 +65,8 @@ class VirtualHost:
 
 @dataclass
 class CloudStorageBucket:
-    """Discovered cloud storage bucket."""
     bucket_name: str
-    bucket_type: str  # s3, gcs, azure, etc
+    bucket_type: str
     target_domain: str
     region: Optional[str]
     public: bool
@@ -90,13 +76,11 @@ class CloudStorageBucket:
 
 
 class SubdomainDatabase:
-    """PostgreSQL database for subdomains and virtual hosts."""
 
     def __init__(self):
         self._init_db()
 
     def _init_db(self):
-        """Initialize database schema."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -158,7 +142,6 @@ class SubdomainDatabase:
             logger.error(f"SubdomainDatabase init failed: {e}")
 
     def save_subdomain(self, subdomain: Subdomain) -> bool:
-        """Save discovered subdomain."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -185,7 +168,6 @@ class SubdomainDatabase:
             return False
 
     def save_virtual_host(self, vhost: VirtualHost) -> bool:
-        """Save virtual host."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -206,7 +188,6 @@ class SubdomainDatabase:
             return False
 
     def save_cloud_bucket(self, bucket: CloudStorageBucket) -> bool:
-        """Save cloud storage bucket."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -226,7 +207,6 @@ class SubdomainDatabase:
             return False
 
     def get_subdomains(self, domain: Optional[str] = None) -> List[Subdomain]:
-        """Retrieve subdomains."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -252,7 +232,6 @@ class SubdomainDatabase:
             return []
 
     def count_subdomains(self, domain: Optional[str] = None) -> int:
-        """Count subdomains."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -267,7 +246,6 @@ class SubdomainDatabase:
 
 
 def extract_apex_domain(domain: str) -> str:
-    """Extract the apex / root domain from a hostname or subdomain."""
     if not domain or "." not in domain:
         return domain
     clean_d = domain.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0].strip().lower()
@@ -286,10 +264,8 @@ def extract_apex_domain(domain: str) -> str:
 
 
 class CertificateTransparencyScanner:
-    """Query Certificate Transparency and passive DNS sources for subdomains."""
 
     async def query_all_sources(self, domain: str) -> List[Subdomain]:
-        """Query multiple CT and passive DNS sources in parallel/fallback sequence."""
         clean_d = domain.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0].strip().lower()
         apex_d = extract_apex_domain(clean_d)
         
@@ -348,7 +324,6 @@ class CertificateTransparencyScanner:
         return subdomains
 
     async def query_crtsh(self, domain: str) -> List[Subdomain]:
-        """Query crt.sh for all certificates for a domain with retry backoff."""
         subdomains = []
         logger.info(f"[CertificateTransparencyScanner] Querying crt.sh for {domain}...")
         
@@ -393,7 +368,6 @@ class CertificateTransparencyScanner:
         return subdomains
 
     async def query_certspotter(self, domain: str) -> List[Subdomain]:
-        """Query CertSpotter (SSLMate) Certificate Transparency logs."""
         subdomains = []
         logger.info(f"[CertificateTransparencyScanner] Querying CertSpotter for {domain}...")
         try:
@@ -423,7 +397,6 @@ class CertificateTransparencyScanner:
         return subdomains
 
     async def query_alienvault_otx(self, domain: str) -> List[Subdomain]:
-        """Query AlienVault OTX passive DNS."""
         subdomains = []
         logger.info(f"[CertificateTransparencyScanner] Querying AlienVault OTX for {domain}...")
         try:
@@ -451,7 +424,6 @@ class CertificateTransparencyScanner:
         return subdomains
 
     async def query_hackertarget(self, domain: str) -> List[Subdomain]:
-        """Query HackerTarget host search API."""
         subdomains = []
         logger.info(f"[CertificateTransparencyScanner] Querying HackerTarget for {domain}...")
         try:
@@ -481,7 +453,6 @@ class CertificateTransparencyScanner:
         return subdomains
 
     async def query_anubis(self, domain: str) -> List[Subdomain]:
-        """Query Anubis subdomain collector."""
         subdomains = []
         try:
             url = f"https://jldc.me/anubis/subdomains/{domain}"
@@ -506,7 +477,6 @@ class CertificateTransparencyScanner:
         return subdomains
 
     async def query_censys(self, domain: str) -> List[Subdomain]:
-        """Query Censys for certificates using Censys Platform API (PAT authentication)."""
         subdomains = []
         try:
             from core.intelligence.censys_client import CensysClient
@@ -539,10 +509,8 @@ class CertificateTransparencyScanner:
 
 
 class CDNAnalyzer:
-    """Analyze CDN configurations to find origin IPs."""
 
     async def detect_cdn(self, subdomain: str) -> Optional[Tuple[str, List[str]]]:
-        """Detect if subdomain is behind CDN and try to find origin."""
         logger.info(f"[CDNAnalyzer] Analyzing CDN for {subdomain}...")
         
         detected_cdn = None
@@ -566,7 +534,6 @@ class CDNAnalyzer:
         return (detected_cdn, origins) if detected_cdn else None
 
     async def enumerate_cloud_storage(self, domain: str) -> List[CloudStorageBucket]:
-        """Enumerate cloud storage buckets."""
         buckets = []
         logger.info(f"[CDNAnalyzer] Enumerating cloud storage for {domain}...")
         
@@ -608,10 +575,8 @@ class CDNAnalyzer:
 
 
 class VirtualHostFuzzer:
-    """Detect virtual hosts via host header fuzzing."""
 
     async def fuzz_host_headers(self, target_ip: str, wordlist: Optional[List[str]] = None) -> List[VirtualHost]:
-        """Fuzz host headers to discover virtual hosts."""
         vhosts = []
         logger.info(f"[VirtualHostFuzzer] Fuzzing virtual hosts for {target_ip}...")
         
@@ -633,7 +598,6 @@ class VirtualHostFuzzer:
         return vhosts
 
     async def detect_dns_rebinding(self, domain: str) -> List[Tuple[str, List[str]]]:
-        """Detect DNS rebinding vulnerabilities."""
         logger.info(f"[VirtualHostFuzzer] Checking for DNS rebinding: {domain}...")
         
         rebinding_victims = []
@@ -645,7 +609,6 @@ class VirtualHostFuzzer:
 
 
 class SubdomainEnumerationEngine:
-    """Main subdomain enumeration orchestrator."""
 
     def __init__(self):
         self.db = SubdomainDatabase()
@@ -654,7 +617,6 @@ class SubdomainEnumerationEngine:
         self.vhost_fuzzer = VirtualHostFuzzer()
 
     async def discover_attack_surface(self, domain: str) -> Dict:
-        """Comprehensive attack surface discovery."""
         logger.info(f"[SubdomainEnumerationEngine] Starting attack surface discovery for {domain}...")
         
         results = {
@@ -708,7 +670,6 @@ class SubdomainEnumerationEngine:
         return results
 
     def generate_attack_surface_report(self, domain: str) -> Dict:
-        """Generate attack surface summary."""
         subdomains = self.db.get_subdomains(domain)
         subdomain_count = self.db.count_subdomains(domain)
         

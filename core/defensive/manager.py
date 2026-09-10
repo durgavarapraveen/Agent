@@ -1,8 +1,3 @@
-"""
-Defensive Risk Assessor Orchestrator.
-Runs all defensive security audits, secret scanning, and persistence monitoring,
-and records findings into SharedContext and Enterprise Reports.
-"""
 
 import logging
 from typing import Dict, Any, Optional
@@ -15,7 +10,6 @@ logger = logging.getLogger(__name__)
 
 
 class DefensiveRiskAssessor:
-    """Orchestrates all defensive auditing and risk assessment procedures."""
 
     def __init__(self, ctx: Optional[Any] = None, root_dir: str = "."):
         self.ctx = ctx
@@ -25,7 +19,6 @@ class DefensiveRiskAssessor:
         self.secret_scanner = SecretScanner(root_dir=root_dir)
         self.persistence_monitor = PersistenceMonitor()
     def run_full_assessment(self) -> Dict[str, Any]:
-        """Execute full defensive risk assessment."""
         logger.info("[DefensiveRiskAssessor] Starting Defensive Architecture Audit...")
 
         # 1. Internal Visibility & Network Audit

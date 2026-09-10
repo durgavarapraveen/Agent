@@ -1,15 +1,3 @@
-"""P1.8 — ExecutionEnvironmentProfile.
-
-The LLM was wasting scan time probing the custom-python sandbox (testing
-imports, async/await, httpx, playwright) during exploitation. This computes the
-sandbox capabilities ONCE and exposes a concise, authoritative description that
-is injected into the agent prompt, so the model never needs to experimentally
-discover the environment.
-
-Kept in sync with the actual sandbox contract in
-``core/exploitation/custom_probe.run_custom_python`` (preloaded globals, banned
-tokens, top-level-await, RESULT contract, 30s / 8KB limits).
-"""
 from __future__ import annotations
 
 import functools
@@ -46,7 +34,6 @@ def get_profile() -> dict:
 
 
 def describe_for_llm() -> str:
-    """One authoritative paragraph for the agent prompt (computed once)."""
     p = get_profile()
     sb = p["custom_python_sandbox"]
     return (

@@ -1,7 +1,3 @@
-"""
-JavaScript Analysis Pipeline — deep extraction of endpoints, API keys,
-secrets, and sensitive data from JS bundles, source maps, and webpack chunks.
-"""
 
 import json
 import logging
@@ -15,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class JSFinding:
-    category: str  # "endpoint", "secret", "api_key", "token", "config"
+    category: str
     value: str
     source_url: str
     context: str = ""  # surrounding code
@@ -91,7 +87,6 @@ _ANALYZED_BUNDLE_HASHES: Set[str] = set()
 
 
 class JSAnalyzer:
-    """Deep JavaScript analysis for endpoint and secret extraction."""
 
     def __init__(self, target: str, timeout: int = 30, asset_registry=None):
         self.target = target.rstrip("/")
@@ -103,9 +98,6 @@ class JSAnalyzer:
         self.source_map_urls: List[str] = []
 
     def _origin(self) -> str:
-        """P1.2: resolve against the origin assets were actually served from
-        (learned via the AssetRegistry) rather than a possibly-unreachable
-        global target — the cause of the container curl rc=7 drop."""
         reg = getattr(self, "asset_registry", None)
         if reg is not None:
             try:
@@ -117,7 +109,6 @@ class JSAnalyzer:
         return self.target
 
     def _resolve(self, ref: str) -> str:
-        """Resolve a root-relative asset ref against the canonical origin."""
         reg = getattr(self, "asset_registry", None)
         if reg is not None:
             try:
@@ -128,8 +119,6 @@ class JSAnalyzer:
         return _uj(self._origin().rstrip("/") + "/", ref.lstrip("/"))
 
     def _fetch(self, url: str) -> str:
-        """Fetch URL content via curl. URL is shlex-quoted to prevent shell
-        injection through user-controlled URLs (was `"{url}"` interpolation)."""
         import shlex
         from agents.kali_executor import KaliDockerExecutor
         cmd = f'curl -s -L -k --max-time {int(self.timeout)} {shlex.quote(url)}'
@@ -139,7 +128,6 @@ class JSAnalyzer:
         return ""
 
     def discover_js_files(self, html: str = None, endpoints: List = None) -> List[str]:
-        """Find all JavaScript file URLs from HTML and known endpoints."""
         urls = set()
 
         # P1.2: seed from canonical registered assets (real origin URLs).
@@ -196,7 +184,6 @@ class JSAnalyzer:
         return self.js_urls
 
     def _run_linkfinder(self, js_url: str) -> List[str]:
-        """Run LinkFinder tool to extract endpoints from a JS file."""
         from agents.kali_executor import KaliDockerExecutor
 
         # Check if linkfinder is available
@@ -218,7 +205,6 @@ class JSAnalyzer:
         return endpoints
 
     def _run_secretfinder(self, js_url: str) -> List[Tuple[str, str]]:
-        """Run SecretFinder tool to extract secrets from a JS file."""
         from agents.kali_executor import KaliDockerExecutor
 
         check = KaliDockerExecutor.run("which secretfinder 2>/dev/null", timeout=5)
@@ -274,7 +260,6 @@ class JSAnalyzer:
         return secrets
 
     def _extract_source_maps(self, js_content: str, js_url: str) -> List[str]:
-        """Find and download source maps referenced in JS files."""
         maps = []
         for pattern in SOURCE_MAP_PATTERNS:
             for match in re.finditer(pattern, js_content):
@@ -293,7 +278,6 @@ class JSAnalyzer:
         return maps
 
     def _analyze_source_map(self, map_url: str) -> str:
-        """Download and extract source code from a source map."""
         content = self._fetch(map_url)
         if not content:
             return ""
@@ -335,7 +319,6 @@ class JSAnalyzer:
         return False
 
     def _regex_extract(self, content: str, source_url: str):
-        """Run regex-based extraction for secrets and endpoints."""
         # Extract secrets
         for pattern, description, category, confidence in SECRET_PATTERNS:
             for match in re.finditer(pattern, content):
@@ -381,7 +364,6 @@ class JSAnalyzer:
                 ))
 
     def _extract_webpack_chunks(self, content: str) -> List[str]:
-        """Find webpack chunk URLs from JS content."""
         chunks = []
         # webpackJsonp patterns
         for match in re.finditer(r'["\']([^"\']*(?:chunk|static/js)[^"\']*\.js)["\']', content):
@@ -399,7 +381,6 @@ class JSAnalyzer:
         return chunks
 
     def analyze(self, html: str = None, endpoints: List = None, max_files: int = 20) -> List[JSFinding]:
-        """Run the full JS analysis pipeline."""
         js_urls = self.discover_js_files(html, endpoints)
 
         analyzed = 0
@@ -477,11 +458,9 @@ class JSAnalyzer:
         return self.findings
 
     def get_endpoints(self) -> List[str]:
-        """Get discovered API endpoints."""
         return [f.value for f in self.findings if f.category == "endpoint"]
 
     def get_secrets(self) -> List[Dict]:
-        """Get discovered secrets as vulnerability findings."""
         findings = []
         for f in self.findings:
             if f.category not in ("secret", "api_key", "token"):
@@ -507,7 +486,6 @@ class JSAnalyzer:
         return findings
 
     def get_source_map_findings(self) -> List[Dict]:
-        """Report exposed source maps as findings."""
         findings = []
         for map_url in self.source_map_urls:
             findings.append({

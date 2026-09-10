@@ -1,22 +1,3 @@
-"""Per-provider rate limiter + circuit breaker for OSINT clients.
-
-Every third-party feed (Shodan, Censys, VirusTotal, AbuseIPDB, NVD, GitHub,
-crt.sh, urlscan, hackertarget, ...) has its own per-key quota and its own
-outage cadence. Prior to this, each client raced against every other client
-without a shared throttle, and any provider going down would hang the whole
-recon phase until the outer LLM timeout fired.
-
-`ProviderGate` is a small, dependency-free primitive:
-
-    from core.intelligence._provider_gate import get_gate
-    gate = get_gate("censys")
-    async with gate.acquire():
-        # do the request
-
-    # or, when a call fails:
-    gate.record_failure(reason="429")
-    # subsequent acquires will short-circuit until the cooldown expires
-"""
 from __future__ import annotations
 
 import asyncio
@@ -52,8 +33,6 @@ _FAILURE_WINDOW_S = 120.0  # streak resets after this quiet period
 
 
 class ProviderGate:
-    """Single-instance-per-provider gate. Tracks the last-request timestamp
-    for rate limiting and a failure streak for the circuit breaker."""
 
     def __init__(self, provider: str):
         self.provider = provider
@@ -72,7 +51,6 @@ class ProviderGate:
         self._open_until = 0.0  # circuit-breaker: acquires short-circuit while > now
 
     def is_open(self) -> bool:
-        """Circuit-breaker state. True → the caller should skip this provider."""
         return time.monotonic() < self._open_until
 
     def record_success(self) -> None:
@@ -125,16 +103,13 @@ class ProviderGate:
 
 
 class ProviderCircuitOpen(RuntimeError):
-    """Raised by ProviderGate.acquire when the circuit is open."""
-
+    pass
 
 _GATES: Dict[str, ProviderGate] = {}
 _GATES_LOCK = threading.Lock()
 
 
 def get_gate(provider: str) -> ProviderGate:
-    """Return the (process-wide) gate for a provider, creating it on first
-    access. Provider name is lower-cased for consistency."""
     key = (provider or "*").strip().lower()
     with _GATES_LOCK:
         g = _GATES.get(key)

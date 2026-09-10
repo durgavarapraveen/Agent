@@ -7,9 +7,6 @@ from core.access_control.idor import IdorTest
 logger = logging.getLogger(__name__)
 
 class MatrixEngine:
-    """
-    Orchestrates the access control tests and emits the AUTHORIZATION_MATRIX.
-    """
     def __init__(self, replayer, identities, shared_context=None):
         self.replayer = replayer
         self.identities = identities
@@ -24,9 +21,6 @@ class MatrixEngine:
         ]
         
     def analyze(self, request_node):
-        """
-        Runs the test suite against a request and prints the matrix.
-        """
         path = request_node.get("path", "unknown")
         logger.info(f"AUTHORIZATION_TEST_STARTED endpoint={path}")
         print(f"AUTHORIZATION_TEST_STARTED endpoint={path}")
@@ -94,9 +88,6 @@ class MatrixEngine:
                 }
         
     def _emit_matrix(self, endpoint, results, idor_result):
-        """
-        Emits the strict log format required.
-        """
         logger.info("AUTHORIZATION_MATRIX_CREATED")
         print("AUTHORIZATION_MATRIX_CREATED")
         

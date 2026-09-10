@@ -8,10 +8,6 @@ class ApplicabilityRule(DomainModel):
     parameters: Dict[str, str] = Field(default_factory=dict)
     
     def evaluate(self, endpoint: Endpoint) -> bool:
-        """
-        Abstract evaluation method. Actual implementation provided by the 
-        CoverageEngine's rule registry mapped to the condition string.
-        """
         raise NotImplementedError("evaluate() must be implemented or delegated to a registry.")
 
 class SecurityTestDefinition(DomainModel):

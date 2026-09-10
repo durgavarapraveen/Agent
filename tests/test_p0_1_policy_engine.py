@@ -1,7 +1,3 @@
-"""P0.1 — PolicyEngine unit tests.
-
-Covers: allow, deny, error/fail-closed, structured decisions, all authorize_* methods.
-"""
 import pytest
 from unittest.mock import patch, MagicMock
 from core.security.policy_engine import (
@@ -225,7 +221,6 @@ class TestAuthorizeTool:
 # ── Fail-closed guarantee ───────────────────────────────────────────────
 
 class TestFailClosed:
-    """Every error path must deny, never allow."""
 
     @patch("core.security.policy_engine.PolicyEngine._get_target_scope_validator")
     def test_scope_validator_crash_denies(self, mock_tsv):

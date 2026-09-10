@@ -1,19 +1,3 @@
-"""Structured JSON logging with global PII redaction.
-
-Every log line emitted after `configure_root()` is guaranteed to:
-  - be a single JSON object per line,
-  - carry `timestamp`, `level`, `logger`, `message`, and any `extra` fields,
-  - have known secret / credential patterns redacted BEFORE reaching stdout.
-
-Usage:
-
-    from core.observability import logging as ag_logging
-    ag_logging.configure_root(json=True, level="INFO")
-
-Set `ANTIGRAVITY_LOG_FORMAT=json` in env to force the JSON format regardless
-of the code default. Set `=text` to force human-readable output (useful in
-interactive debugging).
-"""
 from __future__ import annotations
 
 import json
@@ -25,9 +9,6 @@ from typing import Any
 
 
 class PIIRedactionFilter(logging.Filter):
-    """Runs `core.reporting.reporting.mask_sensitive_data` on every log
-    line before it hits any handler. Falls back to a no-op if the mask
-    module is unavailable (avoids import cycles at boot)."""
 
     def __init__(self):
         super().__init__()
@@ -65,8 +46,6 @@ class PIIRedactionFilter(logging.Filter):
 
 
 class JSONFormatter(logging.Formatter):
-    """Emit one JSON object per record. `extra=...` on the logger call is
-    merged into the top-level object."""
 
     _STANDARD_KEYS = frozenset({
         "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
@@ -107,9 +86,6 @@ def _resolve_format(json_hint: bool | None) -> str:
 
 
 def configure_root(json: bool | None = None, level: str = "INFO") -> None:
-    """Install a single stdout handler on the root logger with the given
-    format and the PII redaction filter. Idempotent — a second call replaces
-    the previous handler rather than stacking a duplicate."""
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
 

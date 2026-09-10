@@ -12,22 +12,12 @@ class Identity:
         self.password_ref = password_ref
 
 class IdentityManager:
-    """
-    Parses configuration and initializes Identity objects.
-    """
     def __init__(self, credential_store: CredentialStore, shared_context=None):
         self.credential_store = credential_store
         self.identities: Dict[str, Identity] = {}
         self.shared_context = shared_context
 
     def load_identities(self, config_list: List[Dict]):
-        """
-        config_list:
-          - id: user_a
-            role: standard
-            username_env: APP_USER_A
-            password_env: APP_PASS_A
-        """
         for identity_conf in config_list:
             ident_id = identity_conf["id"]
             role = identity_conf["role"]

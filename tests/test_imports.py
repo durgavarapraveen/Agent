@@ -1,14 +1,3 @@
-"""Smoke test: every module under core/, agents/, ui/api/ imports cleanly.
-
-Catches:
-  - undefined names / syntax errors from refactors
-  - dangling references to deleted modules
-  - circular imports
-  - missing `requirements.txt` entries (module-level `import foo` fails at
-    boot instead of mid-scan)
-
-Does NOT execute the modules — pure import. Fast, no fixtures.
-"""
 from __future__ import annotations
 
 import importlib

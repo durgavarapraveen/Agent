@@ -1,8 +1,3 @@
-"""
-Cybersecurity knowledge base seeder.
-Seeds the vector DB with CWE descriptions, OWASP patterns, common payloads,
-vulnerability techniques, and security testing methodology.
-"""
 
 import logging
 from typing import List, Dict

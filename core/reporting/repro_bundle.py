@@ -1,14 +1,3 @@
-"""Per-finding reproducibility bundle generator.
-
-For each HIGH/CRITICAL confirmed finding, produce a bundle:
-  - reproduce.sh — curl command(s) that trigger the vuln
-  - reproduce.py — Playwright script that walks the browser path
-  - transcript.txt — full HTTP request+response of the exploit
-  - README.md — one-page explanation + business impact
-
-Bundles stored in scan_artifacts with kind='repro_bundle' — one artefact
-per finding. Also exposed as a ZIP-per-scan endpoint.
-"""
 from __future__ import annotations
 import json
 import logging
@@ -31,8 +20,6 @@ def _to_curl(method: str, url: str, headers: Optional[Dict] = None,
 
 
 def _extract_request_from_finding(v: Dict) -> Dict[str, Any]:
-    """Try to reverse-engineer a working reproduction request from the
-    finding's location + evidence + details."""
     url = v.get("location") or v.get("target") or ""
     method = "GET"
     body = None
@@ -119,8 +106,6 @@ def _bundle_zip(v: Dict) -> bytes:
 
 def generate_bundles_for_scan(scan_id: str,
                                 min_severity: str = "HIGH") -> Dict[str, int]:
-    """Generate a per-finding bundle for every HIGH/CRITICAL confirmed finding.
-    Stores as `scan_artifacts` rows with kind='repro_bundle'."""
     from core.database.pg_store import VulnRepo, ScanArtifactRepo
     order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
     thr = order.get(min_severity.upper(), 1)

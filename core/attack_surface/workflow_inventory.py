@@ -14,11 +14,6 @@ class WorkflowInventory:
         self.workflows[workflow.name] = workflow
         
     def discover_workflows_from_requests(self, requests: List[CapturedRequest]) -> List[Workflow]:
-        """
-        Group real captured requests into workflows by session, ordered by time.
-        A workflow is the ordered sequence of requests sharing a session_id. No
-        fabricated data — only actual captured requests are grouped.
-        """
         if not requests:
             return []
 

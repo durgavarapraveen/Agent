@@ -1,21 +1,3 @@
-"""
-identity_bridge — connects real per-role authenticated sessions (from the
-MultiIdentityAuthManager) into the access-control / IDOR replay engine.
-
-Both the replay loop and the access-control MatrixEngine were built to iterate
-`identity_manager.identities` and replay captured requests as each identity, but
-the replay session layer only ever fabricated MOCK cookies/tokens. This bridge
-injects the REAL session (cookies + auth headers) each role logged in with, so
-cross-role authorization testing exercises genuine sessions:
-
-  * user vs admin reaching the same endpoint,
-  * IDOR: replaying one role's request as another role,
-  * privilege boundaries between sales / marketing / etc.
-
-It registers one identity per authenticated role and pre-loads a real replay
-Session for it, so ReplayEngine.replay_request/replay uses live credentials
-instead of the mock login flow.
-"""
 
 from __future__ import annotations
 
@@ -29,7 +11,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SessionIdentity:
-    """Lightweight identity carrying both attribute names the engines read."""
     identity_id: str
     role: str                     # plain string ("standard", "administrator", "sales"…)
     manager: Any = None           # the AuthSessionManager backing this role
@@ -57,11 +38,6 @@ def build_replay_sessions(
     identity_manager: Any,
     shared_context: Any = None,
 ) -> Dict[str, Any]:
-    """
-    Populate the replay session manager and identity manager with real sessions.
-
-    Returns a summary {roles, identities, sessions_loaded}.
-    """
     # Import here to avoid a hard dependency when the replay stack is absent.
     try:
         from core.domain.session import Session

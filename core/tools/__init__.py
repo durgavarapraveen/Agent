@@ -1,6 +1,3 @@
-"""
-Core Tools Subpackage
-"""
 
 import sys
 import importlib

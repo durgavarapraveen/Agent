@@ -1,9 +1,3 @@
-"""
-Security Test Catalog (Phase 9).
-
-Expanded from 44 tests toward 200+ concrete, executable, evidence-backed tests.
-Tests are only applicable when the target actually exposes the relevant attack surface.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -1242,7 +1236,6 @@ def build_default_catalog() -> SecurityTestCatalog:
         SecurityTest("gitlab_secret_leak_01", "GitLab Secret in API Response", "supply_chain",
                      "GitLab API response contains a secret pattern", "CWE-798",
                      _always, risk="critical"),
-        # Browser-runtime (Chromium in Kali)
         SecurityTest("dom_xss_live_01", "DOM XSS — Live Confirmation", "injection",
                      "Chromium console captured payload execution via fragment", "CWE-79",
                      _always, risk="high", priority=8),

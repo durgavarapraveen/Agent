@@ -1,13 +1,3 @@
-"""Persistent skill library.
-
-Every confirmed custom probe becomes a reusable "skill" — a payload template
-tagged with the tech-shape it worked on. Next scan (any target) the LLM sees
-a filtered list of skills that match the current target's shape and can call
-`run_skill(name)` for instant reuse.
-
-Tech-shape matching = keyword overlap on server/x-powered-by/discovered techs
-so a "PHP MySQL SQLi" skill isn't blindly fired at an ASP.NET site.
-"""
 from __future__ import annotations
 import json
 import logging
@@ -81,7 +71,6 @@ SKILL_TOOL_SCHEMAS = [
 
 
 def list_skills(ctx) -> str:
-    """LLM tool — returns markdown table of matched skills."""
     try:
         from core.database.pg_store import DatabaseManager
         import psycopg2.extras
@@ -156,9 +145,6 @@ def save_skill(*, name: str, description: str, method: str, url_template: str,
                 headers: Optional[Dict] = None, body_template: str = "",
                 expected_signature: str = "", tech_shape: Optional[Dict] = None,
                 scan_id: str = "") -> bool:
-    """Persist or bump a confirmed skill. Called when a custom_probe confirms
-    a finding — either by the LLM's own `analyze_results` call, or by the
-    critic/reflection loop when it detects a confirmed probe."""
     try:
         from core.database.pg_store import DatabaseManager
         cname = _canonical_name(name)

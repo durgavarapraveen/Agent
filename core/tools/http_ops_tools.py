@@ -1,14 +1,3 @@
-"""
-Tool-registry adapters for the structured HTTP ops (P2-8 wiring).
-
-Wraps each function in `core.tools.http_ops` as a first-class `Tool`
-so the router can select it via a capability like `http_fetch` or
-`html_parse`, and the LLM sees them in the tool menu.
-
-Each adapter converts the op's return dict to the local
-`ToolResult` shape (success, output, error, data) used by the rest of
-the registry so ToolGateway/router don't need special handling.
-"""
 from __future__ import annotations
 
 import json
@@ -221,11 +210,6 @@ def build_structured_http_tools():
 
 
 def register_structured_http_tools(registry) -> int:
-    """Register every structured HTTP op with the given ToolRegistry.
-
-    Idempotent: skips names that are already registered.
-    Returns the number of tools newly registered.
-    """
     n = 0
     for t in build_structured_http_tools():
         try:

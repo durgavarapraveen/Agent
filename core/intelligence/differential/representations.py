@@ -1,18 +1,3 @@
-"""
-Request representation model and equivalence-variant generators
-(spec Point J — "Request Parsing Variance", Point A — differential testing).
-
-An ``HttpRequest`` is a transport-agnostic description of one request. The
-engines build a *set* of requests that a well-behaved server should treat
-identically, send them through an injected ``probe`` callable, and compare the
-responses. Any divergence between supposedly-equivalent representations is an
-anomaly worth a hypothesis.
-
-The injected probe matches the executor ``_probe`` signature exactly so the
-same scope-checked network path is reused:
-
-    probe(url, method="GET", headers=None, data=None) -> (status, body, headers)
-"""
 from __future__ import annotations
 
 import json
@@ -29,7 +14,6 @@ ProbeFn = Callable[..., Tuple[int, str, Dict[str, str]]]
 
 @dataclass
 class HttpRequest:
-    """One concrete request in a differential set."""
     label: str
     url: str
     method: str = "GET"
@@ -42,7 +26,6 @@ class HttpRequest:
 
 
 def send(probe: ProbeFn, request: HttpRequest) -> ResponseSnapshot:
-    """Send one request through the injected probe and time it."""
     start = time.monotonic()
     try:
         status, body, headers = probe(
@@ -69,12 +52,6 @@ def representation_variants(
     auth_headers: Optional[Dict[str, str]] = None,
     include_multipart: bool = False,
 ) -> List[HttpRequest]:
-    """Build semantically-equivalent representations of the same parameters.
-
-    A server that authorises/parses one representation differently from another
-    (e.g. accepts an id in the JSON body that it would reject in the query
-    string) exposes a parsing-inconsistency / access-control gap.
-    """
     headers = dict(_DEFAULT_UA)
     if auth_headers:
         headers.update(auth_headers)

@@ -1,8 +1,3 @@
-"""
-Fallback & Recovery Strategies Module (Phase 3 Module 3.3).
-Implements Error-to-Action mapping, exponential backoff retries, tool fallback chains,
-and automatic HTTPS -> HTTP protocol downgrades.
-"""
 
 import functools
 import logging
@@ -29,10 +24,6 @@ TOOL_CHAINS = {
 
 
 def retry_with_backoff(max_attempts: int = 3, base_delay: float = 2.0):
-    """
-    Decorator for retrying transient failures (timeouts, 502s, network errors)
-    with exponential backoff delays (2s, 4s, 8s).
-    """
     def decorator(func: Callable):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -53,13 +44,11 @@ def retry_with_backoff(max_attempts: int = 3, base_delay: float = 2.0):
 
 
 class FallbackRecoveryManager:
-    """Manages error mapping, tool chain fallbacks, and protocol downgrades."""
 
     def __init__(self, scope_validator: Optional[TargetScopeValidator] = None):
         self.scope_validator = scope_validator or TargetScopeValidator.get()
 
     def handle_error_action(self, error_message: str) -> Dict[str, Any]:
-        """Look up error message via regex patterns and return mapped fallback action."""
         err_clean = str(error_message)
         for pattern, action_spec in ERROR_MAPPING.items():
             if re.search(pattern, err_clean, re.IGNORECASE):
@@ -69,10 +58,6 @@ class FallbackRecoveryManager:
         return {"action": "default_retry", "params": {}}
 
     def execute_tool_fallback_chain(self, task_type: str, primary_runner: Callable[[str], bool]) -> Dict[str, Any]:
-        """
-        Execute tool fallback chain if primary tool fails (exit code != 0 or zero findings).
-        Automatically invokes the next tool in the chain.
-        """
         tools = TOOL_CHAINS.get(task_type, ["nmap"])
         logger.info(f"[ToolChain] Executing tool chain for '{task_type}': {tools}")
 
@@ -90,10 +75,6 @@ class FallbackRecoveryManager:
         return {"task_type": task_type, "successful_tool": None, "attempts": len(tools)}
 
     def perform_protocol_downgrade_request(self, target_url: str, request_func: Callable[[str], str]) -> Tuple[str, List[Dict[str, str]]]:
-        """
-        If HTTPS request fails with SSL errors (e.g., SSLCertVerificationError),
-        automatically retry using HTTP. Log downgrade and flag as 'Potential insecure service'.
-        """
         self.scope_validator.validate(target_url)
         findings = []
 

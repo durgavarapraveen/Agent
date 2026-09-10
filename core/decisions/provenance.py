@@ -1,11 +1,3 @@
-"""
-P3-3: decision provenance.
-
-Every action taken by the agent gets a Decision record with its
-parent (what triggered it), the reason, and the artifacts it touched.
-This is what makes the autonomous system explainable — if a scan
-made a weird call, you can walk the chain back.
-"""
 from __future__ import annotations
 
 import uuid
@@ -23,7 +15,7 @@ class Decision:
     reason: str = ""                 # human-readable why
     evidence_ids: List[str] = field(default_factory=list)
     hypothesis_id: str = ""
-    policy_result: str = ""          # "allow" | "deny" | "n/a"
+    policy_result: str = ""
     selected_tool: str = ""
     payload: Dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time)
@@ -73,7 +65,6 @@ class DecisionLog:
         return d
 
     def chain(self, decision_id: str) -> List[Decision]:
-        """Walk ancestor chain root-first."""
         out: List[Decision] = []
         cur = self._store.get(decision_id)
         while cur:

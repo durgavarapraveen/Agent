@@ -1,10 +1,3 @@
-"""
-Phase 6 Module 6.1: Automated Legal Validator (core/legal_validator.py)
-
-Parses signed Statement of Work (SOW) / Rules of Engagement (ROE) documents,
-enforces authorized target CIDRs/domains, tracks contract expiration,
-and logs immutable authorization audit checks.
-"""
 
 import hashlib
 import ipaddress
@@ -21,19 +14,16 @@ logger = logging.getLogger(__name__)
 
 
 class ScopeViolationException(Exception):
-    """Raised when a target IP or domain falls outside authorized legal scope."""
     pass
 
 
 class LegalValidator:
-    """Automated legal and scope enforcement validator."""
 
     def __init__(self, db_path: str = None, audit_log_path: str = "data/audit_trail.jsonl"):
         self.audit_log_path = Path(audit_log_path)
         self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _log_audit_event(self, event_data: Dict[str, Any]):
-        """Append-only audit trail logger."""
         event_data["timestamp"] = datetime.now().isoformat()
         line = json.dumps(event_data) + "\n"
         with open(self.audit_log_path, mode="a", encoding="utf-8") as f:

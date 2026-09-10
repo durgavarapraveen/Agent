@@ -27,7 +27,6 @@ class ToolLearningEngine:
         if not score:
             return 0.0
             
-        # (target_type_success_rate * 0.5 + recent_success_rate * 0.3 + global_success_rate * 0.2) * evidence_quality / average_cost
         effective = (
             (score.target_type_success_rate * 0.5 +
              score.recent_success_rate * 0.3 +

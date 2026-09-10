@@ -1,22 +1,3 @@
-"""
-Embedding abstraction for the RAG pipeline.
-
-Primary path: OpenAI-compatible embeddings API (EMBEDDING_API_URL /
-EMBEDDING_API_KEY / EMBEDDING_MODEL). Produces 1536-dim vectors that go into
-the shared `rag_documents.embedding vector(1536)` column.
-
-Fallback path: local sentence-transformers all-MiniLM-L6-v2 — TRUE semantic
-embeddings, 384-dim, ~80 MB RAM, no API key. Vectors go into a SEPARATE
-`rag_documents.embedding_local vector(384)` column because mixing embedding
-spaces in one index is nonsense.
-
-Last-resort path: deterministic hash-bag (`_hash_embed`). Only used when
-sentence-transformers itself cannot be loaded. The last slot carries
-`LOCAL_MARKER_VALUE` and the pipeline refuses to persist those.
-
-`embed()` and `embed_batch()` now return `EmbedResult(vec, dim, source)` so
-callers know which vector column and index to use.
-"""
 
 import hashlib
 import logging
@@ -37,8 +18,8 @@ DIMENSION = 1536
 @dataclass
 class EmbedResult:
     vector: List[float]
-    dim: int          # 1536 (api) | 384 (local_semantic) | 1536 (hash_bag)
-    source: str       # 'api' | 'local_semantic' | 'hash_bag'
+    dim: int
+    source: str
 
     @property
     def is_api(self) -> bool:
@@ -54,7 +35,6 @@ class EmbedResult:
 
 
 class Embedder:
-    """Generates embeddings via a configured API or local fallback."""
 
     LOCAL_MARKER_VALUE = -9.87654321  # last-slot sentinel for hash-bag path
     _warned_missing = False
@@ -79,9 +59,6 @@ class Embedder:
         return self._client
 
     def semantic_available(self) -> bool:
-        """True if a real (non-hash) embedder is usable, so ingestion will
-        actually persist. False means both the API and local sentence-
-        transformers are unavailable and every chunk would be refused."""
         if self._use_api and not self._api_disabled:
             return True
         try:
@@ -158,12 +135,6 @@ class Embedder:
         raise RuntimeError(f"Batch embedding API {r.status_code}: {r.text[:200]}")
 
     def _hash_embed(self, text: str) -> List[float]:
-        """Last-resort deterministic bag-of-words hash embedding.
-
-        Only reached when sentence-transformers itself is unavailable.
-        Marked via `LOCAL_MARKER_VALUE` in the last slot so pipeline refuses
-        to store it (see pipeline._store_chunk).
-        """
         vec = [0.0] * (self.dimension - 1)
         for token in str(text).lower().split():
             h = int(hashlib.md5(token.encode("utf-8")).hexdigest(), 16)
@@ -177,7 +148,6 @@ class Embedder:
 
     @classmethod
     def is_local_embedding(cls, vec: List[float]) -> bool:
-        """True only for the hash-bag last-resort vectors."""
         if not vec:
             return False
         return abs(vec[-1] - cls.LOCAL_MARKER_VALUE) < 1e-6

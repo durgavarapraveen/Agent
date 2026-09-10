@@ -1,26 +1,3 @@
-"""Single façade over the three scope authorities.
-
-Three overlapping validators grew independently in this codebase:
-
-  * `core.scope.manager.ScopeManager`         — planning-time URL / tier / tool gate
-  * `core.security.authorization.TargetScopeValidator` — runtime host + IP validator
-  * `core.security.legal_validator.LegalValidator`     — SOW / ROE contract check
-
-Each is a separate singleton with its own state. Adding an in-scope subdomain to
-one did not propagate to the others, and different call sites consulted
-different validators. That made the system's answer to "is this target
-authorized?" depend on which import path the caller happened to use.
-
-`ScopeAuthority` is the single consult point for every executor and adapter:
-
-    from core.security.scope_facade import get_scope_authority
-    if not get_scope_authority().is_authorized(target_url):
-        raise ScopeViolation(...)
-
-Under the hood it fans out to whichever back-end authorities are wired,
-requiring ALL of them to say yes (fail-closed). New scope entries added via
-`add_domain`/`add_ip` propagate to every back-end that can accept them.
-"""
 from __future__ import annotations
 
 import logging
@@ -32,12 +9,6 @@ logger = logging.getLogger(__name__)
 
 
 class ScopeAuthority:
-    """Composite scope authority — one consult point for callers.
-
-    All back-ends are optional. If none are wired the authority fails CLOSED
-    (returns False from `is_authorized`) — better than accidentally granting
-    scope while the app is misconfigured.
-    """
 
     _instance: Optional["ScopeAuthority"] = None
     _init_lock = threading.RLock()
@@ -119,7 +90,6 @@ class ScopeAuthority:
 
     # ── The one question every caller asks ────────────────────────────────
     def is_authorized(self, target: str) -> bool:
-        """Return True iff EVERY wired authority says yes. Fail closed."""
         if not target:
             return False
         with self._lock:
@@ -162,7 +132,6 @@ class ScopeAuthority:
             return True
 
     def enforcement_status(self) -> dict:
-        """For diagnostics: which authorities are wired right now."""
         with self._lock:
             return {
                 "scope_manager": self._scope_manager is not None,
@@ -202,6 +171,4 @@ class ScopeAuthority:
 
 
 def get_scope_authority() -> ScopeAuthority:
-    """Module-level accessor. Use this everywhere new code needs to check
-    authorization."""
     return ScopeAuthority.get()

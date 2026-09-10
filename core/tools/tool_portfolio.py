@@ -30,6 +30,4 @@ def get_global_portfolio() -> ToolPortfolio:
 
 
 def get_fallback_chain(capability: str) -> List[str]:
-    """Module-level accessor used by core.common.tool_retry so downstream
-    modules don't need to hold a Portfolio reference."""
     return get_global_portfolio().get_tools(capability)

@@ -1,7 +1,3 @@
-"""
-Tool Result Formatter with Token Compression.
-Reduces LLM context size by 85-95% for tool execution outputs while maintaining decision quality.
-"""
 
 import logging
 from typing import Dict, Any
@@ -10,11 +6,9 @@ logger = logging.getLogger(__name__)
 
 
 class ToolResultFormatter:
-    """Smart result formatter and token compression utility."""
 
     @classmethod
     def should_compress(cls, tool_name: str, data: Any) -> bool:
-        """Determine if tool output requires compression based on size/count."""
         tool_name = (tool_name or "").lower().strip()
         if isinstance(data, list):
             count = len(data)
@@ -46,7 +40,6 @@ class ToolResultFormatter:
         count: int = 0,
         key_finding: str = ""
     ) -> str:
-        """Format successful tool execution using a concise 3-sentence summary structure."""
         tool_name = (tool_name or "").lower().strip()
         
         # 1. Extract counts & key findings if not provided
@@ -90,7 +83,6 @@ class ToolResultFormatter:
         error_message: str,
         retry_suggestion: str = ""
     ) -> str:
-        """Format failed tool execution."""
         tool_name = (tool_name or "").lower().strip()
         error_msg_short = str(error_message)[:150].replace("\n", " ")
         if not retry_suggestion:
@@ -104,7 +96,6 @@ class ToolResultFormatter:
 
     @classmethod
     def format_duplicate_result(cls, tool_name: str, previous_task_id: str) -> str:
-        """Format deduplicated task result."""
         sentence_1 = f"STATUS: DEDUPLICATED for tool '{tool_name}'."
         sentence_2 = f"REASON: Identical capability and target already completed under task '{previous_task_id}'."
         sentence_3 = f"NEXT ACTION: Reuse existing results from shared context."
@@ -113,7 +104,6 @@ class ToolResultFormatter:
 
     @classmethod
     def compress_tool_data(cls, tool_name: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Apply tool-specific token compression rules."""
         tool_name = (tool_name or "").lower().strip()
         compressed = {}
 

@@ -1,13 +1,3 @@
-"""AntiGravity Dashboard API — PostgreSQL-backed, no flat files or SQLite.
-
-Module organisation follow-up (#159): this file is a 2.5k-line monolith. The
-next refactor should split it into per-domain routers under `ui/api/routers/`
-(scans, targets, review, rag, canonical, health/metrics, ws). The
-`app.include_router(...)` pattern lets us move routes one file at a time
-without breaking clients. Not done in this pass — a mid-audit split would
-break the running system too easily. Placeholder skeleton at
-`ui/api/routers/__init__.py` documents the mapping.
-"""
 
 import asyncio
 import json
@@ -78,7 +68,6 @@ except ImportError:
 
 
 def _rate_limit(limit: str):
-    """Return a rate-limit decorator that no-ops when slowapi is absent."""
     if _LIMITER is None:
         def _noop(fn):
             return fn
@@ -95,7 +84,6 @@ import time as _time
 from collections import deque as _deque, defaultdict as _defaultdict, OrderedDict
 
 _ROUTE_LIMITS = {
-    # (path_prefix): (max_requests, window_seconds)
     "/api/scans/run":         (5, 60),
     "/api/scans/kill-all":    (10, 60),
     "/api/rag/ingest/file":   (10, 60),
@@ -135,10 +123,6 @@ async def _builtin_rate_limit(request: Request, call_next):
 # ── HTTP metrics middleware ─────────────────────────────────────────────
 @app.middleware("http")
 async def _http_metrics(request: Request, call_next):
-    """Emit `antigravity_http_requests_total{method, route, status_class}`
-    for every request. The `route` label is the route's PATH TEMPLATE
-    (`/api/scans/{scan_id}`) — never the resolved URL — so path-variable
-    cardinality doesn't explode Prometheus."""
     response = await call_next(request)
     try:
         route = getattr(request.scope.get("route"), "path", None) or "unknown"
@@ -172,7 +156,7 @@ elif _IS_PROD:
 else:
     _cors_origins = [
         "http://localhost:5173", "http://127.0.0.1:5173",  # Vite dev
-        "http://localhost:8903", "http://127.0.0.1:8903",  # same-origin
+        "http://localhost:8903", "http://127.0.0.1:8903",
     ]
 
 if _IS_PROD and "*" in _cors_origins:
@@ -301,8 +285,6 @@ def _scan_log_path(job_id: str) -> Path:
 
 
 def _flush_scan_log_to_db(job_id: str) -> int:
-    """Upload the runtime scan-log tempfile to scan_artifacts and delete it.
-    Called on scan completion/cancel/kill. Idempotent: no-op if file missing."""
     try:
         p = _scan_log_path(job_id)
         if not p.exists() or not p.is_file():
@@ -328,7 +310,6 @@ def _flush_scan_log_to_db(job_id: str) -> int:
 
 
 def _read_scan_log(job_id: str) -> bytes:
-    """DB-first, then live tempfile fallback."""
     try:
         from core.database.pg_store import ScanArtifactRepo
         rows = ScanArtifactRepo.list_by_scan(job_id, kind="scan_log")
@@ -387,12 +368,6 @@ _ALLOWED_SCHEMES = {"http", "https"}
 
 
 def _validate_target_url(v: str) -> str:
-    """Common validator for user-supplied target URLs / hostnames.
-
-    Accepts either a bare hostname/IP or a full HTTP(S) URL. Rejects credentials
-    embedded in the URL (`http://user:pass@host`) — those must come through the
-    credentials field. Refuses schemes outside {http, https}.
-    """
     if not v or not isinstance(v, str):
         raise ValueError("target must be a non-empty string")
     v = v.strip()
@@ -476,7 +451,6 @@ _active_scans: dict = {}  # in-memory cache, synced to PG
 
 
 def _persist_scan_state():
-    """Sync active scans to PostgreSQL."""
     for job_id, job in _active_scans.items():
         try:
             ScanRepo.update_status(job_id, job.get("status", "unknown"),
@@ -491,10 +465,6 @@ _SECRET_PATTERNS = None
 
 
 def _scrub_secrets(text: str) -> str:
-    """Redact secrets from a single log line before it hits the WebSocket / API.
-
-    Patterns compiled once. Aggressive by intent — a false-positive redaction is
-    always safer than leaking a credential to any operator viewing the live UI."""
     global _SECRET_PATTERNS
     if _SECRET_PATTERNS is None:
         import re as _re
@@ -523,8 +493,6 @@ def _scrub_secrets(text: str) -> str:
 
 
 def _redact_command(cmd: list) -> str:
-    """Redact anything that might leak credentials or file paths that lead to
-    them. Called before the command string is exposed via any API endpoint."""
     redacted = []
     skip_next = False
     for tok in cmd:
@@ -541,7 +509,6 @@ def _redact_command(cmd: list) -> str:
 
 
 def _is_pid_alive(pid: int) -> bool:
-    """Check if a process is still running (cross-platform)."""
     try:
         import psutil
         return psutil.pid_exists(pid)
@@ -550,7 +517,8 @@ def _is_pid_alive(pid: int) -> bool:
     try:
         if os.name == "nt":
             import subprocess
-            r = subprocess.run(f'tasklist /FI "PID eq {pid}" /NH', shell=True,
+            cmd = ["tasklist", "/FI", f"PID eq {pid}", "/NH"]
+            r = subprocess.run(cmd, shell=False,
                                capture_output=True, encoding="utf-8", timeout=5)
             return str(pid) in r.stdout
         else:
@@ -561,7 +529,6 @@ def _is_pid_alive(pid: int) -> bool:
 
 
 def _load_scan_state():
-    """Reload active scans from PostgreSQL on startup."""
     global _active_scans
     try:
         for scan in ScanRepo.get_active():
@@ -590,13 +557,6 @@ _load_scan_state()
 
 # ── Health, metrics, and lifecycle ─────────────────────────────────────
 def _kali_container_healthy() -> tuple[bool, str]:
-    """Best-effort readiness probe for the Kali tool container.
-
-    Returns (is_healthy, detail). If `docker` isn't installed we return
-    True with detail "docker_cli_missing" — the tool router will still fall
-    back to Python-only tools. If the CLI is installed and the named
-    container exists but isn't running, we return False.
-    """
     import shutil as _sh
     import subprocess as _sp
     if not _sh.which("docker"):
@@ -617,11 +577,6 @@ def _kali_container_healthy() -> tuple[bool, str]:
 
 @app.get("/api/source-ip", include_in_schema=True)
 def source_ip():
-    """Report the IP the scanner will use — direct real IP, or VPN exit IP.
-
-    UI can call this at page load to show a badge like
-    "🌐 Direct  1.2.3.4"  vs  "🛡️ VPN  5.6.7.8 (Tor)".
-    """
     import os
     from core.security.anon_gate import _vpn_configured, _fetch_direct_ip
     mode = "vpn" if _vpn_configured() else "direct"
@@ -641,13 +596,6 @@ def source_ip():
 
 @app.get("/api/health", include_in_schema=True)
 def health():
-    """Deep health check for readiness probes.
-
-    Returns 200 with `status=ok` when Postgres is reachable and — best
-    effort — the Kali container is running. Returns 503 with a structured
-    body when any critical dependency is unavailable so k8s / cron watchers
-    can react.
-    """
     checks: dict = {"status": "ok", "checks": {}}
     http_code = 200
 
@@ -687,8 +635,6 @@ def health():
 
 @app.get("/api/metrics", include_in_schema=False)
 def metrics_endpoint():
-    """Prometheus scrape endpoint. Returns 501 with a plain-text hint if
-    `prometheus_client` isn't installed."""
     from fastapi.responses import Response
     body, content_type = _metrics.render()
     if not _metrics.is_available():
@@ -723,9 +669,6 @@ async def _on_startup():
 
 @app.on_event("shutdown")
 async def _on_shutdown():
-    """Drain WS push tasks and mark all in-flight scans `stopping` so a
-    supervisor restart resumes them cleanly. Every step is best-effort —
-    we never block shutdown longer than a few seconds per drain step."""
     logger.info("API shutdown starting", extra={
         "active_scans": len(_active_scans),
         "ws_push_tasks": len(_ws_push_tasks) if "_ws_push_tasks" in globals() else 0,
@@ -767,7 +710,6 @@ def _run_scan_process(job_id: str, target: str, tier: str,
                       resume: bool = False, phases: list = None,
                       credentials: dict = None, allow_shell_operators: bool = False,
                       allow_ambient_auth: bool = False):
-    """Runs main.py as a subprocess in a background thread."""
     log_file = _scan_log_path(job_id)
     cmd = [sys.executable, str(BASE / "main.py"), "--target", target, "--tier", tier]
     if auto_approve:
@@ -898,7 +840,6 @@ def _run_scan_process(job_id: str, target: str, tier: str,
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 def _get_scans() -> list:
-    """Get all scans from PostgreSQL."""
     scans = []
     try:
         db_scans = ScanRepo.list_all()
@@ -977,7 +918,6 @@ def list_scans():
 
 @app.get("/api/scans/compare")
 def compare_scans(a: str, b: str):
-    """Compare two scan reports side by side (PostgreSQL-backed)."""
     return VulnRepo.compare_scans(a, b)
 
 
@@ -1003,7 +943,6 @@ def _live_singleton_scan_id() -> str:
 
 @app.get("/api/scans/live-progress")
 def get_live_progress(scan_id: str = ""):
-    """Return live progress from PostgreSQL, scoped to scan_id when provided."""
     try:
         data = LiveDataRepo.get_progress()
         if not data:
@@ -1019,12 +958,6 @@ def get_live_progress(scan_id: str = ""):
 
 @app.get("/api/scans/live-results")
 def get_live_results(scan_id: str = ""):
-    """Return structured live results from PostgreSQL, scoped to scan_id when provided.
-
-    When scan_id is given, the live singleton is only returned if it belongs to that
-    scan; cross-scan finding merges are skipped and only that scan's persisted vulns
-    are added. This prevents leakage from previous scans into the Live Scan view.
-    """
     try:
         singleton_scan = _live_singleton_scan_id() if scan_id else ""
         if scan_id and singleton_scan and singleton_scan != scan_id:
@@ -1090,7 +1023,6 @@ def list_active_scans():
 
 
 def _normalize_ports(ports) -> list:
-    """Filter out garbage port entries (hostname strings from list(dict) bug)."""
     if not ports or not isinstance(ports, list):
         return []
     return [p for p in ports if isinstance(p, dict) and "port" in p and isinstance(p.get("port"), int)]
@@ -1103,11 +1035,6 @@ _TECH_NOISE = {
 }
 
 def _normalize_technologies(techs: dict) -> dict:
-    """Normalize mixed-format technologies into clean {host: [tech_list]}.
-
-    Handles: flat {name: True}, per-host {host: [techs]}, and mixed.
-    Merges hosts with/without protocol prefix, filters garbage entries.
-    """
     if not techs or not isinstance(techs, dict):
         return {}
     merged = {}
@@ -1141,12 +1068,6 @@ def _normalize_technologies(techs: dict) -> dict:
 
 
 def _enrich_subdomains(subs: list, status_map: dict) -> list:
-    """Convert subdomain entries into structured objects with live/dead status.
-
-    Preserves live/status/status_code already present on the input dict —
-    the classifier writes those fields directly onto each subdomain record
-    (see central_brain._classify_subdomains), and the external status_map
-    is only a fallback when the caller hasn't classified yet."""
     if not subs:
         return []
     status_map = status_map or {}
@@ -1185,7 +1106,6 @@ def _enrich_subdomains(subs: list, status_map: dict) -> list:
 
 
 def _split_captured_requests(raw: list, scan_id: str) -> dict:
-    """Separate real HTTP requests from tool executions. DB-first, fallback to context."""
     http_requests = []
     tool_executions = []
 
@@ -1346,7 +1266,6 @@ def get_scan(scan_id: str):
 
 
 def _get_exploits(scan_id: str, report: dict) -> list:
-    """Read exploit results from DB table first, fall back to report_data."""
     try:
         db_exploits = ExploitResultRepo.get_by_scan(scan_id)
         if db_exploits:
@@ -1358,11 +1277,6 @@ def _get_exploits(scan_id: str, report: dict) -> list:
 
 @app.get("/api/scans/{scan_id}/recon")
 def get_recon(scan_id: str):
-    """Full recon intelligence collected for a scan (live during recon, and after).
-
-    Applies the same shaping (`_normalize_technologies`, `_enrich_subdomains`,
-    `_normalize_ports`) as `/api/scans/{scan_id}.context` so the two payloads
-    stay identical — same source (`recon_data`), same transforms."""
     try:
         from core.database.pg_store import ReconRepo
         recon = ReconRepo.get(scan_id) or {}
@@ -1382,8 +1296,6 @@ def get_recon(scan_id: str):
 # ── LIVE CHAIN-OF-THOUGHT — per-agent reasoning stream ────────────────────
 @app.get("/api/scans/{scan_id}/agents/reasoning")
 def list_agent_reasoning(scan_id: str, agent_id: str = "", limit: int = 100):
-    """Per-agent chain-of-thought stream: every tool the LLM decided to call
-    with its rationale. Rendered as live thought bubbles in the UI."""
     try:
         from core.database.pg_store import DatabaseManager
         import psycopg2.extras
@@ -1452,14 +1364,11 @@ def regenerate_repro_bundles(scan_id: str, min_severity: str = "HIGH"):
 # ── SCAN CHATBOT — LLM Q&A over this scan's collected data ─────────────────
 class ScanChatMessage(BaseModel):
     message: str
-    history: list = []   # [{role: 'user'|'assistant', content: str}, ...]
+    history: list = []
 
 
 @app.post("/api/scans/{scan_id}/chat")
 async def scan_chat(scan_id: str, body: ScanChatMessage):
-    """Answer one user question about this scan using the LLM. Every call
-    rebuilds context from the DB (vulns, access gained, OSINT, recon) so the
-    answer reflects the latest scan state — even mid-scan."""
     from core.reporting.scan_chatbot import answer_question
     try:
         result = await answer_question(scan_id, body.message, history=body.history)
@@ -1471,13 +1380,6 @@ async def scan_chat(scan_id: str, body: ScanChatMessage):
 # ── BACKFILL — reflush live_results + report_data into vulnerabilities table ─
 @app.post("/api/scans/{scan_id}/backfill")
 def backfill_scan_findings(scan_id: str):
-    """Re-run VulnRepo.bulk_insert on every finding present in live_results /
-    recon_data / report_data for this scan, then extract embedded credentials
-    from finding evidence into post_exploit_data + auth_bypasses.
-
-    Use case: an earlier scan wrote findings to live_results (the raw stream)
-    but too-aggressive finding_uid dedup dropped rows during persist. Under
-    the current (relaxed) dedup, backfill recovers them without a re-scan."""
     try:
         from core.database.pg_store import (LiveDataRepo, VulnRepo, ReconRepo,
             DatabaseManager, AuthBypassRepo)
@@ -1553,10 +1455,6 @@ def backfill_scan_findings(scan_id: str):
 # ── LIVE AGENTS — per-agent card view of parallel work in progress ─────────
 @app.get("/api/scans/{scan_id}/agents/live")
 def list_live_agents(scan_id: str):
-    """Per-agent live view: one row per parallel sub-task (subdomain scan,
-    OSINT sub-phase, expert probe, cred-chain executor). Each row carries
-    status/current_tool/current_step/steps_taken/findings_count/cost so the
-    UI can render a card per agent, updating in place."""
     try:
         rows = LiveAgentRepo.list_by_scan(scan_id) or []
         counts = LiveAgentRepo.counts_by_scan(scan_id) or {}
@@ -1575,9 +1473,6 @@ def list_live_agents(scan_id: str):
 # ── AUTH BYPASSES / "Access Gained" (SQLi bypass, mass-assign, cred replay) ──
 @app.get("/api/scans/{scan_id}/auth-bypasses")
 def list_auth_bypasses(scan_id: str):
-    """Every successful auth bypass / login during this scan — the payload
-    that worked, the captured token, and a proof-of-entry response snippet.
-    Rendered as the 'Access Gained' panel in the UI."""
     try:
         rows = AuthBypassRepo.get_by_scan(scan_id) or []
         # Never return the raw token in full to the browser — only preview.
@@ -1595,10 +1490,6 @@ def list_auth_bypasses(scan_id: str):
 # ── SCAN ARTIFACTS (PoC, screenshots, SARIF, nuclei templates, canonical) ──
 @app.get("/api/scans/{scan_id}/artifacts")
 def list_scan_artifacts(scan_id: str, kind: str = ""):
-    """List every artifact captured for a scan (metadata only, no content).
-
-    Optionally filter by `kind` (e.g. `poc_python`, `screenshot`, `sarif`,
-    `nuclei_template`, `canonical_summary`, `canonical_markdown`)."""
     try:
         rows = ScanArtifactRepo.list_by_scan(scan_id, kind=kind or None)
         # Strip binary; the content endpoint serves it
@@ -1611,11 +1502,6 @@ def list_scan_artifacts(scan_id: str, kind: str = ""):
 
 @app.get("/api/scans/{scan_id}/artifacts/{artifact_id}")
 def get_scan_artifact(scan_id: str, artifact_id: int, download: bool = False):
-    """Return one artifact's raw content with the right MIME type.
-
-    Text artefacts (poc_*, sarif, canonical_*, nuclei_template) are returned
-    as UTF-8. Binary (screenshots) are returned as bytes with their mime.
-    Pass `?download=true` to get a Content-Disposition attachment header."""
     from fastapi.responses import Response
     try:
         row = ScanArtifactRepo.get(artifact_id)
@@ -1635,8 +1521,6 @@ def get_scan_artifact(scan_id: str, artifact_id: int, download: bool = False):
 
 @app.get("/api/scans/{scan_id}/pocs")
 def get_scan_pocs(scan_id: str):
-    """Return all PoC artefacts (Python + Bash + Markdown) inline as strings
-    so the UI can render them without a second fetch."""
     try:
         rows = ScanArtifactRepo.list_by_scan(scan_id)
         pocs = {}
@@ -1663,7 +1547,6 @@ def get_scan_pocs(scan_id: str):
 
 @app.get("/api/scans/{scan_id}/screenshots")
 def list_scan_screenshots(scan_id: str):
-    """List screenshot artefacts. Use `/artifacts/{id}` to fetch the PNG bytes."""
     try:
         rows = ScanArtifactRepo.list_by_scan(scan_id, kind="screenshot")
         return {"scan_id": scan_id, "count": len(rows), "screenshots": rows}
@@ -1673,7 +1556,6 @@ def list_scan_screenshots(scan_id: str):
 
 @app.get("/api/scans/{scan_id}/tool-outputs")
 def get_tool_outputs(scan_id: str, grouped: bool = False):
-    """Per-tool raw stdout/stderr for a scan — shows what each tool produced."""
     try:
         from core.database.pg_store import ToolOutputRepo
         rows = ToolOutputRepo.list_by_scan(scan_id)
@@ -1712,7 +1594,6 @@ def get_vulnerabilities(scan_id: str):
 
 @app.get("/api/scans/{scan_id}/activity")
 def get_activity_log(scan_id: str, limit: int = 500):
-    """Agent activity timeline — read-only log of what the agent did, how, and the output."""
     try:
         from core.reporting.agent_activity import get_activity_log
         return get_activity_log().get(scan_id, limit)
@@ -1729,21 +1610,17 @@ def _review_queue():
 
 @app.get("/api/review-queue")
 def review_queue_all(limit: int = 200):
-    """Everything the agent attempted, newest first (successes + manual follow-ups)."""
     q = _review_queue()
     return {"summary": q.summary(), "items": q.all(limit)}
 
 
 @app.get("/api/review-queue/successes")
 def review_queue_successes(limit: int = 200):
-    """Objectives the agent actually exploited — ready for a human to verify/showcase."""
     return {"items": _review_queue().successes(limit)}
 
 
 @app.get("/api/review-queue/manual")
 def review_queue_manual(limit: int = 200):
-    """Objectives the agent could NOT exploit — for a human to pentest manually,
-    with what was tried and suggested next steps."""
     return {"items": _review_queue().manual_followups(limit)}
 
 
@@ -1753,7 +1630,6 @@ class ReviewResolve(BaseModel):
 
 @app.post("/api/review-queue/{record_id}/resolve")
 def review_queue_resolve(record_id: str, body: ReviewResolve):
-    """Mark a manual follow-up as handled by the human."""
     ok = _review_queue().resolve(record_id, note=body.note)
     if not ok:
         raise HTTPException(status_code=404, detail="review record not found")
@@ -1829,7 +1705,6 @@ def get_stats():
 
 @app.get("/api/scans/{scan_id}/report")
 def download_report(scan_id: str):
-    """Return the full JSON report for download from PostgreSQL."""
     scan = ScanRepo.get(scan_id)
     if not scan:
         raise HTTPException(404, "Scan not found")
@@ -1914,10 +1789,6 @@ def _resolve_log_file(job_id: str) -> Path:
 
 @app.get("/api/scans/job/{job_id}/logs")
 def get_scan_logs(job_id: str, tail: int = 100):
-    """Return the tail of a scan's execution log.
-    Reads from Postgres (`scan_artifacts.kind='scan_log'`) first — the log is
-    flushed there at scan-end — falling back to the live tempfile while the
-    scan is still running."""
     try:
         raw = _read_scan_log(job_id)
         if not raw:
@@ -1933,7 +1804,6 @@ def get_scan_logs(job_id: str, tail: int = 100):
 
 @app.post("/api/scans/job/{job_id}/stop")
 def stop_scan(job_id: str):
-    """Write a stop signal file so the brain exits after the current phase."""
     target = None
 
     if job_id in _active_scans:
@@ -1955,7 +1825,6 @@ def stop_scan(job_id: str):
 
 @app.post("/api/scans/job/{job_id}/cancel")
 def cancel_scan(job_id: str):
-    """Cancel and dismiss a scan — kills the process, flushes partial log to DB, cleans up."""
     if job_id in _active_scans:
         job = _active_scans[job_id]
         target = job.get("target", "")
@@ -2011,7 +1880,6 @@ def cancel_scan(job_id: str):
 
 @app.post("/api/scans/kill-all")
 def kill_all_scans():
-    """Emergency kill switch — terminate all running scan processes and mark them cancelled."""
     killed = []
     for job_id, job in list(_active_scans.items()):
         pid = job.get("pid")
@@ -2054,7 +1922,6 @@ class ResumeRequest(BaseModel):
 
 @app.post("/api/scans/resume")
 def resume_scan(body: ResumeRequest):
-    """Resume a previously stopped scan from its last checkpoint."""
     from core.orchestration.checkpointer import Checkpointer
     cp = Checkpointer()
     cp_path = cp.get_latest_checkpoint(body.target)
@@ -2093,8 +1960,6 @@ def resume_scan(body: ResumeRequest):
 
 @app.get("/api/scans/job/{job_id}/logs-full")
 def get_scan_logs_full(job_id: str):
-    """Return the complete scan log (from Postgres — falls back to tempfile
-    if the scan is still running and hasn't flushed yet)."""
     raw = _read_scan_log(job_id)
     if not raw:
         return {"lines": [], "total": 0}
@@ -2105,7 +1970,6 @@ def get_scan_logs_full(job_id: str):
 
 @app.get("/api/scans/job/{job_id}/logs-download")
 def download_scan_logs(job_id: str):
-    """Download the complete scan log as a file. Served straight from Postgres."""
     from fastapi.responses import Response
     raw = _read_scan_log(job_id)
     if not raw:
@@ -2119,7 +1983,6 @@ def download_scan_logs(job_id: str):
 # ── WebSocket Live Feed ────────────────────────────────────────────────────
 
 class ConnectionManager:
-    """Manages WebSocket connections for live scan updates."""
 
     def __init__(self):
         self.active: dict = {}  # job_id -> set of WebSocket connections
@@ -2163,7 +2026,6 @@ _ws_push_tasks: dict = {}
 
 
 async def _ws_push_loop(job_id: str):
-    """Push progress/results to WS subscribers every 2 seconds."""
     import asyncio as _aio
     prev_hash = ""
     while ws_manager.has_subscribers(job_id):
@@ -2219,15 +2081,6 @@ async def _ws_push_loop(job_id: str):
 
 @app.websocket("/ws/scan/{job_id}")
 async def ws_scan_feed(websocket: WebSocket, job_id: str):
-    """WebSocket endpoint for real-time scan updates.
-
-    Auth: because @app.websocket bypasses the HTTP middleware, we authenticate
-    the WS handshake ourselves. The client must present the API key via one of:
-      1) a `Sec-WebSocket-Protocol: api-key,<key>` subprotocol pair, or
-      2) a `X-API-Key` header (works with clients that support custom headers).
-    We use constant-time comparison. If auth fails we close with code 4401 so
-    the frontend can surface an "unauthorized" state instead of a silent reject.
-    """
     import asyncio as _aio
 
     # Extract client-provided key
@@ -2272,7 +2125,6 @@ async def ws_scan_feed(websocket: WebSocket, job_id: str):
 
 @app.get("/api/canonical/summary")
 def get_canonical_summary(scan_id: Optional[str] = None):
-    """Return the canonical summary report if available."""
     summary_path = REPORTS_DIR / "canonical_summary.json"
     if summary_path.exists():
         with open(summary_path, "r", encoding="utf-8") as f:
@@ -2282,7 +2134,6 @@ def get_canonical_summary(scan_id: Optional[str] = None):
 
 @app.get("/api/canonical/coverage")
 def get_canonical_coverage():
-    """Return coverage matrix state from the latest canonical report."""
     summary_path = REPORTS_DIR / "canonical_summary.json"
     if summary_path.exists():
         with open(summary_path, "r", encoding="utf-8") as f:
@@ -2293,7 +2144,6 @@ def get_canonical_coverage():
 
 @app.get("/api/canonical/convergence")
 def get_canonical_convergence():
-    """Return convergence status from the latest canonical report."""
     summary_path = REPORTS_DIR / "canonical_summary.json"
     if summary_path.exists():
         with open(summary_path, "r", encoding="utf-8") as f:
@@ -2304,7 +2154,6 @@ def get_canonical_convergence():
 
 @app.get("/api/canonical/attack-surface")
 def get_canonical_attack_surface():
-    """Return the canonical attack surface discovery summary."""
     summary_path = REPORTS_DIR / "canonical_summary.json"
     if summary_path.exists():
         with open(summary_path, "r", encoding="utf-8") as f:
@@ -2315,7 +2164,6 @@ def get_canonical_attack_surface():
 
 @app.get("/api/canonical/learning")
 def get_canonical_learning():
-    """Return structured learning summary."""
     summary_path = REPORTS_DIR / "canonical_summary.json"
     if summary_path.exists():
         with open(summary_path, "r", encoding="utf-8") as f:
@@ -2326,7 +2174,6 @@ def get_canonical_learning():
 
 @app.get("/api/canonical/health")
 def get_canonical_health():
-    """Return target health status."""
     summary_path = REPORTS_DIR / "canonical_summary.json"
     if summary_path.exists():
         with open(summary_path, "r", encoding="utf-8") as f:
@@ -2337,7 +2184,6 @@ def get_canonical_health():
 
 @app.get("/api/coverage/tracker")
 def get_coverage_tracker():
-    """Return honest per-test coverage tracking (Strix Pattern #2)."""
     tracker_path = REPORTS_DIR / "coverage_tracker.json"
     if tracker_path.exists():
         with open(tracker_path, "r", encoding="utf-8") as f:
@@ -2347,7 +2193,6 @@ def get_coverage_tracker():
 
 @app.get("/api/coverage/honest")
 def get_honest_coverage():
-    """Return honest coverage summary instead of inflated metrics."""
     tracker_path = REPORTS_DIR / "coverage_tracker.json"
     if tracker_path.exists():
         with open(tracker_path, "r", encoding="utf-8") as f:
@@ -2358,7 +2203,6 @@ def get_honest_coverage():
 
 @app.get("/api/skills")
 def list_skills():
-    """Return loaded testing skills metadata."""
     try:
         from core.skills import SkillLoader
         loader = SkillLoader()
@@ -2372,7 +2216,6 @@ def list_skills():
 
 @app.get("/api/scans/{scan_id}/sarif")
 def export_sarif(scan_id: str):
-    """Export scan findings in SARIF 2.1.0 format."""
     scan = ScanRepo.get(scan_id)
     if not scan:
         raise HTTPException(404, f"Scan {scan_id} not found")
@@ -2385,7 +2228,6 @@ def export_sarif(scan_id: str):
 
 @app.get("/api/scans/{scan_id}/gitlab-dast")
 def export_gitlab_dast(scan_id: str):
-    """Export scan findings in GitLab DAST report format."""
     scan = ScanRepo.get(scan_id)
     if not scan:
         raise HTTPException(404, f"Scan {scan_id} not found")
@@ -2686,8 +2528,6 @@ def get_dedup_stats():
 # ── Data Transparency ────────────────────────────────────────────────────
 @app.get("/api/scans/{scan_id}/collected-data")
 def get_collected_data(scan_id: str):
-    """Returns a summary of ALL data collected and stored for a scan.
-    Every DB table that holds scan-scoped data is queried here."""
     out = {"scan_id": scan_id, "tables": {}}
     try:
         scan = ScanRepo.get(scan_id)
@@ -2759,7 +2599,6 @@ def get_collected_data(scan_id: str):
 
 @app.get("/api/scans/{scan_id}/exploit-reports")
 def get_exploit_reports(scan_id: str):
-    """Return parsed exploit markdown reports from reports/exploits/."""
     exploit_dir = REPORTS_DIR / "exploits"
     if not exploit_dir.exists():
         return []
@@ -2772,7 +2611,6 @@ def get_exploit_reports(scan_id: str):
 
 
 def _parse_exploit_md(content: str, filename: str) -> dict:
-    """Parse an exploit markdown report into structured data."""
     result = {"filename": filename, "raw": content}
     lines = content.split("\n")
     for line in lines:
@@ -2822,14 +2660,6 @@ def _parse_exploit_md(content: str, filename: str) -> dict:
 
 @app.get("/api/evidence/{filename}")
 def get_evidence_file(filename: str):
-    """Serve evidence screenshots/files from reports/evidence/.
-
-    Path safety: we require the filename to be a single path component with no
-    `..`, no separators, and no null bytes, then resolve and enforce that the
-    result lives inside the evidence directory. The previous `^[\\w\\-\\.]+$`
-    regex allowed `..` (the dot is in the character class), which was a path
-    traversal vulnerability.
-    """
     import re
     if not filename or "\x00" in filename:
         raise HTTPException(400, "Invalid filename")
@@ -2859,7 +2689,6 @@ def get_evidence_file(filename: str):
 
 @app.get("/api/evidence")
 def list_evidence():
-    """List all evidence files."""
     evidence_dir = REPORTS_DIR / "evidence"
     if not evidence_dir.exists():
         return []
@@ -2869,7 +2698,6 @@ def list_evidence():
 
 @app.get("/api/scans/{scan_id}/executive-summary")
 def get_executive_summary(scan_id: str):
-    """Return the executive summary and full report metadata."""
     scan = ScanRepo.get(scan_id)
     if not scan:
         raise HTTPException(404, "Scan not found")
@@ -2921,10 +2749,6 @@ class RAGURLIngest(BaseModel):
     @field_validator("url")
     @classmethod
     def _v_url(cls, v: str) -> str:
-        """Accept only http/https URLs, and refuse hostnames that resolve to
-        loopback, private, link-local, or cloud-metadata addresses. Without
-        this, this endpoint is an SSRF sink pointing at `169.254.169.254` and
-        internal service IPs."""
         v = (v or "").strip()
         if not v:
             raise ValueError("url required")
@@ -2972,9 +2796,6 @@ def _get_rag():
 
 
 async def _ensure_rag():
-    """Return the RAG pipeline, initializing it on first use. Ingest/query
-    endpoints call this so they work immediately after a server start without
-    requiring a prior scan or a manual /api/rag/init."""
     from core.rag.pipeline import get_rag, SecurityRAGPipeline
     rag = get_rag()
     if rag:
@@ -3005,7 +2826,6 @@ def _rag_progress_set(job_id: str, **fields) -> None:
 
 
 def _rag_progress_cb(job_id: str):
-    """Build a (done,total) callback that records progress for job_id."""
     def _cb(done: int, total: int):
         pct = int(done * 100 / total) if total else 0
         _rag_progress_set(job_id, done=done, total=total, percent=pct,
@@ -3015,7 +2835,6 @@ def _rag_progress_cb(job_id: str):
 
 @app.get("/api/rag/ingest/progress/{job_id}")
 def rag_ingest_progress(job_id: str):
-    """Poll ingestion progress for a job started with ?job_id=<id>."""
     p = _RAG_PROGRESS.get(job_id)
     if not p:
         return {"job_id": job_id, "status": "unknown", "percent": 0, "done": 0, "total": 0}
@@ -3045,16 +2864,6 @@ async def rag_stats():
 
 @app.post("/api/rag/ingest/file")
 async def rag_ingest_file(file_path: str = "", metadata: str = "{}"):
-    """Ingest a local file. Pass file_path as query param.
-
-    Path safety: the file must live inside one of the operator-approved
-    ingestion roots (env `RAG_INGEST_ROOTS`, colon/`;`-separated). Defaults to
-    a single directory under the repo (`data/rag_ingest`). Without this, this
-    endpoint was an arbitrary-file-read primitive (any authenticated caller
-    could ingest `/etc/passwd`, `.env`, or `.antigravity/secrets.enc` into the
-    vector store and query it back). File uploads should use
-    `/api/rag/ingest/uploaded` instead.
-    """
     if not file_path:
         raise HTTPException(status_code=400, detail="file_path required")
 
@@ -3113,11 +2922,6 @@ from fastapi import UploadFile, File, Form
 @app.post("/api/rag/ingest/uploaded")
 async def rag_ingest_uploaded(file: UploadFile = File(...), metadata: str = Form("{}"),
                               job_id: str = ""):
-    """Ingest an uploaded file (PDF, txt, md, html, csv, json).
-
-    Pass ?job_id=<id> to run in the background and poll
-    /api/rag/ingest/progress/{job_id} for a live percentage; without it the
-    call blocks and returns the result directly."""
     import tempfile
     rag = await _ensure_rag()
     suffix = Path(file.filename).suffix if file.filename else ".txt"
@@ -3215,7 +3019,6 @@ async def rag_ingest_url(body: RAGURLIngest, job_id: str = ""):
 
 @app.post("/api/rag/ingest/search")
 async def rag_ingest_search(body: RAGSearchIngest, job_id: str = ""):
-    """Search the web and ingest results into the knowledge base."""
     rag = await _ensure_rag()
     if job_id:
         _rag_progress_set(job_id, status="running", done=0, total=0, percent=0,
@@ -3241,7 +3044,6 @@ async def rag_ingest_search(body: RAGSearchIngest, job_id: str = ""):
 
 @app.post("/api/rag/query")
 async def rag_query(body: RAGQuery):
-    """Query the knowledge base for relevant documents."""
     rag = await _ensure_rag()
     docs = await rag.retrieve(
         body.query,
@@ -3288,13 +3090,6 @@ if _FRONTEND_DIR.exists():
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def _spa_fallback(full_path: str):
-        """Serve index.html for all non-API routes (SPA client-side routing).
-
-        Path safety: resolve the target and confirm it is inside `_FRONTEND_DIR`
-        before serving. Without this, `/foo/../../../etc/passwd` would escape.
-        Any escape or missing file falls back to index.html (React handles the
-        route client-side).
-        """
         try:
             _frontend_root = _FRONTEND_DIR.resolve()
             file = (_FRONTEND_DIR / full_path).resolve()

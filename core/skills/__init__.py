@@ -1,13 +1,3 @@
-"""
-Skill System — Modular Testing Methodology (Strix Pattern #1).
-
-Skills are Markdown files with YAML frontmatter that define HOW to test
-a vulnerability category. The LLM reads the skill content and follows
-the methodology instead of guessing payloads.
-
-Inspired by Strix's skills/ architecture: each skill is a standalone
-document that can be edited by non-engineers without touching Python.
-"""
 from __future__ import annotations
 
 import logging
@@ -110,7 +100,6 @@ class SkillLoader:
         return [s for s in self._cache.values() if s.category == category]
 
     def load_for_attack_type(self, attack_type: str) -> List[Skill]:
-        """Find skills whose attack_types list contains this type."""
         self._build_index()
         at_lower = attack_type.lower().replace("-", "_").replace(" ", "_")
         results = []
@@ -125,7 +114,6 @@ class SkillLoader:
         return results
 
     def format_for_prompt(self, skills: List[Skill], max_chars: int = 8000) -> str:
-        """Format skills into a prompt injection block for the LLM."""
         if not skills:
             return ""
         parts = ["## Testing Methodology (from loaded skills)\n"]

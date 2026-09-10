@@ -1,7 +1,3 @@
-"""
-Task state machine and deterministic task management.
-Framework owns task lifecycle, not LLM.
-"""
 
 import json
 import logging
@@ -14,12 +10,10 @@ logger = logging.getLogger(__name__)
 
 
 class TaskStateTransitionError(AutonomousPentestException):
-    """Invalid state transition attempted"""
     pass
 
 
 class Task:
-    """Task wrapper with state machine"""
     
     VALID_TRANSITIONS = {
         TaskStatus.CREATED: [TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.WAITING_DEPENDENCY, TaskStatus.BLOCKED],
@@ -45,7 +39,6 @@ class Task:
         self.max_retries = spec.max_retries or 3
         
     def transition_to(self, new_status: TaskStatus) -> bool:
-        """Deterministic state transition"""
         if new_status == self.status:
             return True
 
@@ -101,7 +94,6 @@ class Task:
 
 
 class TaskManager:
-    """Centralized task lifecycle and deduplication management"""
     
     def __init__(self):
         from core.memory.dedup_tracker import DedupTracker
@@ -109,7 +101,6 @@ class TaskManager:
         self.dedup_tracker = DedupTracker()
 
     def create_task(self, spec: TaskSpec) -> Task:
-        """Create new task"""
         import uuid
         if not spec.task_id:
             spec.task_id = str(uuid.uuid4())
@@ -126,13 +117,6 @@ class TaskManager:
         return task
     
     def get_or_create_task(self, spec: TaskSpec) -> Tuple[Task, bool]:
-        """
-        Deduplicates task creation by matching normalized task fingerprints.
-        Returns (task, is_new)
-
-        force_reexecute=True on the spec bypasses deduplication entirely and
-        always creates a new task (useful for explicit retries / re-scan).
-        """
         # Honour explicit re-execution flag — skip dedup entirely.
         if getattr(spec, 'force_reexecute', False):
             task = self.create_task(spec)
@@ -155,19 +139,16 @@ class TaskManager:
         return task, True
 
     def queue_task(self, task_id: str) -> Task:
-        """Queue task for execution"""
         task = self.get_task(task_id)
         task.transition_to(TaskStatus.QUEUED)
         return task
     
     def start_task(self, task_id: str) -> Task:
-        """Mark task as running"""
         task = self.get_task(task_id)
         task.transition_to(TaskStatus.RUNNING)
         return task
     
     def complete_task(self, task_id: str, result: Dict = None) -> Task:
-        """Mark task as completed"""
         task = self.get_task(task_id)
         task.transition_to(TaskStatus.COMPLETED)
         if result:
@@ -176,7 +157,6 @@ class TaskManager:
         return task
     
     def fail_task(self, task_id: str, error: str = "") -> Task:
-        """Mark task as failed"""
         task = self.get_task(task_id)
         task.error = error
         task.transition_to(TaskStatus.FAILED)
@@ -184,50 +164,37 @@ class TaskManager:
         return task
     
     def timeout_task(self, task_id: str) -> Task:
-        """Mark task as timed out"""
         task = self.get_task(task_id)
         task.transition_to(TaskStatus.TIMEOUT)
         return task
     
     def block_task(self, task_id: str, reason: str = "") -> Task:
-        """Mark task as blocked"""
         task = self.get_task(task_id)
         task.error = reason
         task.transition_to(TaskStatus.BLOCKED)
         return task
     
     def wait_on_dependency(self, task_id: str) -> Task:
-        """Mark task as waiting on dependency"""
         task = self.get_task(task_id)
         task.transition_to(TaskStatus.WAITING_DEPENDENCY)
         return task
     
     def get_task(self, task_id: str) -> Task:
-        """Retrieve task by ID"""
         if task_id not in self.tasks:
             raise KeyError(f"Task {task_id} not found")
         return self.tasks[task_id]
     
     def get_all_tasks(self) -> List[Task]:
-        """Get all tasks"""
         return list(self.tasks.values())
         
     def get_pending_tasks(self) -> List[Task]:
-        """Get tasks that are in a pending state (queued or waiting)"""
         from core.common.schemas import TaskStatus
         return [t for t in self.tasks.values() if t.status in (TaskStatus.QUEUED, TaskStatus.WAITING_DEPENDENCY)]
     
     def get_tasks_by_status(self, status: TaskStatus) -> List[Task]:
-        """Get tasks filtered by status"""
         return [t for t in self.tasks.values() if t.status == status]
     
     def generate_task_signature(self, spec: TaskSpec) -> str:
-        """Generate deterministic signature based on normalized capability, target, parameters, and tools.
-        
-        Signature formula: hash(capability + target_url_or_ip + parameters + dynamic_tools)
-        This ensures that tasks on subdomains or distinct targets (e.g. sub.speshway.com vs speshway.com)
-        are NOT incorrectly deduplicated.
-        """
         import re
         import hashlib
         
@@ -275,7 +242,6 @@ class TaskManager:
         return hashlib.sha256(sig_str.encode()).hexdigest()[:16]
     
     def find_duplicate_task(self, spec: TaskSpec) -> Optional[Task]:
-        """Check if equivalent task exists"""
         sig = self.generate_task_signature(spec)
         with self.dedup_tracker._lock:
             if sig in self.dedup_tracker._completed_tasks:
@@ -292,7 +258,6 @@ class TaskManager:
         return None
     
     def register_task_signature(self, spec: TaskSpec, task_id: str) -> None:
-        """Register task signature for deduplication"""
         sig = self.generate_task_signature(spec)
         target = spec.inputs.get("target") or spec.inputs.get("url") or spec.inputs.get("domain") or spec.inputs.get("host") or ""
         self.dedup_tracker.register_task(
@@ -303,21 +268,18 @@ class TaskManager:
         )
     
     def should_create_task(self, spec: TaskSpec) -> Tuple[bool, Optional[str]]:
-        """Determine if task should be created"""
         duplicate = self.find_duplicate_task(spec)
         if duplicate:
             return (False, f"Duplicate of task {duplicate.spec.task_id}")
         return (True, None)
     
     def get_dependency_graph(self) -> Dict[str, List[str]]:
-        """Build dependency graph for all tasks"""
         graph = {}
         for task in self.tasks.values():
             graph[task.spec.task_id] = task.spec.dependencies
         return graph
     
     def get_blocked_by(self, task_id: str) -> List[str]:
-        """Get IDs of tasks that wait for this task"""
         task = self.get_task(task_id)
         return [
             t.spec.task_id for t in self.tasks.values()
@@ -325,7 +287,6 @@ class TaskManager:
         ]
     
     def check_dependencies_satisfied(self, task_id: str) -> bool:
-        """Check if all dependencies of task are completed"""
         task = self.get_task(task_id)
         for dep_id in task.spec.dependencies:
             if dep_id not in self.tasks:
@@ -337,7 +298,6 @@ class TaskManager:
         return True
     
     def check_dependencies_failed(self, task_id: str) -> bool:
-        """Check if any dependency failed"""
         task = self.get_task(task_id)
         for dep_id in task.spec.dependencies:
             if dep_id in self.tasks:
@@ -347,7 +307,6 @@ class TaskManager:
         return False
     
     def to_dict(self) -> Dict:
-        """Serialize all tasks"""
         return {
             task_id: task.to_dict()
             for task_id, task in self.tasks.items()

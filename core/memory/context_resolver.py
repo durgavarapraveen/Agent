@@ -1,7 +1,3 @@
-"""
-Context resolver - resolve semantic context requirements.
-Agents request context semantically, framework resolves from knowledge store.
-"""
 
 import logging
 from typing import Dict, List, Any, Optional
@@ -11,13 +7,11 @@ logger = logging.getLogger(__name__)
 
 
 class ContextResolver:
-    """Resolve execution context from knowledge store"""
     
     def __init__(self, knowledge_store: KnowledgeStore):
         self.knowledge = knowledge_store
     
     def resolve_hosts(self, authorized_scope: List[str]) -> List[Dict[str, Any]]:
-        """Get all known hosts within authorized scope"""
         hosts = self.knowledge.get_by_type("host")
         
         # Filter to authorized scope
@@ -37,7 +31,6 @@ class ContextResolver:
         ]
     
     def resolve_ports(self, host: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Get known ports"""
         ports = self.knowledge.get_by_type("port")
         
         if host:
@@ -54,7 +47,6 @@ class ContextResolver:
         ]
     
     def resolve_services(self, host: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Get identified services"""
         services = self.knowledge.get_by_type("service")
         
         if host:
@@ -71,7 +63,6 @@ class ContextResolver:
         ]
     
     def resolve_technologies(self, endpoint: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Get identified technologies"""
         techs = self.knowledge.get_by_type("technology")
         
         if endpoint:
@@ -88,7 +79,6 @@ class ContextResolver:
         ]
     
     def resolve_tls_info(self, endpoint: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Get TLS certificate information"""
         certs = self.knowledge.get_by_type("tls_cert")
         
         if endpoint:
@@ -105,7 +95,6 @@ class ContextResolver:
         ]
     
     def resolve_endpoints(self) -> List[Dict[str, Any]]:
-        """Get known HTTP endpoints"""
         endpoints = self.knowledge.get_by_type("http_endpoint")
         
         return [
@@ -121,10 +110,6 @@ class ContextResolver:
     
     def resolve_context(self, context_requirements: List[str], 
                        authorized_scope: List[str]) -> Dict[str, Any]:
-        """
-        Resolve multiple context requirements.
-        Called by scheduler to prepare context for agent.
-        """
         context = {}
         
         for req in context_requirements:
@@ -148,7 +133,6 @@ class ContextResolver:
         return context
     
     def _is_in_scope(self, target: str, allowed: str) -> bool:
-        """Simple scope matching"""
         if allowed == "*":
             return True
         if target == allowed:
@@ -158,7 +142,6 @@ class ContextResolver:
         return False
     
     def get_context_summary(self) -> Dict[str, Any]:
-        """Summary of available context"""
         return {
             "hosts_known": len(self.knowledge.get_by_type("host")),
             "ports_known": len(self.knowledge.get_by_type("port")),

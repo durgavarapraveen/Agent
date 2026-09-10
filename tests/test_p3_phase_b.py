@@ -1,11 +1,3 @@
-"""P3 Phase B — one canonical endpoint identity across ALL stores.
-
-EndpointInventoryV2 (the projection feeding SecurityContextV2) used to dedup by
-raw ``method:url`` and AttackSurfaceGraph by whatever ``endpoint_id`` a feed
-happened to carry, so both could report a different unique endpoint count than
-the authoritative stores for the same URLs under trivial spelling differences.
-These lock every store to the single ``canonical_endpoint_key`` / ``canonical_id``.
-"""
 import pytest
 
 from core.domain.endpoint import Endpoint, canonical_endpoint_key

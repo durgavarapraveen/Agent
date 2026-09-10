@@ -62,23 +62,6 @@ class SecretManager:
         return self._key_version
 
     def rotate_key(self, new_key: bytes) -> None:
-        """Atomic key rotation.
-
-        Previously this decrypted+re-encrypted every entry in place with no
-        version marker; a crash mid-rotation left the on-disk file half-
-        encrypted with the OLD key and half with the NEW key, which the
-        next `_load` could not fully decrypt.
-
-        The new flow:
-          1. Write the freshly-re-encrypted store to `<path>.tmp` with the
-             NEW key and the incremented version marker.
-          2. Move `<path>` → `<path>.prev` (single-step rename).
-          3. Move `<path>.tmp` → `<path>`.
-          4. Only on success do we drop the `.prev` backup.
-
-        On any failure the caller sees the exception and can consult the
-        `.prev` file; the runtime state stays on the old key.
-        """
         new_cache: Dict[str, bytes] = {}
         for k, encrypted_val in self._cache.items():
             plaintext = decrypt(encrypted_val, self._key)

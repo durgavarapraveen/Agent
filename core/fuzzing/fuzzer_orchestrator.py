@@ -44,9 +44,6 @@ class FuzzerOrchestrator:
             )
 
     def run_fuzzing(self, test_type: str, endpoint: Endpoint, params: Dict[str, Any]) -> ToolResult:
-        """
-        Orchestrates tool execution with automatic fallback chain logic.
-        """
         tools = self.get_applicable_tools(test_type)
         if not tools:
             logger.warning(f"No tools registered for test type: {test_type}")

@@ -1,18 +1,3 @@
-"""Adaptive per-target memory.
-
-Remembers, across scans of the SAME target, what worked so subsequent scans
-start with a warm recipe rather than re-discovering from scratch:
-
-  - Which login endpoint responded 200 with a JWT
-  - Which JSON body shape ({"email":...} vs {"username":...} vs form) succeeded
-  - Which WAF was detected (so we start with matching evasion tampers)
-  - Which payload families were BLOCKED (skip on next run)
-  - Which endpoints and subdomains we already know exist
-  - Which technologies were fingerprinted
-
-Loaded at scan start (`load_intel(target)`), updated post-scan
-(`record_scan_intel(target, ctx)`).
-"""
 from __future__ import annotations
 import json
 import logging
@@ -31,10 +16,6 @@ def _canonical_target(t: str) -> str:
 
 
 def load_intel(target: str) -> Dict[str, Any]:
-    """Load prior intel for this target — call this at scan start.
-
-    Returns dict with working_login_endpoints, waf_detected, known_endpoints,
-    known_subdomains, known_tech, prior_scan_ids. Empty dict if first scan."""
     from core.database.pg_store import DatabaseManager
     import psycopg2.extras
     key = _canonical_target(target)
@@ -54,7 +35,6 @@ def load_intel(target: str) -> Dict[str, Any]:
 
 
 def record_scan_intel(target: str, ctx, scan_id: str) -> None:
-    """Extract what worked from this ctx and merge into target_intel."""
     from core.database.pg_store import DatabaseManager, AuthBypassRepo
     key = _canonical_target(target)
     if not key:
@@ -135,21 +115,6 @@ def record_scan_intel(target: str, ctx, scan_id: str) -> None:
 
 async def verify_and_refresh(ctx, target: str,
                                 fingerprint_threshold_days: int = 3) -> Dict[str, Any]:
-    """Prior intel goes stale — targets change. This runs AFTER prime_ctx and:
-
-      1. **Fingerprint check** on the base URL: compare server header +
-         status + tech stack vs stored. If materially different (server
-         changed, framework changed, IP changed), mark intel STALE →
-         invalidate primed endpoints/subs and force full re-discovery.
-         Prevents priming from a migrated target.
-      2. **Liveness re-check** on primed endpoints (parallel HEAD in
-         batches): 404/410/5xx → drop from ctx.endpoints (was removed).
-         200/301/302/401/403 → keep (still real).
-      3. **Never trust prior findings** — those are re-run every scan
-         through live tests; only DISCOVERY hints are reused.
-
-    Returns stats dict: fingerprint_changed, endpoints_dropped, endpoints_kept.
-    """
     import httpx, asyncio as _aio
     from urllib.parse import urlparse
     stats = {"fingerprint_changed": False, "endpoints_dropped": 0,
@@ -269,10 +234,6 @@ async def verify_and_refresh(ctx, target: str,
 
 
 def prime_ctx(ctx, target: str) -> Dict[str, Any]:
-    """Warm-start a fresh ctx with prior intel — call at scan start.
-
-    Seeds ctx.endpoints/subdomains/technologies with prior known values so
-    the crawler starts from what we already know instead of re-discovering."""
     intel = load_intel(target)
     if not intel:
         return {}

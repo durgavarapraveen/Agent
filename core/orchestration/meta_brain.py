@@ -1,7 +1,3 @@
-"""
-MetaBrain - Multi-target parallel pentesting orchestrator.
-Runs multiple CentralBrain instances concurrently with resource limits.
-"""
 
 import asyncio
 import json
@@ -12,21 +8,14 @@ from typing import Dict, List
 
 from core.orchestration.central_brain import CentralBrain
 from core.common.config import get_config
+from core.observability.correlation import CorrelationContext
+from core.security.tenant_isolation import TenantContext
+from core.validation.readiness_gate import AutonomousReadinessGate, ReadinessStatus
 
 logger = logging.getLogger(__name__)
 
 
 class MetaBrain:
-    """
-    Orchestrates pentesting across multiple targets simultaneously.
-
-    Usage:
-        meta = MetaBrain(["app1.com", "app2.com", "app3.com"])
-        results = await meta.run_all()
-
-    Config (.env):
-        MAX_PARALLEL_TARGETS=3
-    """
 
     def __init__(self, targets: List[str], auth_document: str = ""):
         self.targets = targets
@@ -40,7 +29,6 @@ class MetaBrain:
         self.start_time = datetime.now()
 
     async def run_all(self) -> Dict[str, Dict]:
-        """Run pentest on all targets with concurrency limit"""
         logger.info("=" * 60)
         logger.info("META BRAIN — MULTI-TARGET PENTESTING")
         logger.info("=" * 60)
@@ -50,30 +38,44 @@ class MetaBrain:
             logger.info(f"  [{i}] {t}")
         logger.info("=" * 60)
 
+        # Pre-flight readiness check across all targets
+        try:
+            gate = AutonomousReadinessGate()
+            eval_result = gate.evaluate_readiness()
+            logger.info(f"[MetaBrain] Pre-flight readiness status: {eval_result.status.value} (score={eval_result.readiness_score:.1f}%)")
+        except Exception as _ge:
+            logger.debug(f"[MetaBrain] Readiness gate check skipped: {_ge}")
+
         semaphore = asyncio.Semaphore(self.max_parallel)
 
         async def run_one(target: str) -> Dict:
             async with semaphore:
                 logger.info(f"\n>>> STARTING: {target}")
-                brain = CentralBrain(target)
-                try:
-                    await brain.run(auth_document=self.auth_document)
-                    return {
-                        "status": "complete",
-                        "target": target,
-                        "vulnerabilities": len(brain.ctx.vulnerabilities),
-                        "exploits": len(brain.ctx.exploit_results),
-                        "agents_used": len(brain.ctx.agents_spawned),
-                        "vulns": brain.ctx.vulnerabilities,
-                        "chains": brain.ctx.attack_chains,
-                    }
-                except Exception as e:
-                    logger.error(f"Target {target} failed: {e}")
-                    return {
-                        "status": "failed",
-                        "target": target,
-                        "error": str(e),
-                    }
+                tenant_id = target.replace("https://", "").replace("http://", "").split("/")[0].replace(":", "_")
+                with TenantContext(tenant_id=tenant_id):
+                    with CorrelationContext():
+                        brain = CentralBrain(target)
+                        try:
+                            if hasattr(brain, "run"):
+                                await brain.run(auth_document=self.auth_document)
+                            else:
+                                await brain.run_main_loop(auth_document=self.auth_document)
+                            return {
+                                "status": "complete",
+                                "target": target,
+                                "vulnerabilities": len(brain.ctx.vulnerabilities),
+                                "exploits": len(brain.ctx.exploit_results),
+                                "agents_used": len(brain.ctx.agents_spawned),
+                                "vulns": brain.ctx.vulnerabilities,
+                                "chains": brain.ctx.attack_chains,
+                            }
+                        except Exception as e:
+                            logger.error(f"Target {target} failed: {e}")
+                            return {
+                                "status": "failed",
+                                "target": target,
+                                "error": str(e),
+                            }
 
         # Run all targets with concurrency limit
         tasks = [run_one(t) for t in self.targets]
@@ -93,7 +95,6 @@ class MetaBrain:
         return self.results
 
     async def _generate_batch_report(self):
-        """Generate combined report across all targets"""
         duration = (datetime.now() - self.start_time).total_seconds()
 
         total_vulns = sum(

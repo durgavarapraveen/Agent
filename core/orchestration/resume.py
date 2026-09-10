@@ -1,21 +1,3 @@
-"""Idempotent scan resume from checkpoint.
-
-After every completed phase we snapshot the scan's SharedContext into
-`.antigravity/checkpoints/<scan_id>.enc` via `SecureCheckpoint`. On crash-
-recovery boot, `ScanRepo.bootstrap_recover` flips the orphaned scan row to
-`failed`; the operator then re-runs `python main.py --resume --scan-id <id>`
-and this module fast-forwards through the phases that were already checkpointed.
-
-Contract:
-  save_checkpoint(scan_id, ctx, phase, phase_index)  — after each phase
-  load_checkpoint(scan_id) -> (ctx_dict, next_phase_index)  — on resume
-  clear_checkpoint(scan_id)                          — on successful finish
-
-Every operation is best-effort; a checkpoint I/O failure never blocks the
-running scan. The checkpoint is encrypted with the current `ENCRYPTION_KEY`
-and carries a `key_version` marker so key rotation surfaces a clear error
-rather than opaque decrypt failure.
-"""
 from __future__ import annotations
 
 import logging
@@ -39,9 +21,6 @@ def _path_for(scan_id: str) -> Path:
 
 
 def _serialise_ctx(ctx: Any) -> Dict[str, Any]:
-    """Convert the SharedContext to a JSON-safe dict for checkpointing.
-    Only picks small, deterministic fields — no LLM histories, no attack
-    graphs. On resume the graph is rebuilt from the persisted findings."""
     def _get(name):
         v = getattr(ctx, name, None)
         if v is None:
@@ -63,7 +42,6 @@ def _serialise_ctx(ctx: Any) -> Dict[str, Any]:
 
 
 def save_checkpoint(scan_id: str, ctx: Any, phase: str, phase_index: int) -> bool:
-    """Write a checkpoint after `phase` completes. Returns True on success."""
     try:
         state = {
             "scan_id": scan_id,
@@ -82,9 +60,6 @@ def save_checkpoint(scan_id: str, ctx: Any, phase: str, phase_index: int) -> boo
 
 
 def load_checkpoint(scan_id: str) -> Optional[Tuple[Dict[str, Any], int]]:
-    """Return `(ctx_dict, next_phase_index)` when a checkpoint exists and
-    decrypts successfully; None otherwise. Any error is logged and treated
-    as "no checkpoint" so a fresh scan starts."""
     p = _path_for(scan_id)
     if not p.exists():
         return None

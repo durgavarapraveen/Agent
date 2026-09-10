@@ -1,11 +1,3 @@
-"""
-P1-3: classify assets before expensive scanning.
-
-Every discovered subdomain/host is classified so the orchestrator can
-choose the right workflow: full application testing for a live app,
-lightweight checks for docs, redirect checks for redirectors, takeover
-validation for dead hosts, etc.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -71,7 +63,6 @@ class AssetProfile:
 
 
 def classify(profile: AssetProfile) -> AssetClass:
-    """Heuristic asset classifier. Cheap: no additional network calls."""
     sc = int(profile.status_code or 0)
     body = (profile.body_sample or "").lower()
     ct = (profile.content_type or "").lower()

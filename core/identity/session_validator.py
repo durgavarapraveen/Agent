@@ -4,21 +4,12 @@ from core.identity.session_manager import SessionArtifact
 logger = logging.getLogger(__name__)
 
 class SessionValidator:
-    """
-    Validates if an active session is still authenticated.
-    """
     
     def __init__(self, session_manager, validation_endpoint: str = "/api/me"):
         self.session_manager = session_manager
         self.validation_endpoint = validation_endpoint
         
     def is_valid(self, session: SessionArtifact, base_url: str = "") -> bool:
-        """
-        Validate a session for real: send a request to `validation_endpoint`
-        using the session's cookies/headers and treat a non-401/403 response as
-        still authenticated. Falls back to the session's own validity flag only
-        when no base_url is available to probe.
-        """
         if not session or not session.is_valid:
             self.session_manager.auth_health_metrics["session_expirations"] += 1
             logger.info(f"SESSION_EXPIRED identity={session.identity_id if session else 'unknown'}")

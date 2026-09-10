@@ -1,10 +1,3 @@
-"""
-P2-7: takeover false-positive workflow.
-
-A 503 or provider error must NOT auto-promote to
-CONFIRMED SUBDOMAIN TAKEOVER. Route through:
-  DEAD_HOST -> TAKEOVER_INDICATOR -> DNS/provider validation -> CONFIRMED/REJECTED
-"""
 from __future__ import annotations
 
 import re
@@ -63,7 +56,6 @@ def resolve_cname(fqdn: str) -> str:
 
 
 def detect_indicator(fqdn: str, status_code: int, body: str) -> Optional[TakeoverCandidate]:
-    """Turn a raw response into a TAKEOVER_INDICATOR or None."""
     cand = TakeoverCandidate(fqdn=fqdn, status_code=int(status_code or 0),
                              body_sample=(body or "")[:2048])
     for pat, prov in PROVIDER_FINGERPRINTS:
@@ -80,7 +72,6 @@ def detect_indicator(fqdn: str, status_code: int, body: str) -> Optional[Takeove
 
 
 def validate(candidate: TakeoverCandidate) -> TakeoverCandidate:
-    """Escalate to CONFIRMED only when DNS proves the delegation is dangling."""
     if candidate.stage not in (TakeoverStage.INDICATOR, TakeoverStage.DEAD_HOST):
         return candidate
     candidate.stage = TakeoverStage.VALIDATING

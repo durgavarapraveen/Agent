@@ -1,7 +1,3 @@
-"""
-Structured error classification and retry policy.
-Replace failed_tools set with deterministic error handling.
-"""
 
 import logging
 from typing import Optional
@@ -76,7 +72,6 @@ RETRY_POLICY = {
 
 
 class ErrorClassifier:
-    """Classify tool errors and determine retry behavior"""
     
     def classify_error(self, 
                       tool_name: str,
@@ -84,10 +79,6 @@ class ErrorClassifier:
                       stdout: str,
                       stderr: str,
                       command: Optional[str] = None) -> ErrorInfo:
-        """
-        Classify tool execution error into structured error type.
-        Uses exit code, output patterns, command analysis.
-        """
         
         # Check exit code patterns
         if exit_code is None:
@@ -139,7 +130,6 @@ class ErrorClassifier:
         return self._create_error(ErrorType.UNKNOWN, "Unknown error state")
     
     def _create_error(self, error_type: ErrorType, message: str) -> ErrorInfo:
-        """Create ErrorInfo object"""
         return ErrorInfo(
             error_type=error_type,
             message=message,
@@ -147,7 +137,6 @@ class ErrorClassifier:
         )
     
     def _is_package_installation_attempt(self, command: str) -> bool:
-        """Detect package manager commands"""
         install_patterns = [
             "apt-get install",
             "apt install",
@@ -160,7 +149,6 @@ class ErrorClassifier:
         return any(pattern in command_lower for pattern in install_patterns)
     
     def _looks_like_parse_error(self, output: str) -> bool:
-        """Heuristic to detect parse/format errors"""
         if len(output) < 10:
             return True
         if output.startswith("Error:") or output.startswith("ERROR:"):
@@ -168,7 +156,6 @@ class ErrorClassifier:
         return False
     
     def should_retry(self, error: ErrorInfo, attempt_count: int) -> bool:
-        """Determine if error should trigger retry"""
         if not error.retryable:
             return False
         
@@ -179,7 +166,6 @@ class ErrorClassifier:
         return True
     
     def get_recovery_suggestion(self, error: ErrorInfo) -> str:
-        """Suggest recovery action for error"""
         policy = RETRY_POLICY.get(error.error_type, {})
         
         suggestions = {

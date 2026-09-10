@@ -1,11 +1,3 @@
-"""
-Browser Workflow Definitions (Phase 19).
-
-Declarative workflow models for multi-step browser interactions.
-Each workflow is a sequence of steps with preconditions, expected
-outcomes, and evidence capture points. The BrowserActuator executes
-the steps; this module defines what to execute and how to verify.
-"""
 from __future__ import annotations
 
 import uuid

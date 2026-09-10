@@ -1,7 +1,3 @@
-"""
-Kali Docker Executor - Runs real Kali tools inside Docker from Windows/Linux/Mac.
-Auto-detects or provisions Kali Docker containers and auto-installs required tools on first use.
-"""
 
 import logging
 import os
@@ -14,7 +10,6 @@ logger = logging.getLogger(__name__)
 
 
 class KaliDockerExecutor:
-    """Executes commands inside a running Kali Docker container from Windows/Linux/Mac"""
 
     _container_name: Optional[str] = None
     _installed_tools: set = set()
@@ -22,7 +17,6 @@ class KaliDockerExecutor:
 
     # Package mapping: tool_name -> apt package name
     TOOL_PACKAGES = {
-        # DNS / Subdomain
         "nmap": "nmap",
         "masscan": "masscan",
         "amass": "amass",
@@ -56,12 +50,10 @@ class KaliDockerExecutor:
         "dalfox": "dalfox",
         "playwright": "python3-playwright",
 
-        # SSL/TLS
         "sslscan": "sslscan",
         "sslyze": "sslyze",
         "testssl.sh": "testssl.sh",
 
-        # SMB / Network / Exploitation
         "enum4linux": "enum4linux",
         "enum4linux-ng": "enum4linux-ng",
         "netexec": "netexec",
@@ -79,11 +71,10 @@ class KaliDockerExecutor:
 
     @classmethod
     def get_container(cls, auto_create: bool = True) -> Optional[str]:
-        """Auto-detect or automatically launch/create Kali container"""
         if cls._container_name:
             r = subprocess.run(
-                f"docker ps --filter name={cls._container_name} --format {{{{.Names}}}}",
-                shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=5
+                ["docker", "ps", "--filter", f"name={cls._container_name}", "--format", "{{.Names}}"],
+                shell=False, capture_output=True, encoding="utf-8", errors="replace", timeout=5
             )
             if cls._container_name in r.stdout:
                 return cls._container_name
@@ -91,8 +82,8 @@ class KaliDockerExecutor:
 
         try:
             r = subprocess.run(
-                "docker ps --format {{.Names}}\\t{{.Image}}",
-                shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=10
+                ["docker", "ps", "--format", "{{.Names}}\t{{.Image}}"],
+                shell=False, capture_output=True, encoding="utf-8", errors="replace", timeout=10
             )
             for line in r.stdout.strip().split("\n"):
                 if not line.strip():
@@ -111,8 +102,8 @@ class KaliDockerExecutor:
                 if not name:
                     continue
                 check = subprocess.run(
-                    f"docker exec {name} cat /etc/os-release",
-                    shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=5
+                    ["docker", "exec", name, "cat", "/etc/os-release"],
+                    shell=False, capture_output=True, encoding="utf-8", errors="replace", timeout=5
                 )
                 if "kali" in check.stdout.lower():
                     cls._container_name = name
@@ -121,20 +112,20 @@ class KaliDockerExecutor:
 
             # Check stopped containers
             r_stopped = subprocess.run(
-                "docker ps -a --filter name=kali-pentesting --format {{.Names}}",
-                shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=5
+                ["docker", "ps", "-a", "--filter", "name=kali-pentesting", "--format", "{{.Names}}"],
+                shell=False, capture_output=True, encoding="utf-8", errors="replace", timeout=5
             )
             if "kali-pentesting" in r_stopped.stdout:
                 logger.info("[KaliDockerExecutor] Starting existing stopped container 'kali-pentesting-mcp'...")
-                subprocess.run("docker start kali-pentesting-mcp", shell=True, capture_output=True, timeout=10)
+                subprocess.run(["docker", "start", "kali-pentesting-mcp"], shell=False, capture_output=True, timeout=10)
                 cls._container_name = "kali-pentesting-mcp"
                 return cls._container_name
 
             # Auto-create if requested and docker is available
             if auto_create and cls.check_docker():
                 logger.info("[KaliDockerExecutor] Auto-creating new Kali container 'kali-pentesting-mcp'...")
-                run_cmd = "docker run -dit --init --name kali-pentesting-mcp kalilinux/kali-rolling bash"
-                r_create = subprocess.run(run_cmd, shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=60)
+                run_cmd = ["docker", "run", "-dit", "--init", "--name", "kali-pentesting-mcp", "kalilinux/kali-rolling", "bash"]
+                r_create = subprocess.run(run_cmd, shell=False, capture_output=True, encoding="utf-8", errors="replace", timeout=60)
                 if r_create.returncode == 0:
                     cls._container_name = "kali-pentesting-mcp"
                     logger.info("[KaliDockerExecutor] Successfully created Kali container 'kali-pentesting-mcp'.")
@@ -151,20 +142,18 @@ class KaliDockerExecutor:
     @classmethod
     def check_docker(cls) -> bool:
         try:
-            r = subprocess.run("docker --version", shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=5)
+            r = subprocess.run(["docker", "--version"], shell=False, capture_output=True, encoding="utf-8", errors="replace", timeout=5)
             return r.returncode == 0
         except Exception:
             return False
 
     @classmethod
     def is_native_environment(cls) -> bool:
-        """Check if we are already executing natively inside Linux/Kali."""
         import shutil
         return os.path.exists("/.dockerenv") or (os.name != "nt" and shutil.which("nmap") is not None)
 
     @classmethod
     def is_tool_installed(cls, tool: str, bypass_cache: bool = False) -> bool:
-        """Check if tool exists in container or local environment"""
         import shutil
         if shutil.which(tool):
             return True
@@ -182,8 +171,8 @@ class KaliDockerExecutor:
 
         cls._checked_tools.add(tool)
         r = subprocess.run(
-            f"docker exec {container} which {tool}",
-            shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=10
+            ["docker", "exec", container, "which", tool],
+            shell=False, capture_output=True, encoding="utf-8", errors="replace", timeout=10
         )
         if r.returncode == 0 and r.stdout.strip():
             cls._installed_tools.add(tool)
@@ -192,7 +181,6 @@ class KaliDockerExecutor:
 
     @classmethod
     def ensure_tool(cls, tool: str) -> bool:
-        """Ensure tool is installed in the Kali container or host environment."""
         if cls.is_tool_installed(tool):
             return True
 
@@ -203,11 +191,11 @@ class KaliDockerExecutor:
 
         logger.info(f"[KaliDockerExecutor] Auto-installing missing tool '{tool}' (apt package: {package})...")
         try:
-            # Run update and install as separate commands to avoid shell quote escaping issues on Windows
-            up_res = subprocess.run(f"docker exec {container} apt-get update", shell=True, capture_output=True, timeout=120)
+            up_res = subprocess.run(["docker", "exec", container, "apt-get", "update"], shell=False, capture_output=True, timeout=120)
             if up_res.returncode != 0:
-                subprocess.run(f'docker exec {container} bash -c "rm -rf /var/lib/apt/lists/* && apt-get update"', shell=True, capture_output=True, timeout=120)
-            r = subprocess.run(f"docker exec {container} apt-get install -y --no-install-recommends {package}", shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=120)
+                subprocess.run(["docker", "exec", container, "rm", "-rf", "/var/lib/apt/lists/"], shell=False, capture_output=True, timeout=120)
+                subprocess.run(["docker", "exec", container, "apt-get", "update"], shell=False, capture_output=True, timeout=120)
+            r = subprocess.run(["docker", "exec", container, "apt-get", "install", "-y", "--no-install-recommends", package], shell=False, capture_output=True, encoding="utf-8", errors="replace", timeout=120)
             if r.returncode == 0 and cls.is_tool_installed(tool, bypass_cache=True):
                 logger.info(f"[KaliDockerExecutor] Successfully installed '{tool}'")
                 cls._installed_tools.add(tool)
@@ -221,17 +209,15 @@ class KaliDockerExecutor:
 
     @classmethod
     def install_all_tools(cls) -> Dict[str, bool]:
-        """Bulk auto-install all required tools into the Kali container."""
         container = cls.get_container(auto_create=True)
         results = {}
         packages = list(set(cls.TOOL_PACKAGES.values()))
         logger.info(f"[KaliDockerExecutor] Bulk auto-installing {len(packages)} packages into container '{container}'...")
 
         try:
-            subprocess.run(f"docker exec {container} apt-get update", shell=True, capture_output=True, timeout=120)
-            pkg_str = " ".join(packages)
-            cmd = f"docker exec {container} apt-get install -y --fix-missing {pkg_str}"
-            r = subprocess.run(cmd, shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=600)
+            subprocess.run(["docker", "exec", container, "apt-get", "update"], shell=False, capture_output=True, timeout=120)
+            cmd = ["docker", "exec", container, "apt-get", "install", "-y", "--fix-missing"] + packages
+            r = subprocess.run(cmd, shell=False, capture_output=True, encoding="utf-8", errors="replace", timeout=600)
             if r.returncode == 0:
                 logger.info("[KaliDockerExecutor] Bulk installation completed successfully.")
             else:
@@ -267,12 +253,6 @@ class KaliDockerExecutor:
 
     @classmethod
     def _normalize_command(cls, command: str) -> str:
-        """
-        Repair common malformed tool invocations the LLM sometimes emits, so a bad
-        argument order doesn't fail the whole task. Currently: amass — the correct
-        form is `amass enum -passive -d <domain>`; the model often writes
-        `amass <domain> passive` which exits non-zero.
-        """
         try:
             parts = command.split()
         except Exception:
@@ -368,37 +348,34 @@ class KaliDockerExecutor:
 
     @classmethod
     def _kill_in_container(cls, container: str, command: str) -> None:
-        """Reap any orphaned tool process left running inside the container after a
-        host-side timeout, so it does not become a long-lived zombie consuming CPU."""
         try:
             tool = command.split()[0]
             # kill by process name and by the full command signature
-            subprocess.run(f'docker exec {container} pkill -9 -f "{tool}"',
-                           shell=True, capture_output=True, timeout=15)
+            subprocess.run(["docker", "exec", container, "pkill", "-9", "-f", tool],
+                           shell=False, capture_output=True, timeout=15)
         except Exception:
             pass
 
     @classmethod
     def _apply_mem_limit(cls, command: str) -> str:
-        """Wrap OOM-prone tool commands with ulimit to cap virtual memory."""
         try:
             tool = command.split()[0]
         except (IndexError, AttributeError):
             return command
         limit_kb = cls.MEM_LIMITED_TOOLS.get(tool) or cls.MEM_LIMITED_TOOLS.get(tool.lower())
         if limit_kb:
-            return f"ulimit -v {limit_kb}; {command}"
+            mem_bytes = limit_kb * 1024
+            return f"prlimit --as={mem_bytes} {command}"
         return command
 
     @classmethod
     def run(cls, command: str, timeout: int = 900, auto_install: bool = True) -> Dict:
-        """Run command inside Kali container or native Linux environment."""
         timeout = cls._effective_timeout(command, timeout)
         if cls.is_native_environment():
-            timed_cmd = f"timeout --signal=KILL {int(timeout)}s {command}"
+            timed_cmd = ["timeout", "--signal=KILL", f"{int(timeout)}s"] + shlex.split(command)
             try:
                 r = subprocess.run(
-                    timed_cmd, shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=int(timeout) + 10
+                    timed_cmd, shell=False, capture_output=True, encoding="utf-8", errors="replace", timeout=int(timeout) + 10
                 )
                 if r.returncode in (124, 137):
                     return {"status": "timeout", "returncode": r.returncode,
@@ -438,20 +415,14 @@ class KaliDockerExecutor:
 
         command = cls._normalize_command(command)
         mem_cmd = cls._apply_mem_limit(command)
-        # `timeout -k 10s -s TERM Ns`: the container-side timeout fires FIRST (before
-        # the host grace) and sends SIGTERM, then SIGKILL 10s later. We deliberately
-        # do NOT use setsid here — it moved the tool into a new process group that the
-        # old `pkill -g $$` could never reach, which is exactly how nuclei/ffuf children
-        # were orphaned into zombies. Instead, any stragglers are reaped explicitly
-        # via _kill_in_container on every timeout path below.
-        timed_cmd = f"timeout -k 10s -s TERM {int(timeout)}s {mem_cmd}"
-        escaped_cmd = timed_cmd.replace('"', '\\"')
-        full = f'docker exec {container} bash -c "{escaped_cmd}"'
+        
+        timed_cmd_list = ["timeout", "-k", "10s", "-s", "TERM", f"{int(timeout)}s"] + shlex.split(mem_cmd)
+        full = ["docker", "exec", container] + timed_cmd_list
         grace = int(timeout) + 20
 
         try:
             r = subprocess.run(
-                full, shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=grace
+                full, shell=False, capture_output=True, encoding="utf-8", errors="replace", timeout=grace
             )
             if r.returncode in (124, 137):
                 cls._kill_in_container(container, command)  # reap orphaned children
@@ -464,18 +435,16 @@ class KaliDockerExecutor:
                 # the running container so this scan continues without a rebuild.
                 logger.warning(f"[Kali] pkg_resources missing in {container} — installing setuptools and retrying")
                 # Pin <81 because setuptools 81 removed the pkg_resources module.
-                fix_cmd = (
-                    f'docker exec {container} bash -c '
-                    f'"/opt/venv/bin/pip install --no-cache-dir \'setuptools<81\' >/dev/null 2>&1 '
-                    f'|| pip3 install --break-system-packages --no-cache-dir \'setuptools<81\' >/dev/null 2>&1 '
-                    f'|| true"'
-                )
+                fix_cmd1 = ["docker", "exec", container, "/opt/venv/bin/pip", "install", "--no-cache-dir", "setuptools<81"]
+                fix_cmd2 = ["docker", "exec", container, "pip3", "install", "--break-system-packages", "--no-cache-dir", "setuptools<81"]
                 try:
-                    subprocess.run(fix_cmd, shell=True, capture_output=True, timeout=90)
+                    res1 = subprocess.run(fix_cmd1, shell=False, capture_output=True, timeout=90)
+                    if res1.returncode != 0:
+                        subprocess.run(fix_cmd2, shell=False, capture_output=True, timeout=90)
                 except Exception:
                     pass
                 r = subprocess.run(
-                    full, shell=True, capture_output=True, encoding="utf-8", errors="replace", timeout=grace
+                    full, shell=False, capture_output=True, encoding="utf-8", errors="replace", timeout=grace
                 )
             if r.returncode != 0:
                 logger.info(f"[Kali] rc={r.returncode} cmd={command} stderr={r.stderr}")
@@ -500,7 +469,6 @@ class KaliDockerExecutor:
 
     @classmethod
     def preflight(cls, required_tools: List[str] = None) -> Dict:
-        """Verify Docker + Kali container + install common tools upfront"""
         result = {"docker": False, "kali": False, "container": None, "tools": {}}
 
         if not cls.check_docker():

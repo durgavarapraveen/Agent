@@ -1,7 +1,3 @@
-"""
-Capability Intelligence Layer.
-Dynamically resolves and ranks the most suitable tools for a given capability without hardcoding.
-"""
 
 import logging
 from typing import List, Optional
@@ -14,7 +10,6 @@ logger = logging.getLogger(__name__)
 
 
 class CapabilityResolver:
-    """Resolves relevant tool profiles dynamically for capabilities and task objectives"""
 
     def __init__(self, store: Optional[ToolKnowledgeStore] = None):
         self.store = store or ToolKnowledgeStore.get_instance()
@@ -26,10 +21,6 @@ class CapabilityResolver:
         task_spec: Optional[TaskSpec] = None,
         top_k: int = 5
     ) -> List[ToolProfile]:
-        """
-        Resolve and rank the best tools for a capability.
-        Logs CAPABILITY_RESOLUTION_COMPLETED.
-        """
         cap_clean = str(capability).lower().strip()
         candidates = self.store.get_tools_for_capability(cap_clean)
 

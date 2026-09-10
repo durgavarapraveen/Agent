@@ -1,8 +1,3 @@
-"""
-Censys Client Implementation
-Uses Censys Platform API v2 with Personal Access Token (PAT) authentication.
-Header: Authorization: Bearer <CENSYS_PAT>
-"""
 
 import logging
 from typing import Dict, Any, Optional
@@ -16,16 +11,12 @@ CENSYS_BASE_URL = "https://search.censys.io/api/v2"
 
 
 def _sanitize_string(text: str, token: str) -> str:
-    """Mask token string from any output or exception messages."""
     if not token or not text:
         return text
     return text.replace(token, "[MASKED_PAT]")
 
 
 class CensysClient:
-    """
-    Censys Platform API Client using Personal Access Token (PAT).
-    """
 
     def __init__(self, api_token: Optional[str] = None, base_url: str = CENSYS_BASE_URL, timeout: float = 30.0):
         config = get_config()
@@ -53,16 +44,9 @@ class CensysClient:
 
     @property
     def is_configured(self) -> bool:
-        """Check if client has a valid token configured."""
         return bool(self.api_token and self.api_token != "xxxxx")
 
     def _get_headers(self) -> Dict[str, str]:
-        """Generate request headers with Bearer Token authentication.
-
-        Callers must gate on `is_configured` before invoking this. All public
-        `search_*`/`get_*` methods now return an empty result set instead of
-        raising, so this helper is only reached when a token is present.
-        """
         if not self.is_configured:
             raise RuntimeError("Censys PAT not configured; caller should short-circuit")
         return {
@@ -72,10 +56,6 @@ class CensysClient:
         }
 
     async def search_hosts(self, query: str, per_page: int = 10) -> Dict[str, Any]:
-        """
-        Search hosts using Censys Platform API v2 (cached for Free Tier preservation).
-        Endpoint: GET /hosts/search
-        """
         if not self.is_configured:
             # Graceful degradation — OSINT is optional. Log at INFO once per
             # call and return an empty result rather than exploding the whole
@@ -116,10 +96,6 @@ class CensysClient:
             raise RuntimeError(f"Censys host search error: {sanitized_msg}") from None
 
     async def search_certificates(self, query: str, per_page: int = 10) -> Dict[str, Any]:
-        """
-        Search certificates using Censys Platform API v2 (cached for Free Tier preservation).
-        Endpoint: GET /certificates/search
-        """
         if not self.is_configured:
             # Graceful degradation — OSINT is optional. Log at INFO once per
             # call and return an empty result rather than exploding the whole
@@ -150,10 +126,6 @@ class CensysClient:
             raise RuntimeError(f"Censys certificate search error: {sanitized_msg}") from None
 
     async def get_host(self, ip: str) -> Dict[str, Any]:
-        """
-        Get detailed information for a specific host by IP.
-        Endpoint: GET /hosts/{ip}
-        """
         if not self.is_configured:
             # Graceful degradation — OSINT is optional. Log at INFO once per
             # call and return an empty result rather than exploding the whole
@@ -176,7 +148,6 @@ class CensysClient:
             raise RuntimeError(f"Censys get host error: {sanitized_msg}") from None
 
     def _handle_response(self, resp: httpx.Response) -> Dict[str, Any]:
-        """Handle HTTP response and status codes with clean error messaging."""
         if resp.status_code == 200:
             return resp.json()
         elif resp.status_code == 401:

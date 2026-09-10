@@ -1,9 +1,3 @@
-"""
-Phase 5 Module 5.5: Custom Report Builder (core/report_builder.py)
-
-Multi-format report generation (PDF, HTML with DataTables.js/Chart.js, JSON, Markdown)
-with customizable section controls and compliance framework mapping (PCI-DSS, HIPAA).
-"""
 
 import html
 import json
@@ -36,14 +30,12 @@ COMPLIANCE_MAP = {
 
 
 class CustomReportBuilder:
-    """Multi-format report generator with customization engine."""
 
     def __init__(self, config_path: str = "data/report_config.yaml"):
         self.config_path = Path(config_path)
         self.config = self._load_config()
 
     def _load_config(self) -> Dict[str, Any]:
-        """Load report_config.yaml if present."""
         default_config = {
             "sections_to_include": ["executive_summary", "findings_table", "trends", "compliance_mapping"],
             "branding_logo_path": "assets/logo.png",
@@ -61,7 +53,6 @@ class CustomReportBuilder:
         return default_config
 
     def build_compliance_mapping(self, vulnerabilities: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, str]]]:
-        """Map findings to selected compliance framework requirements."""
         frameworks = self.config.get("compliance_frameworks", ["PCI-DSS", "HIPAA"])
         mapping_result = {}
 
@@ -104,7 +95,6 @@ class CustomReportBuilder:
         return mapping_result
 
     def export_json(self, scan_id: str, target: str, vulnerabilities: List[Dict[str, Any]], mask_sensitive: bool = True) -> str:
-        """Export raw machine-readable JSON format with masked sensitive data."""
         masked_target = mask_sensitive_data(target, mask_sensitive)
         masked_findings = []
 
@@ -130,7 +120,6 @@ class CustomReportBuilder:
         return json.dumps(data, indent=2)
 
     def export_markdown(self, scan_id: str, target: str, vulnerabilities: List[Dict[str, Any]], roadmap: List[str] = None, mask_sensitive: bool = True) -> str:
-        """Export version-control friendly Markdown document (report.md)."""
         masked_target = mask_sensitive_data(target, mask_sensitive)
         lines = [
             f"# Security Assessment Report — {masked_target}",
@@ -170,7 +159,6 @@ class CustomReportBuilder:
         return "\n".join(lines)
 
     def export_html_interactive(self, scan_id: str, target: str, vulnerabilities: List[Dict[str, Any]], trend_info: Dict[str, Any] = None, mask_sensitive: bool = True) -> str:
-        """Export single self-contained HTML file with DataTables.js and Chart.js integration."""
         masked_target = mask_sensitive_data(target, mask_sensitive)
         comp_mapping = self.build_compliance_mapping(vulnerabilities)
 
@@ -305,7 +293,6 @@ class CustomReportBuilder:
 </html>"""
 
     def export_pdf(self, scan_id: str, target: str, vulnerabilities: List[Dict[str, Any]], mask_sensitive: bool = True, output_path: str = None) -> str:
-        """Generate professional PDF report using ReportLab platypus with logo injection."""
         if output_path:
             out_file = Path(output_path)
         else:
@@ -334,7 +321,6 @@ class CustomReportBuilder:
                 except Exception as e:
                     logger.warning(f"[ReportBuilder] Logo render error: {e}")
 
-            # Title & Header
             title_style = ParagraphStyle('ReportTitle', parent=styles['Heading1'], fontSize=18, textColor=colors.HexColor("#12233b"))
             story.append(Paragraph(f"Penetration Test Report — {masked_target}", title_style))
             story.append(Paragraph(f"<b>Scan ID:</b> {scan_id} | <b>Date:</b> {datetime.now().strftime('%Y-%m-%d')}", styles['Normal']))

@@ -1,12 +1,3 @@
-"""
-P2-4: experiment / result caching.
-
-Cache deterministic tool results keyed by
-    target + operation + normalized_arguments
-so httpx/whatweb/wafw00f/etc. don't re-run when their result is still
-fresh. Complements P1-2 KnowledgeFreshness (which is a lightweight
-"seen it recently?" flag) by holding the actual payload.
-"""
 from __future__ import annotations
 
 import hashlib

@@ -1,4 +1,3 @@
-"""PHASE 5 — executor wrappers integrate the research engines (offline)."""
 import re
 import urllib.parse
 
@@ -36,9 +35,9 @@ def test_differential_executor_flags_vulnerable_parser():
                 b = urllib.parse.parse_qsl(text, keep_blank_values=True)
         qv = [v for n, v in q if n == "q"]
         bv = [v for n, v in b if n == "q"]
-        winner = (bv or qv or [None])[-1]        # body-overrides-query, last-wins
+        winner = (bv or qv or [None])[-1]
         if winner is not None:
-            winner = urllib.parse.unquote(winner)  # double-decodes
+            winner = urllib.parse.unquote(winner)
         body = '{"value":null}' if winner is None else '{"value":"%s"}' % winner
         return 200, body, {"Content-Type": "application/json"}
 

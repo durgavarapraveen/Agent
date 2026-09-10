@@ -8,7 +8,6 @@ from core.common.exceptions import ScopeViolationException
 logger = logging.getLogger(__name__)
 
 class ScopeManager:
-    """Manages authorized scope for security operations."""
     
     def __init__(self, allowed_domains: List[str] = None, allowed_ips: List[str] = None,
                  allowed_urls: List[str] = None, allowed_paths: List[str] = None,
@@ -17,7 +16,7 @@ class ScopeManager:
         self.allowed_ips: List[str] = allowed_ips or []
         self.allowed_urls: Set[str] = set(allowed_urls or [])
         self.allowed_paths: Set[str] = set(allowed_paths or [])
-        self.execution_mode = execution_mode  # PASSIVE, SAFE_ACTIVE, FULL_AUTHORIZED
+        self.execution_mode = execution_mode
         self.dangerous_operations = {
             "delete_file",
             "write_file",
@@ -30,15 +29,6 @@ class ScopeManager:
     
     @staticmethod
     def _normalize_host(host: str) -> str:
-        """Canonicalize a hostname for scope comparisons.
-
-        - Lowercases.
-        - Strips one trailing dot (`example.com.` and `example.com` are the same
-          authority in DNS).
-        - Converts IDN / punycode via IDNA so `bücher.de` and `xn--bcher-kva.de`
-          match.
-        - Strips IPv6 brackets if the caller left them attached.
-        """
         h = (host or "").strip().lower().rstrip(".")
         if h.startswith("[") and h.endswith("]"):
             h = h[1:-1]
@@ -50,7 +40,6 @@ class ScopeManager:
         return h
 
     def _normalize_domains(self, domains: List[str]) -> Set[str]:
-        """Normalize domain patterns."""
         normalized = set()
         for domain in domains:
             d = self._normalize_host(domain)
@@ -61,7 +50,6 @@ class ScopeManager:
         return normalized
 
     def _is_domain_allowed(self, domain: str) -> bool:
-        """Check if a domain is in allowed scope."""
         domain = self._normalize_host(domain)
 
         for allowed in self.allowed_domains:
@@ -77,7 +65,6 @@ class ScopeManager:
         return False
 
     def _is_ip_allowed(self, ip: str) -> bool:
-        """Check if an IP is in allowed scope."""
         try:
             ip_obj = ipaddress.ip_address(ip)
         except ValueError:
@@ -100,20 +87,12 @@ class ScopeManager:
         return False
     
     def _is_path_allowed(self, path: str) -> bool:
-        """Check if a local path is in allowed scope."""
         for allowed_path in self.allowed_paths:
             if path.startswith(allowed_path):
                 return True
         return False
     
     def validate_url(self, url: str) -> bool:
-        """Validate that a URL is in authorized scope.
-
-        Normalizes hostname (trailing dot, IDN, case), handles IPv6 literals
-        (`urlparse.hostname` already strips the brackets and the port), and
-        routes IP-literal hostnames to the IP allowlist instead of the domain
-        allowlist.
-        """
         # Normalize the exact-URL fast path too — else trailing-slash /
         # fragment differences would defeat the shortcut.
         norm_url = url.strip()
@@ -140,15 +119,12 @@ class ScopeManager:
             return self._is_domain_allowed(self._normalize_host(host))
     
     def validate_ip(self, ip: str) -> bool:
-        """Validate that an IP is in authorized scope."""
         return self._is_ip_allowed(ip)
     
     def validate_path(self, path: str) -> bool:
-        """Validate that a local path is in authorized scope."""
         return self._is_path_allowed(path)
     
     def validate_tool_execution(self, tool_name: str, target: str) -> bool:
-        """Validate tool execution is authorized."""
         # Check if target (URL or path) is in scope
         if target.startswith("http"):
             if not self.validate_url(target):
@@ -175,14 +151,6 @@ class ScopeManager:
         return True
     
     def validate_plan(self, target: str, tool_name: str = "") -> str:
-        """Planning-time scope validation (Phase 14).
-        Returns empty string if allowed, or a rejection reason.
-        An unauthorized target must never become an executable task.
-
-        Handles IPv6 literals correctly: `urlparse('[2001:db8::1]:8080').hostname`
-        returns `2001:db8::1` — no naive `split(":")` slicing that would mangle
-        v6 addresses.
-        """
         if not target:
             return "PLAN_REJECTED_SCOPE: empty target"
 
@@ -214,14 +182,12 @@ class ScopeManager:
         return ""
 
     def can_expand_scope(self, new_domain: str, new_ip: str = None) -> bool:
-        """Determine if scope can be expanded (requires user approval)."""
         # The central agent may propose scope expansion
         # But it must be explicitly approved by the user
         logger.info(f"Scope expansion requested: domain={new_domain}, ip={new_ip}")
         return False  # Default: require explicit approval
     
     def get_scope_summary(self) -> dict:
-        """Get a summary of current scope."""
         return {
             "allowed_domains": sorted(list(self.allowed_domains)),
             "allowed_ips": self.allowed_ips,

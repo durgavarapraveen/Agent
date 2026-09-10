@@ -1,6 +1,3 @@
-"""
-Scan progress tracking and loop detection layer.
-"""
 
 import logging
 from typing import List
@@ -11,7 +8,6 @@ logger = logging.getLogger(__name__)
 
 
 class ProgressSnapshot(BaseModel):
-    """Snapshot representation of the current scanning execution state"""
     completed_tasks_count: int
     failed_tasks_count: int
     blocked_tasks_count: int
@@ -22,14 +18,12 @@ class ProgressSnapshot(BaseModel):
 
 
 class ProgressEvaluator:
-    """Evaluates scan progress over iterations to detect infinite loops or stalled executions"""
 
     def __init__(self):
         self.snapshots: List[ProgressSnapshot] = []
         self.no_progress_streak = 0
 
     def take_snapshot(self, state: ExecutionState) -> ProgressSnapshot:
-        """Create a progress snapshot from current execution state"""
         completed = len(state.tasks_completed)
         failed = len(state.tasks_failed)
         blocked = len(state.tasks_blocked)
@@ -52,11 +46,6 @@ class ProgressEvaluator:
         )
 
     def evaluate_progress(self, current: ProgressSnapshot) -> bool:
-        """
-        Compares the current snapshot to the last snapshot.
-        Increments the no-progress streak if no meaningful updates are found.
-        Returns True if progress was made, False otherwise.
-        """
         if not self.snapshots:
             self.snapshots.append(current)
             return True

@@ -1,7 +1,3 @@
-"""
-KnowledgeBase - PostgreSQL cache for intelligence data.
-Prevents redundant API calls. TTL-based expiry.
-"""
 
 import json
 import logging
@@ -20,7 +16,6 @@ TTL_SEARCH = 3600
 
 
 class KnowledgeBase:
-    """PostgreSQL-backed intelligence cache with TTL expiry."""
 
     def __init__(self, db_path: str = None):
         pass

@@ -1,4 +1,3 @@
-"""P0.3 tool capability (Kali-backend aware) + P0.4 execution truth."""
 import pytest
 
 from core.tools.tool_health import ToolHealthManager, HealthState
@@ -70,7 +69,7 @@ def test_absent_everywhere_is_unavailable(monkeypatch):
 def test_skipped_fresh_is_not_success_but_non_failing():
     r = ToolResult(tool="nmap", capability="port_scan",
                    status=ToolExecutionStatus.SKIPPED_FRESH, exit_code=0)
-    assert r.status == ToolExecutionStatus.SKIPPED_FRESH   # not SUCCESS
+    assert r.status == ToolExecutionStatus.SKIPPED_FRESH
     assert r.success is True                                # no retry
 
 

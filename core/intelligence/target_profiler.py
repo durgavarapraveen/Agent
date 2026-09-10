@@ -1,12 +1,3 @@
-"""
-Target Profiler — HexStrike-Style Intelligent Target Analysis.
-
-Fingerprints target type, technology stack, CMS, and attack surface
-before any tools run. Feeds structured intelligence into the LLM Brain
-prompt so it makes smarter tool and parameter decisions.
-
-Inspired by HexStrike AI's IntelligentDecisionEngine + TargetProfile.
-"""
 
 import logging
 import re
@@ -24,7 +15,6 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════
 
 class TargetType(str, Enum):
-    """Classification of target for intelligent tool selection."""
     WEB_APPLICATION = "web_application"
     API_ENDPOINT = "api_endpoint"
     NETWORK_HOST = "network_host"
@@ -35,12 +25,10 @@ class TargetType(str, Enum):
 
 
 class TechnologyStack(str, Enum):
-    """Detected technology stack for parameter optimization."""
     # Web servers
     APACHE = "apache"
     NGINX = "nginx"
     IIS = "iis"
-    # Languages / runtimes
     NODEJS = "nodejs"
     EXPRESS = "express"
     PHP = "php"
@@ -71,7 +59,6 @@ class TechnologyStack(str, Enum):
 
 @dataclass
 class TargetProfile:
-    """Comprehensive target analysis profile for intelligent decision making."""
     target: str
     target_type: TargetType = TargetType.UNKNOWN
     ip_addresses: List[str] = field(default_factory=list)
@@ -109,7 +96,6 @@ class TargetProfile:
         }
 
     def to_brain_context(self) -> str:
-        """Format profile as a compact text block for the LLM Brain prompt."""
         tech_str = ", ".join(t.value for t in self.technologies if t != TechnologyStack.UNKNOWN) or "unknown"
         ports_str = ", ".join(str(p) for p in self.open_ports[:10]) or "not yet scanned"
         subs_str = ", ".join(self.subdomains[:5]) or "none discovered"
@@ -184,7 +170,6 @@ class TargetProfile:
 # ═══════════════════════════════════════════════
 
 def _recommend_extensions(technologies: List[TechnologyStack]) -> str:
-    """Return recommended file extensions for directory bruteforcing."""
     exts = {"html", "txt"}
     for tech in technologies:
         if tech in (TechnologyStack.PHP, TechnologyStack.WORDPRESS,
@@ -242,16 +227,9 @@ CONTENT_SIGNATURES: Dict[str, List[str]] = {
 # ═══════════════════════════════════════════════
 
 class TargetProfiler:
-    """Build a TargetProfile from the target URL and shared context."""
 
     @classmethod
     def profile_target(cls, target: str, shared_context) -> TargetProfile:
-        """Analyze target and create comprehensive profile.
-
-        Uses data already in shared_context when available (tech fingerprinting,
-        port scans, HTTP headers) so we avoid redundant network calls.
-        Falls back to lightweight heuristics for anything missing.
-        """
         profile = TargetProfile(target=target)
 
         # 1. Determine target type

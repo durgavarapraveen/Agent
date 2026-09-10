@@ -4,9 +4,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 class UnauthenticatedTest(AccessControlTest):
-    """
-    Strips session artifacts to test for unauthenticated access.
-    """
     def execute(self, request_node, identities) -> dict:
         results = {}
         

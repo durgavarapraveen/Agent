@@ -1,7 +1,3 @@
-"""
-Startup diagnostics — logs runtime identity so stale-image / wrong-module
-bugs are caught immediately.
-"""
 
 import inspect
 import logging

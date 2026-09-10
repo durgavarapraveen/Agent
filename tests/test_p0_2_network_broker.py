@@ -1,9 +1,3 @@
-"""P0.2 — NetworkBroker unit tests.
-
-Covers: DNS rebinding protection, redirect revalidation, private IP blocking,
-localhost aliases, IPv4-mapped IPv6, alternate IP encodings, budget enforcement,
-hostname canonicalization, and fail-closed guarantees.
-"""
 import pytest
 import socket
 from unittest.mock import patch, MagicMock

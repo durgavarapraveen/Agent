@@ -1,8 +1,3 @@
-"""
-ToolInstaller - Dynamically install tools at runtime.
-Supports: apt, pip, go, GitHub clone.
-Phase 1 of Enterprise system.
-"""
 
 import logging
 from typing import Dict, List
@@ -126,19 +121,16 @@ TOOL_INSTALL_MAP = {
 
 
 class ToolInstaller:
-    """Install tools dynamically inside Docker container."""
 
     def __init__(self):
         self.installed: Dict[str, bool] = {}
         self.failed: Dict[str, str] = {}
 
     def is_installed(self, tool_name: str) -> bool:
-        """Check if tool is already available."""
         # Check cache first
         if tool_name in self.installed:
             return self.installed[tool_name]
 
-        # Check in Docker
         result = KaliDockerExecutor.run(
             f"which {tool_name} 2>/dev/null || command -v {tool_name} 2>/dev/null",
             timeout=10,
@@ -149,10 +141,6 @@ class ToolInstaller:
         return bool(available)
 
     def install(self, tool_name: str) -> bool:
-        """
-        Install a tool. Returns True if successful.
-        Tries known mapping first, then guesses install method.
-        """
         tool_lower = tool_name.lower().strip()
 
         # Already installed?
@@ -210,14 +198,12 @@ class ToolInstaller:
         return False
 
     def install_multiple(self, tools: List[str]) -> Dict[str, bool]:
-        """Install multiple tools. Returns {tool: success}."""
         results = {}
         for tool in tools:
             results[tool] = self.install(tool)
         return results
 
     def validate_tools(self, tools: List[str]) -> Dict[str, bool]:
-        """Check which tools are available, install missing ones."""
         results = {}
         for tool in tools:
             if self.is_installed(tool):
@@ -231,7 +217,6 @@ class ToolInstaller:
     # ═══════════════════════════════════════════════════════════════
 
     def _install_apt(self, package: str) -> bool:
-        """Install via apt-get."""
         # Update package list first
         KaliDockerExecutor.run(
             "apt-get update -qq 2>/dev/null",
@@ -246,7 +231,6 @@ class ToolInstaller:
         return result["status"] == "success"
 
     def _install_pip(self, package: str) -> bool:
-        """Install via pip."""
         result = KaliDockerExecutor.run(
             f"pip3 install --break-system-packages -q {package} 2>&1",
             timeout=120,
@@ -254,7 +238,6 @@ class ToolInstaller:
         return result["status"] == "success"
 
     def _install_go(self, package: str, binary_name: str = "") -> bool:
-        """Install via go install."""
         result = KaliDockerExecutor.run(
             f"go install -v {package} 2>&1",
             timeout=300,
@@ -274,7 +257,6 @@ class ToolInstaller:
         return True
 
     def _install_github(self, repo_url: str, post_install: str = "") -> bool:
-        """Clone from GitHub."""
         # Create tools directory
         KaliDockerExecutor.run("mkdir -p /pentesting/tools", timeout=5)
 
@@ -296,7 +278,6 @@ class ToolInstaller:
     # ═══════════════════════════════════════════════════════════════
 
     def get_status(self) -> Dict:
-        """Get installation status."""
         return {
             "installed": dict(self.installed),
             "failed": dict(self.failed),
@@ -305,5 +286,4 @@ class ToolInstaller:
         }
 
     def list_available(self) -> List[str]:
-        """List all known installable tools."""
         return sorted(TOOL_INSTALL_MAP.keys())

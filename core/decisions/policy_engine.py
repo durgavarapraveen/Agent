@@ -1,17 +1,3 @@
-"""
-P1-5: divide LLM-owned decisions from deterministic policy.
-
-The rule of thumb from the doc:
-  > The LLM should reason about uncertainty; deterministic code
-  > should enforce reality.
-
-This module is the "enforce reality" side. Every operational check the
-LLM must NOT re-decide lives here: scope, tool health, exit status,
-rate limits, WAF mode, timeouts, duplicate suppression, state
-transitions, whether an endpoint was already tested.
-
-Fail-closed per platform contract: if a dependency is missing, deny.
-"""
 from __future__ import annotations
 
 import logging
@@ -59,19 +45,11 @@ def who_decides(topic: str) -> DecisionOwner:
 
 
 def _fail_closed_import(topic: str, module: str, exc: Exception) -> PolicyVerdict:
-    """Platform contract: missing dependency = deny, not allow."""
     logger.warning("[decisions.policy_engine] %s: %s unavailable (%s), failing closed", topic, module, exc)
     return PolicyVerdict(False, f"{module} unavailable (fail-closed per platform contract): {exc}")
 
 
 def enforce(topic: str, ctx: Dict[str, Any]) -> PolicyVerdict:
-    """Deterministic gate for a single decision topic.
-
-    Returns PolicyVerdict.allow=False whenever an operational rule
-    forbids the action, regardless of what the LLM proposes.
-
-    Fail-closed: missing dependencies deny rather than silently allow.
-    """
     t = (topic or "").lower()
 
     if t == "scope_enforcement":

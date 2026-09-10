@@ -1,9 +1,3 @@
-"""
-Finding -> compliance control mapper.
-
-Given a finding (with a CWE and/or a normalized category) and a set of active
-frameworks, return every applicable control across those frameworks.
-"""
 
 from __future__ import annotations
 
@@ -29,7 +23,6 @@ class ComplianceHit:
 
 
 def _resolve_category(finding: Dict) -> str:
-    """Determine the normalized category for a finding (category -> CWE -> type)."""
     cat = str(finding.get("category", "")).lower().strip()
     if cat:
         return cat
@@ -40,7 +33,6 @@ def _resolve_category(finding: Dict) -> str:
 
 
 class ComplianceMapper:
-    """Maps findings to controls across selected frameworks."""
 
     def __init__(self, active_frameworks: Optional[List[str]] = None):
         self.active = self._normalize(active_frameworks)
@@ -55,7 +47,6 @@ class ComplianceMapper:
 
     def map_finding(self, finding: Dict,
                     active_frameworks: Optional[List[str]] = None) -> List[ComplianceHit]:
-        """Return all controls applicable to a single finding."""
         frameworks = self._normalize(active_frameworks) if active_frameworks else self.active
         category = _resolve_category(finding)
         hits: List[ComplianceHit] = []
@@ -80,10 +71,6 @@ class ComplianceMapper:
 
     def map_findings(self, findings: List[Dict],
                      active_frameworks: Optional[List[str]] = None) -> Dict:
-        """Map many findings; attach '_compliance' to each and return an index.
-
-        Returns {'by_control': {(fw, cid): [finding_idx...]}, 'hits': total}.
-        """
         by_control: Dict[str, List[int]] = {}
         total = 0
         for idx, f in enumerate(findings):

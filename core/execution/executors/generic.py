@@ -1,12 +1,3 @@
-"""
-Generic HTTP-based executors for V2 coverage matrix.
-
-Design principle: ALL test targets come from discovered endpoints.
-No app-specific paths are hardcoded. Each executor classifies discovered
-endpoints by semantic role (auth, data, upload, redirect, etc.) and tests
-the appropriate subset. Minimal generic probes (/, /api) are used ONLY
-when discovery returned nothing.
-"""
 from __future__ import annotations
 
 import logging
@@ -57,7 +48,6 @@ _URL_PARAM_NAMES = {"url", "uri", "link", "src", "source", "dest", "target",
 
 
 class GenericHTTPExecutor(ExecutorBase):
-    """Base for executors that only need a URL to probe."""
 
     def validate_inputs(self, inputs: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
         return True, None
@@ -101,7 +91,6 @@ class GenericHTTPExecutor(ExecutorBase):
     # ── Discovery helpers ──────────────────────────────────────────────
 
     def _discovered_endpoints(self, experiment: SecurityExperiment) -> List[str]:
-        """All discovered endpoints as path strings."""
         eps = experiment.input_parameters.get("endpoints", [])
         if not isinstance(eps, list):
             return []
@@ -113,7 +102,6 @@ class GenericHTTPExecutor(ExecutorBase):
         return out
 
     def _endpoints_by_role(self, experiment: SecurityExperiment, *roles: str) -> List[str]:
-        """Return discovered endpoints matching any of the given semantic roles."""
         keywords = set()
         for r in roles:
             keywords.update(_ROLE_KEYWORDS.get(r, []))
@@ -123,7 +111,6 @@ class GenericHTTPExecutor(ExecutorBase):
         return [ep for ep in discovered if any(k in ep.lower() for k in keywords)]
 
     def _to_paths(self, endpoints: List[str], base: str) -> List[str]:
-        """Convert a mix of full URLs and relative paths to relative paths."""
         out = []
         for ep in endpoints:
             if ep.startswith("http"):
@@ -137,7 +124,6 @@ class GenericHTTPExecutor(ExecutorBase):
         return list(dict.fromkeys(out))  # dedupe, preserve order
 
     def _all_endpoints_as_paths(self, experiment: SecurityExperiment) -> List[str]:
-        """Every discovered endpoint as a relative path (deduped)."""
         base = self._base(experiment)
         return self._to_paths(self._discovered_endpoints(experiment), base)
 
@@ -172,8 +158,6 @@ class GenericHTTPExecutor(ExecutorBase):
         return headers
 
     def _endpoints_with_url_params(self, experiment: SecurityExperiment) -> List[Tuple[str, str]]:
-        """Find discovered endpoints that have query params looking like URLs.
-        Returns list of (full_url_template, param_name)."""
         base = self._base(experiment)
         results = []
         for ep in self._discovered_endpoints(experiment):
@@ -193,7 +177,6 @@ class GenericHTTPExecutor(ExecutorBase):
         return results
 
     def _endpoints_with_ids(self, experiment: SecurityExperiment) -> List[Tuple[str, str, str]]:
-        """Find endpoints containing numeric IDs. Returns (path, original_id, swapped_path)."""
         results = []
         for ep in self._all_endpoints_as_paths(experiment):
             match = _ID_PATTERN.search(ep)
@@ -207,21 +190,18 @@ class GenericHTTPExecutor(ExecutorBase):
         return results
 
     def _json_accepting_endpoints(self, experiment: SecurityExperiment) -> List[str]:
-        """Endpoints likely to accept JSON bodies (API/data endpoints)."""
         paths = self._to_paths(
             self._endpoints_by_role(experiment, "data", "user", "config", "feedback", "order"),
             self._base(experiment))
         return paths or ["/api"]
 
     def _state_changing_endpoints(self, experiment: SecurityExperiment) -> List[str]:
-        """Endpoints that likely accept state-changing requests (POST/PUT/DELETE)."""
         return self._to_paths(
             self._endpoints_by_role(experiment, "user", "feedback", "order", "config", "admin"),
             self._base(experiment))
 
 
 class CORSExecutor(GenericHTTPExecutor):
-    """Test for overly permissive CORS on all discovered endpoints."""
 
     def execute(self, experiment: SecurityExperiment) -> ExecutionResult:
         url = self._url_from_experiment(experiment)
@@ -258,7 +238,6 @@ class CORSExecutor(GenericHTTPExecutor):
 
 
 class InfoDisclosureExecutor(GenericHTTPExecutor):
-    """Check for sensitive info in headers and error responses."""
 
     SENSITIVE_HEADERS = ("x-powered-by", "server", "x-aspnet-version",
                          "x-aspnetmvc-version", "x-debug")
@@ -283,7 +262,6 @@ class InfoDisclosureExecutor(GenericHTTPExecutor):
 
 
 class GraphQLExecutor(GenericHTTPExecutor):
-    """Probe for GraphQL introspection — checks discovered endpoints + common paths."""
 
     def execute(self, experiment: SecurityExperiment) -> ExecutionResult:
         url = self._url_from_experiment(experiment)
@@ -327,7 +305,6 @@ class GraphQLExecutor(GenericHTTPExecutor):
 
 
 class WebSocketExecutor(GenericHTTPExecutor):
-    """Check if WebSocket upgrade is available and lacks origin validation."""
 
     def execute(self, experiment: SecurityExperiment) -> ExecutionResult:
         url = self._url_from_experiment(experiment)
@@ -365,8 +342,6 @@ class WebSocketExecutor(GenericHTTPExecutor):
 
 
 class BusinessLogicExecutor(GenericHTTPExecutor):
-    """Test for business logic flaws: negative values, duplicate requests,
-    workflow bypass, price tampering — on discovered endpoints."""
 
     def execute(self, experiment: SecurityExperiment) -> ExecutionResult:
         url = self._url_from_experiment(experiment)
@@ -437,7 +412,6 @@ class BusinessLogicExecutor(GenericHTTPExecutor):
 
 
 class PathTraversalExecutor(GenericHTTPExecutor):
-    """Test for directory listing and path traversal on discovered endpoints."""
 
     LISTING_INDICATORS = ("index of", "directory listing", "<pre>",
                           "parent directory", "[dir]")
@@ -488,8 +462,6 @@ class PathTraversalExecutor(GenericHTTPExecutor):
 
 
 class JWTExecutor(GenericHTTPExecutor):
-    """Test JWT none-algorithm, key confusion, and claim tampering on
-    all discovered auth-required endpoints."""
 
     def execute(self, experiment: SecurityExperiment) -> ExecutionResult:
         url = self._url_from_experiment(experiment)
@@ -549,7 +521,6 @@ class JWTExecutor(GenericHTTPExecutor):
 
 
 class NoSQLiExecutor(GenericHTTPExecutor):
-    """Test for MongoDB-style NoSQL injection on discovered login/search endpoints."""
 
     NOSQLI_BODY_PAYLOADS = [
         {"email": {"$ne": ""}, "password": {"$ne": ""}},
@@ -612,7 +583,6 @@ class NoSQLiExecutor(GenericHTTPExecutor):
 
 
 class FileUploadExecutor(GenericHTTPExecutor):
-    """Test file upload bypass on discovered upload endpoints."""
 
     TEST_FILES = [
         ("shell.php.jpg", "image/jpeg", b"<?php echo 'test'; ?>"),
@@ -668,7 +638,6 @@ class FileUploadExecutor(GenericHTTPExecutor):
 
 
 class PrototypePollutionExecutor(GenericHTTPExecutor):
-    """Test for __proto__ / constructor.prototype pollution on all JSON-accepting endpoints."""
 
     POLLUTION_PAYLOADS = [
         {"__proto__": {"isAdmin": True}},
@@ -711,8 +680,6 @@ class PrototypePollutionExecutor(GenericHTTPExecutor):
 
 
 class SSRFExecutor(GenericHTTPExecutor):
-    """Test for SSRF by injecting internal URLs into every discovered endpoint
-    that has a URL-like parameter (url=, redirect=, callback=, src=, etc.)."""
 
     SSRF_TARGETS = [
         "http://localhost", "http://127.0.0.1",
@@ -775,7 +742,6 @@ class SSRFExecutor(GenericHTTPExecutor):
 
 
 class XXEExecutor(GenericHTTPExecutor):
-    """Test for XXE on any discovered endpoint that might accept XML."""
 
     XXE_PAYLOADS = [
         '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>',
@@ -819,7 +785,6 @@ class XXEExecutor(GenericHTTPExecutor):
 
 
 class CSRFExecutor(GenericHTTPExecutor):
-    """Test for missing CSRF protections on all discovered state-changing endpoints."""
 
     def execute(self, experiment: SecurityExperiment) -> ExecutionResult:
         url = self._url_from_experiment(experiment)
@@ -858,7 +823,6 @@ class CSRFExecutor(GenericHTTPExecutor):
 
 
 class IDORExecutor(GenericHTTPExecutor):
-    """Test for IDOR by auto-detecting endpoints with numeric IDs and swapping them."""
 
     def execute(self, experiment: SecurityExperiment) -> ExecutionResult:
         url = self._url_from_experiment(experiment)
@@ -911,8 +875,6 @@ class IDORExecutor(GenericHTTPExecutor):
 
 
 class MassAssignmentExecutor(GenericHTTPExecutor):
-    """Test for mass assignment by sending privileged extra fields to
-    any discovered user/registration/profile endpoints."""
 
     PRIV_FIELDS = [
         {"role": "admin"},
@@ -995,7 +957,6 @@ class MassAssignmentExecutor(GenericHTTPExecutor):
 def _timed_probe(exec_obj: GenericHTTPExecutor, url: str, method: str = "GET",
                  headers: Optional[Dict[str, str]] = None,
                  data: Optional[bytes] = None) -> Tuple[int, str, Dict[str, str], float]:
-    """Wrap _probe to also return elapsed seconds (for time-based detection)."""
     t0 = time.monotonic()
     status, body, hdrs = exec_obj._probe(url, method=method, headers=headers, data=data)
     return status, body, hdrs, (time.monotonic() - t0)
@@ -1018,8 +979,6 @@ def _no_endpoints_result(reason: str) -> ExecutionResult:
 # ── 1.1 SSTIExecutor ───────────────────────────────────────────────────
 
 class SSTIExecutor(GenericHTTPExecutor):
-    """Server-Side Template Injection across major engines (Jinja2/Twig/
-    FreeMarker/ERB/Pug). Generic: discovery-driven, no target strings."""
 
     PAYLOADS = [
         ("{{7*7}}", "49"),
@@ -1092,7 +1051,6 @@ class SSTIExecutor(GenericHTTPExecutor):
 # ── 1.2 CommandInjectionExecutor ───────────────────────────────────────
 
 class CommandInjectionExecutor(GenericHTTPExecutor):
-    """OS command injection — output-based marker + time-based blind. Generic."""
 
     MARKER = "CMDIPROOF7X7"
     OUTPUT_PAYLOADS = [
@@ -1161,7 +1119,6 @@ class CommandInjectionExecutor(GenericHTTPExecutor):
 # ── 1.3 OpenRedirectExecutor ───────────────────────────────────────────
 
 class OpenRedirectExecutor(GenericHTTPExecutor):
-    """Open-redirect detection via Location header + body meta/JS redirect."""
 
     EVIL_HOST = "evil.example.com"
     PAYLOAD_TEMPLATES = [
@@ -1229,8 +1186,6 @@ class OpenRedirectExecutor(GenericHTTPExecutor):
 # ── 1.4 OAuthMisconfigExecutor ─────────────────────────────────────────
 
 class OAuthMisconfigExecutor(GenericHTTPExecutor):
-    """Detect OAuth/OIDC misconfigs: redirect_uri manipulation, missing state,
-    token-in-URL. Generic — never assumes a specific IdP or app."""
 
     EVIL_URI = "https://evil.example.com/cb"
     WELL_KNOWN = ("/.well-known/openid-configuration",
@@ -1284,7 +1239,6 @@ class OAuthMisconfigExecutor(GenericHTTPExecutor):
                 findings.append({"test": "oauth_missing_state",
                                  "path": ep, "status": status2,
                                  "body_snippet": body2[:200]})
-            # Token in URL/fragment
             if "access_token=" in loc or "id_token=" in loc:
                 findings.append({"test": "oauth_token_in_url",
                                  "path": ep, "status": status,
@@ -1301,7 +1255,6 @@ class OAuthMisconfigExecutor(GenericHTTPExecutor):
 # ── 1.5 CAPTCHABypassExecutor ──────────────────────────────────────────
 
 class CAPTCHABypassExecutor(GenericHTTPExecutor):
-    """Test CAPTCHA-protected endpoints for weak enforcement."""
 
     CAPTCHA_FIELDS = ("captcha", "g-recaptcha-response", "h-captcha-response",
                       "cf-turnstile-response", "captchaResult", "captchaAnswer")
@@ -1353,7 +1306,6 @@ class CAPTCHABypassExecutor(GenericHTTPExecutor):
 # ── 1.6 PasswordPolicyExecutor ─────────────────────────────────────────
 
 class PasswordPolicyExecutor(GenericHTTPExecutor):
-    """Register with progressively weak passwords; if any is accepted, weak policy."""
 
     WEAK = ["a", "123", "password", "12345678", "qwerty", "test", ""]
 
@@ -1404,7 +1356,6 @@ class PasswordPolicyExecutor(GenericHTTPExecutor):
 # ── 1.7 RateLimitExecutor ──────────────────────────────────────────────
 
 class RateLimitExecutor(GenericHTTPExecutor):
-    """Detect missing rate limiting on sensitive endpoints."""
 
     BURST = 15   # per endpoint, kept modest to be safe
 
@@ -1452,7 +1403,6 @@ class RateLimitExecutor(GenericHTTPExecutor):
 # ── 1.8 LogInjectionExecutor ───────────────────────────────────────────
 
 class LogInjectionExecutor(GenericHTTPExecutor):
-    """Log forging / Log4Shell probing via headers + exposed-log discovery."""
 
     MARKER = "LOGINJ_MARK_9X8B"
     LOG_PATHS = ("/logs", "/log", "/api/logs", "/admin/logs", "/access.log",
@@ -1505,8 +1455,6 @@ class LogInjectionExecutor(GenericHTTPExecutor):
 # ── 1.9 BackupFileScannerExecutor ──────────────────────────────────────
 
 class BackupFileScannerExecutor(GenericHTTPExecutor):
-    """Discover exposed backup files, VCS metadata, env files, and known
-    sensitive paths. Generic — appends suffixes to *discovered* paths."""
 
     BACKUP_SUFFIXES = (".bak", ".backup", ".old", ".orig", ".save", "~",
                        ".swp", ".sql", ".sql.gz", ".zip", ".tar.gz", ".tar",
@@ -1599,9 +1547,6 @@ class BackupFileScannerExecutor(GenericHTTPExecutor):
 # ── 2.1 AdvancedSQLiExecutor ───────────────────────────────────────────
 
 class AdvancedSQLiExecutor(GenericHTTPExecutor):
-    """UNION column count, schema extraction (SQLite/MySQL/PG), INSERT,
-    and time-based blind — across MULTIPLE DBMS. Fully generic; discovery
-    picks endpoints with query params or search/data role."""
 
     ORDER_BY = [f"' ORDER BY {n}--" for n in range(1, 12)]
     UNION_TEMPLATES = [
@@ -1628,7 +1573,6 @@ class AdvancedSQLiExecutor(GenericHTTPExecutor):
     TIME_THRESHOLD = 4.0
 
     def _endpoints_with_query(self, experiment) -> List[str]:
-        """Endpoints with an existing query string OR classified as search/data."""
         eps = self._all_endpoints_as_paths(experiment)
         candidates = [e for e in eps if "?" in e]
         if not candidates:
@@ -1711,9 +1655,6 @@ def _SQL_ERROR_PROBE(body: str) -> bool:
 # ── 2.2 AdvancedXSSExecutor ────────────────────────────────────────────
 
 class AdvancedXSSExecutor(GenericHTTPExecutor):
-    """Stored-XSS flow (POST then GET), filter-bypass payload set, and
-    header-injection XSS. Discovery picks feedback/comment/state-changing
-    endpoints for the stored flow."""
 
     MARKER = "XSSMARK_9x8b_KLM"  # unique, unlikely to collide
 
@@ -1807,14 +1748,11 @@ class AdvancedXSSExecutor(GenericHTTPExecutor):
 # ── 2.3 AdvancedJWTExecutor ────────────────────────────────────────────
 
 class AdvancedJWTExecutor(GenericHTTPExecutor):
-    """RS256→HS256 key confusion (JWKS-driven), jku/jwk header injection,
-    kid path/SQL injection. Fully generic — public key discovered via JWKS."""
 
     JWKS_PATHS = ("/.well-known/jwks.json", "/jwks.json", "/api/jwks",
                   "/oauth/jwks", "/auth/jwks", "/keys")
 
     def _forge_hs256_from_pub(self, secret_bytes: bytes, claims: dict) -> Optional[str]:
-        """Sign a JWT with HS256 using given secret. Requires pyjwt (already a project dep)."""
         try:
             import jwt as pyjwt
             return pyjwt.encode(claims, secret_bytes, algorithm="HS256")
@@ -1929,8 +1867,6 @@ class AdvancedJWTExecutor(GenericHTTPExecutor):
 # ── 2.4 AdvancedFileUploadExecutor (Zip-Slip / Symlink / LFI-params) ───
 
 class AdvancedFileUploadExecutor(GenericHTTPExecutor):
-    """Zip-Slip in archives, symlink-in-tar, and LFI via file-shaped query
-    params. All targets come from discovered endpoints."""
 
     LFI_PARAMS = ("file", "page", "template", "lang", "include", "path",
                   "doc", "view", "content", "document", "layout", "theme")
@@ -2031,12 +1967,6 @@ class AdvancedFileUploadExecutor(GenericHTTPExecutor):
 # ── 3.1 SCAExecutor — Software Composition Analysis via OSV.dev ────────
 
 class SCAExecutor(GenericHTTPExecutor):
-    """Discover exposed dependency manifests (package.json, requirements.txt,
-    composer.json, Gemfile.lock, pom.xml, go.sum, Cargo.lock, yarn.lock,
-    package-lock.json) and check each dependency against OSV.dev for CVEs.
-
-    Fully generic — probes standard well-known manifest paths and any
-    manifest URL discovered during recon."""
 
     MANIFEST_PATHS = (
         "/package.json", "/package-lock.json", "/yarn.lock",
@@ -2063,7 +1993,6 @@ class SCAExecutor(GenericHTTPExecutor):
     }
 
     def _parse_manifest(self, filename: str, body: str) -> List[Tuple[str, str, str]]:
-        """Return list of (package_name, version, ecosystem). Best-effort per format."""
         fn = filename.lower().split("/")[-1]
         eco = self.MANIFEST_TO_ECOSYSTEM.get(fn, "")
         out: List[Tuple[str, str, str]] = []
@@ -2225,8 +2154,6 @@ class SCAExecutor(GenericHTTPExecutor):
 # ── 3.2 TyposquatDetector ──────────────────────────────────────────────
 
 class TyposquatDetector(GenericHTTPExecutor):
-    """Detect dependencies whose names are close typos of popular packages.
-    Reuses SCAExecutor's manifest discovery + parsing."""
 
     # Top ~120 popular npm packages (embedded to keep executor offline-capable).
     POPULAR_NPM = (
@@ -2349,9 +2276,6 @@ class TyposquatDetector(GenericHTTPExecutor):
 # ── 3.3 WAFEvasionDetector ─────────────────────────────────────────────
 
 class WAFEvasionDetector(GenericHTTPExecutor):
-    """Detect a WAF, then attempt evasion via encoding, case, comment, and
-    unicode variants. Confirms bypass only when the evasive payload gets a
-    materially different response than the raw payload."""
 
     WAF_SIGNATURES = (
         ("cloudflare", "cf-ray", "cloudflare"),
@@ -2471,13 +2395,6 @@ class WAFEvasionDetector(GenericHTTPExecutor):
 # ═══════════════════════════════════════════════════════════════════════
 
 class _LLMBudget:
-    """Per-scan cap on LLM calls so Tier-4 can't dominate cost.
-
-    Keyed by scan_id (auto-derived from the scope validator's active scope, or
-    the current PID as a last-resort fallback) so long-running processes that
-    handle multiple scans don't leak the counter between runs. Callers can
-    also explicitly `reset(scan_id)` at the start of each scan.
-    """
     import threading as _threading
     MAX_CALLS_PER_SCAN = 30
     _counts: Dict[str, int] = {}
@@ -2517,22 +2434,12 @@ class _LLMBudget:
 
     @classmethod
     def reset(cls, scan_id: Optional[str] = None) -> None:
-        """Clear the budget counter for a specific scan (or the current one).
-        Called at the start of each scan by the orchestrator."""
         with cls._lock:
             key = str(scan_id) if scan_id else cls._current_scan_key()
             cls._counts.pop(key, None)
 
 
 def _run_async(coro, timeout: float = 60.0):
-    """Safely run an async coroutine from a sync context, whether or not
-    there's an event loop already running (some orchestrators call executors
-    from an async task).
-
-    Raises `TimeoutError` on missed deadline rather than silently returning
-    `None` — the previous behavior confused "coroutine hung" with "coroutine
-    returned nothing" and leaked daemon threads on hang.
-    """
     import asyncio
     try:
         loop = asyncio.get_event_loop()
@@ -2576,8 +2483,6 @@ def _run_async(coro, timeout: float = 60.0):
 async def _llm_json(prompt: str, system: Optional[str] = None,
                     max_tokens: int = 1024,
                     timeout: float = 60.0) -> Optional[dict]:
-    """Ask the harness for JSON. Returns None on failure, budget exhaustion,
-    or timeout. Never allows a stalled provider to halt the whole phase."""
     if not _LLMBudget.can_call():
         return None
     try:
@@ -2598,15 +2503,10 @@ async def _llm_json(prompt: str, system: Optional[str] = None,
 # ── 4.1 SecurityQuestionSolverExecutor ─────────────────────────────────
 
 class SecurityQuestionSolverExecutor(GenericHTTPExecutor):
-    """Discover security-question endpoints, enumerate answers via LLM
-    reasoning over OSINT context, and try each. Fully generic — endpoints
-    come from discovery; user list comes from OSINT+enumeration; the LLM
-    handles the question wording."""
 
     ANSWERS_PER_QUESTION = 15
 
     def _collect_users(self, experiment) -> List[dict]:
-        """Pull known users/emails from OSINT context if provided."""
         users = []
         osint = experiment.input_parameters.get("osint") or {}
         for e in (osint.get("employees") or [])[:20]:
@@ -2717,8 +2617,6 @@ class SecurityQuestionSolverExecutor(GenericHTTPExecutor):
 # ── 4.2 LLMPasswordDerivationExecutor ──────────────────────────────────
 
 class LLMPasswordDerivationExecutor(GenericHTTPExecutor):
-    """Ask the LLM to derive likely passwords from OSINT (name, company,
-    domain, interests) then spray them against discovered login endpoints."""
 
     MAX_USERS = 6
     PASSWORDS_PER_USER = 20
@@ -2815,14 +2713,10 @@ class LLMPasswordDerivationExecutor(GenericHTTPExecutor):
 # ── 4.3 LLMBusinessLogicExplorerExecutor ───────────────────────────────
 
 class LLMBusinessLogicExplorerExecutor(GenericHTTPExecutor):
-    """Feed the LLM the discovered API surface; ask it to reason about
-    workflows, price/quantity manipulation, GDPR endpoints, coupon abuse.
-    Executes each suggested probe and checks for anomalous responses."""
 
     MAX_TESTS = 25
 
     def _endpoint_catalog(self, experiment) -> List[dict]:
-        """Rich list: url, method (if known), params."""
         raw = experiment.input_parameters.get("endpoints", [])
         out = []
         for e in raw:
@@ -2930,12 +2824,6 @@ class LLMBusinessLogicExplorerExecutor(GenericHTTPExecutor):
 # ── 5.1 MFABypassExecutor ──────────────────────────────────────────────
 
 class MFABypassExecutor(GenericHTTPExecutor):
-    """Test 4 classic 2FA weaknesses on discovered MFA/auth endpoints:
-    - skip 2FA step (access protected endpoint with only stage-1 token)
-    - backup code reuse (same code accepted twice)
-    - MFA disable without verification
-    - trivially guessable OTP (000000, 111111, 123456) — capped to 10 attempts,
-      only when rate-limit executor has confirmed no lockout on this host."""
 
     GUESSABLE_OTPS = ["000000", "111111", "123456", "654321", "999999",
                       "000001", "112233", "111222", "121212", "121314"]
@@ -3059,11 +2947,6 @@ class MFABypassExecutor(GenericHTTPExecutor):
 # ── 5.2 CryptoWeaknessDetector ─────────────────────────────────────────
 
 class CryptoWeaknessDetector(GenericHTTPExecutor):
-    """Detect weak/predictable cryptographic patterns in responses:
-    - MD5/SHA1 hash values (weak password hashing signal)
-    - Base64-encoded blobs that decode to user-readable data (unsigned tokens)
-    - Sequential/predictable IDs (paginate two adjacent to compare)
-    - Client-side crypto (JWT/base64 role fields set in localStorage-serving JS)"""
 
     HASH_PATTERNS = [
         (re.compile(r'"[a-f0-9]{32}"'), "MD5"),
@@ -3075,8 +2958,6 @@ class CryptoWeaknessDetector(GenericHTTPExecutor):
                             re.IGNORECASE)
 
     def _sample_responses(self, experiment) -> List[Tuple[str, str, str]]:
-        """Return (path, body, headers_str) tuples for a small sample of
-        discovered endpoints."""
         base = self._base(experiment)
         headers = self._auth_headers(experiment)
         out = []
@@ -3108,7 +2989,6 @@ class CryptoWeaknessDetector(GenericHTTPExecutor):
                                      "path": path, "kind": kind,
                                      "sample": m.group(0)[:40]})
                     break
-            # UUIDv1 (time-based, predictable)
             m = self.UUID_V1_RE.search(blob)
             if m:
                 findings.append({"test": "uuid_v1_predictable",
@@ -3167,10 +3047,6 @@ class CryptoWeaknessDetector(GenericHTTPExecutor):
 # ── 5.3 LLMContentAnalyzerExecutor ─────────────────────────────────────
 
 class LLMContentAnalyzerExecutor(GenericHTTPExecutor):
-    """Fetch pages likely to hide info (JS bundles, robots, sitemap, docs)
-    and ask the LLM to identify secrets, hidden endpoints, deprecated APIs.
-    Then verify each hit with an HTTP probe. LLM call count bound by
-    `_LLMBudget`."""
 
     PAGES_TO_FETCH = ("/", "/robots.txt", "/sitemap.xml", "/humans.txt",
                       "/security.txt", "/.well-known/security.txt",
@@ -3280,13 +3156,6 @@ _FLAG_KEYWORDS = ("flag", "secret", "password", "api_key", "apikey",
 # ── 6.1 SteganographyDetector ──────────────────────────────────────────
 
 class SteganographyDetector(GenericHTTPExecutor):
-    """Fetch images from discovered endpoints and check for:
-    - data appended after the image's terminator (PNG IEND / JPEG FFD9)
-    - EXIF/text-comment tags containing 'flag' / 'secret' / 'password'
-    - LSB steganography: extract low bit of each channel across N pixels
-      and look for ASCII patterns (best-effort; Pillow required — skipped
-      if unavailable).
-    Findings only recorded when we can quote the recovered bytes."""
 
     IMG_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")
     IEND = b"IEND\xaeB`\x82"
@@ -3404,9 +3273,6 @@ class SteganographyDetector(GenericHTTPExecutor):
 # ── 6.2 SubtitleXSSExecutor ────────────────────────────────────────────
 
 class SubtitleXSSExecutor(GenericHTTPExecutor):
-    """Discover .vtt / .srt / .ass subtitle files or upload endpoints
-    accepting them; check for HTML/script content in existing files, and
-    attempt to upload a malicious subtitle if an upload endpoint exists."""
 
     SUFFIXES = (".vtt", ".srt", ".ass", ".ssa", ".sbv")
     MARKER = "SUBXSS_9k2M_MARK"
@@ -3468,15 +3334,12 @@ class SubtitleXSSExecutor(GenericHTTPExecutor):
 # ── 6.3 NestedEncodingSolver ───────────────────────────────────────────
 
 class NestedEncodingSolver(GenericHTTPExecutor):
-    """Recursively try base64/hex/URL/ROT13/gzip decoding on suspicious-looking
-    strings in responses and flag results containing sensitive keywords."""
 
     B64_LONG_RE = re.compile(r'"([A-Za-z0-9+/]{32,}={0,2})"')
     HEX_LONG_RE = re.compile(r'"([0-9a-fA-F]{32,})"')
     MAX_DEPTH = 4
 
     def _try_decode(self, s: str) -> List[Tuple[str, str]]:
-        """Return list of (decoder_name, decoded_string) that succeeded."""
         import base64 as _b64
         import binascii, gzip, codecs, urllib.parse
         out = []
@@ -3504,7 +3367,6 @@ class NestedEncodingSolver(GenericHTTPExecutor):
                 out.append(("rot13", txt))
         except Exception:
             pass
-        # URL-decode
         try:
             txt = urllib.parse.unquote(s)
             if txt != s and any(k in txt.lower() for k in _FLAG_KEYWORDS):
@@ -3574,8 +3436,6 @@ class NestedEncodingSolver(GenericHTTPExecutor):
 # ── 6.4 BlockchainWeb3Detector ─────────────────────────────────────────
 
 class BlockchainWeb3Detector(GenericHTTPExecutor):
-    """Detect Web3/blockchain exposure — hardcoded private keys in JS,
-    mnemonic phrases, ABI files leaked, unrestricted RPC endpoints."""
 
     ETH_PRIVKEY_RE = re.compile(r'\b(0x)?[0-9a-fA-F]{64}\b')
     BIP39_WORDS = ("abandon", "ability", "wallet", "seed", "mnemonic", "witness")
@@ -3638,9 +3498,6 @@ class BlockchainWeb3Detector(GenericHTTPExecutor):
 # ── 6.5 RaceConditionExploiter ─────────────────────────────────────────
 
 class RaceConditionExploiter(GenericHTTPExecutor):
-    """Fire N parallel POSTs at state-changing endpoints and check if
-    the server allowed a race — e.g., an operation that should have run
-    once ran N times."""
 
     PARALLEL = 15
 
@@ -3690,9 +3547,6 @@ class RaceConditionExploiter(GenericHTTPExecutor):
 # ── 6.6 HiddenResourceEnumerator ───────────────────────────────────────
 
 class HiddenResourceEnumerator(GenericHTTPExecutor):
-    """Enumerate numeric IDs on discovered ID-shaped endpoints and flag
-    entries whose response body contains 'deleted', 'unavailable', 'hidden',
-    or 'archived' flags but are still readable — a common data-leak."""
 
     RANGE = 30
     HIDDEN_MARKERS = ("deleted", "hidden", "archived", "unavailable",
@@ -3741,9 +3595,6 @@ class HiddenResourceEnumerator(GenericHTTPExecutor):
 # ── 6.7 GDPRAbuseDetector ──────────────────────────────────────────────
 
 class GDPRAbuseDetector(GenericHTTPExecutor):
-    """Discover common GDPR endpoints (data export, account deletion, right
-    to be forgotten) and check for missing authentication or cross-user
-    access."""
 
     GDPR_PATHS = ("/gdpr", "/gdpr/export", "/api/gdpr", "/api/gdpr/export",
                   "/user/export", "/api/user/export", "/api/data-export",
@@ -3797,8 +3648,6 @@ class GDPRAbuseDetector(GenericHTTPExecutor):
 # ── 6.8 ErrorMessageLeakDetector ───────────────────────────────────────
 
 class ErrorMessageLeakDetector(GenericHTTPExecutor):
-    """Trigger errors and scan responses for stack traces, DB names, file
-    paths, internal hostnames, emails, and credentials."""
 
     TRIGGERS = [
         ("GET",  "?id=abcxyz", None),
@@ -3862,8 +3711,6 @@ class ErrorMessageLeakDetector(GenericHTTPExecutor):
 # ── 6.9 EncodingMisconfigDetector ──────────────────────────────────────
 
 class EncodingMisconfigDetector(GenericHTTPExecutor):
-    """Send payloads in unusual charsets and see if the server double-decodes
-    them (UTF-7 XSS, mixed-encoding param, missing Content-Type charset)."""
 
     UTF7_XSS = "+ADw-script+AD4-alert(1)+ADw-/script+AD4-"
     MARKER = "ENCMISCFG_MRK"
@@ -3931,9 +3778,6 @@ class EncodingMisconfigDetector(GenericHTTPExecutor):
 # ── 7.1 HTTPRequestSmugglingExecutor ───────────────────────────────────
 
 class HTTPRequestSmugglingExecutor(GenericHTTPExecutor):
-    """Detect classic HTTP request smuggling (CL.TE / TE.CL / TE.TE) via
-    timing signal: a valid TE-chunked terminator with a mismatched CL
-    causes one server to wait for more bytes → time delta > baseline."""
 
     def _raw_probe(self, host: str, port: int, use_tls: bool,
                    raw_request: bytes, read_bytes: int = 2048) -> Tuple[float, bytes]:
@@ -4037,10 +3881,6 @@ class HTTPRequestSmugglingExecutor(GenericHTTPExecutor):
 # ── 7.2 InsecureDeserializationDetector ────────────────────────────────
 
 class InsecureDeserializationDetector(GenericHTTPExecutor):
-    """Send serialized-object markers in cookies and POST bodies; flag if
-    the server returns a distinct error signalling deserialization
-    (or, better, accepts them without error). Generic — never invokes any
-    real gadget chain."""
 
     # Java serialized-object magic bytes: AC ED 00 05 → base64 = rO0AB...
     JAVA_MAGIC_B64 = "rO0ABXQAAA=="
@@ -4109,8 +3949,6 @@ class InsecureDeserializationDetector(GenericHTTPExecutor):
 # ── 7.3 CloudBucketEnumerator ──────────────────────────────────────────
 
 class CloudBucketEnumerator(GenericHTTPExecutor):
-    """Derive candidate S3 / Azure / GCS bucket names from the target's
-    domain and probe them. Public-read buckets return a listing XML/JSON."""
 
     S3_TMPL = ("https://{name}.s3.amazonaws.com/",
                "https://s3.amazonaws.com/{name}/",
@@ -4177,9 +4015,6 @@ class CloudBucketEnumerator(GenericHTTPExecutor):
 # ── 7.4 SubdomainTakeoverDetector ──────────────────────────────────────
 
 class SubdomainTakeoverDetector(GenericHTTPExecutor):
-    """Fingerprint discovered subdomains against known "dangling" service
-    signatures (Heroku, GitHub Pages, S3, Fastly, Azure, Shopify, ...).
-    Zero attempt to actually take over — just detection."""
 
     FINGERPRINTS = (
         ("github_pages", ("There isn't a GitHub Pages site here",)),
@@ -4284,8 +4119,6 @@ class SubdomainTakeoverDetector(GenericHTTPExecutor):
 # ── 7.5 LDAPInjectionExecutor ──────────────────────────────────────────
 
 class LDAPInjectionExecutor(GenericHTTPExecutor):
-    """Inject LDAP filter metacharacters into login/search endpoints and
-    look for wildcard-bypass behavior or LDAP error signatures."""
 
     PAYLOADS = ("*", "*)(uid=*", "*)(|(uid=*", "admin*)(|(password=*",
                 "*))(|(&", "*)(|(objectclass=*", "\\29\\28uid=\\2a")
@@ -4339,8 +4172,6 @@ class LDAPInjectionExecutor(GenericHTTPExecutor):
 # ── 7.6 CSPBypassDetector ──────────────────────────────────────────────
 
 class CSPBypassDetector(GenericHTTPExecutor):
-    """Fetch responses and analyse Content-Security-Policy for unsafe
-    directives (`unsafe-inline`, wildcards, known bypassable CDNs)."""
 
     BYPASSABLE_CDNS = (
         "cdn.jsdelivr.net", "cdnjs.cloudflare.com", "unpkg.com",
@@ -4407,9 +4238,6 @@ class CSPBypassDetector(GenericHTTPExecutor):
 # ── 7.7 WebCachePoisoningExecutor ──────────────────────────────────────
 
 class WebCachePoisoningExecutor(GenericHTTPExecutor):
-    """Test whether unkeyed headers (X-Forwarded-Host / X-Forwarded-Proto /
-    X-Original-URL / etc.) influence a cached response — a classic web-cache
-    poisoning primitive."""
 
     MARKER = "WCPMRK_9k2X"
     UNKEYED_HEADERS = ("X-Forwarded-Host", "X-Forwarded-Proto",
@@ -4467,8 +4295,6 @@ class WebCachePoisoningExecutor(GenericHTTPExecutor):
 # ── 7.8 DOMXSSStaticAnalyzer ───────────────────────────────────────────
 
 class DOMXSSStaticAnalyzer(GenericHTTPExecutor):
-    """Fetch JS files and search for classic source-to-sink patterns
-    (location.hash / postMessage → innerHTML / eval / document.write)."""
 
     SOURCES = ("location.hash", "location.search", "location.href",
                "document.URL", "document.documentURI", "document.referrer",
@@ -4521,8 +4347,6 @@ class DOMXSSStaticAnalyzer(GenericHTTPExecutor):
 # ── 7.9 SAMLFlawDetector ───────────────────────────────────────────────
 
 class SAMLFlawDetector(GenericHTTPExecutor):
-    """Probe SAML endpoints for common flaws: XML signature stripping,
-    comment injection in NameID, unsigned assertions accepted."""
 
     SAML_HINTS = ("/saml", "/sso", "/simplesaml", "/adfs", "/oam/server",
                   "/api/saml", "/auth/saml")
@@ -4598,9 +4422,6 @@ class SAMLFlawDetector(GenericHTTPExecutor):
 # ── 7.10 PromptInjectionTester (LLM endpoints on TARGET) ───────────────
 
 class PromptInjectionTester(GenericHTTPExecutor):
-    """If the target exposes an LLM chat/completion endpoint, probe it with
-    classic prompt-injection payloads and check for evidence of instruction
-    override (secret exfil / role change / restricted output)."""
 
     LLM_HINTS = ("/chat", "/completions", "/api/chat", "/api/completions",
                  "/v1/chat", "/v1/completions", "/api/llm", "/api/ai",
@@ -4660,8 +4481,6 @@ class PromptInjectionTester(GenericHTTPExecutor):
 # ── 7.11 CICDExposureScanner ───────────────────────────────────────────
 
 class CICDExposureScanner(GenericHTTPExecutor):
-    """Probe well-known CI/CD server paths (Jenkins, GitLab, GitHub Actions
-    artefacts, Drone, TeamCity, Bamboo, ArgoCD) and flag exposed content."""
 
     PATHS = (
         # Jenkins
@@ -4671,13 +4490,9 @@ class CICDExposureScanner(GenericHTTPExecutor):
         "/-/health", "/api/v4/version", "/help", "/users/sign_in",
         # ArgoCD / Argo Workflows
         "/api/v1/applications", "/workflows/",
-        # Drone / Concourse / Buildkite
         "/api/user/repos", "/api/v1/teams",
-        # TeamCity / Bamboo
         "/app/rest/server", "/rest/api/latest/serverInfo",
-        # Nexus / Artifactory
         "/service/rest/v1/repositories", "/artifactory/api/system/ping",
-        # Sonar / Grafana / Kibana
         "/api/system/status", "/api/health", "/app/kibana",
         # Kubernetes dashboards
         "/api/v1/namespaces", "/apis/", "/version",
@@ -4722,8 +4537,6 @@ class CICDExposureScanner(GenericHTTPExecutor):
 # ── 7.12 BasicAuthBypassExecutor ───────────────────────────────────────
 
 class BasicAuthBypassExecutor(GenericHTTPExecutor):
-    """Attempt classic Basic-Auth bypass primitives: null byte, wildcard,
-    Authorization override, empty password, and case variation."""
 
     ATTACKS = [
         ("null_byte_username",  "admin\x00:password"),
@@ -4775,8 +4588,6 @@ class BasicAuthBypassExecutor(GenericHTTPExecutor):
 # ── 7.13 HeaderRateLimitBypassExecutor ─────────────────────────────────
 
 class HeaderRateLimitBypassExecutor(GenericHTTPExecutor):
-    """After a rate limit fires (429), rotate common client-IP-spoof headers
-    to see whether the backend counts against a spoofable identity."""
 
     HEADERS = ("X-Forwarded-For", "X-Real-IP", "X-Client-IP", "X-Originating-IP",
                "CF-Connecting-IP", "True-Client-IP", "X-Remote-Addr")
@@ -4838,8 +4649,6 @@ class HeaderRateLimitBypassExecutor(GenericHTTPExecutor):
 
 
 class _CredentialResolver:
-    """Locate credentials for a given provider from experiment / ctx / env.
-    Returns None cleanly when nothing is available."""
 
     @staticmethod
     def _from_experiment(experiment: SecurityExperiment, key: str) -> Optional[dict]:
@@ -4915,7 +4724,6 @@ class _CredentialResolver:
 
     @staticmethod
     def ci_pipeline(experiment, ctx) -> Optional[dict]:
-        """Jenkins / GitLab / GitHub CI tokens."""
         got = _CredentialResolver._from_experiment(experiment, "ci") \
               or _CredentialResolver._from_ctx(ctx, "ci")
         if got and (got.get("bearer_token") or got.get("api_token")):
@@ -4943,8 +4751,6 @@ import os  # ensure available for _CredentialResolver env reads
 # ── 8.1 AWSCredentialedEnumerator ──────────────────────────────────────
 
 class AWSCredentialedEnumerator(GenericHTTPExecutor):
-    """When AWS creds are present, enumerate STS identity, IAM policies,
-    accessible S3 buckets, and Lambda functions. AWS SigV4 signed."""
 
     def _sign_v4(self, method: str, host: str, path: str, query: str,
                  body: bytes, region: str, service: str,
@@ -5073,8 +4879,6 @@ class AWSCredentialedEnumerator(GenericHTTPExecutor):
 # ── 8.2 AzureCredentialedEnumerator ────────────────────────────────────
 
 class AzureCredentialedEnumerator(GenericHTTPExecutor):
-    """When Azure bearer token is present, enumerate accessible ARM
-    subscriptions/resource groups/storage accounts."""
 
     def execute(self, experiment: SecurityExperiment) -> ExecutionResult:
         creds = _CredentialResolver.azure(experiment, getattr(self, "ctx", None))
@@ -5131,8 +4935,6 @@ class AzureCredentialedEnumerator(GenericHTTPExecutor):
 # ── 8.3 GCPCredentialedEnumerator ──────────────────────────────────────
 
 class GCPCredentialedEnumerator(GenericHTTPExecutor):
-    """When a GCP OAuth token is present, enumerate accessible projects
-    and GCS buckets."""
 
     def execute(self, experiment: SecurityExperiment) -> ExecutionResult:
         creds = _CredentialResolver.gcp(experiment, getattr(self, "ctx", None))
@@ -5176,8 +4978,6 @@ class GCPCredentialedEnumerator(GenericHTTPExecutor):
 # ── 8.4 KubernetesRBACExecutor ─────────────────────────────────────────
 
 class KubernetesRBACExecutor(GenericHTTPExecutor):
-    """When Kube token+API server known, enumerate what the identity can
-    do (namespaces, secrets cluster-wide, exec into pods) via SelfSubjectAccessReview."""
 
     ACTIONS = [
         ("get_secrets_all", {"verb": "get", "resource": "secrets"}),
@@ -5247,8 +5047,6 @@ class KubernetesRBACExecutor(GenericHTTPExecutor):
 # ── 8.5 CIPipelineSecretExtractor ──────────────────────────────────────
 
 class CIPipelineSecretExtractor(GenericHTTPExecutor):
-    """With CI/CD API tokens (Jenkins/GitLab/GitHub), pull job logs and
-    environment listings, then scan for secret patterns."""
 
     SECRET_PATTERNS = (
         (re.compile(r"AKIA[0-9A-Z]{16}"), "aws_access_key"),
@@ -5317,20 +5115,6 @@ _KALI_CONTAINER_DEFAULT = "kali-pentesting"
 
 
 def _run_in_kali(script: str, timeout: int = 60) -> Tuple[int, str, str]:
-    """Execute a Python script inside the Kali container via docker exec.
-    Returns (returncode, stdout, stderr). Falls back to (rc=-1, "", err) if
-    docker/container unavailable.
-
-    Container name is validated against a strict allowlist regex before
-    interpolation. Even though it comes from an env var (operator-controlled),
-    a container name with shell metacharacters would enable command injection
-    in an otherwise trusted operator's shell — enforce the Docker naming rules
-    (`[a-zA-Z0-9][a-zA-Z0-9_.-]*`) so the interpolation is safe under all
-    reasonable operator inputs.
-
-    We also switch from `shell=True` to `shell=False` with a list argv, so the
-    only shell-interpretation surface remaining is inside the container.
-    """
     import subprocess
     import base64 as _b64
     container = os.getenv(_KALI_CONTAINER_ENV, _KALI_CONTAINER_DEFAULT)
@@ -5366,14 +5150,10 @@ def _browser_available() -> bool:
 
 
 class _BrowserBase(GenericHTTPExecutor):
-    """Common Playwright driver — spawns a headless Chromium inside the
-    Kali container, runs a JS payload against a URL, returns collected
-    console messages and any window.__RESULT__ set by the page."""
 
     def _run_playwright(self, url: str, page_script_js: str,
                         pre_navigate_js: str = "",
                         timeout_ms: int = 15000) -> dict:
-        """Returns a dict: {status, console: [...], result: any, error}"""
         # Compose a small Python driver script that runs inside the container
         driver = (
             "import json, sys\n"
@@ -5429,9 +5209,6 @@ class _BrowserBase(GenericHTTPExecutor):
 # ── 8.6 LiveDOMXSSExecutor ─────────────────────────────────────────────
 
 class LiveDOMXSSExecutor(_BrowserBase):
-    """Drive Chromium against discovered URLs with classic DOM XSS
-    fragments (`#<img src=x onerror=…>`, `?q=<script>…</script>`) and
-    capture actual JS execution (console.log / dialog / pageerror)."""
 
     MARKER = "LIVEDOMXSS_9M2K"
     FRAGMENT_PAYLOADS = (
@@ -5500,9 +5277,6 @@ class LiveDOMXSSExecutor(_BrowserBase):
 # ── 8.7 LivePostMessageAbuseDetector ───────────────────────────────────
 
 class LivePostMessageAbuseDetector(_BrowserBase):
-    """Load the page in Chromium, enumerate `window.addEventListener('message', …)`
-    handlers via a pre-navigate hook, then send crafted messages and see
-    if any reach a dangerous sink (eval / innerHTML / location assignment)."""
 
     def execute(self, experiment: SecurityExperiment) -> ExecutionResult:
         base = self._base(experiment)
@@ -5577,8 +5351,6 @@ class LivePostMessageAbuseDetector(_BrowserBase):
 # ── 8.8 LiveClickjackingDetector ───────────────────────────────────────
 
 class LiveClickjackingDetector(_BrowserBase):
-    """Try to load the target inside a same-origin iframe under Chromium.
-    Works only when X-Frame-Options / CSP frame-ancestors allow it."""
 
     def execute(self, experiment: SecurityExperiment) -> ExecutionResult:
         base = self._base(experiment)
@@ -5629,8 +5401,6 @@ class LiveClickjackingDetector(_BrowserBase):
 # ── 8.9 LiveCSPBypassAttempt ───────────────────────────────────────────
 
 class LiveCSPBypassAttempt(_BrowserBase):
-    """When CSP allows a bypassable CDN, actually load a script from that
-    CDN and confirm execution — proves the CSP is genuinely bypassable."""
 
     def execute(self, experiment: SecurityExperiment) -> ExecutionResult:
         base = self._base(experiment)

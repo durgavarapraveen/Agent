@@ -14,15 +14,10 @@ logger = logging.getLogger(__name__)
 
 
 def _tool_available(binary: str) -> bool:
-    """Cheap preflight — cache is provided by shutil.which itself on Linux."""
     return shutil.which(binary) is not None
 
 
 def _missing_binary_result(tool: str, binary: str, start: float) -> ToolResult:
-    """Distinguishable result for a missing binary. Previously every adapter
-    caught `FileNotFoundError` inside its generic `except Exception` and
-    returned an indistinguishable ERROR — operators couldn't tell whether
-    the tool was misconfigured or the target was refusing connections."""
     duration = (time.time() - start) * 1000
     logger.warning("Tool binary not found: %s (%s)", tool, binary)
     return ToolResult(
@@ -98,7 +93,6 @@ class SQLMapAdapter(BaseAdapter):
             )
 
     # sqlmap prints per-parameter blocks like:
-    #   Parameter: id (GET)
     #       Type: boolean-based blind
     #       Title: AND boolean-based blind - WHERE or HAVING clause
     #       Payload: id=1 AND 1=1
@@ -261,15 +255,6 @@ class DalfoxAdapter(BaseAdapter):
             )
 
     def _parse_output(self, stdout: str) -> List[SecurityFinding]:
-        """Parse dalfox stdout for confirmed and grep findings.
-
-        Dalfox prints one line per finding:
-            [V] URL  -- confirmed vulnerable (payload triggered)
-            [G] URL  -- grep-based match (weak signal, may be FP)
-        Emit ONE finding per line so downstream dedup can score them
-        individually. The previous "any `[V]` or `[G]` anywhere → one
-        finding" collapsed dozens of real hits into a single entry.
-        """
         findings: List[SecurityFinding] = []
         import re as _re_dx
         for m in _re_dx.finditer(r"^\s*\[(V|G|R)\]\s+(\S+)(.*)$", stdout, _re_dx.MULTILINE):

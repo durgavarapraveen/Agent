@@ -1,6 +1,3 @@
-"""
-Core Common Subpackage
-"""
 
 import sys
 import importlib

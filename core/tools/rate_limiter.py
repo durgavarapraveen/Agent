@@ -1,7 +1,3 @@
-"""
-Adaptive Rate Limiter — detects WAF blocks and rate limiting responses,
-then automatically adjusts scan speed per-target to avoid false negatives.
-"""
 
 import asyncio
 import logging
@@ -15,7 +11,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TargetState:
-    """Per-target rate limiting state."""
     requests_sent: int = 0
     blocks_detected: int = 0
     last_block_time: float = 0.0
@@ -76,7 +71,6 @@ TOOL_BLOCK_PATTERNS = [
 
 
 class AdaptiveRateLimiter:
-    """Detects and adapts to per-target rate limits and WAF protections."""
 
     def __init__(self, default_delay: float = 1.0):
         self._targets: Dict[str, TargetState] = defaultdict(
@@ -87,7 +81,6 @@ class AdaptiveRateLimiter:
         self._lock = asyncio.Lock()
 
     def _normalize_target(self, target: str) -> str:
-        """Extract hostname from target URL for per-host tracking."""
         from urllib.parse import urlparse
         try:
             parsed = urlparse(target if "://" in target else f"https://{target}")
@@ -96,16 +89,11 @@ class AdaptiveRateLimiter:
             return target
 
     def get_state(self, target: str) -> TargetState:
-        """Get the current rate limiting state for a target."""
         host = self._normalize_target(target)
         return self._targets[host]
 
     def detect_block(self, target: str, status_code: int = 0,
                      stdout: str = "", stderr: str = "") -> Tuple[bool, str]:
-        """Analyze a tool response for signs of rate limiting or WAF blocking.
-
-        Returns (is_blocked, reason).
-        """
         reasons = []
 
         if status_code in BLOCK_STATUS_CODES:
@@ -138,7 +126,6 @@ class AdaptiveRateLimiter:
     async def record_result(self, target: str, success: bool,
                             status_code: int = 0,
                             stdout: str = "", stderr: str = ""):
-        """Record a tool execution result and adjust rate limiting."""
         host = self._normalize_target(target)
         async with self._lock:
             state = self._targets[host]
@@ -188,7 +175,6 @@ class AdaptiveRateLimiter:
                     state.consecutive_successes = 0
 
     async def wait_if_needed(self, target: str):
-        """Wait the appropriate delay before sending the next request to target."""
         host = self._normalize_target(target)
         state = self._targets[host]
 
@@ -200,12 +186,10 @@ class AdaptiveRateLimiter:
             await asyncio.sleep(delay)
 
     def get_delay(self, target: str) -> float:
-        """Get the current delay for a target (for non-async callers)."""
         host = self._normalize_target(target)
         return self._targets[host].current_delay
 
     def get_tool_flags(self, target: str, tool_name: str) -> Dict[str, str]:
-        """Get tool-specific rate limiting flags based on current target state."""
         host = self._normalize_target(target)
         state = self._targets[host]
         flags = {}
@@ -257,7 +241,6 @@ class AdaptiveRateLimiter:
         return {k: v for k, v in flags.items() if v}
 
     def get_summary(self) -> Dict:
-        """Get a summary of rate limiting state across all targets."""
         targets = {}
         for host, state in self._targets.items():
             if state.requests_sent == 0:
@@ -283,7 +266,6 @@ _instance: Optional[AdaptiveRateLimiter] = None
 
 
 def get_rate_limiter() -> AdaptiveRateLimiter:
-    """Get or create the global rate limiter singleton."""
     global _instance
     if _instance is None:
         _instance = AdaptiveRateLimiter()

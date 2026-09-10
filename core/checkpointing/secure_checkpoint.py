@@ -11,7 +11,6 @@ logger = logging.getLogger(__name__)
 
 
 # On-disk envelope:
-#   {"version": 1, "key_version": N, "state": {...}, "integrity_hash": "..."}
 # Enveloping lets us stamp a key version so a checkpoint saved with key vN
 # can be recognised (and refused with a clear error) when the process is
 # now running with key vN+1. Previously an ENCRYPTION_KEY rotation without a
@@ -94,12 +93,6 @@ class SecureCheckpoint:
         return state
 
     def rotate_key(self, new_key: bytes, new_key_version: int) -> None:
-        """Re-save the current checkpoint under a new master key.
-
-        Load with the old key, save with the new one. Callers should invoke
-        this at the same time as `SecretManager.rotate_key(...)` so all
-        encrypted files under `.antigravity/` move in lockstep.
-        """
         state = self.load_checkpoint()
         self._key = new_key
         self._key_version = int(new_key_version)

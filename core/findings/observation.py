@@ -1,13 +1,3 @@
-"""
-P0-3: separate observations from vulnerabilities.
-
-Lifecycle: OBSERVATION -> INDICATOR -> HYPOTHESIS -> VALIDATION -> CONFIRMED_FINDING
-
-Callers must NOT create a `Finding` directly from a raw HTTP 200 or a
-discovered path. They record an `Observation` first, promote it to an
-`Indicator`, generate a `Hypothesis`, and only after validation does it
-become a real `Finding` via `promote_to_finding()`.
-"""
 from __future__ import annotations
 
 import uuid
@@ -37,7 +27,6 @@ class LifecycleStage(str, Enum):
 
 @dataclass
 class Observation:
-    """A raw, neutral fact captured from tool output. NOT a vulnerability."""
     obs_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     target: str = ""
     source_tool: str = ""
@@ -63,7 +52,6 @@ class Observation:
 
 @dataclass
 class Hypothesis:
-    """A candidate vulnerability that needs validation before becoming a Finding."""
     hyp_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     vuln_class: str = ""        # e.g. "IDOR", "SQLi", "SUBDOMAIN_TAKEOVER"
     target: str = ""
@@ -105,10 +93,6 @@ _INDICATOR_ONLY = {
 
 
 def is_confirmable_without_validation(kind: str) -> bool:
-    """P0-3 gate: only allow direct promotion for pre-validated tool outputs
-    (e.g. Nuclei matched a signed template) — everything else needs a
-    hypothesis + evidence step first.
-    """
     kind = (kind or "").lower()
     if kind in _NON_VULN_OBSERVATIONS or kind in _INDICATOR_ONLY:
         return False
@@ -117,16 +101,6 @@ def is_confirmable_without_validation(kind: str) -> bool:
 
 def promote_to_finding(obs: Observation, hypothesis: Optional[Hypothesis] = None,
                        validation_proof: str = "") -> Optional[Dict[str, Any]]:
-    """Return a Finding-shaped dict if the promotion is legitimate.
-
-    Rejects promotion when the observation kind isn't confirmable and no
-    validation proof is supplied. This is the P0-3 firewall between
-    "we saw something" and "we found a bug".
-
-    P0.6: status is always UNCONFIRMED at promotion. Confirmation requires
-    passing the FindingConfirmationGate with deterministic evidence.
-    A 200 status or LLM wording is never sufficient.
-    """
     kind = (obs.kind or "").lower()
     if not is_confirmable_without_validation(kind) and not validation_proof:
         return None

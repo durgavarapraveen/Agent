@@ -4,14 +4,8 @@ from typing import Dict, Any
 logger = logging.getLogger(__name__)
 
 class AuthorizationOracle:
-    """
-    Compares responses to determine authorization flaws.
-    """
     @staticmethod
     def compare(baseline_status: int, test_status: int, baseline_body: str, test_body: str) -> str:
-        """
-        Determines the state of an access control test.
-        """
         if test_status == 401 or test_status == 403:
             return "REJECTED"
             
@@ -34,13 +28,8 @@ class AuthorizationOracle:
         return "REJECTED"
 
 class AccessControlTest:
-    """Base class for all access control tests."""
     def __init__(self, replayer):
         self.replayer = replayer
         
     def execute(self, request_node, identities: Dict[str, Any]) -> Dict[str, str]:
-        """
-        Executes the test. Should return a dictionary of results mapping
-        identity_id or context to the oracle result (e.g., {"user_b": "VULNERABLE"}).
-        """
         raise NotImplementedError()

@@ -1,10 +1,3 @@
-"""
-MITRE ATT&CK Integration (Phase 3, Module 4)
-
-Maps discovered vulnerabilities and post-exploitation actions to MITRE ATT&CK
-techniques, and surfaces detection methods + evasion considerations for each.
-Uses a local technique table (no network dependency).
-"""
 
 import logging
 from typing import Dict, List
@@ -99,7 +92,6 @@ class TechniqueMapping:
 
 
 class MitreMapper:
-    """Maps vulns/actions to ATT&CK techniques with detection + evasion notes."""
 
     def __init__(self):
         self.mappings: List[TechniqueMapping] = []
@@ -114,14 +106,12 @@ class MitreMapper:
         )
 
     def map_key(self, key: str, source: str = "") -> List[TechniqueMapping]:
-        """Map a single vuln_type/action key to techniques."""
         out = []
         for tid in VULN_TECHNIQUE_MAP.get((key or "").lower(), []):
             out.append(self._lookup(tid, source or key))
         return out
 
     def map_context(self, ctx) -> List[TechniqueMapping]:
-        """Map everything discovered so far in SharedContext to ATT&CK."""
         seen = {}
 
         def add(mappings):
@@ -147,7 +137,6 @@ class MitreMapper:
         return self.mappings
 
     def navigator_layer(self) -> Dict:
-        """Export a minimal ATT&CK Navigator layer for reporting."""
         return {
             "name": "Autonomous Pentest Coverage",
             "versions": {"layer": "4.5", "attack": "14"},

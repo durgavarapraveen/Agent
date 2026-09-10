@@ -7,10 +7,6 @@ from core.domain.experiment import SecurityExperiment
 logger = logging.getLogger(__name__)
 
 class ContractValidator:
-    """
-    Validates that the Canonical Domain Models load correctly on startup.
-    Emits required V2 logs to signal successful schema bindings.
-    """
     @staticmethod
     def validate_startup():
         logger.info("CONTRACT_VALIDATION: OK")

@@ -1,11 +1,3 @@
-"""
-Identity-Aware Coverage Engine (Phase 30).
-
-Tracks test coverage per (endpoint, identity) pair. A test against
-endpoint /admin with user_role=admin is a different coverage cell than
-the same test with user_role=guest. This drives authorization testing
-to cover every role × endpoint combination.
-"""
 from __future__ import annotations
 
 import logging

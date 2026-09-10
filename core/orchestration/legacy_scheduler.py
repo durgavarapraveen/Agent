@@ -1,7 +1,3 @@
-"""
-Dependency-aware task scheduler.
-Deterministic scheduling logic owned by framework, not LLM.
-"""
 
 import logging
 from typing import Dict, List
@@ -12,7 +8,6 @@ logger = logging.getLogger(__name__)
 
 
 class Scheduler:
-    """Deterministic task scheduler with dependency awareness"""
     
     def __init__(self, task_manager: TaskManager):
         self.task_manager = task_manager
@@ -21,7 +16,6 @@ class Scheduler:
 
 
     def detect_circular_dependencies(self, proposed_specs: List[TaskSpec]) -> bool:
-        """Helper to detect cycles in the task dependency DAG using DFS"""
         graph = {}
         for task in self.task_manager.tasks.values():
             graph[task.spec.task_id] = list(task.spec.dependencies)
@@ -49,11 +43,6 @@ class Scheduler:
         return False
 
     def schedule_tasks(self, task_specs: List[TaskSpec]) -> Dict[str, Task]:
-        """
-        Create and schedule multiple tasks.
-        Independent tasks run in parallel.
-        Dependent tasks queue and wait.
-        """
         # Validate dependency IDs
         proposed_ids = {spec.task_id for spec in task_specs}
         for spec in task_specs:
@@ -91,7 +80,6 @@ class Scheduler:
         return created_tasks
     
     def _build_execution_plan(self) -> None:
-        """Build deterministic execution plan respecting dependencies"""
         self.execution_order = []
         self.parallel_groups = []
         
@@ -126,7 +114,6 @@ class Scheduler:
         logger.info(f"[Scheduler] Execution plan: {len(self.parallel_groups)} stages")
     
     def _find_independent_group(self, candidates: List[str]) -> List[str]:
-        """Find maximal set of tasks with no interdependencies"""
         if not candidates:
             return []
         
@@ -146,10 +133,6 @@ class Scheduler:
         return group
     
     def process_dependencies(self) -> None:
-        """
-        After a task completes, unblock waiting tasks.
-        Propagates cascading block/failures.
-        """
         updated = True
         while updated:
             updated = False
@@ -177,7 +160,6 @@ class Scheduler:
                     updated = True
     
     def get_next_runnable_tasks(self) -> List[Task]:
-        """Get tasks ready to run"""
         runnable = []
         for task in self.task_manager.get_tasks_by_status(TaskStatus.QUEUED):
             if self.task_manager.check_dependencies_satisfied(task.spec.task_id):
@@ -185,7 +167,6 @@ class Scheduler:
         return runnable
     
     def get_execution_summary(self) -> Dict:
-        """Summary of execution plan"""
         return {
             "total_stages": len(self.parallel_groups),
             "parallel_groups": self.parallel_groups,
@@ -198,7 +179,6 @@ class Scheduler:
         }
     
     def to_dict(self) -> Dict:
-        """Serialize scheduler state"""
         return {
             "execution_plan": self.get_execution_summary(),
             "tasks": self.task_manager.to_dict(),

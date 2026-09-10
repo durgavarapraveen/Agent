@@ -13,7 +13,6 @@ from core.common.events import EventType
 logger = logging.getLogger(__name__)
 
 class BaseAgent(ABC):
-    """Base class for all agents."""
     
     def __init__(self, agent_id: str, role: str, capability: str, context: Any):
         self.agent_id = agent_id
@@ -34,7 +33,6 @@ class BaseAgent(ABC):
         self.end_time: Optional[datetime] = None
     
     async def initialize(self):
-        """Initialize the agent."""
         self.state = AgentState.INITIALIZED
         logger.info(f"Agent {self.agent_id} ({self.role}) initialized")
         
@@ -45,7 +43,6 @@ class BaseAgent(ABC):
         )
     
     async def execute_task(self, task: Task) -> AgentResult:
-        """Execute a task."""
         self.task = task
         self.state = AgentState.RUNNING
         self.start_time = datetime.now()
@@ -120,11 +117,9 @@ class BaseAgent(ABC):
     
     @abstractmethod
     async def perform_work(self) -> AgentResult:
-        """Perform the actual agent work - must be implemented by subclasses."""
         pass
     
     def propose_task(self, capability: str, objective: str, reason: str, priority: int = 5) -> TaskProposal:
-        """Propose a new task."""
         proposal = TaskProposal(
             capability=capability,
             objective=objective,
@@ -136,7 +131,6 @@ class BaseAgent(ABC):
         return proposal
     
     def get_info(self) -> AgentInfo:
-        """Get agent information."""
         return AgentInfo(
             agent_id=self.agent_id,
             parent_agent_id=self.parent_agent_id,
@@ -149,11 +143,9 @@ class BaseAgent(ABC):
         )
     
     async def log_execution_event(self, event_type: EventType, data: Dict[str, Any]):
-        """Log an execution event."""
         await self.context.event_logger.log_event(event_type, self.agent_id, data)
     
     def get_runtime_seconds(self) -> float:
-        """Get runtime in seconds."""
         start = self.start_time or datetime.now()
         end = self.end_time or datetime.now()
         return (end - start).total_seconds()

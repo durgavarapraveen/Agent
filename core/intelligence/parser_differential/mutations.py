@@ -1,15 +1,3 @@
-"""
-Parser-ambiguity request builders (spec Point C / P1.7).
-
-Each builder takes a parameter and two *benign, distinguishable* marker values
-(A and B) and produces a request whose interpretation depends on a parser
-quirk. The engine then observes which marker the server acted on. Markers are
-harmless alphanumerics, never attack payloads — this module discovers *parsing
-behaviour*, it does not exploit it.
-
-``expected`` records what a conservative, spec-faithful parser should surface,
-so the engine can flag "the server acted on the value it should have ignored".
-"""
 from __future__ import annotations
 
 import json
@@ -26,7 +14,7 @@ _UA = {"User-Agent": "AntiGravity-ParserDiff/1.0"}
 class ParserProbe:
     technique: str
     request: HttpRequest
-    expected: str          # "A" | "B" | "either"
+    expected: str
     note: str = ""
 
 
@@ -127,7 +115,6 @@ def build_parser_probes(
 
 def json_probe_control(base_url: str, param: str, marker: str,
                        auth_headers: Optional[Dict[str, str]] = None) -> HttpRequest:
-    """A plain single-value JSON request, used as the reflection control."""
     headers = dict(_UA)
     if auth_headers:
         headers.update(auth_headers)

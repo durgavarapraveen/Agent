@@ -121,13 +121,6 @@ class FindingStore:
     # ------------------------------------------------------------------
 
     def bulk_store(self, findings: List[Finding]) -> Dict[str, int]:
-        """Deduplicate findings by canonical fingerprint BEFORE insertion.
-
-        Fixes the `ON CONFLICT DO UPDATE command cannot affect row a second
-        time` incident: the database is no longer the place semantic dedup
-        happens. Multiple observations of the same vuln collapse to one
-        finding whose `evidence_ids` union the inputs.
-        """
         from core.validation.dedup import fingerprint
         by_fp: Dict[str, Finding] = {}
         for f in findings or []:

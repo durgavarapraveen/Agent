@@ -1,6 +1,3 @@
-"""
-Core Reporting Subpackage
-"""
 
 import sys
 import importlib

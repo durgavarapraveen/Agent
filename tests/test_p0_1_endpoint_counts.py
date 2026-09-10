@@ -1,8 +1,3 @@
-"""P0.1 regression tests — endpoint count invariants & canonical identity.
-
-Reproduces the log corruption (deduplicated 5173 > input 1265, transferred_to_v2
-collapsing to 1-3) and proves it can no longer occur.
-"""
 import pytest
 
 from core.domain.endpoint import Endpoint

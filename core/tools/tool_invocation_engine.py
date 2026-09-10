@@ -56,10 +56,6 @@ class ToolInvocationEngine:
         self.gateway = tool_gateway
 
     async def invoke(self, context: ToolInvocationContext) -> ToolResult:
-        """
-        Single entry point for tool invocations.
-        Routes to ToolGateway and returns normalized ToolResult.
-        """
         logger.info(f"Tool invocation started from source: {context.source.name}")
         
         # Convert engine context to gateway schema
@@ -126,7 +122,6 @@ class ToolInvocationEngine:
             return result
 
     def _handle_tool_failure(self, invocation: ToolInvocation, result: ToolResult):
-        """Diagnostic logging for failed tools, outputting stderr/stdout captures."""
         logger.warning(f"TASK_FAILED: Tool={result.tool} target={result.target} status={result.status}")
         if result.error:
             logger.warning(f"Error Type: {result.error.error_type.name} - {result.error.message}")
@@ -139,11 +134,6 @@ class ToolInvocationEngine:
         self, capability: str, target: str, params: Dict[str, Any], 
         session_id: str, auth_context: Any
     ) -> ToolResult:
-        """
-        Approach A:
-        Called by TaskManager when DeepSeek requests a capability (e.g., 'port_scan').
-        The router within or alongside the gateway will select the actual tool.
-        """
         context = ToolInvocationContext(
             tool_id=None,
             operation=capability,
@@ -166,11 +156,6 @@ class ToolInvocationEngine:
         session_id: str, auth_context: Any,
         tool_ids: List[str] = None,
     ) -> ToolResult:
-        """
-        Run multiple tools for a discovery capability concurrently and merge
-        their results. Returns a single merged ToolResult. Tools that fail
-        are logged but don't block the aggregate.
-        """
         if not tool_ids:
             if hasattr(self.gateway, 'router') and hasattr(self.gateway.router, '_get_tools_for_operation'):
                 tool_objs = self.gateway.router._get_tools_for_operation(capability)
@@ -246,11 +231,6 @@ class ToolInvocationEngine:
         self, tool_id: str, target: str, params: Dict[str, Any],
         session_id: str, auth_context: Any
     ) -> ToolResult:
-        """
-        Approach B:
-        Called by Claude when it explicitly specifies a tool (e.g., 'nmap_scan').
-        Skips router capability selection and goes directly to ToolGateway.
-        """
         context = ToolInvocationContext(
             tool_id=tool_id,
             operation=tool_id,  # Fallback to tool_id as operation to satisfy underlying router temporarily

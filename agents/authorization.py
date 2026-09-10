@@ -1,6 +1,3 @@
-"""
-Authorization & Audit Layer - Required for all exploitations
-"""
 
 import json
 import logging
@@ -14,17 +11,12 @@ logger = logging.getLogger(__name__)
 
 
 class ExploitTier(Enum):
-    """Exploitation tiers by impact"""
     POC = 1          # Read-only proof, no side effects
     SHALLOW = 2      # Low impact, reversible (test accounts, temp files)
     DEEP = 3         # High impact, irreversible (RCE, data exfil)
 
 
 class AuthorizationManager:
-    """
-    Verifies authorization before ANY exploitation.
-    Maintains audit trail for compliance.
-    """
 
     def __init__(self, scope_file: str = ".pentest_scope.json", audit_dir: str = ".audit_logs"):
         self.scope_file = Path(scope_file)
@@ -33,7 +25,6 @@ class AuthorizationManager:
         self.scope = self._load_scope()
 
     def _load_scope(self) -> Dict:
-        """Load authorized domains and scopes"""
         if not self.scope_file.exists():
             logger.warning(f"Scope file not found: {self.scope_file}")
             return {}
@@ -48,12 +39,10 @@ class AuthorizationManager:
             return {}
 
     def verify_domain(self, domain: str) -> bool:
-        """Check if domain is authorized"""
         from core.security.authorization import TargetScopeValidator
         return TargetScopeValidator.get().is_authorized(domain)
 
     def verify_tier(self, tier: ExploitTier) -> bool:
-        """Check if tier is allowed"""
         allowed = self.scope.get("max_tier", "POC")
         allowed_num = {"POC": 1, "SHALLOW": 2, "DEEP": 3}.get(allowed, 1)
         return tier.value <= allowed_num
@@ -66,10 +55,6 @@ class AuthorizationManager:
         payload: str,
         require_approval: bool = True
     ) -> bool:
-        """
-        Full authorization check before exploitation.
-        Logs intent even if denied.
-        """
 
         # 1. Check domain
         if not self.verify_domain(domain):
@@ -102,7 +87,6 @@ class AuthorizationManager:
         return True
 
     def _log_approved(self, domain: str, vuln_type: str, tier: ExploitTier, payload: str):
-        """Log approved exploit"""
         entry = {
             "timestamp": datetime.now().isoformat(),
             "status": "APPROVED",
@@ -116,7 +100,6 @@ class AuthorizationManager:
         logger.info(f"✓ Exploit AUTHORIZED: {domain} / {vuln_type} ({tier.name})")
 
     def _log_denied(self, domain: str, vuln_type: str, tier: ExploitTier, reason: str):
-        """Log denied exploit"""
         entry = {
             "timestamp": datetime.now().isoformat(),
             "status": "DENIED",
@@ -129,12 +112,6 @@ class AuthorizationManager:
         logger.warning(f"✗ Exploit DENIED: {domain} / {reason}")
 
     def _request_deep_approval(self, domain: str, vuln_type: str, payload: str) -> bool:
-        """Route a DEEP-tier approval through EscalationGate.
-
-        Handles both async and sync callers via `asyncio.run` when no loop is
-        active. Returns True on approval, False on deny/timeout/error. Never
-        blocks an async event loop.
-        """
         import asyncio as _aio
         try:
             from core.escalation.escalation_gate import get_escalation_gate, RiskLevel
@@ -172,7 +149,6 @@ class AuthorizationManager:
             return False
 
     def log_exploit_execution(self, domain: str, vuln_id: str, payload: str, result: Dict):
-        """Log actual exploit execution"""
         entry = {
             "timestamp": datetime.now().isoformat(),
             "status": "EXECUTED",
@@ -186,7 +162,6 @@ class AuthorizationManager:
         logger.info(f"Exploit executed: {vuln_id} → {result.get('success', False)}")
 
     def _write_audit_log(self, entry: Dict):
-        """Append to audit log file"""
         ts = datetime.now().strftime("%Y%m%d")
         log_file = self.audit_dir / f"exploits_{ts}.jsonl"
         with open(log_file, 'a') as f:
@@ -198,11 +173,10 @@ class AuthorizationManager:
         max_tier: str = "POC",
         output_file: str = ".pentest_scope.json"
     ):
-        """Create scope file for authorized testing"""
         scope = {
             "created": datetime.now().isoformat(),
             "domains": domains,
-            "max_tier": max_tier,  # POC, SHALLOW, DEEP
+            "max_tier": max_tier,
             "note": "Authorized domains for penetration testing",
         }
         with open(output_file, 'w') as f:
@@ -220,7 +194,6 @@ if __name__ == "__main__":
         max_tier="SHALLOW",  # Can test, but no RCE
     )
 
-    # Use in agents
     auth = AuthorizationManager()
-    print(auth.verify_domain("api.example.com"))  # True
-    print(auth.verify_domain("attacker.com"))     # False
+    print(auth.verify_domain("api.example.com"))
+    print(auth.verify_domain("attacker.com"))

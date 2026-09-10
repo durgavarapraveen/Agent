@@ -1,8 +1,3 @@
-"""
-Relationship Database
-Known vulnerability-to-vulnerability transitions with success probabilities.
-Used by VulnGraph to auto-infer attack edges.
-"""
 
 import logging
 from typing import Dict, List, Optional
@@ -206,14 +201,12 @@ TYPE_ALIASES = {
 
 
 class RelationshipDB:
-    """Database of known vulnerability relationships and transition probabilities"""
 
     def __init__(self):
         self.relationships = dict(VULN_RELATIONSHIPS)
         self.aliases = dict(TYPE_ALIASES)
 
     def normalize_type(self, vuln_type: str) -> str:
-        """Normalize vulnerability type names"""
         vt = vuln_type.lower().strip().replace(" ", "_").replace("-", "_")
         if "missing" in vt or "header" in vt:
             if "csp" in vt or "content_security_policy" in vt:
@@ -225,13 +218,11 @@ class RelationshipDB:
         return self.aliases.get(vt, vt)
 
     def get_relationship(self, source_type: str, target_type: str) -> Optional[Dict]:
-        """Get relationship between two vuln types"""
         src = self.normalize_type(source_type)
         tgt = self.normalize_type(target_type)
         return self.relationships.get((src, tgt))
 
     def get_all_targets(self, source_type: str) -> List[Dict]:
-        """Get all vulnerability types reachable from source"""
         src = self.normalize_type(source_type)
         results = []
         for (s, t), rel in self.relationships.items():
@@ -241,7 +232,6 @@ class RelationshipDB:
         return results
 
     def get_all_sources(self, target_type: str) -> List[Dict]:
-        """Get all vulnerability types that can lead to target"""
         tgt = self.normalize_type(target_type)
         results = []
         for (s, t), rel in self.relationships.items():
@@ -251,7 +241,6 @@ class RelationshipDB:
         return results
 
     def get_chain_probability(self, chain: List[str]) -> float:
-        """Calculate probability of a full chain succeeding"""
         if len(chain) < 2:
             return 1.0
         prob = 1.0
@@ -264,14 +253,12 @@ class RelationshipDB:
         return prob
 
     def suggest_next_steps(self, current_type: str, max_results: int = 5) -> List[Dict]:
-        """Given a vuln type, suggest what to try next"""
         targets = self.get_all_targets(current_type)
         return targets[:max_results]
 
     def add_relationship(self, source: str, target: str,
                          relationship: str, success_rate: float,
                          description: str = ""):
-        """Add or update a relationship (for LLM-discovered chains)"""
         src = self.normalize_type(source)
         tgt = self.normalize_type(target)
         self.relationships[(src, tgt)] = {
@@ -282,7 +269,6 @@ class RelationshipDB:
         logger.info(f"[RelDB] Added: {src} --[{relationship} {success_rate:.0%}]--> {tgt}")
 
     def summary_for_llm(self) -> str:
-        """Compact summary of known relationships for LLM"""
         lines = ["KNOWN ATTACK RELATIONSHIPS:"]
         by_source = {}
         for (s, t), rel in self.relationships.items():

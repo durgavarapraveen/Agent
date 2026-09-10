@@ -1,8 +1,3 @@
-"""
-Planner Response Normalizer.
-Eliminates planner schema drift and ensures only canonical BrainDecision/TaskSpec
-flows into the TaskManager and core application.
-"""
 
 import json
 import logging
@@ -15,20 +10,13 @@ logger = logging.getLogger(__name__)
 
 
 class PlannerSchemaError(AutonomousPentestException):
-    """Raised when planner response cannot be normalized into canonical schema"""
     pass
 
 
 class PlannerResponseNormalizer:
-    """Canonical normalizer for LLM planner outputs"""
 
     @classmethod
     def _loads_lenient(cls, text: str):
-        """Parse JSON from a possibly-noisy LLM response.
-
-        Handles: markdown ```json fences, reasoning/prose prefixes, and trailing text
-        by extracting the first balanced {...} object. Returns dict/list or None.
-        """
         import re as _re
         if not text or not text.strip():
             return None
@@ -91,10 +79,6 @@ class PlannerResponseNormalizer:
 
     @classmethod
     def normalize(cls, raw: Union[Dict[str, Any], str, None]) -> BrainDecision:
-        """
-        Convert raw LLM response dict/json into a canonical BrainDecision.
-        Logs PLANNER_DECISION_ACCEPTED or PLANNER_DECISION_REJECTED.
-        """
         if raw is None:
             logger.warning("PLANNER_DECISION_REJECTED: Empty response received from planner")
             raise PlannerSchemaError("Empty response from planner")
@@ -200,7 +184,6 @@ class PlannerResponseNormalizer:
 
     @classmethod
     def _extract_tools_from_text(cls, text: str) -> list:
-        """Return known tool names mentioned in free text (word-boundary matched)."""
         import re as _re
         if not text:
             return []
@@ -210,7 +193,6 @@ class PlannerResponseNormalizer:
 
     @classmethod
     def _normalize_task_spec(cls, data: Dict[str, Any]) -> TaskSpec:
-        """Normalize an individual task specification"""
         objective = data.get("objective") or data.get("goal") or data.get("description") or "Unspecified task"
         
         # Determine capability: prioritize objective text keyword inference first
@@ -283,7 +265,6 @@ class PlannerResponseNormalizer:
 
     @classmethod
     def _infer_capability(cls, objective: str, data: Dict[str, Any]) -> CapabilityType:
-        """Infer capability type with word-boundary matching and priority ranking"""
         import re
         obj_text = (objective or "").lower().strip()
 
@@ -420,7 +401,6 @@ class PlannerResponseNormalizer:
 
     @classmethod
     def _default_criteria_for_capability(cls, capability: CapabilityType) -> list[SuccessCriterion]:
-        """Return deterministic success criteria for each capability type"""
         return [
             SuccessCriterion(
                 criterion_type=SuccessCriterionType.TOOL_SUCCESS,

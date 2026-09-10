@@ -1,9 +1,3 @@
-"""
-Phase 6 Module 6.5: Framework-Specific Compliance Mapper (core/compliance_mapper.py)
-
-YAML control mapping loader, automated gap detection, per-framework compliance scorecards,
-primary framework prioritization, and audit-ready evidence collection statements.
-"""
 
 import logging
 from datetime import datetime
@@ -33,14 +27,12 @@ DEFAULT_COMPLIANCE_MAPPINGS = {
 
 
 class ComplianceMapper:
-    """Framework-specific compliance mapper and evidence generator."""
 
     def __init__(self, mapping_file_path: str = "data/compliance_mappings.yaml"):
         self.mapping_file_path = Path(mapping_file_path)
         self.mappings = self._load_mappings()
 
     def _load_mappings(self) -> Dict[str, List[Dict[str, Any]]]:
-        """Load YAML compliance mapping file if available."""
         if self.mapping_file_path.exists():
             try:
                 import yaml
@@ -53,7 +45,6 @@ class ComplianceMapper:
         return DEFAULT_COMPLIANCE_MAPPINGS
 
     def map_finding(self, finding: Dict[str, Any], framework: str = "PCI-DSS") -> Dict[str, str]:
-        """Map a single finding to a specific framework requirement."""
         fw_clean = framework.upper().replace("-", "")
         for fw_key, controls in self.mappings.items():
             if fw_clean in fw_key.upper().replace("-", ""):
@@ -85,9 +76,6 @@ class ComplianceMapper:
     }
 
     def attach_cves(self, vulnerabilities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Enrich generic vulnerabilities with Reference CVEs and CWEs for compliance auditing.
-        """
         for v in vulnerabilities:
             # If the finding doesn't already have a real CVE (e.g., from Nuclei or Nmap)
             if not v.get("cve_id") and not v.get("cve") and str(v.get("id", "")).upper() not in ("VULN", "CVE-UNKNOWN"):
@@ -106,10 +94,6 @@ class ComplianceMapper:
         return vulnerabilities
 
     def detect_compliance_gaps(self, vulnerabilities: List[Dict[str, Any]]) -> List[str]:
-        """
-        Generate automated gap statements per finding:
-        e.g., "CVE-2023-12345 (SQLi) violates PCI-DSS Requirement 6.6, GDPR Art. 32, ISO-27001 A.12.6.1."
-        """
         gap_statements = []
         for v in vulnerabilities:
             cve = v.get("cve_id") or v.get("cve") or v.get("id") or "VULN"
@@ -130,13 +114,6 @@ class ComplianceMapper:
         return gap_statements
 
     def generate_scorecard(self, vulnerabilities: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-        """
-        Compliance Scorecard (Per Framework):
-          total_controls_tested
-          controls_passed
-          controls_failed
-          compliance_percentage = (passed / tested) * 100
-        """
         scorecards = {}
         vuln_types = set(str(v.get("type") or v.get("title") or "").upper() for v in vulnerabilities)
 
@@ -165,10 +142,6 @@ class ComplianceMapper:
         return scorecards
 
     def prioritize_for_framework(self, vulnerabilities: List[Dict[str, Any]], primary_framework: str = "PCI-DSS") -> List[str]:
-        """
-        Generate primary framework prioritized action plan:
-        e.g., "PCI-DSS Violations: Fix SQLi (Requirement 6.6), implement encryption (Requirement 3.2)."
-        """
         fw_scorecard = self.generate_scorecard(vulnerabilities).get(primary_framework, {})
         action_plan = []
         action_plan.append(f"== {primary_framework} PRIORITIZED COMPLIANCE ACTION PLAN ==")
@@ -181,11 +154,6 @@ class ComplianceMapper:
         return action_plan
 
     def collect_audit_evidence(self, vulnerabilities: List[Dict[str, Any]]) -> List[str]:
-        """
-        Audit-Ready Evidence Collection:
-        For passing controls (no findings), generate boilerplate evidence statement:
-        "Control A.12.6.1 (Patch Management) was tested on 2026-08-28. No out-of-date critical software detected."
-        """
         today_str = datetime.now().strftime("%Y-%m-%d")
         evidence = []
         scorecards = self.generate_scorecard(vulnerabilities)

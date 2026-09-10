@@ -1,21 +1,3 @@
-"""OpenTelemetry tracing wrapper.
-
-Zero hard dependency on OTel. When the SDK is installed and configured (via
-`OTEL_EXPORTER_OTLP_ENDPOINT` etc.), spans propagate through the API →
-scan-process → executor boundary. When it isn't installed the `span()`
-context manager is a no-op.
-
-Instrumentation contract:
-
-    with tracing.span("phase.recon", scan_id=sid, target=t):
-        ...
-    tracing.record_exception(exc)
-    tracing.set_attr("finding_count", n)
-
-Trace-ID propagation across the subprocess boundary uses the
-`traceparent` env var (W3C standard); `main.py` reads it at boot and
-`ui/api/server.py` sets it when spawning the child.
-"""
 from __future__ import annotations
 
 import os
@@ -55,9 +37,6 @@ def is_available() -> bool:
 
 @contextlib.contextmanager
 def span(name: str, **attributes: Any) -> Iterator[Optional[Any]]:
-    """Start a span with the given attributes. Attribute values are coerced
-    to str/int/float/bool — OTel rejects other types. A no-op when the SDK
-    isn't installed."""
     tracer = _get_tracer()
     if tracer is None:
         yield None
@@ -112,8 +91,6 @@ def set_attr(key: str, value: Any) -> None:
 # ── Cross-process propagation via env var ──────────────────────────────
 
 def inject_headers() -> dict:
-    """Return {traceparent, tracestate} headers for the current span (if any),
-    ready to inject into an outgoing HTTP request or a subprocess env."""
     if not _AVAILABLE:
         return {}
     headers: dict = {}
@@ -125,9 +102,6 @@ def inject_headers() -> dict:
 
 
 def context_from_env(env: dict | None = None) -> None:
-    """Configure the current process to inherit a span context from env vars.
-    Called by `main.py` after argparse so the scan subprocess is a child of
-    the API span that spawned it."""
     if not _AVAILABLE or extract is None:
         return
     env = env or os.environ

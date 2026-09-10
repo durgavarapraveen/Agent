@@ -1,27 +1,3 @@
-"""Parallel-agent runner + per-agent activity tracker.
-
-Two pieces:
-
-  1. `AgentTracker` — thin wrapper that publishes a per-agent status row to
-     `live_agents` on start/heartbeat/finish. Displayed in the UI as a card.
-
-  2. `run_parallel_agents` — runs a set of independent async tasks with a
-     bounded semaphore. Each task gets its own tracker and its logs are
-     prefixed with `[agent=<id>]` so interleaved output stays readable.
-
-Kept intentionally small so any callsite can go parallel with 3 lines:
-
-    from core.orchestration.parallel_agents import run_parallel_agents, AgentTracker
-    async def one(item):
-        t = AgentTracker(scan_id, f"sub:{item}", label=item, phase="subdomain_scan")
-        try:
-            t.start()
-            # ... do work; call t.heartbeat(tool='sqlmap', step='dumping users')
-            t.finish(findings=[...], status='completed')
-        except Exception as e:
-            t.finish(status='failed', error=str(e))
-    await run_parallel_agents(items, one, concurrency=3)
-"""
 from __future__ import annotations
 import asyncio
 import logging
@@ -32,7 +8,6 @@ logger = logging.getLogger(__name__)
 
 
 class AgentTracker:
-    """Per-agent live tracker. Publishes to live_agents table."""
 
     def __init__(self, scan_id: str, agent_id: str, *,
                  label: str = "", phase: str = "", target: str = ""):
@@ -114,11 +89,6 @@ async def run_parallel_agents(items: Iterable[Any],
                                 worker: Callable[[Any], Awaitable[Any]],
                                 *, concurrency: int = 3,
                                 label: str = "parallel_agents") -> List[Any]:
-    """Fan out `worker(item)` across `items` with a bounded semaphore.
-
-    Exceptions from a worker are logged and swallowed so one bad agent does
-    not sink the batch — parity with the previous sequential loop, which also
-    caught per-iteration exceptions."""
     items = list(items)
     if not items:
         return []

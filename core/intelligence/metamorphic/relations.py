@@ -1,14 +1,3 @@
-"""
-Built-in metamorphic relations (spec Point B / P1.6).
-
-A metamorphic relation pairs a *semantic-preserving* input transform with an
-expected relation on the outputs. Because the transforms preserve meaning, a
-well-behaved server should return equivalent responses; a violation is an
-anomaly (routing/normalisation/parser quirk, cache-key confusion, header
-mishandling) worth a hypothesis.
-
-All transforms here are read-only and benign.
-"""
 from __future__ import annotations
 
 import urllib.parse
@@ -46,7 +35,6 @@ def _rebuild(p, pairs, path: Optional[str] = None) -> str:
 
 
 def _equivalent(source: ResponseSnapshot, followups: List[ResponseSnapshot]) -> Optional[str]:
-    """Relation: every follow-up must be equivalent to the source."""
     for f in followups:
         divs = compare_snapshots(source, f)
         material = [d for d in divs if d.kind in ("status", "body", "content_type")]

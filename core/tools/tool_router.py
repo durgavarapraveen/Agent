@@ -5,18 +5,6 @@ from core.common.schemas import ToolInvocation, ToolResult
 logger = logging.getLogger(__name__)
 
 class ToolRouter:
-    """
-    Intelligent tool selection (the DETERMINISTIC part of Approach A).
-    
-    Given a capability request:
-    - "port_scan"
-    
-    Decides:
-    - Which tool? (nmap vs masscan vs zmap)
-    - With what params? (timing, ports, detection)
-    - In what order? (primary, fallback)
-    - In parallel? (yes if non-exclusive)
-    """
     
     def __init__(self, tool_registry):
         self.registry = tool_registry
@@ -24,12 +12,6 @@ class ToolRouter:
     
     async def route_and_execute(self, invocation: ToolInvocation, 
                                auth_context) -> ToolResult:
-        """
-        1. Score available tools for this capability
-        2. Select best + plan fallbacks
-        3. Execute + measure effectiveness
-        4. Return result
-        """
         
         # Get all tools that implement this operation
         capable_tools = self._get_tools_for_operation(invocation.operation)
@@ -246,8 +228,8 @@ class ToolRouter:
                         # authorised at scan start. Do NOT run them as shell
                         # control: shlex-tokenise (respecting the LLM's quoting)
                         # then shlex.quote each token so the characters survive as
-                        # LITERAL DATA (e.g. sqlmap --data="a=1&b=2"). Safe even
-                        # though the Kali layer runs shell=True.
+                        # LITERAL DATA (e.g. sqlmap --data="a=1&b=2"). Safe and
+                        # compliant, as the Kali layer now runs shell=False.
                         try:
                             import shlex as _shlex
                             toks = _shlex.split(extra_args)
@@ -431,14 +413,6 @@ class ToolRouter:
     
     async def _score_tool(self, tool: Any, target: str, 
                          target_profile=None, requested_tool: str = None, objective: str = "") -> float:
-        """
-        Score 0.0-1.0 based on:
-        - Explicit request / objective match
-        - Historical effectiveness (40%)
-        - Target type match (30%)
-        - Speed (20%)
-        - False positive rate (10%)
-        """
         
         score = 0.0
 
@@ -471,7 +445,6 @@ class ToolRouter:
         return min(1.0, score)
     
     def _target_match_score(self, tool: Any, target_profile) -> float:
-        """Score how well tool matches target"""
         
         score = 0.0
         
@@ -494,7 +467,6 @@ class ToolRouter:
         return min(1.0, score)
     
     def _get_tools_for_operation(self, operation: str) -> List[Any]:
-        """Get all tools implementing this operation"""
         
         # Map operation → tool_ids (aligned with HexStrike AI capability architecture)
         op_map = {
@@ -560,7 +532,6 @@ class ToolRouter:
 
 
 class EffectivenessDB:
-    """Track which tools work best on what targets"""
     
     def __init__(self):
         from core.memory.database import DatabaseManager
@@ -580,7 +551,6 @@ class EffectivenessDB:
                 conn.commit()
     
     async def get_score(self, tool_id: str, target_type: str) -> float:
-        """Get historical effectiveness (0.0-1.0)"""
         with self.db.get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -603,7 +573,6 @@ class EffectivenessDB:
     
     async def update(self, tool_id: str, success: bool, 
                     time_taken: float, target_type: str):
-        """After tool runs, update its score"""
         success_val = 1 if success else 0
         with self.db.get_connection() as conn:
             with conn.cursor() as cur:

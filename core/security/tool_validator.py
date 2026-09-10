@@ -1,24 +1,3 @@
-"""P0.4 — Secure LLM-authored tool validation pipeline.
-
-Replaces the pattern: LLM generates code -> LLM critic -> exec()
-
-New pipeline:
-    LLM generation
-     |
-    AST/static validation     (this module)
-     |
-    capability analysis        (this module)
-     |
-    policy validation          (PolicyEngine)
-     |
-    isolated execution         (ExecutionController from P0.3)
-     |
-    runtime policy enforcement
-     |
-    ToolRegistry
-
-The LLM critic is advisory only — it cannot authorize anything.
-"""
 from __future__ import annotations
 
 import ast
@@ -56,7 +35,6 @@ class RiskLevel(str, Enum):
 
 @dataclass(frozen=True)
 class AuthoredToolDefinition:
-    """Security-annotated metadata for an LLM-authored tool."""
     name: str
     description: str = ""
     capabilities: FrozenSet[ToolCapability] = frozenset()
@@ -183,7 +161,6 @@ _BLOCKED_PATTERNS = [
 
 
 class _CapabilityVisitor(ast.NodeVisitor):
-    """Walk AST to detect capabilities used by the code."""
 
     def __init__(self):
         self.capabilities: Set[ToolCapability] = set()
@@ -242,7 +219,6 @@ class _CapabilityVisitor(ast.NodeVisitor):
 # ── Risk assessment ──────────────────────────────────────────────────────
 
 def _assess_risk(capabilities: Set[ToolCapability]) -> RiskLevel:
-    """Determine risk level from detected capabilities."""
     if ToolCapability.DYNAMIC_EXEC in capabilities:
         return RiskLevel.CRITICAL
     if ToolCapability.SUBPROCESS in capabilities:
@@ -275,19 +251,6 @@ _ALWAYS_BLOCKED: FrozenSet[ToolCapability] = frozenset({
 def validate_authored_code(code: str, name: str = "",
                            allowed_capabilities: Optional[Set[ToolCapability]] = None,
                            ) -> ValidationResult:
-    """Full validation pipeline for LLM-authored tool code.
-
-    Steps:
-      1. Size check
-      2. Blocked pattern scan (regex)
-      3. AST parse
-      4. Capability detection via AST walk
-      5. Risk assessment
-      6. Capability policy check
-      7. PolicyEngine authorization
-
-    Returns ValidationResult with capabilities, risk, issues.
-    """
     result = ValidationResult(valid=False)
 
     # 1. Size check
@@ -377,7 +340,6 @@ def build_tool_definition(name: str, description: str, code: str,
                           validation: ValidationResult,
                           timeout: int = 30,
                           request_budget: int = 100) -> AuthoredToolDefinition:
-    """Build an AuthoredToolDefinition from validation results."""
     return AuthoredToolDefinition(
         name=name,
         description=description,

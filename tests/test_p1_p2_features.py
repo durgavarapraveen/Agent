@@ -1,5 +1,3 @@
-"""Regression tests for P1.2 (AssetRegistry), P1.5 (attack-path correlation),
-P2.7 (MutationLedger), P2.8 (LLM redaction)."""
 import pytest
 
 

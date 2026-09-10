@@ -1,16 +1,3 @@
-"""
-Reachability analysis.
-
-Given a finding (file, line, vulnerable symbol), decide whether the vulnerable
-symbol is actually reachable from an entry point (main, __main__ block, route
-handler, or exported/public function). This separates "the vulnerable code
-exists" from "the vulnerable code can actually run".
-
-  - Python targets: a lightweight call graph via the stdlib `ast` module.
-  - JS/TS targets:  via tree-sitter when available; otherwise 'indeterminate'.
-
-Output: 'reachable' | 'unreachable' | 'indeterminate'.
-"""
 
 from __future__ import annotations
 
@@ -33,7 +20,7 @@ _ROUTE_DECORATORS = ("route", "get", "post", "put", "delete", "patch",
 
 @dataclass
 class ReachabilityResult:
-    status: str                  # reachable | unreachable | indeterminate
+    status: str
     symbol: str
     reason: str = ""
     entry_points: List[str] = field(default_factory=list)
@@ -46,7 +33,6 @@ class ReachabilityResult:
 
 
 class _PyCallGraph(ast.NodeVisitor):
-    """Builds function -> {called names} and detects entry points."""
 
     def __init__(self):
         self.graph: Dict[str, Set[str]] = {}
@@ -112,7 +98,6 @@ class _PyCallGraph(ast.NodeVisitor):
 
 
 class ReachabilityAnalyzer:
-    """Determines whether a vulnerable symbol is reachable from an entry point."""
 
     def analyze(self, file_path: str, symbol: str,
                 extra_files: Optional[List[str]] = None) -> ReachabilityResult:

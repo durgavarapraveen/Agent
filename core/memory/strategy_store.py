@@ -7,9 +7,6 @@ from core.memory.database import MemoryDatabase, DatabaseManager
 
 
 class StrategyStore:
-    """Postgres-backed store of strategies. Previously broken: called `.cursor()`
-    on the context manager and used SQLite `?` placeholders + `INSERT OR REPLACE`.
-    Rewritten to use the pooled `DatabaseManager`."""
 
     def __init__(self, db: MemoryDatabase = None):
         self.db = db

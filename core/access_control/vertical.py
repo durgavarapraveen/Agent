@@ -1,9 +1,6 @@
 from core.access_control.base import AccessControlTest, AuthorizationOracle
 
 class VerticalTest(AccessControlTest):
-    """
-    Tests if a standard user can access administrative resources.
-    """
     def execute(self, request_node, identities) -> dict:
         results = {}
         

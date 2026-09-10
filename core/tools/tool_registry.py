@@ -1,7 +1,3 @@
-"""
-ToolRegistry - All available tools (Kali, Python, MCP).
-DynamicAgent picks tools from here. Each tool has a standard interface.
-"""
 
 import logging
 import re
@@ -28,7 +24,6 @@ def strip_ansi(text: str) -> str:
 
 
 class ToolResult:
-    """Standard result from any tool"""
     def __init__(self, success: bool, output: str = "", error: str = "", data: Dict = None):
         self.success = success
         self.output = output
@@ -41,11 +36,10 @@ class ToolResult:
 
 
 class Tool:
-    """Base tool interface"""
     def __init__(self, name: str, description: str, category: str):
         self.name = name
         self.description = description
-        self.category = category  # recon, exploit, util
+        self.category = category
 
     def run(self, **kwargs) -> ToolResult:
         raise NotImplementedError
@@ -56,7 +50,6 @@ class Tool:
 # ═══════════════════════════════════════════════
 
 class KaliTool(Tool):
-    """Wraps any Kali Linux tool via Docker"""
 
     def __init__(self, name: str, description: str, category: str = "recon"):
         super().__init__(name, description, category)
@@ -70,7 +63,6 @@ class KaliTool(Tool):
     }
 
     def run(self, command: str, timeout: int = 600) -> ToolResult:
-        """Run raw command in Kali container (kali_executor bumps heavy scanners further)"""
         logger.info(f"  [{self.name}] {command}")
         r = KaliDockerExecutor.run(command, timeout=timeout, auto_install=True)
         stdout = strip_ansi(r.get("stdout", ""))
@@ -112,7 +104,6 @@ class KaliTool(Tool):
 # ═══════════════════════════════════════════════
 
 class PythonHTTPTool(Tool):
-    """HTTP requests via httpx"""
 
     def __init__(self):
         super().__init__("http_request", "Make HTTP requests", "util")
@@ -184,7 +175,6 @@ class PythonHTTPTool(Tool):
 
 
 class PythonDNSTool(Tool):
-    """DNS resolution via socket"""
 
     def __init__(self):
         super().__init__("dns_lookup", "DNS resolution", "recon")
@@ -206,7 +196,6 @@ class PythonDNSTool(Tool):
 
 
 class PythonSSLTool(Tool):
-    """SSL certificate inspection"""
 
     def __init__(self):
         super().__init__("ssl_inspect", "SSL certificate analysis", "recon")
@@ -233,7 +222,6 @@ class PythonSSLTool(Tool):
 
 
 class PythonPortScanTool(Tool):
-    """Quick port check via socket"""
 
     def __init__(self):
         super().__init__("port_check", "Check if port is open", "recon")
@@ -259,7 +247,6 @@ class PythonPortScanTool(Tool):
 # ═══════════════════════════════════════════════
 
 class HeadlessBrowserTool(Tool):
-    """Headless browser via Docker for JS execution, screenshots, form filling"""
 
     def __init__(self):
         super().__init__(
@@ -346,10 +333,6 @@ class HeadlessBrowserTool(Tool):
     )
 
     def run(self, command: str, timeout: int = 30) -> ToolResult:
-        """
-        Dispatch browser commands to Playwright in Docker.
-        command format: "<action> <args>"
-        """
         import base64 as _b64
         import json as _json
 
@@ -370,7 +353,6 @@ class HeadlessBrowserTool(Tool):
             payload = {"url": args}
             driver = self._DRIVER_COOKIES
         elif action == "form":
-            # args = "<url> <json>"
             sp = args.split(None, 1)
             url = sp[0] if sp else ""
             try:
@@ -403,7 +385,6 @@ class HeadlessBrowserTool(Tool):
         )
         
     def execute(self, tool_name: str, params: Dict = None) -> Dict:
-        """Execute a tool and return result dict."""
         if params is None:
             params = {}
         
@@ -437,7 +418,6 @@ class HeadlessBrowserTool(Tool):
 # ═══════════════════════════════════════════════
 
 class ToolRegistry:
-    """Central registry of all available tools"""
 
     def __init__(self):
         self.tools: Dict[str, Tool] = {}
@@ -504,7 +484,6 @@ class ToolRegistry:
         return self.tools.get(name)
 
     def list_tools(self) -> str:
-        """List available tools for LLM"""
         if hasattr(self, 'available_tools') and self.available_tools:
             return f"Available tools: {', '.join(sorted(self.available_tools.keys()))}"
         return f"Available tools: {', '.join(sorted(self.tools.keys()))}"
@@ -513,7 +492,6 @@ class ToolRegistry:
         return [t for t in self.tools.values() if t.category == category]
 
     def get_tools_for_objective(self, objective: str) -> str:
-        """Return relevant tool names for a given objective (for LLM context)"""
         # Simple keyword matching — brain can use any tool regardless
         keywords = objective.lower()
         relevant = []
@@ -527,7 +505,6 @@ class ToolRegistry:
         return "\n".join(relevant)
     
     async def validate_tools(self) -> dict:
-        """Validate which tools exist. Called once at startup."""
         logger.info("Validating tool availability on startup...")
         
         self.available_tools = {}
@@ -547,7 +524,6 @@ class ToolRegistry:
         return self.available_tools
 
     async def execute(self, tool_name: str, params: Dict = None):
-        """Execute a tool and return result dict."""
         if params is None:
             params = {}
 
@@ -600,7 +576,6 @@ class ToolRegistry:
             }
 
     async def _tool_exists(self, tool_name: str) -> bool:
-        """Check if tool exists and is executable"""
         try:
             proc = await asyncio.create_subprocess_exec(
                 tool_name, "--version",

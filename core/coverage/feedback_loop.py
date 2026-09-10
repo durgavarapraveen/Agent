@@ -1,13 +1,3 @@
-"""
-Feedback Loop Engine (Phase 11).
-
-Implements closed-loop adaptive testing:
-1. Classify response
-2. Update hypothesis confidence
-3. Choose next payload/strategy
-4. Adapt to WAF/blocking patterns
-5. Mine errors for intelligence
-"""
 from __future__ import annotations
 
 import hashlib

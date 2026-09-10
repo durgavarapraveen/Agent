@@ -1,19 +1,3 @@
-"""LLM-authored security tools — P0.4 hardened pipeline.
-
-Pipeline (P0.4):
-    LLM generation
-     -> AST/static validation    (tool_validator)
-     -> capability analysis      (tool_validator)
-     -> policy validation        (PolicyEngine)
-     -> LLM critic               (advisory only — cannot authorize)
-     -> isolated execution       (ExecutionController / P0.3 sandbox)
-     -> runtime policy enforcement
-     -> ToolRegistry
-
-The LLM critic is advisory only. Approval/rejection is determined by the
-deterministic AST + policy pipeline. The critic's opinion is logged but
-never overrides a policy denial.
-"""
 from __future__ import annotations
 import json
 import logging
@@ -177,7 +161,6 @@ async def author_tool(args: Dict[str, Any], ctx) -> str:
 
 def _persist_tool(name: str, desc: str, schema: Dict,
                   code: str, status: str, review_notes: Any) -> None:
-    """Persist authored tool to database."""
     try:
         from core.database.pg_store import DatabaseManager
         with DatabaseManager.get_connection() as conn:

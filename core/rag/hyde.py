@@ -1,19 +1,3 @@
-"""
-HyDE — Hypothetical Document Embeddings.
-
-Instead of embedding the user's instruction/question directly and hoping it
-lands near relevant facts in vector space, we first ask a small LLM to
-generate a HYPOTHETICAL DOCUMENT that would answer the query (a fake exploit
-writeup, a plausible CVE excerpt, a mock payload). We then embed THAT and
-use it as the search vector.
-
-Why this helps: vector DBs match facts to facts. A question and its answer
-are shaped very differently in embedding space; a fake answer and the real
-answer are shaped similarly.
-
-Failure mode is safe: if the LLM call errors or returns empty, we fall back
-to embedding the raw query.
-"""
 
 from __future__ import annotations
 
@@ -42,7 +26,6 @@ def _enabled() -> bool:
 
 
 async def transform_query(query: str, max_chars: int = 1200) -> str:
-    """Return a HyDE-expanded search text, or the raw query on any failure."""
     if not _enabled() or not query or len(query) > 800:
         return query
 
@@ -56,7 +39,6 @@ async def transform_query(query: str, max_chars: int = 1200) -> str:
 
 
 async def _generate_hypothetical(query: str) -> Optional[str]:
-    """Best-effort call into whichever LLM the project already has wired."""
     # Try the project's LLM harness first (already configured with keys / retry).
     try:
         from agents.universal_llm_harness import LLMHarness

@@ -1,16 +1,3 @@
-"""
-Response comparison primitives shared by the differential, parser-differential,
-metamorphic and invariant research engines (spec PHASE 5, Points A/B/C/K/P).
-
-Design goals:
-- Pure standard-library. No network, no heavy deps -> unit-testable offline.
-- Deterministic. Volatile tokens (CSRF, timestamps, UUIDs, nonces) are
-  normalised away before comparison so two "equivalent" responses do not
-  diverge just because of a per-request nonce.
-- Evidence-driven. Every divergence carries both sides' concrete values so a
-  human (or the adjudicator) can reproduce and judge it. Nothing here declares
-  a vulnerability; it surfaces *anomalies* for the hypothesis pipeline.
-"""
 from __future__ import annotations
 
 import difflib
@@ -44,7 +31,6 @@ _VOLATILE_HEADERS = {
 
 
 def normalize_body(body: str, max_len: int = 8192) -> str:
-    """Scrub volatile tokens and collapse whitespace for stable comparison."""
     if not body:
         return ""
     scrubbed = body[:max_len]
@@ -56,7 +42,6 @@ def normalize_body(body: str, max_len: int = 8192) -> str:
 
 
 def body_similarity(a: str, b: str) -> float:
-    """Ratio in [0.0, 1.0] of how similar two (normalised) bodies are."""
     if not a and not b:
         return 1.0
     return difflib.SequenceMatcher(None, a, b).ratio()
@@ -64,7 +49,6 @@ def body_similarity(a: str, b: str) -> float:
 
 @dataclass(frozen=True)
 class ResponseSnapshot:
-    """Immutable, comparable view of a single HTTP response."""
     label: str
     status: int
     body: str
@@ -91,7 +75,6 @@ class ResponseSnapshot:
         return ""
 
     def stable_headers(self) -> Dict[str, str]:
-        """Header set with volatile headers removed, keys lowercased."""
         return {
             k.lower(): v
             for k, v in self.headers.items()
@@ -101,12 +84,6 @@ class ResponseSnapshot:
 
 @dataclass
 class Divergence:
-    """A single observed difference between two responses.
-
-    ``kind`` is one of: status, body, length, content_type, header, reflection,
-    timing. ``severity`` is an *observation* weight (info/low/medium), never a
-    confirmed-vulnerability rating.
-    """
     kind: str
     a_label: str
     b_label: str
@@ -135,13 +112,6 @@ def compare_snapshots(
     timing_ratio: float = 4.0,
     timing_floor_ms: float = 40.0,
 ) -> List[Divergence]:
-    """Return every material difference between two responses.
-
-    ``similarity_floor`` — normalised bodies below this ratio are "materially
-    different". ``timing_ratio``/``timing_floor_ms`` — a timing divergence is
-    only reported when the slower response is both ``timing_ratio``x slower and
-    the gap exceeds ``timing_floor_ms`` (guards against noise on fast calls).
-    """
     out: List[Divergence] = []
 
     if a.status != b.status:
@@ -200,7 +170,6 @@ def compare_snapshots(
 
 
 def all_equivalent(snapshots: List[ResponseSnapshot], **kwargs) -> bool:
-    """True when every snapshot is pairwise-equivalent to the first."""
     if len(snapshots) < 2:
         return True
     first = snapshots[0]

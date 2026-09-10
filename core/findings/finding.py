@@ -1,11 +1,3 @@
-"""
-Canonical Finding model — single authoritative definition.
-
-Finding lifecycle: DISCOVERED → VALIDATING → CONFIRMED / REJECTED / INCONCLUSIVE
-
-All other Finding definitions (core.common.models, core.domain.finding) should
-import from here or use backward-compat aliases.
-"""
 from __future__ import annotations
 
 import uuid

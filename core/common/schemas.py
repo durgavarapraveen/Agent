@@ -1,7 +1,3 @@
-"""
-Strict Pydantic schemas for all framework communication.
-Single source of truth for schema definitions.
-"""
 
 from pydantic import BaseModel, Field, model_validator
 from datetime import datetime
@@ -76,7 +72,6 @@ class ErrorType(str, Enum):
 
 
 class TaskTier(str, Enum):
-    """Canonical task complexity tier — controls model selection and budgets."""
     SMALL = "small"
     MEDIUM = "medium"
     LARGE = "large"
@@ -104,7 +99,6 @@ class SuccessCriterionType(str, Enum):
 
 
 class ExecutionMetrics(BaseModel):
-    """Track execution performance"""
     total_duration_seconds: float = 0.0
     task_count_total: int = 0
     task_count_completed: int = 0
@@ -124,7 +118,6 @@ class ExecutionMetrics(BaseModel):
 
 
 class ErrorInfo(BaseModel):
-    """Structured error information"""
     error_type: ErrorType
     message: str
     retryable: bool = False
@@ -135,7 +128,6 @@ class ErrorInfo(BaseModel):
 
 
 class Evidence(BaseModel):
-    """Provenance information for observations"""
     evidence_id: str = Field(default_factory=lambda: str(uuid4()))
     source: str  # tool name: nmap, openssl, etc
     agent_id: Optional[str] = None
@@ -171,7 +163,6 @@ class RetryDecisionType(str, Enum):
 
 
 class ToolResult(BaseModel):
-    """Standard result from tool execution (Phase 12 contract)."""
     tool: str
     capability: str
     status: Union[ToolExecutionStatus, Literal[
@@ -222,15 +213,6 @@ class ToolResult(BaseModel):
     @classmethod
     def derive_status(cls, exit_code: Optional[int], stdout: str = "", stderr: str = "",
                       timed_out: bool = False, blocked: bool = False) -> "ToolExecutionStatus":
-        """P0-1: single source of truth for exit_code -> status mapping.
-
-        Rules (per doc P0-1):
-          rc == 0                              -> SUCCESS
-          rc != 0 + useful partial output      -> PARTIAL
-          rc != 0 + no trustworthy output      -> FAILED
-          timed_out                            -> TIMEOUT
-          blocked (scope/waf/policy)           -> BLOCKED
-        """
         if blocked:
             return ToolExecutionStatus.BLOCKED
         if timed_out:
@@ -245,7 +227,6 @@ class ToolResult(BaseModel):
 
     @property
     def is_semantic_success(self) -> bool:
-        """Exit code 0 is not enough — output must contain meaningful data."""
         if not self.success:
             return False
         return bool(self.stdout.strip() or self.normalized_result or self.data)
@@ -253,7 +234,6 @@ class ToolResult(BaseModel):
 
 
 class SuccessCriterion(BaseModel):
-    """Typed success criteria for task completion"""
     criterion_type: SuccessCriterionType
     entity_type: Optional[str] = None
     operator: Optional[str] = None  # >, <, ==, >=, <=
@@ -263,7 +243,6 @@ class SuccessCriterion(BaseModel):
 
 
 class TaskSpec(BaseModel):
-    """Complete task specification"""
     task_id: str = Field(default_factory=lambda: str(uuid4()))
     objective: str
     capability: CapabilityType
@@ -302,7 +281,6 @@ class TaskSpec(BaseModel):
 
 
 class CapabilityRequest(BaseModel):
-    """Request to resolve and execute a capability"""
     capability: CapabilityType
     target: str
     parameters: Dict[str, Any] = Field(default_factory=dict)
@@ -310,7 +288,6 @@ class CapabilityRequest(BaseModel):
 
 
 class CapabilityResult(BaseModel):
-    """Result of capability resolution and execution"""
     capability: CapabilityType
     resolved_tool: str
     tool_result: ToolResult
@@ -318,9 +295,8 @@ class CapabilityResult(BaseModel):
 
 
 class KnowledgeItem(BaseModel):
-    """Structured knowledge with full provenance"""
     knowledge_id: str = Field(default_factory=lambda: str(uuid4()))
-    entity_type: str  # subdomain, host, port, service, endpoint, etc
+    entity_type: str
     entity_value: str  # the actual value
     attributes: Dict[str, Any] = Field(default_factory=dict)
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
@@ -333,14 +309,13 @@ class KnowledgeItem(BaseModel):
 
 
 class Finding(BaseModel):
-    """Security finding with full evidence trail"""
     finding_id: str = Field(default_factory=lambda: str(uuid4()))
     title: str
     description: str
     severity: Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     status: Literal["OBSERVED", "CANDIDATE", "VALIDATING", "CONFIRMED", "REJECTED"]
-    category: str  # authentication, injection, exposure, etc
+    category: str
     cwe: Optional[str] = None
     cve: Optional[str] = None
     affected_asset: str
@@ -354,7 +329,6 @@ class Finding(BaseModel):
 
 
 class AgentResult(BaseModel):
-    """Standard result from agent execution"""
     task_id: str
     agent_id: str
     status: Literal["completed", "failed", "partial", "timeout"]
@@ -368,7 +342,6 @@ class AgentResult(BaseModel):
 
 
 class NormalizedLLMResponse(BaseModel):
-    """Normalized response format across all LLM providers"""
     content: str
     structured_output: Optional[Dict[str, Any]] = None
     finish_reason: Optional[str] = None
@@ -380,7 +353,6 @@ class NormalizedLLMResponse(BaseModel):
 
 
 class BrainDecision(BaseModel):
-    """Canonical decision output from Central Brain"""
     action: BrainDecisionAction
     thought: Optional[str] = None
     tasks: List[TaskSpec] = Field(default_factory=list)
@@ -412,7 +384,6 @@ class BrainDecision(BaseModel):
 
 
 class ExecutionState(BaseModel):
-    """Complete execution state for Brain replanning"""
     target: str
     scope: Dict[str, Any]
     tasks_completed: List[TaskSpec] = Field(default_factory=list)
@@ -433,7 +404,6 @@ PlannerDecision = BrainDecision
 
 
 class ToolInvocation(BaseModel):
-    """Tool execution request"""
     tool_id: str
     operation: Optional[str] = None
     target: str
@@ -443,7 +413,6 @@ class ToolInvocation(BaseModel):
 
 
 class ToolDefinition(BaseModel):
-    """Tool metadata and characteristics"""
     tool_id: str
     category: str = "generic"
     estimated_time_sec: int = 60

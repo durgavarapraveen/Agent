@@ -1,8 +1,3 @@
-"""
-Deterministic Retry Policy.
-Determines whether a tool execution should be retried, skipped, or switched to an alternative tool.
-LLM does not make retry decisions.
-"""
 
 import logging
 from typing import Optional, Dict, Any, Union
@@ -12,7 +7,6 @@ logger = logging.getLogger(__name__)
 
 
 class RetryDecision:
-    """Represents a deterministic retry decision"""
     def __init__(
         self,
         decision: RetryDecisionType,
@@ -35,7 +29,6 @@ class RetryDecision:
 
 
 class RetryPolicy:
-    """Evaluates ToolResult against deterministic rules"""
 
     ALTERNATIVE_TOOLS: Dict[str, list[str]] = {
         "subfinder": ["amass", "dig", "dns_lookup_python"],
@@ -59,10 +52,6 @@ class RetryPolicy:
         attempt: int = 1,
         max_retries: int = 3
     ) -> RetryDecision:
-        """
-        Evaluate ToolResult deterministically.
-        Logs RETRY_POLICY_DECISION.
-        """
         # Normalize result inputs
         if isinstance(result, dict):
             status = result.get("status", "failed")

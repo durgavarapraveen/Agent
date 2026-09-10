@@ -11,7 +11,7 @@ class LLMHypothesis(BaseModel):
     priority: float = Field(default=0.5, ge=0.0, le=1.0)
 
 class LLMDecision(BaseModel):
-    action: str = Field(...) # TEST, INVESTIGATE, SKIP
+    action: str = Field(...)
     hypotheses: List[LLMHypothesis] = Field(default_factory=list)
     reasoning: str = Field(...)
     confidence: float = Field(default=0.8, ge=0.0, le=1.0)

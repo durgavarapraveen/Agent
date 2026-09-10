@@ -7,10 +7,6 @@ from core.domain.request import CapturedRequest, ResponseData
 logger = logging.getLogger(__name__)
 
 class HttpProxy:
-    """
-    Acts as a wrapper over `requests` to fire native HTTP requests
-    from the agent to the target, bypassing socket complexity.
-    """
     def __init__(self, verify_ssl: bool = False):
         self.verify_ssl = verify_ssl
         self.session = requests.Session()
@@ -20,10 +16,6 @@ class HttpProxy:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             
     def forward(self, request: CapturedRequest) -> ResponseData:
-        """
-        Translates a CapturedRequest into a live HTTP request, sends it,
-        and parses the result back into a ResponseData object.
-        """
         logger.info(f"Forwarding {request.method} {request.url}")
         
         # We need to construct the kwargs for the requests call

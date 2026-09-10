@@ -1,19 +1,4 @@
 #!/usr/bin/env python3
-"""Issue 1.1 — Repository-wide architecture baseline.
-
-Generates a machine-readable component inventory of every module, class,
-high-risk primitive, and call graph edge.  Emits JSON + Markdown.
-
-Run:
-    python scripts/inventory_generator.py
-    python scripts/inventory_generator.py --format json
-    python scripts/inventory_generator.py --format markdown
-    python scripts/inventory_generator.py --check   # CI mode: exits 1 if stale
-
-Output:
-    docs/architecture_inventory.json
-    docs/architecture_inventory.md
-"""
 from __future__ import annotations
 
 import argparse

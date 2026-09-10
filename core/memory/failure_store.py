@@ -7,9 +7,6 @@ from core.memory.database import MemoryDatabase, DatabaseManager
 
 
 class FailureStore:
-    """Postgres-backed store of LLM failure events. Previously broken: called
-    `.cursor()` on the context manager and used SQLite `?` placeholders. Rewritten
-    to use the pooled `DatabaseManager`."""
 
     def __init__(self, db: MemoryDatabase = None):
         self.db = db

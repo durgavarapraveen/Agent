@@ -1,10 +1,3 @@
-"""
-P2-2: Hypothesis Engine.
-
-Replaces "tool available -> run tool" with:
-  new evidence -> possible hypotheses -> rank -> next best action
-  -> collect evidence -> update hypothesis
-"""
 from __future__ import annotations
 
 import uuid
@@ -39,8 +32,6 @@ class Hypothesis:
     next_action: str = ""
 
     def score(self) -> float:
-        """Rank = expected value / cost. Priority captures impact, evidence
-        gap widens value, cost shrinks it."""
         gap = max(1, len(self.required_evidence) - len(self.evidence_ids))
         return (self.priority * gap) / max(0.1, self.cost_estimate)
 
@@ -72,7 +63,6 @@ class HypothesisEngine:
                         h.evidence_ids.append(e)
 
     def next_best_action(self) -> Optional[Hypothesis]:
-        """Highest-scoring OPEN or NEEDS_EVIDENCE hypothesis."""
         with self._lock:
             candidates = [h for h in self._store.values()
                           if h.state in (HypothesisState.OPEN,

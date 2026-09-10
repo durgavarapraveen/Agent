@@ -1,10 +1,3 @@
-"""
-Convergence Engine V2 (Phase 34).
-
-Convergence means no high-value applicable tests remain that can be
-executed under current scope, health, identity, budget, and evidence
-constraints. It is NOT just "queue empty."
-"""
 from __future__ import annotations
 
 import logging

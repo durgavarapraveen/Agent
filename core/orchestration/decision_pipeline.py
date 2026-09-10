@@ -1,14 +1,3 @@
-"""
-Phase 33 — Structured Decision Pipeline.
-
-The LLM receives a structured state bundle and returns structured decisions.
-Deterministic Python validates each decision before execution.
-
-Pipeline:
-  LLM decision → Schema validation → Scope validation → Prerequisite validation
-  → Health/risk policy → Task creation → Tool execution → Result normalization
-  → Evidence → Validation → Canonical state update
-"""
 from __future__ import annotations
 
 import logging
@@ -32,7 +21,6 @@ class DecisionAction(str, Enum):
 
 @dataclass
 class StructuredDecision:
-    """What the LLM returns — deterministic Python validates before executing."""
     next_action: DecisionAction
     reason: str = ""
     target: str = ""
@@ -55,7 +43,6 @@ class DecisionValidationResult:
 
 
 class StructuredStateBuilder:
-    """Builds the state bundle sent to the LLM for decision-making."""
 
     @staticmethod
     def build(
@@ -144,7 +131,6 @@ class StructuredStateBuilder:
 
 
 class DecisionValidator:
-    """Validates LLM decisions through the deterministic pipeline stages."""
 
     def __init__(
         self,
@@ -233,7 +219,6 @@ class DecisionValidator:
 
     @staticmethod
     def parse_llm_decision(data: Dict[str, Any]) -> StructuredDecision:
-        """Parse raw LLM JSON response into a StructuredDecision."""
         action_str = str(data.get("next_action", data.get("action", "SKIP"))).upper()
         try:
             action = DecisionAction(action_str)
@@ -260,7 +245,6 @@ class DecisionValidator:
 
 @dataclass
 class GranularBudget:
-    """Phase 36 — Multiple budget dimensions beyond just time and dollars."""
     request_budget: int = 10000
     request_used: int = 0
     time_budget_seconds: int = 3600
@@ -319,7 +303,6 @@ class GranularBudget:
         }
 
     def untested_report(self, remaining_tests: List[str]) -> Dict[str, Any]:
-        """Phase 36: When budget exhausted, report what remains untested."""
         return {
             "budget_exhausted": self.is_any_exhausted(),
             "remaining_tests_count": len(remaining_tests),

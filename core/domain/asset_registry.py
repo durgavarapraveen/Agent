@@ -1,17 +1,3 @@
-"""P1.2 — canonical AssetRegistry.
-
-A discovered JS/asset must keep the ORIGIN it was actually served from. The old
-code had two JS pipelines that each reconstructed asset URLs from a global
-``ctx.target``; when the target was an internal address (e.g. localhost:3000 not
-reachable from the Kali container) one pipeline rebuilt unreachable URLs and
-curl failed with rc=7, silently dropping every asset, while the other pipeline —
-using real captured absolute URLs — succeeded. Same asset, two different URLs.
-
-This registry is the single source of truth for assets. Analyzers must resolve
-relative references against the registered origin, never re-prefix a global
-target. It is deliberately target-agnostic (production-safe): the "primary
-origin" is learned from what was actually observed, with no hardcoded host.
-"""
 from __future__ import annotations
 
 import hashlib
@@ -75,10 +61,6 @@ class AssetRegistry:
                  parent_endpoint: str = "", content_type: str = "",
                  status_code: Optional[int] = None, in_scope: bool = True,
                  resolved_url: str = "") -> Optional[Asset]:
-        """Register an asset by its discovered ABSOLUTE url. Returns the Asset
-        (existing or new). A relative url is ignored here — callers must resolve
-        it first via :meth:`resolve`.
-        """
         if not source_url:
             return None
         origin = _origin_of(source_url)
@@ -111,13 +93,6 @@ class AssetRegistry:
         return a
 
     def resolve(self, ref: str, base_origin: str) -> str:
-        """Resolve a possibly-relative asset reference against a KNOWN origin.
-
-        Absolute refs are returned unchanged (origin preserved). Root/relative
-        refs are joined onto ``base_origin`` — the real origin that served the
-        referring page, NOT a global target — so an asset from the preview host
-        is never rewritten to localhost.
-        """
         if not ref:
             return ""
         if _origin_of(ref):
@@ -128,10 +103,6 @@ class AssetRegistry:
         return urljoin(base.rstrip("/") + "/", ref.lstrip("/"))
 
     def primary_origin(self) -> str:
-        """The origin most assets were actually served from (learned, not
-        hardcoded). Used to reconstruct relative refs when no page origin is
-        known — replaces the old habit of re-prefixing ``ctx.target``.
-        """
         if not self._origin_hits:
             return ""
         return max(self._origin_hits.items(), key=lambda kv: kv[1])[0]

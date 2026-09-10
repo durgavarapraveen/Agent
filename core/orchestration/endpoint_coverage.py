@@ -1,10 +1,3 @@
-"""
-P2-3: endpoint test coverage tracker.
-
-For every endpoint, records which vuln classes have been tested under
-which auth state. The planner uses this to identify real gaps instead
-of re-running the same probes.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

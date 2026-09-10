@@ -1,15 +1,3 @@
-"""
-Enterprise Reporting (Phase 4, Module 1)
-
-Produces a self-contained professional HTML report (PDF if a renderer is
-available) from SharedContext:
-  - Executive summary + technical details
-  - Attack-path visualization (inline SVG)
-  - MITRE ATT&CK heatmap
-  - Risk scoring + remediation guidance
-
-No external template/runtime dependencies; the HTML is fully self-contained.
-"""
 
 import html
 import logging
@@ -37,10 +25,6 @@ MANDATORY_DISCLAIMER = (
 
 
 def mask_sensitive_data(text: str, enabled: bool = True) -> str:
-    """
-    Mask PII, passwords, API keys, and sensitive tokens.
-    Default: mask_sensitive_data = True.
-    """
     if not enabled or not text:
         return text or ""
 
@@ -108,15 +92,6 @@ def mask_sensitive_data(text: str, enabled: bool = True) -> str:
 
 
 class EncryptedTrendStore:
-    """Stores historical scan trend metrics in an encrypted PostgreSQL table.
-
-    Now uses real authenticated encryption (AES-256-GCM) via the project's
-    `core.security.encryption` helper. Previous versions used XOR against a
-    hardcoded default key, which was equivalent to no encryption — known-plaintext
-    recovery of the key was trivial. Existing rows encrypted with the old scheme
-    can no longer be decrypted; the reader silently drops undecryptable rows and
-    returns whatever new AES-GCM rows exist.
-    """
 
     def __init__(self):
         self._init_db()
@@ -202,7 +177,6 @@ class EncryptedTrendStore:
 
 
 def compare_industry_benchmark(counts: Dict[str, int], industry: str = None, csv_path: str = "data/industry_benchmarks.csv") -> str:
-    """Compare scan finding counts to industry benchmarks."""
     import csv
     ind_clean = (industry or "default").strip().lower()
     benchmarks = {}
@@ -243,10 +217,6 @@ def compare_industry_benchmark(counts: Dict[str, int], industry: str = None, csv
 
 
 def generate_severity_chart(counts: Dict[str, int], previous_critical_avg: float = 0.0) -> Dict[str, str]:
-    """
-    Generate horizontal bar chart showing counts per severity level (Critical, High, Medium, Low, Info).
-    Returns dict containing base64_png and trend_indicator.
-    """
     import base64
     severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
     values = [counts.get(s, 0) for s in severities]
@@ -295,10 +265,6 @@ def generate_severity_chart(counts: Dict[str, int], previous_critical_avg: float
 
 
 def generate_key_metrics_table(vulnerabilities: List[Dict], retest_results: List[Dict] = None, historical_patches: List[Dict] = None) -> str:
-    """
-    Compute MTTR, % public exploit, and % reproducible.
-    Format as Markdown table.
-    """
     total = len(vulnerabilities)
     if total == 0:
         return (
@@ -334,7 +300,6 @@ def generate_key_metrics_table(vulnerabilities: List[Dict], retest_results: List
 
 
 class ExecutiveSummaryGenerator:
-    """Module 5.1 One-Page Executive Summary Generator using Jinja2 template."""
 
     def __init__(self, template_path: str = "templates/executive_summary.jinja2"):
         self.template_path = Path(template_path)
@@ -430,7 +395,6 @@ class ExecutiveSummaryGenerator:
 
 
 class EnterpriseReporter:
-    """Builds enterprise-grade HTML/PDF reports from a SharedContext."""
 
     def __init__(self, ctx, report_dir: str = None,
                  active_frameworks=None):
@@ -445,7 +409,6 @@ class EnterpriseReporter:
         self.active_frameworks = active_frameworks
 
     def _compliance_html(self) -> str:
-        """Per-framework compliance table (uses the compliance module)."""
         try:
             from core.compliance import ComplianceReporter
         except Exception:       # noqa: BLE001
@@ -475,7 +438,6 @@ class EnterpriseReporter:
     # ── risk scoring ──
 
     def risk_score(self) -> Dict:
-        """Aggregate risk score (0-100) from vulnerability severities."""
         counts = {k: 0 for k in SEV_WEIGHT}
         for v in self.ctx.vulnerabilities:
             sev = str(v.get("severity", "MEDIUM")).upper()
@@ -535,7 +497,6 @@ class EnterpriseReporter:
                 + "".join(rows) + "</tbody></table>")
 
     def _attack_path_svg(self) -> str:
-        """Render attack chains as a horizontal node-arrow SVG."""
         chains = self.ctx.attack_chains or []
         if isinstance(chains, dict):
             chains = list(chains.values()) if chains else []
@@ -623,7 +584,6 @@ class EnterpriseReporter:
         return "".join(blocks) or "<p class='muted'>No remediation items.</p>"
 
     def _poc_reproduction_table(self) -> str:
-        """Render POC reproduction commands and script links."""
         vulns = self.ctx.vulnerabilities or []
         if not vulns:
             return "<p class='muted'>No confirmed vulnerabilities requiring POC reproduction.</p>"
@@ -729,9 +689,6 @@ class EnterpriseReporter:
         return self.add_osint_findings(full_html)
 
     def generate(self, executive_summary: str = "", stem: str = "") -> Dict[str, str]:
-        """Write HTML (and PDF if a renderer is available). Returns paths.
-        When REPORTS_ENABLED=false, only the in-memory HTML is generated and
-        returned (no disk writes)."""
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         stem = stem or f"report_{ts}"
         html_str = self.build_html(executive_summary)
@@ -809,7 +766,6 @@ class EnterpriseReporter:
 
     @staticmethod
     def _html_to_fpdf(html_str: str):
-        """Convert HTML report to a basic PDF using fpdf2 (pure Python)."""
         from fpdf import FPDF
         import re as _re
 
@@ -846,7 +802,6 @@ class EnterpriseReporter:
 
 
     def add_osint_findings(self, report_html: str) -> str:
-        """Add OSINT section to report based on findings in self.ctx."""
         osint_findings = getattr(self.ctx, "osint_findings", {}) or {}
         
         employees_data = getattr(self.ctx, "discovered_employees", []) or osint_findings.get("employees", [])

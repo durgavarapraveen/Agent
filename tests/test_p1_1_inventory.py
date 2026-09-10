@@ -1,4 +1,3 @@
-"""Tests for Issue 1.1 — Architecture inventory generator."""
 import json
 import sys
 from pathlib import Path

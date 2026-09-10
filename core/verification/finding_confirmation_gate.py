@@ -1,21 +1,3 @@
-"""P0.6 — Deterministic finding confirmation gate.
-
-Replaces LLM-wording / keyword / status-code based confirmation.
-
-Pipeline:
-    Candidate -> Supported -> Reproduced -> Impact Verified -> Confirmed
-
-Each vuln class has specific, deterministic evidence requirements.
-A 200 response is NEVER sufficient by itself.
-`confirmed=True` from upstream LLM output is NEVER trusted.
-
-Example (IDOR):
-    identity A -> resource A baseline
-    identity B -> resource A attempt
-    resource belongs to A AND B can access/mutate it
-    AND independent reproduction succeeds
-    = confirmed
-"""
 from __future__ import annotations
 
 import logging
@@ -422,11 +404,6 @@ def _is_status_code_only(evidence: Dict[str, Any]) -> bool:
 
 
 class FindingConfirmationGate:
-    """Deterministic finding confirmation gate.
-
-    Enforces per-vuln-class evidence requirements.
-    Never trusts LLM wording, status codes alone, or upstream confirmed=True.
-    """
 
     def __init__(self):
         self._states: Dict[str, ConfirmationState] = {}

@@ -41,13 +41,6 @@ class DatabaseManager:
 
     @classmethod
     def _init_extensions(cls):
-        """
-        Best-effort: enable pgvector if the role is allowed to. This is OPTIONAL —
-        only the vector-memory feature needs it. It must never abort startup, or the
-        core tables (targets, scans, vulnerabilities, review_queue) would never be
-        created. CREATE EXTENSION requires superuser/rds_superuser; a plain app role
-        will fail here, which is fine.
-        """
         try:
             with cls.get_connection() as conn:
                 with conn.cursor() as cur:
@@ -64,16 +57,6 @@ class DatabaseManager:
     @classmethod
     @contextmanager
     def get_connection(cls):
-        """
-        Context manager for getting a connection from the pool.
-
-        Fixes pool-poisoning bug: any exception inside the `with` block leaves the
-        connection in an aborted transaction state. Returning it to the pool without
-        rollback poisons the next borrower with `InFailedSqlTransaction`. We roll
-        back on exception, and also rollback (best-effort) on the happy path in case
-        the caller left an open transaction. The connection is returned to the pool
-        unless it's already broken, in which case we drop it so the pool refills.
-        """
         if cls._pool is None:
             cls.initialize()
 
@@ -102,7 +85,6 @@ class DatabaseManager:
 
     @classmethod
     def close_all(cls):
-        """Close all connections in the pool."""
         if cls._pool is not None:
             cls._pool.closeall()
             logger.info("Closed all PostgreSQL connections")
@@ -112,7 +94,6 @@ db_manager = DatabaseManager()
 
 
 class MemoryDatabase:
-    """PostgreSQL-backed memory system for experiences, strategies, and LLM failures."""
 
     def __init__(self, db_path=None):
         self._ensure_schema()

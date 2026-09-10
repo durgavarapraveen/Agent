@@ -1,11 +1,3 @@
-"""
-AgentSpawner - Creates agents from brain decisions.
-
-Two agent types:
-  1. DynamicAgent     — generic LLM-driven (recon, analysis, misc)
-  2. UniversalExploit — LLM-driven exploitation for ANY vuln type
-     Brain just says "exploit XSS" or "exploit SQLi" — agent handles it.
-"""
 
 import logging
 from typing import Dict, Union
@@ -29,7 +21,6 @@ EXPLOIT_KEYWORDS = [
 
 
 class AgentSpawner:
-    """Creates agents on-the-fly from brain decisions"""
 
     def __init__(self, tool_registry: ToolRegistry, shared_context: SharedContext):
         self.tools = tool_registry
@@ -37,20 +28,6 @@ class AgentSpawner:
         self.counter = 0
 
     def spawn(self, spec: Dict) -> Union[DynamicAgent, object]:
-        """
-        Brain provides spec:
-        {
-            "objective": "Exploit SQL injection in login form",
-            "tools": ["http_request", "sqlmap"],
-            "context_keys": ["target", "endpoints", "vulnerabilities"],
-            "max_steps": 15,
-            "vuln_type": "sqli",         ← optional, auto-detected if missing
-            "target_params": [...]        ← optional, injection points
-        }
-
-        If objective matches exploitation → UniversalExploitAgent
-        Otherwise → generic DynamicAgent (recon, analysis, etc.)
-        """
         self.counter += 1
         objective = spec.get("objective", "")
         allowed_tools = spec.get("tools", [])
@@ -213,7 +190,6 @@ class AgentSpawner:
 
     def _spawn_exploit(self, agent_id, objective, agent_context,
                         vuln_type, target_params, max_steps):
-        """Create UniversalExploitAgent"""
         from agents.exploit_agent import UniversalExploitAgent
         from core.common.config import get_config
 

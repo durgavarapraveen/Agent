@@ -1,9 +1,3 @@
-"""
-Phase 8 Module 8.2: Resource Limits & Timeouts (core/resource_limiter.py)
-
-Per-tool CPU, RAM, and open file descriptor capping, tool-specific timeouts
-with partial output capture, daemonized global scan timer, and psutil tracking.
-"""
 
 import logging
 import os
@@ -29,32 +23,24 @@ TOOL_TIMEOUTS = {
 
 
 class ScanTimeoutError(Exception):
-    """Raised when the global scan timer expires."""
     pass
 
 
 class ResourceViolationError(Exception):
-    """Raised when a subprocess exceeds CPU or memory resource limits."""
     pass
 
 
 class ResourceLimiter:
-    """Enforces process resource limits, timeouts, and psutil monitoring."""
 
     def __init__(self):
         self.active_processes: List[subprocess.Popen] = []
         self._global_timer: Optional[threading.Timer] = None
 
     def can_allocate(self, tool_id: str) -> bool:
-        """Check if resources are available to run this tool"""
         # A simple check for now, can be expanded to check CPU/RAM
         return True
 
     def start_global_scan_timer(self, timeout_sec: float = 86400.0, callback: Optional[Callable] = None) -> threading.Timer:
-        """
-        Start daemonized global scan timer.
-        Raises ScanTimeoutError and terminates active processes when timer expires.
-        """
         def _on_timeout():
             logger.critical(f"[ResourceLimiter] GLOBAL SCAN TIMEOUT EXPIRED ({timeout_sec}s). Terminating active processes.")
             self.terminate_all_processes()
@@ -68,13 +54,11 @@ class ResourceLimiter:
         return timer
 
     def cancel_global_scan_timer(self):
-        """Cancel global scan timer if active."""
         if self._global_timer:
             self._global_timer.cancel()
             self._global_timer = None
 
     def terminate_all_processes(self):
-        """Gracefully terminate or kill all registered active subprocesses."""
         for proc in list(self.active_processes):
             try:
                 if proc.poll() is None:
@@ -94,11 +78,6 @@ class ResourceLimiter:
         memory_limit_mb: int = 2048,
         cpu_time_limit_sec: int = 300
     ) -> Dict[str, Any]:
-        """
-        Spawn subprocess with POSIX setrlimit preexec_fn (where supported),
-        monitor CPU/RAM via psutil, enforce tool timeout, capture partial stdout/stderr,
-        and return a resource usage summary.
-        """
         tool_key = tool_name.lower()
         effective_timeout = timeout or TOOL_TIMEOUTS.get(tool_key, TOOL_TIMEOUTS["generic"])
 

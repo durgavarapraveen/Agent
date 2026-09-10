@@ -1,7 +1,3 @@
-"""
-Config loader - reads from .env file
-Simple, no external dependencies
-"""
 
 import logging
 import os
@@ -12,7 +8,6 @@ logger = logging.getLogger(__name__)
 
 
 class Config:
-    """Load config from .env file"""
 
     @property
     def osint_enabled(self) -> bool:
@@ -74,13 +69,6 @@ class Config:
         self._load()
 
     def _load(self):
-        """Load .env file.
-
-        Prefers `python-dotenv` (already a project dependency) for proper
-        handling of quoted values, escapes, inline comments, and line
-        continuations. Falls back to a strict manual parser only if
-        python-dotenv is unavailable.
-        """
         if not self.env_file.exists():
             logger.warning(f".env file not found: {self.env_file}")
             return
@@ -122,16 +110,13 @@ class Config:
         logger.info(f"Loaded config from {self.env_file} (fallback parser)")
 
     def get(self, key: str, default: str = None) -> Optional[str]:
-        """Get config value"""
         return self.config.get(key, default)
 
     def get_bool(self, key: str, default: bool = False) -> bool:
-        """Get boolean config value"""
         val = self.config.get(key, str(default)).lower()
         return val in ('true', 'yes', '1', 'on')
 
     def get_int(self, key: str, default: int = 0) -> int:
-        """Get integer config value"""
         try:
             return int(self.config.get(key, default))
         except ValueError:
@@ -194,7 +179,6 @@ _config: Optional[Config] = None
 
 
 def get_config() -> Config:
-    """Get global config instance"""
     global _config
     if _config is None:
         _config = Config()
@@ -202,7 +186,6 @@ def get_config() -> Config:
 
 
 def load_config(env_file: str = ".env") -> Config:
-    """Load config from specific file"""
     global _config
     _config = Config(env_file)
     return _config

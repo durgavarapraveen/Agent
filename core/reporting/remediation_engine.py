@@ -1,9 +1,3 @@
-"""
-Phase 5 Module 5.3: Remediation Engine (core/remediation_engine.py)
-
-Automated remediation text generation, patch effort estimation, industry playbook overrides,
-and zero-day workaround suggestions with warning flags.
-"""
 
 import csv
 import logging
@@ -40,7 +34,6 @@ FALLBACK_EFFORT_MAP = {
 
 
 class RemediationEngine:
-    """Provides remediation guidance, patch effort estimates, and workaround suggestions."""
 
     def __init__(
         self,
@@ -61,7 +54,6 @@ class RemediationEngine:
         self._load_databases()
 
     def _load_databases(self):
-        """Load lookup CSV databases if they exist."""
         # 1. Remediation Map
         if self.remediation_map_path.exists():
             try:
@@ -105,7 +97,6 @@ class RemediationEngine:
                 logger.warning(f"[RemediationEngine] Workarounds load failed: {e}")
 
     def get_industry_override(self, vulnerability_type: str, industry: str) -> Optional[str]:
-        """Check for industry-specific playbook override recommendations."""
         if not industry:
             return None
 
@@ -132,12 +123,6 @@ class RemediationEngine:
             return None
 
     def get_remediation_text(self, finding: Dict[str, Any], industry: Optional[str] = None) -> str:
-        """
-        Get remediation text for a finding:
-        1. Check industry playbook override first if specified.
-        2. Check CVE in remediation_map.csv.
-        3. Fall back to vulnerability_type mapping rules.
-        """
         vuln_type = str(finding.get("type") or finding.get("title") or "MISCONFIGURATION")
 
         # Industry playbook override
@@ -160,15 +145,6 @@ class RemediationEngine:
         return "Apply vendor security patch and implement input validation and least-privilege security controls."
 
     def estimate_patch_effort(self, finding: Dict[str, Any]) -> int:
-        """
-        Estimate patch effort in hours:
-        1. Check CVE in patch_effort.csv.
-        2. Fall back to vulnerability/fix type heuristics:
-           - configuration_change -> 1 hour
-           - library_update -> 4 hours
-           - application_code_fix -> 16 hours
-           - kernel_update -> 40 hours
-        """
         cve = str(finding.get("cve") or finding.get("cve_id") or "").strip().upper()
         if cve and cve in self._patch_effort_db:
             return self._patch_effort_db[cve]
@@ -189,14 +165,9 @@ class RemediationEngine:
         return 1
 
     def calculate_total_remediation_hours(self, vulnerabilities: List[Dict[str, Any]]) -> int:
-        """Sum total estimated hours for all findings in the assessment report."""
         return sum(self.estimate_patch_effort(v) for v in vulnerabilities)
 
     def check_workaround(self, finding: Dict[str, Any]) -> Optional[Dict[str, str]]:
-        """
-        If no vendor patch is available (e.g. 0-day or patch_available == False),
-        search workarounds.csv and return workaround text with a warning flag.
-        """
         patch_available = finding.get("patch_available", True)
         cve = str(finding.get("cve") or finding.get("cve_id") or "").strip().upper()
         is_zero_day = finding.get("is_zero_day") or "zero-day" in str(finding.get("details", "")).lower()
@@ -212,7 +183,6 @@ class RemediationEngine:
         return None
 
     def enrich_finding_remediation(self, finding: Dict[str, Any], industry: Optional[str] = None) -> Dict[str, Any]:
-        """Enrich finding dictionary with remediation_text, estimated_hours, and workarounds."""
         item = dict(finding)
         item["remediation"] = self.get_remediation_text(item, industry=industry)
         item["estimated_hours"] = self.estimate_patch_effort(item)

@@ -1,14 +1,3 @@
-"""
-Composite risk scoring.
-
-Blends three independent signals into a single 0-100 risk score:
-  - CVSS base score   (severity of the flaw)        weight 0.3
-  - EPSS probability  (likelihood of exploitation)  weight 0.4
-  - CISA KEV flag     (known exploited in the wild) weight 0.3
-
-CVSS is normalized from its native 0-10 scale to 0-1 before weighting so all
-three signals share a common range; the weighted sum is scaled to 0-100.
-"""
 
 from __future__ import annotations
 
@@ -23,11 +12,10 @@ W_KEV = 0.3
 
 @dataclass
 class RiskVerdict:
-    """Structured composite-risk output for a single CVE."""
     cve_id: str
     score: float                 # 0-100 composite
-    severity_label: str          # CRITICAL / HIGH / MEDIUM / LOW / INFO
-    epss_percentile: float       # 0-1
+    severity_label: str
+    epss_percentile: float
     kev_match: bool
     cvss_vector: str = ""
     cvss_base: float = 0.0
@@ -56,7 +44,6 @@ def severity_from_score(score: float) -> str:
 
 
 def compute_score(cvss_base: float, epss: float, kev: bool) -> float:
-    """Composite 0-100 score from the three normalized signals."""
     cvss_n = max(0.0, min(10.0, float(cvss_base or 0.0))) / 10.0
     epss_n = max(0.0, min(1.0, float(epss or 0.0)))
     kev_n = 1.0 if kev else 0.0
@@ -66,7 +53,6 @@ def compute_score(cvss_base: float, epss: float, kev: bool) -> float:
 
 def score_cve(cve_id: str, cvss_base: float = 0.0, epss: float = 0.0,
               kev: bool = False, cvss_vector: str = "") -> RiskVerdict:
-    """Build a RiskVerdict from raw CVE signals."""
     score = compute_score(cvss_base, epss, kev)
     return RiskVerdict(
         cve_id=cve_id,
@@ -85,7 +71,6 @@ def score_cve(cve_id: str, cvss_base: float = 0.0, epss: float = 0.0,
 
 
 def rank(verdicts: List[RiskVerdict]) -> List[RiskVerdict]:
-    """Sort verdicts by composite score, highest first."""
     return sorted(verdicts, key=lambda v: v.score, reverse=True)
 
 
@@ -107,11 +92,6 @@ BASELINE_HARDENING_HEADERS_LOW_INFO = {
 
 
 def score_security_header_severity(header_name: str) -> str:
-    """
-    Categorize security header vulnerability severity:
-    - MEDIUM: Actionable security headers (Content-Security-Policy, X-Frame-Options, CORS, HSTS)
-    - LOW/INFO: Baseline hardening & disclosure headers (X-Content-Type-Options, Referrer-Policy, Server disclosure)
-    """
     h_clean = (header_name or "").strip().lower()
 
     if any(h in h_clean for h in ACTIONABLE_HEADERS_MEDIUM):
@@ -125,9 +105,6 @@ def score_security_header_severity(header_name: str) -> str:
 
 
 def enrich_finding_with_cve(finding: dict, cve_db: Optional[Any] = None) -> dict:
-    """
-    Enrich a candidate finding dictionary with real-time CVE IDs, CVSS scores, and KEV exploit status.
-    """
     if cve_db is None:
         from core.intelligence.vuln_intel.feeds import CVEDatabase
         cve_db = CVEDatabase()

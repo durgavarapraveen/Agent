@@ -73,7 +73,6 @@ class AttackSurfaceGraph:
         self.edges_count += 1  # PAGE -> CALLS -> ENDPOINT
 
     def pages_calling_endpoint(self, endpoint_id: str) -> List[str]:
-        """Return every page URL that called `endpoint_id`."""
         edges = getattr(self, "_page_endpoint_edges", {}) or {}
         return [page for page, eps in edges.items() if endpoint_id in eps]
 
@@ -163,7 +162,6 @@ class AttackSurfaceGraph:
         return [self.endpoints[eid] for eid in matched_ids if eid in self.endpoints]
 
     def sync_from_endpoint_inventory(self, inventory) -> int:
-        """Sync endpoints from an EndpointInventoryV2 (dict-based) into the graph."""
         from core.domain.endpoint import Endpoint
         added = 0
         for ep_data in inventory.list_endpoints():

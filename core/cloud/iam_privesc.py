@@ -1,16 +1,3 @@
-"""
-Cloud IAM / RBAC privilege-escalation analysis.
-
-IAMPrivescAnalyzer detects the well-documented AWS IAM privilege-escalation
-methods (Rhino Security Labs taxonomy) from a principal's effective permissions.
-K8sRBACAnalyzer flags dangerous Kubernetes RBAC permissions. ContainerEscapeChecker
-applies container-escape heuristics to a container/pod spec (or the live container
-the agent runs in). Each returns findings in the pipeline's standard dict shape.
-
-Inputs are data-driven: pass exported policy/RBAC/spec JSON so no live cloud
-credentials are required. When boto3 + AWS credentials are present, the analyzer
-can also enumerate the current principal's permissions directly.
-"""
 
 from __future__ import annotations
 
@@ -96,7 +83,6 @@ _K8S_DANGEROUS = [
 
 class IAMPrivescAnalyzer:
     def analyze_permissions(self, permissions: List[str], principal: str = "current-principal") -> List[Dict[str, Any]]:
-        """Given a flat list of allowed IAM actions, return privesc-path findings."""
         allowed = {p.lower() for p in permissions}
         findings: List[Dict[str, Any]] = []
 
@@ -123,7 +109,6 @@ class IAMPrivescAnalyzer:
         return findings
 
     def analyze_policy_document(self, policy: Dict[str, Any], principal: str = "current-principal") -> List[Dict[str, Any]]:
-        """Extract Allow actions from an IAM policy JSON and analyze them."""
         perms: Set[str] = set()
         statements = policy.get("Statement", [])
         if isinstance(statements, dict):
@@ -138,7 +123,6 @@ class IAMPrivescAnalyzer:
         return self.analyze_permissions(sorted(perms), principal)
 
     def analyze_live(self) -> List[Dict[str, Any]]:
-        """Enumerate the current principal's permissions via boto3 (if available)."""
         try:
             import boto3  # type: ignore
         except Exception:
@@ -181,7 +165,6 @@ class IAMPrivescAnalyzer:
 
 class K8sRBACAnalyzer:
     def analyze_rules(self, rules: List[Dict[str, Any]], subject: str = "role") -> List[Dict[str, Any]]:
-        """Analyze a list of RBAC policyRules ({verbs, resources}) for dangerous grants."""
         findings: List[Dict[str, Any]] = []
         for rule in rules or []:
             verbs = [str(v).lower() for v in (rule.get("verbs") or [])]
@@ -211,7 +194,6 @@ class K8sRBACAnalyzer:
 
 class ContainerEscapeChecker:
     def analyze_spec(self, spec: Dict[str, Any], name: str = "container") -> List[Dict[str, Any]]:
-        """Heuristics over a container/pod spec dict for escape-prone configuration."""
         findings: List[Dict[str, Any]] = []
         sc = spec.get("securityContext", {}) or {}
 
@@ -245,7 +227,6 @@ class ContainerEscapeChecker:
         return findings
 
     def analyze_live(self) -> List[Dict[str, Any]]:
-        """Best-effort checks from inside the container the agent runs in."""
         findings: List[Dict[str, Any]] = []
         try:
             if os.path.exists("/var/run/docker.sock"):
@@ -258,7 +239,6 @@ class ContainerEscapeChecker:
 
 
 class CloudPrivescScanner:
-    """Runs whichever cloud analyses have input available and returns findings."""
 
     def __init__(self):
         self.iam = IAMPrivescAnalyzer()

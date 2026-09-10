@@ -1,14 +1,3 @@
-"""
-PHASE 5 executors — bridge the differential / parser / metamorphic / invariant
-research engines into the V2 executor pipeline.
-
-Each executor reuses the discovery helpers and the scope-checked ``_probe`` of
-``GenericHTTPExecutor`` and emits evidence dicts whose keys end in ``_findings``
-so ``CentralBrain._ingest_executor_findings`` picks them up. They are tuned for
-precision: representation-differential ignores "method not supported" statuses,
-parser analysis only fires on reflected values, and metamorphic low-signals are
-downgraded on non-deterministic endpoints.
-"""
 from __future__ import annotations
 
 import time
@@ -28,11 +17,9 @@ _UNSUPPORTED = {404, 405, 501}
 
 
 class _ResearchBase(GenericHTTPExecutor):
-    """Shared endpoint-selection helpers for the PHASE 5 executors."""
 
     def _param_targets(self, experiment: SecurityExperiment,
                        limit: int = 6) -> List[Tuple[str, str]]:
-        """(url_without_query, param_name) pairs from discovered endpoints."""
         base = self._base(experiment)
         out: List[Tuple[str, str]] = []
         for ep in self._discovered_endpoints(experiment):
@@ -55,7 +42,6 @@ class _ResearchBase(GenericHTTPExecutor):
 
 
 class DifferentialResearchExecutor(_ResearchBase):
-    """Parser-differential + request-representation differential testing."""
 
     def execute(self, experiment: SecurityExperiment) -> ExecutionResult:
         if not self._url_from_experiment(experiment):
@@ -101,7 +87,6 @@ class DifferentialResearchExecutor(_ResearchBase):
 
 
 class MetamorphicConsistencyExecutor(_ResearchBase):
-    """Metamorphic-relation testing over discovered endpoints."""
 
     def execute(self, experiment: SecurityExperiment) -> ExecutionResult:
         if not self._url_from_experiment(experiment):
@@ -131,7 +116,6 @@ class MetamorphicConsistencyExecutor(_ResearchBase):
 
 
 class InvariantOracleExecutor(_ResearchBase):
-    """Run security invariants over sampled responses (incl. a 404 error page)."""
 
     def execute(self, experiment: SecurityExperiment) -> ExecutionResult:
         if not self._url_from_experiment(experiment):

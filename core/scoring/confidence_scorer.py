@@ -1,12 +1,3 @@
-"""
-Confidence Scoring — Auto-Calculate from Response Patterns (Strix Pattern #4).
-
-Replaces manual "need review" tagging with auto-calculated confidence (0-100%)
-based on response consistency, timing, evidence quality, reproducibility, and
-payload specificity.
-
-Inspired by Strix's required confidence with mandatory rationale.
-"""
 from __future__ import annotations
 
 import logging
@@ -288,7 +279,6 @@ class ConfidenceScorer:
         self,
         findings: List[Dict[str, Any]],
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """Split findings into reportable, needs_review, and rejected."""
         reportable = []
         needs_review = []
         rejected = []

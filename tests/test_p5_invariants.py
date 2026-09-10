@@ -1,4 +1,3 @@
-"""PHASE 5 — security-invariant engine (offline)."""
 from core.intelligence.differential.comparison import ResponseSnapshot
 from core.intelligence.invariants import InvariantEngine
 
@@ -100,6 +99,6 @@ def test_https_with_hsts_ok():
 def test_hsts_not_flagged_without_https_scheme():
     # Plain http:// origin, or a non-URL label: HSTS is meaningless -> silent.
     http_snap = ResponseSnapshot(label="http://t.example/x", status=200, body="ok")
-    label_snap = _snap(200, "ok")  # label="r"
+    label_snap = _snap(200, "ok")
     assert "https_hsts" not in _names(InvariantEngine().check(http_snap))
     assert "https_hsts" not in _names(InvariantEngine().check(label_snap))

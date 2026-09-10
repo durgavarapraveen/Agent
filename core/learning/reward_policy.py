@@ -1,20 +1,3 @@
-"""
-RewardPolicy — closed-loop self-improvement over pentest strategies.
-
-The system already records raw success/failure via ExperienceLearner. RewardPolicy
-adds a *reward signal* and a persistent policy so the agent gets better across runs:
-
-  - Every strategy/tool outcome earns a scalar reward (confirmed finding = strong
-    positive; a critic-rejected false positive = negative; plain failure = mild
-    negative), optionally scaled by severity and normalized by cost.
-  - Rewards accumulate in data/learning/reward_policy.json across runs.
-  - score() ranks strategies by reward-per-cost with a UCB-style exploration bonus,
-    so under-sampled strategies still get tried (exploration) while proven ones are
-    preferred (exploitation).
-
-Consumers: DecisionGuardV2 (choosing alternative strategies) and any tool-selection
-site can call preferred()/rank() to let measured yield drive the next decision.
-"""
 
 from __future__ import annotations
 
@@ -56,7 +39,6 @@ class RewardPolicy:
         self._total_pulls = 0
         self._load()
 
-    # ------------------------------------------------------------- persistence
 
     @staticmethod
     def _key(strategy: str, test_type: str) -> str:
@@ -86,7 +68,6 @@ class RewardPolicy:
         except Exception as e:
             logger.error(f"[RewardPolicy] persist error: {e}")
 
-    # ------------------------------------------------------------------ record
 
     def record_outcome(
         self,
@@ -98,7 +79,6 @@ class RewardPolicy:
         cost_tokens: int = 0,
         reward: Optional[float] = None,
     ) -> float:
-        """Record one strategy outcome and return the reward earned."""
         outcome = (outcome or "failure").lower()
         if reward is None:
             reward = _REWARDS.get(outcome, 0.0)
@@ -129,11 +109,6 @@ class RewardPolicy:
         return reward
 
     def record_finding_outcomes(self, findings: List[Dict[str, Any]]) -> Dict[str, int]:
-        """
-        Reward strategies from a batch of critic-annotated findings.
-        Each finding's producing tool/source is the strategy; its critic verdict
-        (or exploited flag) is the outcome.
-        """
         counts = {"confirmed": 0, "false_positive": 0, "uncertain": 0}
         for f in findings or []:
             strategy = str(f.get("tool") or f.get("source") or "unknown")
@@ -162,10 +137,8 @@ class RewardPolicy:
             logger.info(f"[RewardPolicy] recorded finding outcomes: {counts}")
         return counts
 
-    # ----------------------------------------------------------------- scoring
 
     def score(self, strategy: str, test_type: str) -> float:
-        """Reward-per-cost with a UCB exploration bonus. Higher = try sooner."""
         st = self._policy.get(self._key(strategy, test_type))
         if not st or st["attempts"] == 0:
             # Unseen strategy: optimistic so it gets explored.
@@ -179,7 +152,6 @@ class RewardPolicy:
         return base + exploration
 
     def rank(self, candidates: List[str], test_type: str) -> List[Tuple[str, float]]:
-        """Return candidates sorted by descending score."""
         scored = [(c, self.score(c, test_type)) for c in candidates]
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored

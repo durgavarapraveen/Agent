@@ -1,7 +1,3 @@
-"""
-SARIF/DAST Export — converts findings to SARIF 2.1.0 format for CI/CD integration.
-Supports GitHub Security tab, GitLab SAST, Azure DevOps, and generic SARIF viewers.
-"""
 
 import json
 import hashlib
@@ -33,7 +29,6 @@ SEVERITY_TO_SECURITY_SEVERITY = {
 
 
 class SARIFExporter:
-    """Exports vulnerability findings in SARIF 2.1.0 format."""
 
     def __init__(self, tool_name: str = "AntiGravity", tool_version: str = "2.0.0"):
         self.tool_name = tool_name
@@ -47,11 +42,6 @@ class SARIFExporter:
         return vuln_type
 
     def _make_fingerprint(self, finding: Dict) -> str:
-        """Deterministic SARIF-partial fingerprint. Full SHA-256 hex is
-        returned (64 chars) — the 32-char truncation used previously invited
-        collisions on scans with thousands of findings and broke the
-        partial-fingerprint equality semantics SARIF consumers rely on for
-        result stability across runs."""
         parts = [
             finding.get("title", ""),
             finding.get("type", ""),
@@ -157,7 +147,6 @@ class SARIFExporter:
 
     def export(self, findings: List[Dict], target: str = "",
                scan_id: str = "", output_path: Optional[str] = None) -> Dict:
-        """Export findings to SARIF 2.1.0 format."""
         rules = self._build_rules(findings)
         rule_id_to_index = {r["id"]: i for i, r in enumerate(rules)}
 
@@ -208,7 +197,6 @@ class SARIFExporter:
 
     def export_gitlab_dast(self, findings: List[Dict], target: str = "",
                            scan_id: str = "", output_path: Optional[str] = None) -> Dict:
-        """Export findings in GitLab DAST report format."""
         gl_vulns = []
         for f in findings:
             severity_map = {"CRITICAL": "Critical", "HIGH": "High", "MEDIUM": "Medium", "LOW": "Low", "INFO": "Info"}

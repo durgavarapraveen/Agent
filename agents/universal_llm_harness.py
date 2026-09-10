@@ -1,16 +1,3 @@
-"""
-Universal LLM Harness - Provider-agnostic orchestration layer
-Supports: OpenAI, Claude, Gemini, DeepSeek, Ollama, Groq, Azure, Custom
-
-Core features:
-  - Single interface for all providers
-  - Token budget tracking & cost monitoring
-  - Automatic retry & rate limiting
-  - Response normalization
-  - Structured JSON fallback parsing
-  - Task-tier optimization (SMALL/LARGE)
-  - Provider auto-discovery & fallback
-"""
 
 import asyncio
 import hashlib
@@ -49,14 +36,12 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════
-# ENUMS & CONSTANTS
 # ═══════════════════════════════════════════════════════════════
 
 from core.common.schemas import TaskTier  # noqa: E402 — canonical enum
 
 
 class ProviderType(Enum):
-    """Supported LLM providers"""
     OPENAI = "openai"
     CLAUDE = "claude"
     CLAUDE_CLI = "claude_cli"
@@ -74,7 +59,6 @@ class ProviderType(Enum):
 
 @dataclass
 class PricingTier:
-    """Pricing per 1M tokens (converted to per-token internally)"""
     input: float      # $/1M tokens (cache miss)
     output: float     # $/1M tokens
     cache_hit: float = 0.0  # $/1M tokens (cache hit, 0 = no cache discount)
@@ -122,7 +106,6 @@ PROVIDER_PRICING = {
 
 @dataclass
 class UsageMetrics:
-    """Track per-request & aggregate usage"""
     provider: str
     model: str
     input_tokens: int = 0
@@ -138,7 +121,6 @@ class UsageMetrics:
 
 
 class TokenBudget:
-    """Multi-provider token & cost budget tracker"""
     
     def __init__(self, max_budget_usd: float = 100.0):
         self.max_budget_usd = max_budget_usd
@@ -146,7 +128,6 @@ class TokenBudget:
         self.requests: List[UsageMetrics] = []
     
     def log_request(self, metric: UsageMetrics):
-        """Log request metrics"""
         self.spent_usd += metric.cost_usd
         self.requests.append(metric)
         pct = (self.spent_usd / self.max_budget_usd) * 100
@@ -157,7 +138,6 @@ class TokenBudget:
         )
     
     def can_afford(self, estimated_tokens: int, provider: str, model: str) -> bool:
-        """Check if budget allows request"""
         if estimated_tokens <= 0:
             return True
         pricing = self._get_pricing(provider, model)
@@ -167,7 +147,6 @@ class TokenBudget:
         return estimated_cost <= remaining
     
     def _get_pricing(self, provider: str, model: str) -> PricingTier:
-        """Get pricing for model"""
         provider_lower = provider.lower()
         model_lower = model.lower()
         
@@ -182,7 +161,6 @@ class TokenBudget:
         return next(iter(provider_pricing.values())) if provider_pricing else PricingTier(0.001, 0.001)
     
     def stats(self) -> Dict[str, Any]:
-        """Get aggregate statistics"""
         total_cost = sum(r.cost_usd for r in self.requests)
         total_tokens = sum(r.total_tokens for r in self.requests)
         total_cache_hit = sum(r.cache_hit_tokens for r in self.requests)
@@ -222,7 +200,6 @@ class TokenBudget:
 
 @dataclass
 class LLMResponse:
-    """Normalized response across all providers"""
     content: str
     structured_output: Optional[Dict[str, Any]] = None
     finish_reason: Optional[str] = None
@@ -243,7 +220,6 @@ class LLMResponse:
 # ═══════════════════════════════════════════════════════════════
 
 class LLMProvider(ABC):
-    """Abstract base for all LLM providers"""
     
     def __init__(self, provider_type: ProviderType, budget: TokenBudget):
         self.provider_type = provider_type
@@ -261,21 +237,17 @@ class LLMProvider(ABC):
     
     @abstractmethod
     async def is_available(self) -> bool:
-        """Check provider availability"""
         pass
     
     @abstractmethod
     def get_small_model(self) -> str:
-        """Get small/fast model name"""
         pass
     
     @abstractmethod
     def get_large_model(self) -> str:
-        """Get large/powerful model name"""
         pass
     
     def get_model_for_tier(self, tier: TaskTier) -> str:
-        """Select model based on tier"""
         return self.get_small_model() if tier == TaskTier.SMALL else self.get_large_model()
     
     @abstractmethod
@@ -288,7 +260,6 @@ class LLMProvider(ABC):
         response_format: Optional[str] = None,
         tier: TaskTier = TaskTier.SMALL
     ) -> LLMResponse:
-        """Generate LLM response"""
         pass
     
     async def generate_text(
@@ -299,7 +270,6 @@ class LLMProvider(ABC):
         temperature: float = 0.3,
         tier: TaskTier = TaskTier.SMALL
     ) -> str:
-        """Generate plain text response"""
         resp = await self.generate_response(prompt, system, max_tokens, temperature, tier=tier)
         return resp.content if not resp.error else ""
     
@@ -311,7 +281,6 @@ class LLMProvider(ABC):
         mandatory_fields: Optional[List[str]] = None,
         tier: TaskTier = TaskTier.SMALL
     ) -> Dict[str, Any]:
-        """Generate JSON response with fallback parsing"""
         resp = await self.generate_response(
             prompt, system, max_tokens, 0.1, "json", tier
         )
@@ -343,7 +312,6 @@ class LLMProvider(ABC):
         return {}
     
     def _parse_json_response(self, content: str) -> Optional[Dict]:
-        """Robust JSON parsing with multiple fallbacks"""
         if not content:
             return None
         
@@ -383,21 +351,6 @@ class LLMProvider(ABC):
 # ═══════════════════════════════════════════════════════════════
 
 class DeepSeekProvider(LLMProvider):
-    """
-    DeepSeek V4 API provider (OpenAI-compatible format).
-
-    Models:
-      - deepseek-v4-flash   : fast, cheap  (concurrency 2500)
-      - deepseek-v4-pro     : powerful reasoning (concurrency 500)
-      - deepseek-v4-flash-vision-exp : flash + image input
-
-    Thinking mode is ON by default (reasoning_effort: high).
-    Context caching is automatic — prompt_cache_hit_tokens in response.
-    Pricing per 1M tokens (off-peak):
-      flash  input $0.22 / cache-hit $0.007 / output $0.66
-      pro    input $0.66 / cache-hit $0.022 / output $1.98
-    Peak hours (2x): Mon-Fri 01:00-04:00 & 06:00-10:00 UTC.
-    """
 
     MODEL_ALIASES = {
         "deepseek-chat": "deepseek-v4-flash",
@@ -709,14 +662,6 @@ class DeepSeekProvider(LLMProvider):
         tool_executor: Optional[Any] = None,
         max_rounds: int = 10,
     ) -> LLMResponse:
-        """
-        Tool-calling loop. Sends messages with tools, executes tool_calls
-        via tool_executor callback, and loops until the model stops calling tools.
-
-        tool_executor: async callable(name, arguments_dict) -> str
-        When tools param is present, reasoning_content MUST be passed back
-        in all subsequent turns per DeepSeek API requirement.
-        """
         model = self._resolve_model(model or self.get_model_for_tier(tier))
         use_thinking = (tier == TaskTier.LARGE)
         conv_messages = list(messages)
@@ -812,7 +757,6 @@ class DeepSeekProvider(LLMProvider):
 
 
 class OllamaProvider(LLMProvider):
-    """Ollama local LLM provider"""
     
     def __init__(
         self,
@@ -898,7 +842,6 @@ class OllamaProvider(LLMProvider):
 
 
 class GroqProvider(LLMProvider):
-    """Groq cloud inference (free tier)"""
     
     def __init__(
         self,
@@ -1003,7 +946,6 @@ class GroqProvider(LLMProvider):
 # ═══════════════════════════════════════════════════════════════
 
 class ClaudeCLIProvider(LLMProvider):
-    """Calls the local `claude` CLI in pipe mode — uses your Claude Code Pro subscription."""
 
     def __init__(
         self,
@@ -1113,10 +1055,6 @@ class ClaudeCLIProvider(LLMProvider):
 # ═══════════════════════════════════════════════════════════════
 
 class UniversalLLMHarness:
-    """
-    Provider-agnostic LLM harness
-    Auto-selects & falls back between providers
-    """
     
     def __init__(
         self,
@@ -1137,7 +1075,6 @@ class UniversalLLMHarness:
         self.governor: Optional[Any] = None
 
     async def initialize(self):
-        """Initialize & test primary provider, fallback if needed"""
         logger.info(f"[HARNESS] Initializing {self.primary_provider.value}...")
         
         # Attach the budget governor (graded spend policy over the TokenBudget).
@@ -1188,7 +1125,6 @@ class UniversalLLMHarness:
         raise RuntimeError("No LLM provider available!")
     
     def _create_provider(self, provider_type: ProviderType) -> LLMProvider:
-        """Factory for provider instances"""
         if provider_type == ProviderType.DEEPSEEK:
             return DeepSeekProvider(
                 api_key=self.provider_config.get("deepseek_api_key", ""),
@@ -1235,7 +1171,6 @@ class UniversalLLMHarness:
         response_format: Optional[str] = None,
         tier: TaskTier = TaskTier.SMALL
     ) -> LLMResponse:
-        """Generate response from active provider with mid-session fallback on fatal errors (402, 5xx)."""
         if not self.active_provider:
             await self.initialize()
 
@@ -1274,11 +1209,6 @@ class UniversalLLMHarness:
         return resp
 
     def _is_fatal_provider_error(self, error: str) -> bool:
-        """Return True only for errors that indicate the primary provider is
-        unusable and we should permanently swap. Uses regex-anchored HTTP status
-        codes so message bodies containing the string 'HTTP 500' don't false-
-        trigger a swap. Transient (429/408/timeout/connection) errors are handled
-        via retry/backoff at the provider layer, not here."""
         import re as _re
         err = str(error or "")
         # Payment / quota errors — permanent for this key
@@ -1310,7 +1240,6 @@ class UniversalLLMHarness:
         max_tokens: int = 1024,
         tier: TaskTier = TaskTier.SMALL
     ) -> str:
-        """Generate text"""
         resp = await self.generate_response(prompt, system, max_tokens, tier=tier)
         return resp.content if not resp.error else ""
     
@@ -1321,7 +1250,6 @@ class UniversalLLMHarness:
         max_tokens: int = 2048,
         tier: TaskTier = TaskTier.SMALL
     ) -> Dict[str, Any]:
-        """Generate JSON with fallback parsing"""
         resp = await self.generate_response(
             prompt, system, max_tokens, 0.1, "json", tier
         )
@@ -1336,7 +1264,6 @@ class UniversalLLMHarness:
         tier: TaskTier = TaskTier.LARGE,
         max_rounds: int = 10,
     ) -> LLMResponse:
-        """Tool-calling loop via active provider with mid-session fallback."""
         if not self.active_provider:
             await self.initialize()
         # Economic policy also governs the agentic tool loop (the biggest spender).
@@ -1374,11 +1301,9 @@ class UniversalLLMHarness:
         return max(1, len(text) // 4)
 
     def stats(self) -> Dict[str, Any]:
-        """Get usage statistics"""
         return self.budget.stats()
 
     async def _inject_rag_context(self, prompt: str, system: Optional[str]) -> Optional[str]:
-        """Retrieve relevant security knowledge and augment the system prompt."""
         try:
             from core.rag.pipeline import get_rag
             rag = get_rag()
@@ -1393,13 +1318,11 @@ class UniversalLLMHarness:
             return system
 
     async def close(self):
-        """Cleanup"""
         if self.active_provider and self.active_provider.session:
             await self.active_provider.session.aclose()
 
 
 async def demo():
-    """Example usage"""
     import os
     
     harness = UniversalLLMHarness(

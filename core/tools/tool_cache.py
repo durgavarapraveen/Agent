@@ -8,7 +8,6 @@ from core.common.schemas import ToolResult
 logger = logging.getLogger(__name__)
 
 class ToolResultCache:
-    """Avoid re-running identical tool calls using PostgreSQL"""
 
     def __init__(self):
         try:

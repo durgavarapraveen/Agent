@@ -1,7 +1,3 @@
-"""
-Scan Scheduler — cron-based recurring scans with delta reporting.
-Persists schedule to disk and runs scans at configured intervals.
-"""
 
 import asyncio
 import json
@@ -43,7 +39,6 @@ class ScanSchedule:
 
 
 class ScanScheduler:
-    """Manages scheduled recurring scans."""
 
     def __init__(self):
         self.schedules: Dict[str, ScanSchedule] = {}
@@ -52,7 +47,6 @@ class ScanScheduler:
         self._load_schedules()
 
     def _load_schedules(self):
-        """Load schedules from disk."""
         if SCHEDULES_FILE.exists():
             try:
                 data = json.loads(SCHEDULES_FILE.read_text(encoding="utf-8"))
@@ -63,7 +57,6 @@ class ScanScheduler:
                 logger.warning(f"[Scheduler] Failed to load schedules: {e}")
 
     def _save_schedules(self):
-        """Persist schedules to disk."""
         try:
             SCHEDULES_FILE.parent.mkdir(parents=True, exist_ok=True)
             data = {sid: asdict(s) for sid, s in self.schedules.items()}
@@ -73,7 +66,6 @@ class ScanScheduler:
 
     def add_schedule(self, target: str, interval_hours: int = 24,
                      tier: str = "POC", phases: list = None) -> ScanSchedule:
-        """Add a new scan schedule."""
         import hashlib
         schedule_id = hashlib.md5(f"{target}:{time.time()}".encode()).hexdigest()[:12]
 
@@ -90,7 +82,6 @@ class ScanScheduler:
         return schedule
 
     def remove_schedule(self, schedule_id: str) -> bool:
-        """Remove a schedule."""
         if schedule_id in self.schedules:
             del self.schedules[schedule_id]
             self._save_schedules()
@@ -98,7 +89,6 @@ class ScanScheduler:
         return False
 
     def update_schedule(self, schedule_id: str, **kwargs) -> Optional[ScanSchedule]:
-        """Update schedule parameters."""
         if schedule_id not in self.schedules:
             return None
         schedule = self.schedules[schedule_id]
@@ -109,11 +99,9 @@ class ScanScheduler:
         return schedule
 
     def list_schedules(self) -> List[Dict]:
-        """List all schedules."""
         return [asdict(s) for s in self.schedules.values()]
 
     def _compute_delta(self, current_report: Dict, previous_report: Dict) -> Dict:
-        """Compute delta between two scan reports."""
         curr_vulns = {v.get("title", ""): v for v in current_report.get("vulnerabilities", [])}
         prev_vulns = {v.get("title", ""): v for v in previous_report.get("vulnerabilities", [])}
 
@@ -167,7 +155,6 @@ class ScanScheduler:
         }
 
     async def _run_scheduled_scan(self, schedule: ScanSchedule):
-        """Execute a scheduled scan and compute delta."""
         logger.info(f"[Scheduler] Running scheduled scan: {schedule.target}")
 
         try:
@@ -228,7 +215,6 @@ class ScanScheduler:
             self._save_schedules()
 
     def _check_loop(self):
-        """Background thread that checks for due scans."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
@@ -249,7 +235,6 @@ class ScanScheduler:
         loop.close()
 
     def start(self):
-        """Start the scheduler background thread."""
         if self._running:
             return
         self._running = True
@@ -258,7 +243,6 @@ class ScanScheduler:
         logger.info(f"[Scheduler] Started with {len(self.schedules)} schedules")
 
     def stop(self):
-        """Stop the scheduler."""
         self._running = False
         if self._thread:
             self._thread.join(timeout=5)

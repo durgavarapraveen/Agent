@@ -1,8 +1,3 @@
-"""
-False Positive Reduction Module (Phase 4 Module 4.1).
-Combines existing heuristic checks with ML-based classification (RandomForest),
-signature-based heuristic overrides (FP_PATTERNS), and confidence score categorization.
-"""
 
 import csv
 import logging
@@ -45,13 +40,12 @@ NON_HTML_CONTENT_TYPES = [
 FP_PATTERNS = [
     {"response_code": 200, "content_length": 0},  # Empty responses
     {"response_code": 302, "location": "login"},  # Redirect loops
-    {"tool": "gobuster", "status": "429"},        # Rate-limited
+    {"tool": "gobuster", "status": "429"},
     {"response_code": 429}                        # Rate-limited generic
 ]
 
 
 class FalsePositiveFilter:
-    """Evaluates candidate findings using heuristic rules, signature patterns, and ML model predictions."""
 
     def __init__(self, model_path: str = "data/models/fp_model.joblib", scaler_path: str = "data/models/scaler.joblib"):
         self.model_path = model_path
@@ -61,7 +55,6 @@ class FalsePositiveFilter:
         self._load_or_train_model()
 
     def _load_or_train_model(self):
-        """Load trained ML model and scaler from disk or train an offline RandomForestClassifier."""
         if HAS_JOBLIB and os.path.exists(self.model_path) and os.path.exists(self.scaler_path):
             try:
                 self.model = joblib.load(self.model_path)
@@ -130,10 +123,6 @@ class FalsePositiveFilter:
             logger.warning(f"[FPFilter] ML model training fallback skipped: {e}")
 
     def extract_feature_vector(self, finding: Dict[str, Any], response_meta: Optional[Dict[str, Any]] = None) -> np.ndarray:
-        """
-        Extract numerical feature vector:
-        [response_status_code, response_content_length, response_time_ms, tool_id, endpoint_depth, contains_error, waf_detected]
-        """
         meta = response_meta or {}
         code = float(meta.get("status_code", finding.get("status_code", 200)))
         length = float(meta.get("content_length", finding.get("content_length", 0)))
@@ -153,7 +142,6 @@ class FalsePositiveFilter:
         return np.array([[code, length, time_ms, tool_id, depth, has_error, waf]])
 
     def check_signature_fp(self, finding: Dict[str, Any], response_meta: Optional[Dict[str, Any]] = None) -> bool:
-        """Check if finding matches hardcoded FP_PATTERNS signature overrides."""
         meta = response_meta or {}
         code = meta.get("status_code", finding.get("status_code"))
         length = meta.get("content_length", finding.get("content_length"))
@@ -173,10 +161,6 @@ class FalsePositiveFilter:
         return False
 
     def predict_confidence_score(self, finding: Dict[str, Any], response_meta: Optional[Dict[str, Any]] = None) -> Tuple[float, str]:
-        """
-        Use model predict_proba() to get confidence_score (probability of class 1).
-        Categories: HIGH (>0.85), MEDIUM (0.60-0.85), LOW (<0.60).
-        """
         if self.check_signature_fp(finding, response_meta):
             return 0.05, "LOW"
 
@@ -238,7 +222,6 @@ class FalsePositiveFilter:
         return True, "Content-Type valid"
 
     def should_report_finding(self, finding: Dict[str, Any], response_meta: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
-        """Run heuristic rules, signature patterns, and ML model predictions."""
         response_meta = response_meta or {}
 
         if self.check_signature_fp(finding, response_meta):

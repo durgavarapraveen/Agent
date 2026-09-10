@@ -1,11 +1,3 @@
-"""
-Smart Wordlist Selector — HexStrike-Style Context-Aware Dictionaries.
-
-Maintains and dynamically generates technology-tailored wordlists for
-directory bruteforcing, API endpoint discovery, and secret finding.
-
-Inspired by HexStrike AI's dynamic wordlist selection.
-"""
 
 import logging
 from pathlib import Path
@@ -66,13 +58,11 @@ WORDLIST_TEMPLATES: Dict[str, List[str]] = {
 
 
 class SmartWordlistManager:
-    """Selects and manages tailored wordlists based on target profiling."""
 
     _WORDLIST_DIR: Path = Path("data/wordlists")
 
     @classmethod
     def ensure_wordlists_exist(cls) -> None:
-        """Create the data/wordlists directory and write template files if missing."""
         cls._WORDLIST_DIR.mkdir(parents=True, exist_ok=True)
         for category, words in WORDLIST_TEMPLATES.items():
             filepath = cls._WORDLIST_DIR / f"wordlist_{category}.txt"
@@ -86,7 +76,6 @@ class SmartWordlistManager:
 
     @classmethod
     def get_wordlist_for_profile(cls, profile: Optional[TargetProfile] = None) -> str:
-        """Return the best tailored wordlist path for the given TargetProfile."""
         cls.ensure_wordlists_exist()
 
         if not profile:
@@ -110,7 +99,6 @@ class SmartWordlistManager:
 
     @classmethod
     def get_wordlist_path(cls, category: str) -> str:
-        """Get absolute path to a specific wordlist file."""
         cls.ensure_wordlists_exist()
         filepath = cls._WORDLIST_DIR / f"wordlist_{category}.txt"
         if filepath.exists():
@@ -119,7 +107,6 @@ class SmartWordlistManager:
 
     @classmethod
     def get_combined_custom_wordlist(cls, profile: TargetProfile) -> str:
-        """Build and return a combined custom wordlist merging tech words + secrets."""
         cls.ensure_wordlists_exist()
         combined: List[str] = []
 

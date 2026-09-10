@@ -1,23 +1,3 @@
-"""P0.2 — explicit request identity; stops ambient auth contamination.
-
-Root cause fixed: a JWT captured mid-scan was written to three ungated stores
-(``agentic_executor._captured_tokens``, ``ctx.auth_headers``, and the process
-global ``auth_registry.set_active_auth``) and then auto-attached to *every*
-later same-host request that omitted its own Authorization header. An anonymous
-or access-control probe therefore ran silently as the captured — possibly
-admin — identity.
-
-This module is the single deterministic authority for "what token, if any, may
-this request use". It is independent of any LLM instruction.
-
-Rule enforced:
-  * explicit anonymous session  -> NO Authorization header, ever.
-  * explicit named session       -> ONLY that session's own token (or nothing
-    if the session is unknown — never another identity's token).
-  * no session declared          -> ANONYMOUS by default (no token), UNLESS the
-    operator opted into ambient reuse at scan start
-    (``ALLOW_AMBIENT_AUTH=1``), which restores the legacy same-host token.
-"""
 from __future__ import annotations
 
 import hashlib
@@ -40,17 +20,10 @@ class RequestIdentity(str, Enum):
 
 
 def is_anonymous(session_id: Optional[str]) -> bool:
-    """True for an explicitly-anonymous session id (case-insensitive)."""
     return (session_id or "").strip().lower() in _ANON_ALIASES
 
 
 def _lookup_session_header(ctx, session_id: str) -> str:
-    """Resolve the Authorization header for a named session/identity.
-
-    Looks in ``ctx.sessions`` (Session objects or dicts), keyed by session_id,
-    identity_id, or role. Returns "" when unknown so the caller never silently
-    borrows another identity's token.
-    """
     try:
         sessions = getattr(ctx, "sessions", None) or {}
         sess = sessions.get(session_id)
@@ -75,13 +48,6 @@ def _lookup_session_header(ctx, session_id: str) -> str:
 
 
 def resolve_request_auth(ctx, session_id: Optional[str]) -> Tuple[str, str, str]:
-    """Return ``(authorization_header, identity_label, auth_mode)`` for a request.
-
-    Never raises. Never returns another identity's token for an unknown session.
-
-    auth_mode is one of: ``explicit_anonymous``, ``explicit_session``,
-    ``default_anonymous`` (ambient off), ``ambient`` (operator opted in).
-    """
     sid = (session_id or "").strip()
 
     if is_anonymous(sid):
@@ -105,7 +71,6 @@ def resolve_request_auth(ctx, session_id: Optional[str]) -> Tuple[str, str, str]
 
 
 def redact_auth(auth: str) -> str:
-    """Render an Authorization value for logs without leaking the credential."""
     if not auth:
         return "(none)"
     parts = auth.split(None, 1)
@@ -117,6 +82,5 @@ def redact_auth(auth: str) -> str:
 
 def log_request_identity(where: str, method: str, url: str,
                          session_id: Optional[str], auth: str, mode: str) -> None:
-    """Structured, credential-safe request-identity log line."""
     logger.info("[SESSION] %s %s %s session=%s auth=%s mode=%s",
                 where, method, url, session_id or "anonymous", redact_auth(auth), mode)

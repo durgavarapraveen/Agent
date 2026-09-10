@@ -1,17 +1,3 @@
-"""
-OSINT Integration Module
-Connects OSINT engines to central_brain for autonomous reconnaissance phases.
-
-This file shows how to integrate:
-- osint_engine.py (Employee enumeration, GitHub scanning, DNS intelligence)
-- threat_intel.py (Threat feed integration)
-- subdomain_enum.py (Advanced subdomain discovery)
-
-Usage in central_brain:
-- Create reconnaissance phases that spawn OSINT agents
-- Pass objectives to OSINTOrchestrator
-- Collect findings into shared_context
-"""
 
 import logging
 from typing import Dict, List, Optional
@@ -26,18 +12,16 @@ logger = logging.getLogger(__name__)
 
 
 class OSINTAgentSpec:
-    """OSINT agent specification for spawning from central_brain."""
 
     def __init__(self, agent_type: str, objective: str, target_domain: str, 
                  company_name: Optional[str] = None):
-        self.agent_type = agent_type  # employee_enum, github_scan, dns_intel, subdomain_enum, threat_intel
+        self.agent_type = agent_type
         self.objective = objective
         self.target_domain = target_domain
         self.company_name = company_name
         self.created_at = datetime.now().isoformat()
 
     def to_dict(self) -> Dict:
-        """Convert to dict for task storage."""
         return {
             'agent_type': self.agent_type,
             'objective': self.objective,
@@ -48,7 +32,6 @@ class OSINTAgentSpec:
 
 
 class OSINTOrchestrator:
-    """Orchestrates OSINT modules and manages OSINT agents."""
 
     def __init__(self, shared_context: SharedContext):
         self.ctx = shared_context
@@ -57,7 +40,6 @@ class OSINTOrchestrator:
         self.subdomain_engine = SubdomainEnumerationEngine()
 
     async def spawn_employee_enumeration_agent(self, domain: str, company_name: str) -> Dict:
-        """Spawn agent to enumerate employees."""
         logger.info(f"[OSINTOrchestrator] Spawning employee enumeration agent for {domain}")
         
         spec = OSINTAgentSpec(
@@ -83,7 +65,6 @@ class OSINTOrchestrator:
         }
 
     async def spawn_github_scanning_agent(self, company_name: str) -> Dict:
-        """Spawn agent to scan GitHub repositories."""
         logger.info(f"[OSINTOrchestrator] Spawning GitHub scanner agent for {company_name}")
         
         spec = OSINTAgentSpec(
@@ -116,7 +97,6 @@ class OSINTOrchestrator:
         }
 
     async def spawn_dns_intelligence_agent(self, domain: str) -> Dict:
-        """Spawn agent to analyze DNS and mail infrastructure."""
         logger.info(f"[OSINTOrchestrator] Spawning DNS intelligence agent for {domain}")
         
         spec = OSINTAgentSpec(
@@ -143,7 +123,6 @@ class OSINTOrchestrator:
         }
 
     async def spawn_subdomain_enumeration_agent(self, domain: str) -> Dict:
-        """Spawn agent to discover subdomains and virtual hosts."""
         logger.info(f"[OSINTOrchestrator] Spawning subdomain enumeration agent for {domain}")
         
         spec = OSINTAgentSpec(
@@ -175,7 +154,6 @@ class OSINTOrchestrator:
         }
 
     async def spawn_threat_intelligence_agent(self, discovered_assets: Dict) -> Dict:
-        """Spawn agent to correlate findings with threat intelligence."""
         logger.info("[OSINTOrchestrator] Spawning threat intelligence agent")
         
         spec = OSINTAgentSpec(
@@ -208,7 +186,6 @@ class OSINTOrchestrator:
         }
 
     async def run_phase_osint_reconnaissance(self, domain: str, company_name: str) -> Dict:
-        """Run complete OSINT reconnaissance phase."""
         logger.info(f"[OSINTOrchestrator] Starting OSINT reconnaissance for {domain}")
         
         # Profile target for intelligent OSINT orchestration
@@ -283,7 +260,6 @@ class OSINTOrchestrator:
         return phase_results
 
     def generate_osint_summary_report(self) -> Dict:
-        """Generate summary of all OSINT findings."""
         emp_summary = self.osint_engine.generate_osint_summary()
         ctx_employees = getattr(self.ctx, "discovered_employees", []) or self.ctx.get("discovered_employees", []) or []
         ctx_creds = getattr(self.ctx, "leaked_credentials", []) or self.ctx.get("leaked_credentials", []) or []
@@ -306,7 +282,6 @@ class OSINTOrchestrator:
 
     @staticmethod
     def _count_by_severity(credentials: List) -> Dict[str, int]:
-        """Count credentials by severity."""
         counts = {}
         for cred in credentials:
             severity = getattr(cred, 'severity', 'unknown')
@@ -315,7 +290,6 @@ class OSINTOrchestrator:
 
 
 class OSINTCapabilityResolver:
-    """Maps OSINT objectives to capabilities and tools, incorporating Kali and HexStrike toolchains."""
 
     OSINT_CAPABILITIES = {
         'employee_enumeration': {
@@ -357,7 +331,6 @@ class OSINTCapabilityResolver:
 
     @classmethod
     def resolve_osint_objective(cls, objective: str) -> Optional[Dict]:
-        """Map OSINT objective to capability and tools."""
         obj_lower = objective.lower()
         best_cap = None
         best_score = 0

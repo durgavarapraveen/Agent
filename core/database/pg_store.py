@@ -1,6 +1,3 @@
-"""
-Unified PostgreSQL data layer — replaces all JSON files and SQLite databases.
-"""
 
 import hashlib
 import json
@@ -34,15 +31,6 @@ def _target_slug(target: str) -> str:
 
 
 def make_run_id(target: str) -> str:
-    """
-    Canonical, globally-unique run identifier for one scan of one URL.
-
-    Format: <target-slug>_<UTC-timestamp>_<random>. Because it embeds a UTC
-    timestamp AND a random suffix, two runs of the SAME url — even in the same
-    second — always get distinct ids, so their results never collide or merge.
-    This single id is used across the whole DB (scans, vulnerabilities,
-    review_queue, live data) as the run's identity.
-    """
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"{_target_slug(target)}_{ts}_{uuid.uuid4().hex[:8]}"
 
@@ -70,9 +58,6 @@ _VULN_CATEGORY_KEYWORDS = [
 
 
 def _vuln_category(title: str) -> str:
-    """Extract a stable vulnerability category from a title so LLM wording
-    variations ('Exposed /ftp directory' vs '/ftp listing exposed') map
-    to the same category key for dedup."""
     t = (title or "").lower()
     for cat, keywords in _VULN_CATEGORY_KEYWORDS:
         for kw in keywords:
@@ -85,7 +70,6 @@ def _vuln_category(title: str) -> str:
 
 
 def _normalize_location(loc: str) -> str:
-    """Extract just scheme+host+path from a URL for stable dedup."""
     loc = (loc or "").lower().strip()
     loc = re.sub(r"^https?://", "", loc)
     loc = loc.split("?")[0].split("#")[0].rstrip("/")
@@ -93,9 +77,6 @@ def _normalize_location(loc: str) -> str:
 
 
 def _host_only(loc: str) -> str:
-    """Strip URL down to host — used when the finding's category makes it a
-    site-level fact ('ftp_listing on demo.owasp-juice.shop') and the path
-    variance ('/ftp/' vs '/ftp') should not create false-negative dedup."""
     loc = _normalize_location(loc)
     return loc.split("/")[0] if loc else ""
 
@@ -118,19 +99,6 @@ _HOST_LEVEL_CATEGORIES = {"cors", "ftp_listing", "directory_listing", "default_c
 
 
 def finding_uid(scan_id: str, v: Dict[str, Any]) -> str:
-    """
-    Deterministic finding id, ALWAYS namespaced by the run's scan_id.
-
-    Two dedup regimes:
-      - PER-ENDPOINT categories (SQLi/XSS/SSRF/RCE/IDOR/Auth-bypass/etc):
-        key = (category, full URL path, short-title hash, cve). This keeps
-        different endpoints AND different attack proofs (UNION dump vs error
-        probe vs auth-bypass) as separate rows.
-      - HOST-LEVEL categories (missing headers, CORS, FTP listing, TLS…):
-        key = (category, host, cve). Collapses path variance across probes.
-      - Uncategorized: full title + path — worst case is one extra row, but
-        no data loss.
-    """
     title_raw = str(v.get("title") or "").lower().strip()
     loc_raw = str(v.get("location") or v.get("target") or v.get("affected_endpoint") or "")
     vtype = str(v.get("type") or v.get("vuln_type") or "").upper()
@@ -157,7 +125,6 @@ def finding_uid(scan_id: str, v: Dict[str, Any]) -> str:
 
 
 def _init_schema():
-    """Create all tables if they don't exist."""
     with DatabaseManager.get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -869,7 +836,6 @@ def _init_schema():
 
 
 class TargetRepo:
-    """CRUD for authorized scan targets."""
 
     @staticmethod
     def list_all(limit: int = 500, offset: int = 0) -> List[Dict]:
@@ -913,7 +879,6 @@ class TargetRepo:
 
 
 class ScanRepo:
-    """CRUD for scan jobs and their results."""
 
     @staticmethod
     def create(scan_id: str, target: str, tier: str = "POC", **kwargs) -> str:
@@ -983,14 +948,6 @@ class ScanRepo:
 
     @staticmethod
     def bootstrap_recover() -> int:
-        """Called at API startup. Marks any scan whose row still says
-        `running/starting/stopping` but whose child process is gone as
-        `failed` with a clear error message. Without this, a crash mid-scan
-        leaves the row in the running state forever, blocks new scans of the
-        same target, and shows a stuck progress bar in the UI.
-
-        Returns the number of scans reconciled. Best-effort — never raises.
-        """
         recovered = 0
         try:
             import os
@@ -1063,7 +1020,6 @@ class ScanRepo:
 
 
 class VulnRepo:
-    """CRUD for vulnerabilities linked to scans."""
 
     @staticmethod
     def bulk_insert(scan_id: str, vulns: List[Dict]):
@@ -1258,7 +1214,6 @@ class VulnRepo:
 
 
 class LiveDataRepo:
-    """Stores live progress and live results (replaces JSON files)."""
 
     @staticmethod
     def upsert_progress(scan_id: str, data: Dict):
@@ -1280,9 +1235,6 @@ class LiveDataRepo:
 
     @staticmethod
     def get_progress(scan_id: str = None) -> Dict:
-        """Fetch live progress for a scan. If scan_id is None, returns the most
-        recently updated row (best-effort backward compat for callers that
-        haven't been updated yet)."""
         with DatabaseManager.get_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 if scan_id:
@@ -1328,7 +1280,6 @@ class LiveDataRepo:
 
 
 class ExploitResultRepo:
-    """CRUD for exploit_results linked to scans."""
 
     @staticmethod
     def insert(scan_id: str, result: Dict):
@@ -1398,7 +1349,6 @@ class ExploitResultRepo:
 
 
 class FindingV2Repo:
-    """Replaces findings_v2.json and the JSON-backed FindingStore."""
 
     @staticmethod
     def store(finding_id: str, title: str, severity: str = "MEDIUM",
@@ -1444,18 +1394,10 @@ class FindingV2Repo:
 
 
 class DedupRepo:
-    """Replaces SQLite dedup tracker."""
 
     @staticmethod
     def check_and_insert(signature: str, tool: str, finding_type: str,
                          data_repr: str, task_id: str = "") -> bool:
-        """Returns True if new (not duplicate), False if duplicate.
-
-        Single atomic upsert avoids the SELECT-then-INSERT race that previously
-        surfaced as `IntegrityError` under concurrency (which then poisoned the
-        connection pool). `signature` is the PK — `ON CONFLICT` fires when two
-        workers race on the same signature.
-        """
         with DatabaseManager.get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -1489,7 +1431,6 @@ class DedupRepo:
 
 
 class AuditRepo:
-    """Replaces JSONL audit log files."""
 
     @staticmethod
     def log_event(action: str, target: str = "", details: dict = None,
@@ -1530,7 +1471,6 @@ class AuditRepo:
 
 
 class ScheduleRepo:
-    """Replaces scan_schedules.json."""
 
     @staticmethod
     def upsert(schedule_id: str, target: str, tier: str = "POC",
@@ -1590,8 +1530,6 @@ class ScheduleRepo:
 
 
 class ReconRepo:
-    """Full recon intelligence per scan (infrastructure, tech, endpoints, OSINT, …)
-    so the user can see exactly what recon collected — updated live during the scan."""
 
     @staticmethod
     def save(scan_id: str, target: str, data: Dict) -> None:
@@ -1617,7 +1555,6 @@ class ReconRepo:
 
 
 class ToolOutputRepo:
-    """Per-tool raw stdout/stderr persisted for UI display and debugging."""
 
     @staticmethod
     def save(scan_id: str, tool_name: str, operation: str, target: str,
@@ -1657,7 +1594,6 @@ class ToolOutputRepo:
 
 
 class CapturedRequestRepo:
-    """HTTP requests captured by Playwright/Chromium during scanning."""
 
     @staticmethod
     def save(scan_id: str, method: str, url: str, resource_type: str = "",
@@ -1682,9 +1618,6 @@ class CapturedRequestRepo:
 
     @staticmethod
     def save_batch(scan_id: str, requests: list) -> int:
-        """Persist captured requests, deduplicated by
-        (scan_id, method, url, status, md5(post_data)) — see
-        ux_captured_requests_dedup unique index."""
         saved = 0
         seen = set()  # in-batch dedupe as well
         try:
@@ -1739,7 +1672,6 @@ class CapturedRequestRepo:
 
 
 class ToolExecutionRepo:
-    """Tool command executions recorded during scanning."""
 
     @staticmethod
     def save(scan_id: str, tool: str, command: str, target: str = "",
@@ -1809,7 +1741,6 @@ class ToolExecutionRepo:
 
 
 class ActivityLogRepo:
-    """Read-only timeline of what the agent did during a scan."""
 
     @staticmethod
     def insert(rec: Dict) -> None:
@@ -1855,7 +1786,6 @@ class ActivityLogRepo:
 
 
 class ReviewRepo:
-    """Human review queue — agent successes to showcase + failures to pentest manually."""
 
     @staticmethod
     def record(rec: Dict) -> Dict:
@@ -1920,7 +1850,6 @@ class ReviewRepo:
 
 
 class CampaignRepo:
-    """Replaces campaign JSON files."""
 
     @staticmethod
     def create(campaign_id: str, tier: str, total_targets: int):
@@ -1971,7 +1900,6 @@ class CampaignRepo:
 
 
 class AttackChainRepo:
-    """CRUD for attack chains linked to scans."""
 
     @staticmethod
     def bulk_upsert(scan_id: str, chains):
@@ -2034,14 +1962,9 @@ class AttackChainRepo:
 
 
 class PostExploitRepo:
-    """CRUD for post-exploitation data (privesc, creds, lateral, persistence, mitre)."""
 
     @staticmethod
     def bulk_upsert(scan_id: str, data_type: str, items):
-        """Insert post-exploit findings deduped by
-        (scan_id, data_type, title, md5(details)) so repeat writes of the
-        same live_results singleton don't multiply rows — see
-        ux_post_exploit_dedup unique index."""
         if not items:
             return
         if isinstance(items, dict):
@@ -2085,7 +2008,6 @@ class PostExploitRepo:
 
 
 class ScanMetadataRepo:
-    """Key-value metadata per scan (mitre_mappings, brain_log, agents, etc.)."""
 
     @staticmethod
     def upsert(scan_id: str, key: str, value):
@@ -2117,13 +2039,6 @@ class ScanMetadataRepo:
 
 
 class ScanArtifactRepo:
-    """Per-scan file-like artefacts kept in Postgres so the UI can show them
-    without needing a `reports/` folder on disk.
-
-    `kind` is a short label: 'poc_python' / 'poc_bash' / 'poc_markdown' /
-    'screenshot' / 'nuclei_template' / 'sarif' / 'canonical_summary' /
-    'coverage_tracker' / 'exploit_report_md' / etc.
-    """
 
     @staticmethod
     def insert(scan_id: str, kind: str, name: str, content,
@@ -2202,10 +2117,6 @@ class ScanArtifactRepo:
 
 
 def _encrypt_secret_field(value: str) -> Optional[str]:
-    """Encrypt a sensitive column value using AES-256-GCM, returning base64 or
-    None on empty input. Uses `core.security.encryption`. Failure to encrypt is
-    fatal (we refuse to write plaintext into columns that should be encrypted).
-    """
     if value is None or value == "":
         return None
     import base64 as _b64
@@ -2214,11 +2125,6 @@ def _encrypt_secret_field(value: str) -> Optional[str]:
 
 
 def _decrypt_secret_field(value: Optional[str]) -> str:
-    """Decrypt a column value written by `_encrypt_secret_field`. Returns "" on
-    empty input; returns the raw stored value if it doesn't look like our
-    ciphertext envelope (backwards compat for rows written before encryption
-    was added). NEVER returns a decryption error to the caller — audit logs
-    would otherwise be spammed with tool retries."""
     if not value:
         return ""
     import base64 as _b64
@@ -2232,16 +2138,6 @@ def _decrypt_secret_field(value: Optional[str]) -> str:
 
 
 class AuthBypassRepo:
-    """Successful auth bypasses / logins captured during a scan.
-
-    Every row is a 'we entered the site' event — the payload that worked, the
-    resulting token, and a proof-of-entry snippet. Rendered in the UI as
-    'Access Gained' so operators can see at a glance whether the scan actually
-    got inside the app and with what technique.
-
-    Sensitive fields (`password`, `token`) are encrypted at the column level
-    with AES-256-GCM (see `_encrypt_secret_field`). Reads transparently decrypt.
-    """
 
     @staticmethod
     def insert(scan_id: str, host: str, technique: str, login_url: str, *,
@@ -2279,11 +2175,6 @@ class AuthBypassRepo:
 
     @staticmethod
     def get_by_scan(scan_id: str, reveal_secrets: bool = False) -> List[Dict[str, Any]]:
-        """Return auth-bypass rows for a scan. By default password/token are
-        redacted; pass reveal_secrets=True (server-side only) to decrypt. Never
-        expose reveal_secrets=True to the UI without an operator confirmation
-        flow — plaintext credentials leaving the DB by default was the original
-        vulnerability."""
         with DatabaseManager.get_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("""
@@ -2313,12 +2204,6 @@ class AuthBypassRepo:
 
 
 class LiveAgentRepo:
-    """Per-agent live tracker rows — feeds the UI's parallel-agent panel.
-
-    Each parallel task (subdomain scan, OSINT sub-phase, expert probe, cred
-    chain executor) registers an agent_id at start and updates its row as it
-    progresses. The UI polls a single endpoint for a card-per-agent view.
-    """
 
     @staticmethod
     def upsert(scan_id: str, agent_id: str, *, label: str = "", phase: str = "",
@@ -2399,10 +2284,6 @@ class LiveAgentRepo:
 
 
 class LLMMemoryRepo:
-    """Persists the LLM's OWN scan-time reasoning (phase summaries, decisions,
-    reflections). Reused by the chatbot so it doesn't need to re-derive
-    conclusions from raw DB rows — it reads what the scan-time LLM already
-    concluded (at cost)."""
 
     @staticmethod
     def append(scan_id: str, phase: str, content: str, *,

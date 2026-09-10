@@ -1,7 +1,3 @@
-"""
-Tool Ranking Engine.
-Computes dynamic composite ranking scores for tools based on trust, performance, success rate, and task relevance.
-"""
 
 import logging
 from typing import List, Tuple, Optional
@@ -12,7 +8,6 @@ logger = logging.getLogger(__name__)
 
 
 class ToolRankingEngine:
-    """Ranks tool candidates dynamically using empirical metrics and task context"""
 
     @classmethod
     def rank_tools(
@@ -21,10 +16,6 @@ class ToolRankingEngine:
         task_spec: Optional[TaskSpec] = None,
         limit: Optional[int] = None
     ) -> List[ToolProfile]:
-        """
-        Rank tools and return sorted list of ToolProfiles.
-        Logs TOOLS_RANKED.
-        """
         if not tools:
             return []
 

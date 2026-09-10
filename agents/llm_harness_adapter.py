@@ -1,4 +1,3 @@
-# agents/llm_harness_adapter.py
 import asyncio
 
 from agents.universal_llm_harness import UniversalLLMHarness, ProviderType

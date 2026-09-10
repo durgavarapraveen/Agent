@@ -4,9 +4,6 @@ from datetime import datetime, timezone
 from typing import Dict
 
 class HybridExecutorLogger:
-    """
-    Logger to track which execution path (A or B) was used for each tool.
-    """
     
     def __init__(self, log_dir="data/logs"):
         self.log_dir = log_dir
@@ -15,7 +12,6 @@ class HybridExecutorLogger:
 
     def log_task_execution(self, task_id: str, approach: str, capability: str, 
                            tool_id: str, success: bool, duration_sec: float):
-        """Create JSON entry and append as single line to log file"""
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "task_id": task_id,
@@ -30,7 +26,6 @@ class HybridExecutorLogger:
             f.write(json.dumps(entry) + "\n")
 
     def get_execution_summary(self) -> Dict[str, int]:
-        """Read log file and count approach A vs B executions"""
         summary = {"A": 0, "B": 0, "total": 0}
         
         if not os.path.exists(self.log_file):
@@ -55,7 +50,6 @@ class HybridExecutorLogger:
         return summary
 
     def print_summary(self):
-        """Print formatted table of execution distribution"""
         summary = self.get_execution_summary()
         count_a = summary["A"]
         count_b = summary["B"]

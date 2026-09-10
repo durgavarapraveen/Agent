@@ -1,9 +1,3 @@
-"""FindingIngestionMixin — extracted from central_brain.py.
-
-Turns raw executor / tool-runner output into `SharedContextV2` vulnerability
-records. Held as a mixin so `CentralBrain` composes it via MRO without any
-public-API change.
-"""
 from __future__ import annotations
 
 import json
@@ -16,13 +10,6 @@ logger = logging.getLogger(__name__)
 
 class FindingIngestionMixin:
     def _stamp_and_add_vuln(self, v: dict, source: str = "", parser: str = "regex") -> None:
-        """Enrich a vuln with confidence (P2-6), gate raw observations
-        (P0-3), attach a decision-provenance id (P3-3), and forward to
-        `SharedContext.add_vulnerability`.
-
-        Never raises — a failure in the confidence path must not block
-        finding ingestion.
-        """
         try:
             from core.evidence.confidence_model import compute, ConfidenceInputs, label
             already = float(v.get("confidence_score") or 0.0)
@@ -109,7 +96,6 @@ class FindingIngestionMixin:
             pass
 
     def _ingest_executor_findings(self, test_id: str, target: str, evidence: dict) -> None:
-        """Convert V2 executor evidence into SharedContext vulnerability records."""
         SEVERITY_MAP = {
             "jwt": "HIGH", "nosqli": "CRITICAL", "upload": "HIGH",
             "proto_pollution": "MEDIUM", "ssrf": "HIGH", "xxe": "HIGH",
@@ -188,7 +174,6 @@ class FindingIngestionMixin:
                 self.ctx.add_vulnerability(vuln)
 
     def _ingest_approach_a_result(self, capability: str, target: str, result: Any) -> None:
-        """Parse and ingest tool results into SharedContext and knowledge stores."""
         if not result or not result.success:
             return
         

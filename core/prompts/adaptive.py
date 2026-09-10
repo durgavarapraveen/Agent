@@ -1,8 +1,3 @@
-"""
-Adaptive Prompt Engineering Engine (Phase 3 Module 3.2).
-Loads industry-specific variants (healthcare, finance, retail, default), enforces tier-based depth rules
-(shallow, poc, deep), dynamically injects error recovery instructions, and tracks A/B prompt performance.
-"""
 
 import logging
 import os
@@ -40,7 +35,6 @@ RECOVERY_INSTRUCTIONS = {
 
 
 class AdaptivePromptEngine:
-    """Manages industry variants, depth instructions, error recovery, and A/B test refinement."""
 
     def __init__(self, variants_dir: str = "core/prompts/prompt_variants", db_path: str = "prompt_ab_tests.sqlite"):
         self.variants_dir = variants_dir
@@ -66,7 +60,6 @@ class AdaptivePromptEngine:
             logger.error(f"[AdaptivePrompt] DB init error: {e}")
 
     def load_industry_variant(self, industry: str = "default") -> str:
-        """Load base prompt template for healthcare, finance, retail, or default."""
         ind_clean = (industry or "default").strip().lower()
         variant_path = os.path.join(self.variants_dir, ind_clean, "base.txt")
 
@@ -83,10 +76,6 @@ class AdaptivePromptEngine:
         return f"# Default Security Assessment Base Prompt for {ind_clean.upper()}"
 
     def build_prompt(self, industry: str = "default", depth: str = "poc", error_context: Optional[str] = None) -> str:
-        """
-        Build complete adaptive prompt incorporating industry variant, depth constraints,
-        and dynamic error recovery instructions.
-        """
         base = self.load_industry_variant(industry)
         depth_clean = (depth or "poc").strip().lower()
         depth_spec = DEPTH_TOOL_CONSTRAINTS.get(depth_clean, DEPTH_TOOL_CONSTRAINTS["poc"])
@@ -109,7 +98,6 @@ class AdaptivePromptEngine:
         return full_prompt
 
     def log_run_result(self, variant_key: str, target_type: str, findings_count: int, success_rate: float):
-        """Log prompt variant run result for A/B testing analysis."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -122,10 +110,6 @@ class AdaptivePromptEngine:
             logger.debug(f"[AdaptivePrompt] Log run result error: {e}")
 
     def suggest_best_variant(self, target_type: str) -> Optional[str]:
-        """
-        After 10 runs of a target type, auto-suggest the best-performing prompt variant via a CLI message:
-        "Suggested prompt: finance/deep based on 85% success rate across 10 scans."
-        """
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cur:

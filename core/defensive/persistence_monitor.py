@@ -1,8 +1,3 @@
-"""
-Persistence Vector Monitor & Defensive Rule Generator.
-Audits Windows Scheduled Tasks (Event ID 4698), Linux Cron/Systemd timers, SSH keys,
-Web Shell File Integrity Monitoring (FIM), and generates Sigma YAML & Auditd rules.
-"""
 
 import logging
 import os
@@ -47,21 +42,17 @@ AUDITD_CRON_RULE = """# Auditd rules for monitoring persistence in Cron & System
 
 
 class PersistenceMonitor:
-    """Audits persistence vectors and generates actionable SIEM / Auditd defensive rules."""
 
     def __init__(self, web_root: str = "/var/www/html"):
         self.web_root = web_root
 
     def generate_sigma_rules(self) -> str:
-        """Return Sigma YAML rule specification for Windows Event 4698 (Scheduled Tasks)."""
         return SIGMA_TASK_CREATION_RULE.strip()
 
     def generate_auditd_rules(self) -> str:
-        """Return Linux Auditd rule specification for Cron and Systemd Timers."""
         return AUDITD_CRON_RULE.strip()
 
     def audit_ssh_authorized_keys(self, ssh_dir: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Audit permissions and integrity of ~/.ssh/authorized_keys."""
         findings = []
         target_dir = ssh_dir or os.path.expanduser("~/.ssh")
         auth_keys_path = os.path.join(target_dir, "authorized_keys")
@@ -99,7 +90,6 @@ class PersistenceMonitor:
         return findings
 
     def audit_webshell_fim(self, search_dir: Optional[str] = None) -> List[Dict[str, Any]]:
-        """File Integrity Monitoring (FIM) check on web root for suspicious web shell scripts."""
         findings = []
         target_root = search_dir or self.web_root
 

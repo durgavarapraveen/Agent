@@ -76,12 +76,6 @@ class NmapAdapter(BaseAdapter):
             ), []
 
     def _parse_output(self, stdout: str) -> List[SecurityFinding]:
-        """Parse `nmap -oX -` XML into structured findings.
-
-        Falls back to the legacy line regex if XML is unavailable — some
-        environments strip the XML output entirely on certain switches, and
-        graceful degradation is better than losing every finding.
-        """
         findings: List[SecurityFinding] = []
         stdout = stdout or ""
         if stdout.lstrip().startswith("<?xml"):

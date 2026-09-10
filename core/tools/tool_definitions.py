@@ -1,7 +1,3 @@
-"""
-Tool definitions and capability registry.
-Single source of truth for tool/capability mapping.
-"""
 
 import logging
 from typing import Dict, List, Optional
@@ -26,7 +22,6 @@ class OperationType(str, Enum):
 
 @dataclass
 class ToolDefinition:
-    """Complete tool specification"""
     name: str
     executable: str
     capability: CapabilityType
@@ -42,7 +37,6 @@ class ToolDefinition:
     parameters: Dict[str, str] = field(default_factory=dict)
     
     def is_available(self) -> bool:
-        """Check if tool is available for use"""
         return self.available and not self.dependencies
     
     def to_dict(self) -> Dict:
@@ -60,7 +54,6 @@ class ToolDefinition:
 
 
 class CapabilityRegistry:
-    """Maps capabilities to available tool implementations"""
     
     def __init__(self):
         self.tools: Dict[str, ToolDefinition] = {}
@@ -68,7 +61,6 @@ class CapabilityRegistry:
         self._init_default_tools()
     
     def _init_default_tools(self) -> None:
-        """Initialize standard tools and capabilities"""
         
         # DNS Enumeration
         self.register_tool(ToolDefinition(
@@ -167,7 +159,6 @@ class CapabilityRegistry:
         ))
     
     def register_tool(self, tool: ToolDefinition) -> None:
-        """Register a tool"""
         self.tools[tool.name] = tool
         
         if tool.capability not in self.capabilities:
@@ -177,11 +168,9 @@ class CapabilityRegistry:
         logger.info(f"[ToolRegistry] Registered tool: {tool.name} -> {tool.capability.value}")
     
     def get_tool(self, name: str) -> Optional[ToolDefinition]:
-        """Get tool by name"""
         return self.tools.get(name)
     
     def get_tools_for_capability(self, capability: CapabilityType) -> List[ToolDefinition]:
-        """Get available tools for a capability"""
         tool_names = self.capabilities.get(capability, [])
         tools = []
         for name in tool_names:
@@ -191,10 +180,6 @@ class CapabilityRegistry:
         return tools
     
     def resolve_capability(self, capability: CapabilityType) -> Optional[ToolDefinition]:
-        """
-        Resolve capability to a tool.
-        Returns first available tool for capability, or None.
-        """
         tools = self.get_tools_for_capability(capability)
         if tools:
             return tools[0]
@@ -203,7 +188,6 @@ class CapabilityRegistry:
         return None
     
     def resolve_alternative_tool(self, tool_name: str) -> Optional[ToolDefinition]:
-        """Get alternative tool for same capability"""
         tool = self.get_tool(tool_name)
         if not tool:
             return None
@@ -218,17 +202,14 @@ class CapabilityRegistry:
         return None
     
     def resolve_tool_alternative(self, tool_name: str) -> Optional[ToolDefinition]:
-        """Alias for resolve_alternative_tool (for backward compatibility)"""
         return self.resolve_alternative_tool(tool_name)
     
     def mark_tool_unavailable(self, tool_name: str) -> None:
-        """Mark tool as unavailable (e.g., installation failed)"""
         if tool_name in self.tools:
             self.tools[tool_name].available = False
             logger.warning(f"[ToolRegistry] Marked tool unavailable: {tool_name}")
     
     def mark_tool_available(self, tool_name: str, version: Optional[str] = None) -> None:
-        """Mark tool as available"""
         if tool_name in self.tools:
             self.tools[tool_name].available = True
             if version:
@@ -236,18 +217,15 @@ class CapabilityRegistry:
             logger.info(f"[ToolRegistry] Marked tool available: {tool_name}")
     
     def get_all_available_tools(self) -> List[ToolDefinition]:
-        """Get all available tools"""
         return [t for t in self.tools.values() if t.is_available()]
     
     def get_all_capabilities(self) -> List[CapabilityType]:
-        """Get all capabilities with available tools"""
         return [
             cap for cap, tools in self.capabilities.items()
             if any(self.tools[t].is_available() for t in tools if t in self.tools)
         ]
     
     def to_dict(self) -> Dict:
-        """Serialize registry"""
         return {
             "tools": {name: tool.to_dict() for name, tool in self.tools.items()},
             "capabilities": {

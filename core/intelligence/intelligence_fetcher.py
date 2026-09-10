@@ -1,7 +1,3 @@
-"""
-IntelligenceFetcher - Search NVD, GitHub, MITRE, Shodan for real-time vuln data.
-Phase 1 of Enterprise system. Brain calls this after finding service+version.
-"""
 
 import asyncio
 import logging
@@ -14,7 +10,6 @@ logger = logging.getLogger(__name__)
 
 
 class IntelligenceFetcher:
-    """Fetch real-time vulnerability intelligence from public APIs."""
 
     def __init__(self, shodan_key: str = "", github_token: str = "", nvd_key: str = "", censys_pat: str = ""):
         self.shodan_key = shodan_key
@@ -28,7 +23,6 @@ class IntelligenceFetcher:
         }
 
     async def search_censys(self, query: str, per_page: int = 10) -> Optional[Dict]:
-        """Search Censys hosts/certificates using PAT authentication."""
         try:
             from core.intelligence.censys_client import CensysClient
             client = CensysClient(api_token=self.censys_pat)
@@ -46,12 +40,6 @@ class IntelligenceFetcher:
 
     async def search_nvd(self, product: str, version: str = "",
                          max_results: int = 10) -> List[Dict]:
-        """
-        Search NVD for CVEs by product name and version.
-        Free API. Rate limit: 5 req/30s without key, 50 req/30s with key.
-
-        Example: search_nvd("apache", "2.4.49") → list of CVEs
-        """
         base_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
         # Build keyword search
@@ -147,7 +135,6 @@ class IntelligenceFetcher:
             return []
 
     async def search_nvd_by_cve(self, cve_id: str) -> Optional[Dict]:
-        """Fetch specific CVE details by ID."""
         base_url = f"https://services.nvd.nist.gov/rest/json/cves/2.0"
         params = {"cveId": cve_id}
 
@@ -176,12 +163,6 @@ class IntelligenceFetcher:
     async def search_github_exploits(self, cve_id: str = "",
                                       keyword: str = "",
                                       max_results: int = 5) -> List[Dict]:
-        """
-        Search GitHub for exploit code / PoCs.
-        Free: 10 req/min unauthenticated, 30 req/min with token.
-
-        Example: search_github_exploits(cve_id="CVE-2024-1234")
-        """
         base_url = "https://api.github.com/search/repositories"
 
         query = cve_id or keyword
@@ -238,7 +219,6 @@ class IntelligenceFetcher:
             return []
 
     def _score_exploit_repo(self, repo: Dict) -> float:
-        """Score exploit reliability: 0.0-1.0"""
         score = 0.3  # Base score
         stars = repo.get("stargazers_count", 0)
         if stars >= 100:
@@ -263,13 +243,6 @@ class IntelligenceFetcher:
 
     async def search_mitre(self, technique_id: str = "",
                             keyword: str = "") -> List[Dict]:
-        """
-        Search MITRE ATT&CK for techniques.
-        Uses the MITRE ATT&CK STIX data (free, no key).
-
-        Example: search_mitre(technique_id="T1190")
-        Example: search_mitre(keyword="sql injection")
-        """
         # Use MITRE ATT&CK TAXII server or local mapping
         # For speed, use the pre-built mapping for common techniques
         techniques = self._get_mitre_mapping()
@@ -293,7 +266,6 @@ class IntelligenceFetcher:
         return results[:10]
 
     async def search_mitre_for_vuln(self, vuln_type: str) -> List[Dict]:
-        """Map vulnerability type to MITRE techniques."""
         vuln_to_mitre = {
             "sqli": ["T1190", "T1505"],
             "sql_injection": ["T1190", "T1505"],
@@ -326,7 +298,6 @@ class IntelligenceFetcher:
         return results
 
     def _get_mitre_mapping(self) -> Dict[str, Dict]:
-        """Pre-built MITRE ATT&CK technique mapping (most common ones)."""
         return {
             "T1190": {
                 "id": "T1190", "name": "Exploit Public-Facing Application",
@@ -496,12 +467,6 @@ class IntelligenceFetcher:
     # ═══════════════════════════════════════════════════════════════
 
     async def search_shodan(self, ip: str = "", query: str = "") -> Optional[Dict]:
-        """
-        Search Shodan for host information.
-        Requires API key. Free tier: 1 query/month for search, unlimited host lookups.
-
-        Example: search_shodan(ip="93.184.216.34")
-        """
         if not self.shodan_key:
             logger.debug("Shodan API key not configured, skipping")
             return None
@@ -580,10 +545,6 @@ class IntelligenceFetcher:
 
     async def search_all(self, product: str, version: str = "",
                           ip: str = "") -> Dict:
-        """
-        Search all intelligence sources in parallel.
-        Returns combined results.
-        """
         tasks = {
             "cves": self.search_nvd(product, version),
         }
@@ -645,10 +606,6 @@ class IntelligenceFetcher:
 
     @staticmethod
     def extract_service_version(banner: str) -> tuple:
-        """
-        Extract product and version from service banner.
-        Example: "Apache/2.4.49" → ("apache", "2.4.49")
-        """
         patterns = [
             r"([\w.-]+)\s+version\s+([\d.]+)",  # MySQL version 8.0 (MOVED FIRST)
             r"([\w.-]+)/([\d.]+)",              # Apache/2.4.49

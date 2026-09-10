@@ -1,4 +1,3 @@
-"""PHASE 5 — differential testing engine + comparison primitives (offline)."""
 from core.intelligence.differential import (
     DifferentialEngine,
     ResponseSnapshot,
@@ -54,7 +53,6 @@ def test_representation_variants_shapes():
 
 
 def test_engine_flags_json_vs_query_divergence():
-    """Server that authorises via JSON body but not query string => divergence."""
     def probe(url, method="GET", headers=None, data=None):
         ct = (headers or {}).get("Content-Type", "")
         if method == "POST" and "json" in ct:

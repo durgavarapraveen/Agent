@@ -1,11 +1,3 @@
-"""
-Metamorphic testing engine (spec Point B / P1.6).
-
-Runs metamorphic relations against a source request. The idempotence relation
-runs first as a stability gate: if an endpoint is non-deterministic, low-signal
-equivalence violations from the other relations are downgraded to ``info`` and
-annotated, so response noise is never reported as a parser/routing bug.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

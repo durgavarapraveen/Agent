@@ -43,11 +43,6 @@ class ApplicabilityEngine:
         identities: Optional[List[str]] = None,
         discovered_features: Optional[Dict[str, bool]] = None,
     ) -> Tuple[ApplicabilityResult, str]:
-        """Distinguish NOT_APPLICABLE from NOT_DISCOVERED.
-
-        NOT_APPLICABLE: surface was scanned and confirmed absent (e.g., no file upload on GET).
-        NOT_DISCOVERED: recon hasn't probed the feature yet — might become applicable later.
-        """
         features = discovered_features or {}
 
         feature_requirements = {
@@ -91,7 +86,6 @@ class ApplicabilityEngine:
         identities: Optional[List[str]] = None,
         discovered_features: Optional[Dict[str, bool]] = None,
     ) -> Dict[str, List[SecurityTest]]:
-        """Classify all tests into applicable/not_applicable/not_discovered."""
         result: Dict[str, List[SecurityTest]] = {
             "applicable": [],
             "not_applicable": [],

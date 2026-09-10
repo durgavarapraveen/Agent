@@ -10,12 +10,6 @@ class IdentityStore:
         self.identities: Dict[str, Identity] = {}
         
     def load_identities_from_env(self):
-        """
-        Loads configured identities from environment variables.
-        Expected format:
-        APP_USER_A=username:password OR token
-        APP_USER_A_ROLE=standard
-        """
         # Very simple mock initialization for now, reading from explicit config or env
         # In a real scenario, this would parse os.environ for specific prefixes.
         

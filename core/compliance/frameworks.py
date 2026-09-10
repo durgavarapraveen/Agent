@@ -1,17 +1,3 @@
-"""
-Compliance framework definitions (structured data, not hardcoded strings).
-
-Each framework is a dict of:
-    control_id -> {title, description, applicable_finding_categories: [...]}
-
-Findings are mapped by a normalized *category* (e.g. "injection", "xss",
-"vulnerable_component"). A CWE->category table lets findings that carry only a
-CWE be mapped too.
-
-Frameworks shipped: PCI-DSS 4.0, SOC 2 (TSC), HIPAA Security Rule, CIS Controls
-v8, NIST SP 800-53. The category lists cover the required controls at minimum;
-extend the data structures to broaden coverage.
-"""
 
 from __future__ import annotations
 
@@ -177,7 +163,6 @@ TYPE_CATEGORY = {
 
 
 def category_for_type(vuln_type: str) -> str:
-    """Map a scanner vulnerability 'type' (e.g. 'sqli') to a normalized category."""
     if not vuln_type:
         return ""
     key = str(vuln_type).lower().strip()
@@ -187,7 +172,6 @@ def category_for_type(vuln_type: str) -> str:
 
 
 def category_for_cwe(cwe: str) -> str:
-    """Map a CWE id (e.g. 'CWE-89') to a normalized category, or '' if unknown."""
     if not cwe:
         return ""
     key = cwe.upper().strip()

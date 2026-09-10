@@ -1,6 +1,3 @@
-"""
-Centralized Target Scope Authorization validation layer.
-"""
 
 import re
 import logging
@@ -25,7 +22,6 @@ PASSIVE_OSINT_DOMAINS = frozenset({
 
 
 class TargetScopeValidator:
-    """Centralized target scope validator singleton"""
 
     _instance: Optional['TargetScopeValidator'] = None
     _lock = __import__("threading").RLock()
@@ -56,13 +52,6 @@ class TargetScopeValidator:
         logger.info(f"[TargetScopeValidator] Initialized with scope: {self.authorized_scope}")
 
     def note_resolution(self, host: str, ip: str = None) -> None:
-        """
-        Record that an in-scope host resolves to an IP, authorizing that IP.
-        If the host is in authorized scope (an authorized domain or any of its
-        subdomains), every IP it resolves to is added to the authorized set — so a
-        follow-up scan of that IP is not blocked. Call this whenever recon resolves
-        a host to an address.
-        """
         try:
             host_norm = self._normalize_target(host)
             if not host_norm or not self._host_in_scope(host_norm):
@@ -87,7 +76,6 @@ class TargetScopeValidator:
             raise SystemError(f"Policy enforcement failed: {e}") from e
 
     def _host_in_scope(self, norm: str) -> bool:
-        """True if a (non-IP) hostname matches an authorized domain or subdomain."""
         norm_bare = norm[4:] if norm.startswith("www.") else norm
         for allowed in self.authorized_scope:
             allowed_norm = self._normalize_target(allowed)
@@ -170,7 +158,6 @@ class TargetScopeValidator:
         return False
 
     def validate(self, target: str) -> None:
-        """Raises AuthorizationError if target is not in authorized scope"""
         logger.debug(f"[TargetScopeValidator] Validating target: {target}")
         # Phase 6.1 seal: `TargetScopeValidator` MUST NOT be no-op'd, even in
         # benchmark mode. The HF July 2026 incident happened partly because
@@ -193,7 +180,6 @@ class TargetScopeValidator:
         logger.info(f"[TargetScopeValidator] AUTHORIZATION_CHECK passed: {target}")
 
     def extract_and_validate_command(self, command: str) -> None:
-        """Parses a raw shell command string and validates any extracted hosts/domains/IPs"""
         if not command:
             return
             
@@ -233,7 +219,6 @@ class TargetScopeValidator:
             self.validate(t)
 
 class AuthContext:
-    """Authorization context for tool invocations"""
     def __init__(self, allowed_tools: Optional[List[str]] = None, 
                  has_elevated_privilege: bool = False, 
                  target_profile=None):

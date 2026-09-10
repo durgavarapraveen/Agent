@@ -1,7 +1,3 @@
-"""
-LLM Client - Reads config from .env file
-Supports Gemini + Ollama + extensible for other providers
-"""
 
 import asyncio
 import json
@@ -21,10 +17,6 @@ logger = logging.getLogger(__name__)
 
 
 def validate_json_payload(data: Any, mandatory_fields: Optional[List[str]] = None) -> bool:
-    """
-    Strict validation check for LLM JSON responses.
-    Treats None, non-dict objects, empty dicts ({}), or dicts missing mandatory fields as invalid.
-    """
     if not data or not isinstance(data, dict) or len(data) == 0:
         return False
     if mandatory_fields:
@@ -40,7 +32,6 @@ from agents.llm_harness_adapter import get_llm, initialize_llm
 HarnessTaskTier = TaskTier  # backward compat alias
 
 class LLMProvider(ABC):
-    """Base provider interface (Deprecated - routing to Universal Harness)"""
 
     async def generate_response(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
                                 system: Optional[str] = None, max_tokens: int = 1024,
@@ -122,11 +113,6 @@ class LLMProvider(ABC):
         max_retries: int = 3,
         initial_backoff: float = 0.5
     ) -> Tuple[Dict, str]:
-        """
-        Generates JSON response with strict validation, exponential backoff retries,
-        and diagnostic logging of raw responses on empty/invalid outputs.
-        Returns tuple of (structured_dict, raw_content).
-        """
         raw_content = ""
         for attempt in range(max_retries):
             res = await self.generate_response(prompt, tier, system, max_tokens, temperature=0.1, response_format="json")
@@ -171,7 +157,6 @@ class LLMProvider(ABC):
 # ═══════════════════════════════════════════════════════════════
 
 class DeepSeekProvider(LLMProvider):
-    """DeepSeek API provider - OpenAI-compatible chat completions."""
 
     def __init__(self, api_key: str, small_model: str = "deepseek-v4-flash",
                  large_model: str = "deepseek-v4-flash",
@@ -275,7 +260,6 @@ class DeepSeekProvider(LLMProvider):
 # ═══════════════════════════════════════════════════════════════
 
 class LLMClient:
-    """Main client - now acts as a proxy to universal_llm_harness"""
 
     _instance: Optional[LLMProvider] = None
 

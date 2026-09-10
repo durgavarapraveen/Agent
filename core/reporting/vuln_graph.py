@@ -1,8 +1,3 @@
-"""
-Vulnerability Graph Builder
-Builds a directed graph of discovered vulnerabilities and finds all attack paths.
-Nodes = vulnerabilities, Edges = "leads to" relationships.
-"""
 
 import logging
 from typing import TYPE_CHECKING, Dict, List, Optional, Set
@@ -16,11 +11,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class VulnNode:
-    """A vulnerability in the attack graph"""
     id: str
     vuln_type: str          # sqli, xss, lfi, rce, auth_bypass, etc.
     location: str           # URL/endpoint where it exists
-    severity: str           # critical, high, medium, low
+    severity: str
     details: Dict = field(default_factory=dict)
     confirmed: bool = False
     exploited: bool = False
@@ -34,7 +28,6 @@ class VulnNode:
 
 @dataclass
 class AttackEdge:
-    """A relationship between two vulnerabilities"""
     source: str       # source vuln id
     target: str       # target vuln id
     relationship: str # e.g. "credentials_from", "access_to", "escalates_to"
@@ -44,18 +37,16 @@ class AttackEdge:
 
 @dataclass
 class AttackPath:
-    """A complete chain of vulnerabilities"""
     chain_id: str
     steps: List[str]           # ordered vuln IDs
     edges: List[AttackEdge]    # edges between steps
     total_impact: float = 0.0
     total_success_rate: float = 0.0
     complexity: int = 0
-    score: float = 0.0        # (success_rate * impact) / complexity
+    score: float = 0.0
 
 
 class VulnGraph:
-    """Directed graph of vulnerabilities and attack relationships"""
 
     def __init__(self):
         self.nodes: Dict[str, VulnNode] = {}
@@ -65,7 +56,6 @@ class VulnGraph:
         self._path_counter = 0
 
     def add_vulnerability(self, vuln: Dict) -> VulnNode:
-        """Add a vulnerability node from shared context format"""
         vid = vuln.get("id", f"VULN-{len(self.nodes)+1:03d}")
         node = VulnNode(
             id=vid,
@@ -82,7 +72,6 @@ class VulnGraph:
     def add_edge(self, source_id: str, target_id: str,
                  relationship: str, success_rate: float = 0.5,
                  description: str = "") -> Optional[AttackEdge]:
-        """Add a directed edge between two vulnerability nodes"""
         if source_id not in self.nodes or target_id not in self.nodes:
             logger.warning(f"[VulnGraph] Edge skipped: {source_id} → {target_id} (missing node)")
             return None
@@ -102,10 +91,6 @@ class VulnGraph:
 
     def build_from_context(self, vulnerabilities: List[Dict],
                            relationship_db: Optional["RelationshipDB"] = None):
-        """
-        Build graph from SharedContext.vulnerabilities list.
-        Auto-infer edges using RelationshipDB if provided.
-        """
         # Add all vulns as nodes
         for v in vulnerabilities:
             self.add_vulnerability(v)
@@ -136,7 +121,6 @@ class VulnGraph:
         logger.info(f"[VulnGraph] Built graph: {len(self.nodes)} nodes, {len(self.edges)} edges")
 
     def find_all_paths(self, max_depth: int = 6) -> List[AttackPath]:
-        """Find all attack paths using DFS from every entry point"""
         all_paths: List[AttackPath] = []
 
         # Entry points = nodes with no incoming edges (or all nodes for completeness)
@@ -160,7 +144,6 @@ class VulnGraph:
     def _dfs_paths(self, current: str, visited: Set[str],
                    path_nodes: List[str], path_edges: List[AttackEdge],
                    results: List[AttackPath], max_depth: int):
-        """DFS to find all paths"""
         if len(path_nodes) > max_depth:
             return
 
@@ -189,7 +172,6 @@ class VulnGraph:
         visited.discard(current)
 
     def _score_path(self, path: AttackPath) -> float:
-        """Score: (combined_success_rate * max_impact) / complexity"""
         if not path.edges:
             return 0.0
 
@@ -211,7 +193,6 @@ class VulnGraph:
         return path.score
 
     def get_entry_vulns(self) -> List[VulnNode]:
-        """Get vulnerabilities that are good entry points (no prerequisites)"""
         entry = []
         for nid, node in self.nodes.items():
             if nid not in self.reverse_adj:
@@ -219,7 +200,6 @@ class VulnGraph:
         return entry if entry else list(self.nodes.values())
 
     def get_terminal_vulns(self) -> List[VulnNode]:
-        """Get vulnerabilities that are end goals (no outgoing edges)"""
         terminal = []
         for nid, node in self.nodes.items():
             if nid not in self.adjacency:
@@ -227,7 +207,6 @@ class VulnGraph:
         return terminal
 
     def to_dict(self) -> Dict:
-        """Serialize graph for LLM context or storage"""
         return {
             "nodes": {nid: {
                 "type": n.vuln_type,
@@ -251,7 +230,6 @@ class VulnGraph:
         }
 
     def summary_for_llm(self, max_chars: int = 2000) -> str:
-        """Compact summary for LLM context window"""
         lines = [f"VULNERABILITY GRAPH: {len(self.nodes)} vulns, {len(self.edges)} relationships"]
         for nid, n in self.nodes.items():
             status = "EXPLOITED" if n.exploited else ("CONFIRMED" if n.confirmed else "unconfirmed")

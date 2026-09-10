@@ -4,11 +4,10 @@ from datetime import datetime
 
 @dataclass
 class ExecutionContext:
-    """Central context for execution - holds all shared state."""
     
     target: str  # URL, repository path, or "DEMO"
     objective: str
-    mode: str  # "DEMO", "WEB", "SOURCE"
+    mode: str
     
     # System components
     knowledge_store: Any = None
@@ -23,7 +22,6 @@ class ExecutionContext:
     start_time: datetime = field(default_factory=datetime.now)
     end_time: Optional[datetime] = None
     
-    # Limits and config
     max_concurrent_agents: int = 4
     max_total_tasks: int = 100
     max_task_runtime: int = 300  # seconds
@@ -37,18 +35,14 @@ class ExecutionContext:
     metadata: Dict[str, Any] = field(default_factory=dict)
     
     def get_global_elapsed_seconds(self) -> float:
-        """Get seconds elapsed since start."""
         return (datetime.now() - self.start_time).total_seconds()
     
     def is_timeout_exceeded(self) -> bool:
-        """Check if global timeout exceeded."""
         return self.get_global_elapsed_seconds() > self.global_execution_timeout
     
     def mark_complete(self):
-        """Mark execution as complete."""
         self.end_time = datetime.now()
     
     def get_duration_seconds(self) -> float:
-        """Get total execution duration."""
         end = self.end_time or datetime.now()
         return (end - self.start_time).total_seconds()

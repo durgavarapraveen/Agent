@@ -1,16 +1,3 @@
-"""
-Anonymisation kill-switch.
-
-Refuses to let the agent start a scan unless:
-  1. The process can reach the internet ONLY via the configured SOCKS5
-     (Tor) proxy — direct connections must be blocked at the OS layer.
-  2. The observed exit IP is different from REAL_WAN_IP (proves the
-     chain of hops is up; if a VPN dropped and traffic fell back to
-     your real interface, exit IP == real IP and we refuse to run).
-  3. The exit is a Tor exit (check.torproject.org confirms).
-
-Called from main.py before any tool is invoked.
-"""
 from __future__ import annotations
 
 import logging
@@ -22,12 +9,9 @@ logger = logging.getLogger(__name__)
 
 
 class AnonGateFailed(RuntimeError):
-    """Raised when the anonymisation chain is not proven up."""
-
+    pass
 
 def _fetch_via_socks(url: str, timeout: float = 30.0) -> str:
-    """Fetch a URL ONLY via the configured SOCKS5 proxy. If the proxy is
-    down, this raises — never falls back to direct."""
     import httpx
     proxy = (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
              or os.getenv("ALL_PROXY") or "").strip()
@@ -47,7 +31,6 @@ def _fetch_via_socks(url: str, timeout: float = 30.0) -> str:
 
 
 def check_exit_ip() -> Tuple[str, bool]:
-    """Return (exit_ip, is_tor_exit). Raises AnonGateFailed on any leak."""
     real = (os.getenv("REQUIRE_EXIT_IP_DIFFERS_FROM") or "").strip()
     if not real:
         raise AnonGateFailed(
@@ -83,8 +66,6 @@ def check_exit_ip() -> Tuple[str, bool]:
 
 
 def _fetch_direct_ip(timeout: float = 5.0) -> str:
-    """Best-effort: look up our WAN IP without going through any proxy.
-    Returns '' on failure — never raises. Used only for the startup log."""
     try:
         import httpx
         with httpx.Client(timeout=timeout, proxy=None,
@@ -96,19 +77,12 @@ def _fetch_direct_ip(timeout: float = 5.0) -> str:
 
 
 def _vpn_configured() -> bool:
-    """VPN mode is active only when a SOCKS proxy env var is set."""
     proxy = (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
              or os.getenv("ALL_PROXY") or "").strip().lower()
     return proxy.startswith("socks5")
 
 
 def enforce_or_die() -> None:
-    """Call at startup. Auto-detects mode:
-      - VPN mode:    SOCKS proxy env is set  -> verify chain is up, abort if not
-      - Direct mode: no proxy configured     -> log and proceed (real IP)
-
-    ANON_GATE=0 force-skips verification even in VPN mode.
-    """
     if os.getenv("ANON_GATE", "1").strip().lower() in ("0", "false", "no", "off"):
         logger.warning("[AnonGate] disabled via ANON_GATE=0")
         return

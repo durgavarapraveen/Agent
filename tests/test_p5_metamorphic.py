@@ -1,4 +1,3 @@
-"""PHASE 5 — metamorphic testing engine (offline, simulated servers)."""
 import urllib.parse
 
 from core.intelligence.differential.representations import HttpRequest

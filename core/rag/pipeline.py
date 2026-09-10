@@ -1,17 +1,3 @@
-"""
-SecurityRAGPipeline — the single entry point for the RAG system.
-
-Handles: knowledge seeding, document/URL/search ingestion, embedding,
-vector storage in pgvector, retrieval, re-ranking, HyDE query rewriting,
-parent-child chunk retrieval, and LLM context injection.
-
-Upgrades wired in this file:
-  1. Two-stage retrieval + cross-encoder re-rank (core/rag/reranker.py)
-  2. True semantic local embeddings via MiniLM (core/rag/local_embedder.py)
-  3. Semantic dedup on ingest (cosine sim >= SEMANTIC_DUP_THRESHOLD)
-  4. HyDE query transformation (core/rag/hyde.py)
-  5. Parent-child chunks: small children indexed, big parents returned
-"""
 
 import asyncio
 import json
@@ -57,15 +43,6 @@ def get_rag() -> Optional["SecurityRAGPipeline"]:
 
 
 class SecurityRAGPipeline:
-    """
-    Unified RAG pipeline for cybersecurity knowledge.
-
-    Usage:
-        rag = SecurityRAGPipeline()
-        await rag.initialize()
-        await rag.ingest_file("cwe.pdf")
-        docs = await rag.retrieve("SQL injection login bypass", top_k=5)
-    """
 
     def __init__(self, api_key: Optional[str] = None):
         self.embedder = Embedder(api_key=api_key)
@@ -193,13 +170,6 @@ class SecurityRAGPipeline:
     async def _store_chunk(self, content: str, metadata: Dict[str, Any],
                             source_type: str, source_ref: str,
                             parent_id: str = "", parent_content: str = "") -> str:
-        """Embed one child chunk, dedup (exact + semantic), then insert.
-
-        Never persists a hash-bag fallback vector — the row would poison the
-        HNSW index. Semantic dup: if any existing row has cosine sim >=
-        SEMANTIC_DUP_THRESHOLD to this chunk in the same embedding space, we
-        skip. Ensures diverse top_k results.
-        """
         c_hash = content_hash(content)
 
         # Exact-text dedup (cheap; embedding-free).
@@ -256,10 +226,6 @@ class SecurityRAGPipeline:
                 return doc_id if cur.rowcount else ""
 
     async def _is_semantic_duplicate(self, emb: EmbedResult) -> bool:
-        """Query the appropriate vector column for near-duplicates.
-
-        Never fatal — a failed dedup check just falls through to insert.
-        """
         try:
             col = "embedding" if emb.dim == DIMENSION else "embedding_local"
             with DatabaseManager.get_connection() as conn:
@@ -281,10 +247,6 @@ class SecurityRAGPipeline:
     async def _ingest_parent_child(self, text: str, source_type: str,
                                      source_ref: str, base_meta: Dict[str, Any],
                                      progress_cb: Optional[Callable[[int, int], None]] = None) -> int:
-        """Split into parent/child, store every child pointing at its parent.
-
-        `progress_cb(done, total)` is invoked after each chunk so callers can
-        surface ingestion progress (e.g. a UI progress bar)."""
         pieces = chunk_parent_child(text)
         total = len(pieces)
         stored = 0
@@ -449,15 +411,6 @@ class SecurityRAGPipeline:
                        min_similarity: float = 0.05,
                        use_hyde: bool = RAG_USE_HYDE_DEFAULT,
                        use_rerank: bool = True) -> List[Dict[str, Any]]:
-        """Retrieve relevant knowledge chunks for a query.
-
-        Pipeline:
-          1. HyDE — rewrite query as a hypothetical answer (optional)
-          2. Embed the rewritten query
-          3. pgvector top-N (fan-out = RERANK_FANOUT) in the matching space
-          4. Collapse to unique parents (keep best-scoring child per parent)
-          5. Cross-encoder rerank to top_k
-        """
         search_text = query
         if use_hyde:
             try:
@@ -541,8 +494,6 @@ class SecurityRAGPipeline:
         return collapsed
 
     def _collapse_by_parent(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Keep the single highest-scoring child per parent_id (or per doc_id
-        for rows with no parent), preserving retrieval order among the winners."""
         best: Dict[str, Dict[str, Any]] = {}
         for r in rows:
             key = r.get("parent_id") or r.get("doc_id")

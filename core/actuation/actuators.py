@@ -1,13 +1,3 @@
-"""
-Actuators — the target-agnostic "hands" an LLM agent can call against ANY
-authorized target (localhost, a deployed instance, or any in-scope URL).
-
-Real capability functions (no mocks): authenticated HTTP, JWT decode/forge
-(algorithm-confusion / none-alg), crypto/encoding helpers, and file upload.
-Every network action is scope-validated so the agent cannot touch a host outside
-the authorized scope. Each call returns a compact JSON observation the LLM reads
-back to reflect and choose the next action.
-"""
 
 from __future__ import annotations
 
@@ -34,7 +24,6 @@ _TOKEN_KEYS = (
 
 
 def _extract_token(payload) -> Optional[str]:
-    """Walk a small allowlist of common bearer-token key names at any depth."""
     seen: list = []
     def _walk(node):
         if isinstance(node, dict):
@@ -66,7 +55,6 @@ def _b64url_decode(s: str) -> bytes:
 
 
 class Actuators:
-    """Stateful actuator set bound to a target (keeps cookies/token across calls)."""
 
     def __init__(self, base_url: str, auth_headers: Optional[Dict[str, str]] = None,
                  timeout: int = 20, scope_validator: Optional[Any] = None):
@@ -89,12 +77,10 @@ class Actuators:
             logger.warning(f"[Actuators] Error validating target '{url}': {e}")
             return False
 
-    # ------------------------------------------------------------------ HTTP
 
     async def http_request(self, method: str, path: str, headers: Optional[Dict[str, str]] = None,
                            json_body: Any = None, data: Any = None,
                            params: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-        """Perform an HTTP request against the target. path may be absolute or relative."""
         url = path if path.startswith("http") else f"{self.base_url}/{path.lstrip('/')}"
         if not self._in_scope(url):
             return {"error": "target out of authorized scope", "blocked": True}
@@ -131,7 +117,6 @@ class Actuators:
         except Exception as e:
             return {"error": str(e)}
 
-    # ------------------------------------------------------------------- JWT
 
     def jwt_decode(self, token: str) -> Dict[str, Any]:
         try:
@@ -156,7 +141,6 @@ class Actuators:
         except Exception as e:
             return {"error": str(e)}
 
-    # -------------------------------------------------------------- encoding
 
     def encode(self, text: str, scheme: str = "base64") -> Dict[str, Any]:
         try:
@@ -184,7 +168,6 @@ class Actuators:
         except Exception as e:
             return {"error": str(e)}
 
-    # ---------------------------------------------------------------- upload
 
     async def upload_file(self, path: str, filename: str, content: str,
                           content_type: str = "application/octet-stream",

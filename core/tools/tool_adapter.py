@@ -1,12 +1,3 @@
-"""
-Abstract Tool Invocation and Adapter layer.
-Decouples LLM planning from raw command line syntax.
-Python deterministic code constructs commands strictly from structured parameters.
-
-Enhanced with HexStrike-style stack-aware parameter optimization:
-When a TargetProfile is provided, adapters generate smarter CLI flags
-based on detected technology stack, CMS, and target type.
-"""
 
 import json
 import logging
@@ -18,7 +9,6 @@ logger = logging.getLogger(__name__)
 
 
 class ToolInvocation(BaseModel):
-    """Abstract model representing a structured tool call proposed by the planner"""
     tool: str
     operation: str
     params: Dict[str, Any] = Field(default_factory=dict)
@@ -155,7 +145,6 @@ class WhatWebAdapter:
 
 
 class GobusterAdapter:
-    """Stack-aware directory bruteforcing with smart wordlists."""
     @staticmethod
     def dir_scan(target: str, params: Dict[str, Any], profile=None) -> Dict[str, Any]:
         from core.tools.smart_wordlists import SmartWordlistManager
@@ -186,7 +175,6 @@ class GobusterAdapter:
 
 
 class FeroxbusterAdapter:
-    """Stack-aware recursive directory discovery."""
     @staticmethod
     def scan(target: str, params: Dict[str, Any], profile=None) -> Dict[str, Any]:
         from core.tools.smart_wordlists import SmartWordlistManager
@@ -205,7 +193,6 @@ class FeroxbusterAdapter:
 
 
 class FFufAdapter:
-    """Stack-aware fuzzer with tailored wordlists."""
     @staticmethod
     def fuzz(target: str, params: Dict[str, Any], profile=None) -> Dict[str, Any]:
         from core.tools.smart_wordlists import SmartWordlistManager
@@ -226,7 +213,6 @@ class FFufAdapter:
 
 
 class NucleiAdapter:
-    """Stack-aware template vulnerability scanner."""
     @staticmethod
     def scan(target: str, params: Dict[str, Any], profile=None) -> Dict[str, Any]:
         flags = [f"-u {target}"]
@@ -275,7 +261,6 @@ class NucleiAdapter:
 
 
 class SqlmapAdapter:
-    """Stack-aware SQL injection scanner with dynamic WAF bypass tampers."""
     @staticmethod
     def scan(target: str, params: Dict[str, Any], profile=None) -> Dict[str, Any]:
         from core.exploitation.waf_evasion import WAFEvasionManager
@@ -321,7 +306,6 @@ class SqlmapAdapter:
 
 
 class KatanaAdapter:
-    """Stack-aware web crawler."""
     @staticmethod
     def crawl(target: str, params: Dict[str, Any], profile=None) -> Dict[str, Any]:
         flags = [f"-u {target}"]
@@ -347,7 +331,6 @@ class KatanaAdapter:
 
 
 class DalfoxAdapter:
-    """Stack-aware XSS scanner."""
     @staticmethod
     def scan(target: str, params: Dict[str, Any], profile=None) -> Dict[str, Any]:
         flags = [f"url {target}"]
@@ -365,7 +348,6 @@ class DalfoxAdapter:
 
 
 class ArjunAdapter:
-    """Stack-aware parameter discovery."""
     @staticmethod
     def discover(target: str, params: Dict[str, Any], profile=None) -> Dict[str, Any]:
         flags = [f"-u {target}"]
@@ -380,7 +362,6 @@ class ArjunAdapter:
 
 
 class WPScanAdapter:
-    """WordPress-specific scanner with full enumeration."""
     @staticmethod
     def scan(target: str, params: Dict[str, Any], profile=None) -> Dict[str, Any]:
         flags = [f"--url {target}"]
@@ -393,7 +374,6 @@ class WPScanAdapter:
 
 
 class DirsearchAdapter:
-    """Stack-aware directory scanner."""
     @staticmethod
     def scan(target: str, params: Dict[str, Any], profile=None) -> Dict[str, Any]:
         flags = [f"-u {target}"]
@@ -412,7 +392,6 @@ class DirsearchAdapter:
 # ═══════════════════════════════════════════════
 
 def _get_extensions_for_profile(profile) -> str:
-    """Return comma-separated file extensions based on detected tech stack."""
     if not profile or not hasattr(profile, "technologies"):
         return ""
     from core.intelligence.target_profiler import TechnologyStack
@@ -441,11 +420,6 @@ def _get_extensions_for_profile(profile) -> str:
 # ═══════════════════════════════════════════════
 
 class ToolAdapter:
-    """Translates abstract tool operations into concrete CLI command arguments or parameters.
-    
-    Enhanced with HexStrike-style stack-aware parameter optimization: when a TargetProfile
-    is passed, each adapter tailors CLI flags to the detected technology stack.
-    """
 
     FORBIDDEN_TOOLS = {"bash", "sh", "cmd", "powershell", "zsh"}
 

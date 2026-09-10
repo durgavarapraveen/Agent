@@ -1,10 +1,3 @@
-"""
-Canonical AttackSurfaceState — single authoritative representation
-of everything discovered about the target.
-
-Every discovery preserves: id, source, evidence, confidence, first_seen, last_seen.
-States: DISCOVERED, INFERRED, HYPOTHESIS, CONFIRMED.
-"""
 from __future__ import annotations
 
 import logging
@@ -21,22 +14,6 @@ logger = logging.getLogger(__name__)
 
 
 class AttackSurfaceState:
-    """
-    One authoritative view of the target's attack surface.
-
-    Structure:
-      Target
-       ├── Assets (domains, subdomains, IPs, ports, services)
-       ├── Applications
-       ├── Endpoints (HTTP, REST, GraphQL, WebSocket)
-       ├── Parameters
-       ├── Technologies
-       ├── Authentication
-       ├── Identities
-       ├── Sessions
-       ├── Files
-       └── Workflows
-    """
 
     def __init__(self, target: str):
         self.target = target
@@ -66,16 +43,15 @@ class AttackSurfaceState:
         # accumulated cumulatively. `endpoints_raw_fed` is the only running
         # tally (every add_endpoint call, new or duplicate); everything else is
         # computed from it and `len(self.endpoints)` so the invariant
-        #   raw_fed >= unique >= 0  and  deduplicated == raw_fed - unique
         # always holds and "deduplicated" can never exceed the input.
         self._counts = {
             "assets_discovered": 0,
             "applications_discovered": 0,
             "endpoints_raw_fed": 0,        # cumulative add_endpoint calls (new+dup)
-            "endpoints_discovered": 0,     # unique (derived)
-            "endpoints_normalized": 0,     # unique (derived)
+            "endpoints_discovered": 0,
+            "endpoints_normalized": 0,
             "endpoints_deduplicated": 0,   # duplicates removed = raw_fed - unique (derived)
-            "endpoints_unique": 0,         # len(self.endpoints) (derived)
+            "endpoints_unique": 0,
             "endpoints_transferred_to_v2": 0,   # endpoints now present in the V2 surface
             "endpoints_new_last_transfer": 0,   # genuinely-new in the last wire pass
             "parameters_discovered": 0,
@@ -131,12 +107,6 @@ class AttackSurfaceState:
 
     def add_endpoint(self, endpoint: Endpoint,
                      source: str = "unknown") -> bool:
-        """Add endpoint with deduplication. Returns True if new.
-
-        O(1) via `_endpoint_key_index` — the previous O(n) linear scan
-        compounded to O(n²) over the course of a scan with thousands of
-        endpoints.
-        """
         norm_key = endpoint.normalized_key()
         # Every feed attempt counts as raw input (new OR duplicate).
         self._counts["endpoints_raw_fed"] += 1
@@ -157,7 +127,7 @@ class AttackSurfaceState:
         # stable ids).
         try:
             eid = endpoint.endpoint_id or ""
-            if (not eid) or len(eid) == 36 and eid.count("-") == 4:  # empty or uuid4
+            if (not eid) or len(eid) == 36 and eid.count("-") == 4:
                 endpoint.endpoint_id = endpoint.canonical_id()
         except Exception:
             if not endpoint.endpoint_id:
@@ -172,7 +142,6 @@ class AttackSurfaceState:
         return True
 
     def _recompute_counts(self) -> None:
-        """Derive endpoint counts from actual set sizes so the invariant holds."""
         unique = len(self.endpoints)
         raw = self._counts["endpoints_raw_fed"]
         self._counts["endpoints_unique"] = unique
@@ -181,7 +150,6 @@ class AttackSurfaceState:
         self._counts["endpoints_deduplicated"] = max(0, raw - unique)
 
     def assert_endpoint_invariants(self) -> bool:
-        """Fail loudly (log ERROR) if endpoint counts are inconsistent (P0.1)."""
         self._recompute_counts()
         raw = self._counts["endpoints_raw_fed"]
         unique = self._counts["endpoints_unique"]
@@ -255,11 +223,6 @@ class AttackSurfaceState:
         self.assert_endpoint_invariants()
 
     def mark_transferred_to_v2(self, new_endpoints: int, parameters: int) -> None:
-        """Record a wire pass. `new_endpoints` is how many were genuinely new in
-        THIS pass; the reported `transferred_to_v2` is the ACTUAL surface size
-        (len of the endpoint set), not the single-pass delta — a later pass that
-        finds everything already present must not overwrite the total with 1-3.
-        """
         self._recompute_counts()
         self._counts["endpoints_new_last_transfer"] = new_endpoints
         self._counts["endpoints_transferred_to_v2"] = len(self.endpoints)

@@ -1,7 +1,3 @@
-"""
-Tool Knowledge Store.
-Centralized repository for dynamic tool profiles, capabilities, and execution metrics.
-"""
 
 import logging
 from typing import Dict, List, Optional, Any
@@ -11,7 +7,6 @@ logger = logging.getLogger(__name__)
 
 
 class ToolKnowledgeStore:
-    """Stores and indexes dynamic tool intelligence"""
 
     _instance: Optional["ToolKnowledgeStore"] = None
 
@@ -28,7 +23,6 @@ class ToolKnowledgeStore:
         self._bootstrap_default_tools()
 
     def register_tool(self, profile: ToolProfile, log_profile: bool = True) -> None:
-        """Register or update a tool profile in the store"""
         tool_id = profile.name.lower().strip()
         profile.id = f"tool_{tool_id}"
         self.profiles[tool_id] = profile
@@ -46,11 +40,9 @@ class ToolKnowledgeStore:
             logger.debug(f"TOOL_PROFILE_CREATED: tool={profile.name} capabilities={profile.capabilities} trust={profile.trust_score}")
 
     def get_tool(self, name: str) -> Optional[ToolProfile]:
-        """Get profile by tool name"""
         return self.profiles.get(name.lower().strip())
 
     def get_tools_for_capability(self, capability: str) -> List[ToolProfile]:
-        """Retrieve all registered tool profiles matching a capability"""
         cap_norm = capability.lower().strip()
         tool_ids = self.capability_index.get(cap_norm, [])
         return [self.profiles[tid] for tid in tool_ids if tid in self.profiles]
@@ -63,7 +55,6 @@ class ToolKnowledgeStore:
         findings_count: int = 0,
         metadata: Optional[Dict[str, Any]] = None
     ) -> None:
-        """Record execution outcome and update tool performance stats"""
         tool_id = tool_name.lower().strip()
         profile = self.profiles.get(tool_id)
         if profile:
@@ -78,11 +69,9 @@ class ToolKnowledgeStore:
         })
 
     def get_all_tools(self) -> List[ToolProfile]:
-        """Return all registered tool profiles"""
         return list(self.profiles.values())
 
     def _bootstrap_default_tools(self) -> None:
-        """Initialize baseline profiles for security tools"""
         defaults = [
             # DNS Enumeration
             ToolProfile(

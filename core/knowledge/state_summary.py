@@ -1,10 +1,3 @@
-"""
-P1-6: normalized shared state for LLM context.
-
-Do NOT feed the LLM the raw action history. Build a compact, structured
-target summary from the SharedContext and hand THAT to DeepSeek. The
-LLM should see facts, not log lines.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -53,7 +46,6 @@ def build_state(ctx, waf_mode: str = "NORMAL",
 
 
 def render(state: NormalizedState) -> str:
-    """Compact plain-text form: <60 lines even on rich context."""
     def lst(name: str, items: List[str], cap: int = 20) -> str:
         if not items:
             return f"{name}: (none)"

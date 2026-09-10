@@ -1,19 +1,3 @@
-"""Framework quirks corpus (Phase 5).
-
-Per-stack curated attack knowledge — the difference between "run nuclei"
-and "here's a known Express prototype-pollution bypass to try first."
-
-Each entry in `CORPUS` has:
-  - `stack`   — fingerprint match (from RECON's tech-stack detection)
-  - `quirks`  — list of well-documented bug classes / CVEs / techniques
-    to prioritise when this stack is present.
-
-When the fingerprinter reports a stack, `lookup(stack)` returns the
-prioritised quirks. The exploit planner uses that as retrieval-augmented
-context, so the LLM sees stack-specific attacks BEFORE generic ones.
-
-Adding a new stack = adding a dict; no code changes required.
-"""
 from __future__ import annotations
 
 import logging
@@ -250,8 +234,6 @@ CORPUS: List[Dict[str, Any]] = [
 
 
 def lookup(stack: str) -> List[Dict[str, Any]]:
-    """Case-insensitive contains-match against every fingerprint. Returns
-    the union of matching stacks' quirks, priority-sorted."""
     if not stack:
         return []
     s = str(stack).lower()
@@ -265,7 +247,6 @@ def lookup(stack: str) -> List[Dict[str, Any]]:
 
 
 def lookup_all(fingerprints: List[str]) -> List[Dict[str, Any]]:
-    """Union of quirks across every fingerprint in the list."""
     out: List[Dict[str, Any]] = []
     seen = set()
     for fp in fingerprints or []:

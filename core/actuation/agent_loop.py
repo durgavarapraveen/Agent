@@ -1,22 +1,3 @@
-"""
-ObjectiveAgentLoop — general, target-agnostic ReAct exploitation loop.
-
-Given an objective and an authorized target, the agent runs
-plan -> act -> observe -> reflect, using the full actuator toolkit (HTTP, JWT,
-encode/decode, upload, and a real browser). It works against ANY authorized URL —
-localhost, a deployed instance, or any in-scope host.
-
-Success detection is pluggable:
-  * `verifier` — an async callable returning True when the objective is met
-    (e.g. a benchmark oracle like Juice Shop's /api/Challenges). When present it is
-    the source of truth and its confirmations end the loop.
-  * otherwise the agent reports findings itself via the `report_finding` action;
-    those findings flow into the normal pipeline (critic / retest / reward) for
-    downstream verification.
-
-Every action is scope-validated inside the actuators, so the agent cannot touch a
-host outside the authorized scope.
-"""
 
 from __future__ import annotations
 
@@ -127,7 +108,6 @@ class ObjectiveAgentLoop:
         )
 
     async def _manual_guidance(self, objective: str, history: List[Dict[str, Any]]) -> str:
-        """Best-effort LLM summary of what was tried + how a human should continue."""
         if self.harness is None or not history:
             return ""
         try:
@@ -173,7 +153,6 @@ class ObjectiveAgentLoop:
 
     async def run(self, objective: str, hint: str = "", context: str = "",
                   category: str = "", record: bool = True, scan_id: str = "") -> Dict[str, Any]:
-        """Run the loop. Returns {success, steps, findings, history}. Feeds the review queue."""
         if self.harness is None:
             return {"success": False, "steps": 0, "findings": [], "history": []}
 

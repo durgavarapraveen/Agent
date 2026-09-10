@@ -1,11 +1,3 @@
-"""P1.15 — distinguish infrastructure layers (edge/proxy vs origin vs app).
-
-The logs show distinct layers (an edge/CDN/proxy in front of an origin
-application). A finding attributed to the wrong layer is misleading — a missing
-header at the edge is a different fix from one at the origin. This classifies a
-response's serving layer from generic, vendor-agnostic header signals so
-findings can be tagged ``infra_layer``.
-"""
 from __future__ import annotations
 
 from enum import Enum

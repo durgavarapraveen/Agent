@@ -1,33 +1,3 @@
-"""P1.1 — Unified ApplicationModel.
-
-Single source of truth for everything known about the target application.
-Merges discovery (AttackSurfaceState) and runtime (SharedContextV2) into
-one typed, thread-safe, event-driven model that every agent, analyzer,
-and reporter reads from.
-
-Structure:
-    ApplicationModel
-    ├── hosts            — discovered hosts / IPs
-    ├── services         — port/protocol/banner per host
-    ├── technologies     — tech stack per host
-    ├── endpoints        — HTTP/WS/GraphQL endpoints
-    ├── parameters       — per-endpoint input vectors
-    ├── schemas          — response/request shape models
-    ├── identities       — credential sets / user personas
-    ├── roles            — RBAC / privilege tiers
-    ├── sessions         — authenticated session state
-    ├── resources        — protected data objects
-    ├── workflows        — multi-step business flows
-    ├── state_transitions — observed state machine edges
-    ├── trust_boundaries — network/auth/privilege lines
-    ├── data_flows       — data movement between components
-    ├── client_sinks     — browser-side injection points
-    ├── server_sinks     — server-side injection points
-    ├── dependencies     — external services / third-party
-    ├── caches           — caching layers observed
-    ├── queues           — async processing observed
-    └── security_invariants — rules that must always hold
-"""
 from __future__ import annotations
 
 import logging
@@ -128,7 +98,7 @@ class StateTransition:
 class TrustBoundary:
     boundary_id: str
     name: str
-    boundary_type: str  # network, auth, privilege, process, data
+    boundary_type: str
     from_zone: str = ""
     to_zone: str = ""
     crossing_endpoints: List[str] = field(default_factory=list)
@@ -153,7 +123,7 @@ class DataFlow:
 @dataclass
 class SinkInfo:
     sink_id: str
-    sink_type: str  # xss, redirect, eval, innerHTML, sql, command, file, template, ...
+    sink_type: str
     location: str
     endpoint_id: str = ""
     parameter_name: str = ""
@@ -170,7 +140,7 @@ class SinkInfo:
 class DependencyInfo:
     dep_id: str
     name: str
-    dep_type: str  # api, cdn, saas, database, storage, auth_provider, ...
+    dep_type: str
     url: str = ""
     host: str = ""
     version: str = ""
@@ -181,7 +151,7 @@ class DependencyInfo:
 @dataclass
 class CacheInfo:
     cache_id: str
-    cache_type: str  # cdn, reverse_proxy, application, browser, ...
+    cache_type: str
     location: str
     headers_observed: Dict[str, str] = field(default_factory=dict)
     cacheable_endpoints: List[str] = field(default_factory=list)
@@ -191,7 +161,7 @@ class CacheInfo:
 @dataclass
 class QueueInfo:
     queue_id: str
-    queue_type: str  # message_queue, job_queue, webhook, event_stream, ...
+    queue_type: str
     name: str = ""
     endpoint_ids: List[str] = field(default_factory=list)
     source: str = "unknown"
@@ -201,10 +171,10 @@ class QueueInfo:
 class SecurityInvariant:
     invariant_id: str
     description: str
-    invariant_type: str  # auth, access_control, data_integrity, rate_limit, ...
+    invariant_type: str
     check_fn_name: str = ""
     endpoint_ids: List[str] = field(default_factory=list)
-    status: str = "active"  # active, violated, unverified
+    status: str = "active"
     violations: List[Dict[str, Any]] = field(default_factory=list)
     source: str = "unknown"
 
@@ -230,12 +200,6 @@ EventListener = Callable[[ModelEvent, str, Any], None]
 
 
 class ApplicationModel:
-    """Unified live model of the target application.
-
-    Thread-safe: all mutations go through ``_lock``.
-    Event-driven: register listeners via ``on()`` to react to changes.
-    Singleton-per-scan: use ``get()`` / ``reset_for_tests()``.
-    """
 
     _instance: Optional[ApplicationModel] = None
     _instance_lock = threading.Lock()
@@ -500,7 +464,6 @@ class ApplicationModel:
     # ── Hydration from SharedContextV2 ──
 
     def hydrate_from_shared_context(self, ctx: Any) -> None:
-        """Populate the model from an existing SharedContextV2 instance."""
         if hasattr(ctx, "target") and ctx.target:
             self.target = ctx.target
             try:

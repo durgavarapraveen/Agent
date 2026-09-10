@@ -1,7 +1,3 @@
-"""
-API Schema Auto-Importer — discovers and parses OpenAPI/Swagger/GraphQL schemas
-to seed the endpoint inventory without relying solely on crawling.
-"""
 
 import json
 import logging
@@ -35,7 +31,6 @@ GRAPHQL_INTROSPECTION_QUERY = '{"query":"{ __schema { types { name kind fields {
 
 
 class APISchemaImporter:
-    """Discovers and imports API schemas from OpenAPI/Swagger/GraphQL endpoints."""
 
     def __init__(self, target: str, timeout: int = 15, artifacts=None):
         self.target = target.rstrip("/")
@@ -55,12 +50,6 @@ class APISchemaImporter:
             return []
 
     def _fetch(self, url: str) -> Tuple[int, str]:
-        """Fetch a URL via curl in Kali container.
-
-        Uses shlex.quote to escape the URL — previously the URL was interpolated
-        raw into a shell command via f-string, which was a shell-injection sink
-        if `target` (or a discovered URL fragment) contained shell metachars.
-        """
         import shlex
         from agents.kali_executor import KaliDockerExecutor
         safe_url = shlex.quote(url)
@@ -93,7 +82,6 @@ class APISchemaImporter:
         return status, body
 
     def _fetch_post(self, url: str, data: str, content_type: str = "application/json") -> Tuple[int, str]:
-        """POST request via curl. Quotes URL and body via shlex."""
         import shlex
         from agents.kali_executor import KaliDockerExecutor
         safe_url = shlex.quote(url)
@@ -128,8 +116,6 @@ class APISchemaImporter:
         return status, body
 
     def discover_openapi(self) -> Optional[Dict]:
-        """Consume already-discovered OpenAPI/Swagger artifacts first, then probe
-        common spec paths (P1.3)."""
         candidates: List[str] = []
         for u in self._registered_urls("OPENAPI", "SWAGGER"):
             if u:
@@ -167,7 +153,6 @@ class APISchemaImporter:
         return None
 
     def _is_openapi_spec(self, spec: dict) -> bool:
-        """Check if a JSON object looks like an OpenAPI/Swagger spec."""
         if not isinstance(spec, dict):
             return False
         return bool(
@@ -177,7 +162,6 @@ class APISchemaImporter:
         )
 
     def discover_graphql(self) -> Optional[Dict]:
-        """Probe for GraphQL introspection endpoints."""
         for path in GRAPHQL_PATHS:
             url = f"{self.target}{path}"
             status, body = self._fetch_post(url, GRAPHQL_INTROSPECTION_QUERY)
@@ -198,7 +182,6 @@ class APISchemaImporter:
         return None
 
     def parse_openapi(self, spec: Dict) -> List[Dict]:
-        """Parse OpenAPI/Swagger spec into endpoint dicts."""
         from core.domain.parameter import ParameterType
 
         base_url = self.target
@@ -297,7 +280,6 @@ class APISchemaImporter:
         return endpoints
 
     def parse_graphql(self, introspection: Dict) -> List[Dict]:
-        """Parse GraphQL introspection result into endpoint entries."""
         schema = introspection.get("data", {}).get("__schema", {})
         types = schema.get("types", [])
 
@@ -350,7 +332,6 @@ class APISchemaImporter:
         return endpoints
 
     def _resolve_ref(self, spec: Dict, ref: str) -> Optional[Dict]:
-        """Resolve a JSON $ref pointer like #/components/schemas/User."""
         if not ref.startswith("#/"):
             return None
         parts = ref[2:].split("/")
@@ -363,7 +344,6 @@ class APISchemaImporter:
         return node if isinstance(node, dict) else None
 
     def _extract_schema_params(self, spec: Dict, schema: Dict, prefix: str = "") -> List[Dict]:
-        """Extract parameters from a JSON Schema object."""
         params = []
         if not isinstance(schema, dict):
             return params
@@ -395,7 +375,6 @@ class APISchemaImporter:
         return params
 
     def _graphql_type_name(self, type_obj: Dict) -> str:
-        """Extract readable type name from GraphQL introspection type."""
         if not isinstance(type_obj, dict):
             return "String"
         name = type_obj.get("name")
@@ -407,7 +386,6 @@ class APISchemaImporter:
         return type_obj.get("kind", "String")
 
     def to_domain_endpoints(self) -> list:
-        """Convert parsed endpoints to domain Endpoint objects."""
         from core.domain.endpoint import Endpoint
         from core.domain.parameter import Parameter, ParameterType
 
@@ -444,7 +422,6 @@ class APISchemaImporter:
         return domain_eps
 
     def import_all(self) -> List[Dict]:
-        """Run full discovery: try OpenAPI first, then GraphQL."""
         spec = self.discover_openapi()
         if spec:
             return self.parse_openapi(spec)

@@ -1,18 +1,3 @@
-"""Attacker-critic two-LLM loop for custom probes.
-
-Wraps `run_custom_probe` calls with a critique step:
-
-  1. Attacker proposes probe → critic scores {viability 0-1, will_be_blocked_by,
-     revised_payload}
-  2. If viability < 0.5 or a WAF/rate-limit issue is spotted, use the revised
-     payload.
-  3. Execute.
-  4. If response looks blocked (403/406/429/challenge page), one refinement
-     pass: critic proposes a bypass tamper, retry.
-
-Kept off by default to avoid slowing every probe — enable per-scan with the
-env `ADVERSARIAL_CRITIC=1` or programmatically at high-value phases.
-"""
 from __future__ import annotations
 import asyncio
 import json
@@ -111,7 +96,6 @@ async def _critic_llm(prompt: str) -> Optional[Dict]:
 
 
 async def critique_and_run(probe_args: Dict, ctx, tracker=None) -> str:
-    """Drop-in wrapper for run_custom_probe with critic pre/post-passes."""
     from core.exploitation.custom_probe import run_custom_probe
     if not enabled():
         return await run_custom_probe(probe_args, ctx, tracker)

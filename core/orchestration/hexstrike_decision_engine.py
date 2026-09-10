@@ -6,7 +6,6 @@ from enum import Enum
 from typing import Dict, Any, List, Optional, Set
 
 class TargetType(Enum):
-    """Enumeration of different target types for intelligent analysis"""
     WEB_APPLICATION = "web_application"
     NETWORK_HOST = "network_host"
     API_ENDPOINT = "api_endpoint"
@@ -16,7 +15,6 @@ class TargetType(Enum):
     UNKNOWN = "unknown"
 
 class TechnologyStack(Enum):
-    """Common technology stacks for targeted testing"""
     APACHE = "apache"
     NGINX = "nginx"
     IIS = "iis"
@@ -35,7 +33,6 @@ class TechnologyStack(Enum):
 
 @dataclass
 class TargetProfile:
-    """Comprehensive target analysis profile for intelligent decision making"""
     target: str
     target_type: TargetType = TargetType.UNKNOWN
     ip_addresses: List[str] = field(default_factory=list)
@@ -73,7 +70,6 @@ class TargetProfile:
 
 @dataclass
 class AttackStep:
-    """Individual step in an attack chain"""
     tool: str
     parameters: Dict[str, Any]
     expected_outcome: str
@@ -82,7 +78,6 @@ class AttackStep:
     dependencies: List[str] = field(default_factory=list)
 
 class AttackChain:
-    """Represents a sequence of attacks for maximum impact"""
     def __init__(self, target_profile: TargetProfile):
         self.target_profile = target_profile
         self.steps: List[AttackStep] = []
@@ -126,7 +121,6 @@ class AttackChain:
         }
 
 class IntelligentDecisionEngine:
-    """AI-powered tool selection and parameter optimization engine from HexStrike"""
 
     def __init__(self):
         self.tool_effectiveness = self._initialize_tool_effectiveness()

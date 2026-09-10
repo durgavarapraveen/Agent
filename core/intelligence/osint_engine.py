@@ -1,12 +1,3 @@
-"""
-OSINT Engine (Weeks 13-14)
-Autonomous reconnaissance module for:
-- Employee enumeration (LinkedIn, company websites)
-- Public code repository scanning (GitHub, GitLab, Bitbucket)
-- DNS/Mail server intelligence (MX, SPF, DKIM, DMARC analysis)
-
-Accepts objectives from central_brain and spawns specialized agents.
-"""
 
 import json
 import logging
@@ -24,32 +15,29 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Employee:
-    """Employee record from OSINT."""
     name: str
     email: str
     role: str
     domain: str
-    source: str  # linkedin, company_website, email_pattern_inference
-    confidence: float  # 0-1
+    source: str
+    confidence: float
     discovered_date: str
 
 
 @dataclass
 class LeakedCredential:
-    """Leaked credential from public sources."""
     username: str
     email: Optional[str]
     password: Optional[str]
     service: str  # github, bitbucket, docker registry, etc
     found_in_repo: str  # repo path
-    severity: str  # critical, high, medium
+    severity: str
     url: str  # link to evidence
     discovered_date: str
 
 
 @dataclass
 class DomainIntelligence:
-    """DNS and mail server intelligence."""
     domain: str
     mx_records: List[str]  # Mail servers
     spf_policy: Optional[str]
@@ -62,13 +50,11 @@ class DomainIntelligence:
 
 
 class OSINTDatabase:
-    """PostgreSQL database for OSINT findings."""
 
     def __init__(self):
         self._init_db()
 
     def _init_db(self):
-        """Initialize database schema in PostgreSQL."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -135,7 +121,6 @@ class OSINTDatabase:
             logger.error(f"OSINTDatabase init failed: {e}")
 
     def save_employee(self, employee: Employee) -> bool:
-        """Save discovered employee."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -155,7 +140,6 @@ class OSINTDatabase:
             return False
 
     def save_credential(self, cred: LeakedCredential) -> bool:
-        """Save leaked credential."""
         try:
             pwd_hash = hashlib.sha256(cred.password.encode()).hexdigest() if cred.password else None
             with DatabaseManager.get_connection() as conn:
@@ -175,7 +159,6 @@ class OSINTDatabase:
             return False
 
     def save_domain_intel(self, intel: DomainIntelligence) -> bool:
-        """Save domain intelligence."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -199,7 +182,6 @@ class OSINTDatabase:
             return False
 
     def get_employees(self, domain: Optional[str] = None) -> List[Employee]:
-        """Retrieve employees."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -221,7 +203,6 @@ class OSINTDatabase:
             return []
 
     def get_credentials(self, severity: Optional[str] = None) -> List[LeakedCredential]:
-        """Retrieve leaked credentials."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -244,7 +225,6 @@ class OSINTDatabase:
             return []
 
     def count_employees(self, domain: Optional[str] = None) -> int:
-        """Count employees."""
         try:
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -259,14 +239,12 @@ class OSINTDatabase:
 
 
 class EmployeeEnumerator:
-    """Employee discovery from multiple sources."""
 
     def __init__(self, db: OSINTDatabase):
         self.db = db
         self.discovered_emails: Set[str] = set()
 
     async def enumerate_from_company_site(self, domain: str) -> List[Employee]:
-        """Extract employee info from company website."""
         employees = []
         logger.info(f"[EmployeeEnumerator] Scanning {domain} for employee info...")
         
@@ -318,7 +296,6 @@ class EmployeeEnumerator:
         return employees
 
     async def extract_email_patterns(self, domain: str, sample_emails: List[str]) -> Dict[str, float]:
-        """Extract email pattern from known employee emails."""
         patterns = {}
         
         if not sample_emails:
@@ -327,9 +304,6 @@ class EmployeeEnumerator:
         logger.info(f"[EmployeeEnumerator] Analyzing email patterns from {len(sample_emails)} samples...")
         
         # Extract common patterns
-        # firstname.lastname@domain.com
-        # f.lastname@domain.com
-        # firstnamelastname@domain.com
         # etc.
         
         for email in sample_emails:
@@ -352,7 +326,6 @@ class EmployeeEnumerator:
 
     async def infer_employee_emails(self, domain: str, names: List[str], 
                                    patterns: Dict[str, float]) -> List[Employee]:
-        """Infer potential employee emails from names and patterns."""
         inferred_employees = []
         logger.info(f"[EmployeeEnumerator] Inferring emails for {len(names)} names using patterns...")
         
@@ -390,10 +363,8 @@ class EmployeeEnumerator:
 
 
 class GitHubScanner:
-    """GitHub repository scanning for credentials and endpoints."""
 
     async def scan_repository(self, org_or_user: str, repo: str) -> List[LeakedCredential]:
-        """Scan GitHub repo for hardcoded credentials."""
         credentials = []
         logger.info(f"[GitHubScanner] Scanning {org_or_user}/{repo}...")
         
@@ -432,7 +403,7 @@ class GitHubScanner:
                         cred = LeakedCredential(
                             username=secret_type,
                             email=None,
-                            password=secret_value[:20] + "...",  # Truncate in logs
+                            password=secret_value[:20] + "...",
                             service="github",
                             found_in_repo=f"{org_or_user}/{repo}:{file_path}",
                             severity="critical",
@@ -448,7 +419,6 @@ class GitHubScanner:
         return credentials
 
     async def find_organization_repos(self, org_name: str) -> List[str]:
-        """Find public repositories for an organization or user with search fallback."""
         repos = []
         logger.info(f"[GitHubScanner] Discovering repos for organization: {org_name}...")
         
@@ -491,10 +461,8 @@ class GitHubScanner:
 
 
 class DNSMailIntelligence:
-    """DNS and mail server intelligence gathering."""
 
     async def analyze_domain(self, domain: str) -> DomainIntelligence:
-        """Analyze domain's mail and DNS infrastructure."""
         logger.info(f"[DNSMailIntelligence] Analyzing {domain}...")
         
         intel = DomainIntelligence(
@@ -563,7 +531,6 @@ class DNSMailIntelligence:
 
 
 class OSINTEngine:
-    """Main OSINT orchestrator."""
 
     def __init__(self):
         self.db = OSINTDatabase()
@@ -572,7 +539,6 @@ class OSINTEngine:
         self.dns_intel = DNSMailIntelligence()
 
     async def run_full_osint(self, domain: str, company_name: str) -> Dict:
-        """Execute complete OSINT reconnaissance."""
         logger.info(f"[OSINTEngine] Starting full OSINT for {domain} ({company_name})...")
         
         results = {
@@ -610,7 +576,6 @@ class OSINTEngine:
         return results
 
     def generate_osint_summary(self) -> Dict:
-        """Generate summary of all OSINT findings."""
         total_employees = self.db.count_employees()
         credentials = self.db.get_credentials()
         

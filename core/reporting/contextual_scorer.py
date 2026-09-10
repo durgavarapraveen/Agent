@@ -1,8 +1,3 @@
-"""
-Automated CVSS Scoring & Contextualization Module (Phase 2 Module 2.2).
-Parses CVSS v3.1 vectors, computes contextual business & exploit risk adjustments,
-enforces custom score overrides, and logs immutable hash-chain audit entries.
-"""
 
 import csv
 import hashlib
@@ -50,7 +45,6 @@ def check_exploit_availability(cve_id: str, csv_path: str = "exploit_availabilit
 
 
 class ContextualScorer:
-    """Computes contextual risk scores and maintains immutable hash-chain override audit log."""
 
     def __init__(self, db_path: str = None, overrides_path: str = "overrides.json", audit_log_path: str = "audit_overrides.hashlog"):
         if not os.path.exists(overrides_path) and os.path.exists(os.path.join("data", overrides_path)):

@@ -1,15 +1,3 @@
-"""
-Tool argument validation (Phase 13).
-
-Validates tool invocation requests BEFORE execution:
-1. Tool exists
-2. Capability exists
-3. Required arguments exist
-4. Target is normalized
-5. Target is in scope
-6. Arguments match tool schema
-7. Resource/risk budget allows execution
-"""
 from __future__ import annotations
 
 import logging
@@ -32,13 +20,6 @@ class ToolArgumentValidator:
         self._scope = scope_manager
 
     def _resolve_tool(self, tool_name: str):
-        """Look up a tool across the registry APIs actually in use.
-
-        ToolRegistry exposes get(name) + a `tools` dict and a validated
-        `available_tools` dict. Older call sites assumed get_tool()/
-        get_all_available_tools(); support both so validation never
-        silently rejects everything.
-        """
         reg = self._registry
         for getter in ("get_tool", "get"):
             fn = getattr(reg, getter, None)
@@ -73,7 +54,6 @@ class ToolArgumentValidator:
                  args: Dict[str, Any],
                  capability: str = "",
                  required_args: Optional[List[str]] = None) -> None:
-        """Validate tool invocation. Raises ToolArgumentValidationError on failure."""
 
         if self._registry and tool_name:
             tool = self._resolve_tool(tool_name)

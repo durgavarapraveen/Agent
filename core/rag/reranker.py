@@ -1,16 +1,3 @@
-"""
-Cross-encoder re-ranker for two-stage retrieval.
-
-Stage 1: pgvector returns top ~20 candidates (fast, approximate).
-Stage 2: this module scores each (query, doc) pair with a cross-encoder
-that reads both together and returns a real relevance score.
-
-Order of preference:
-  1. Cohere Rerank API      (COHERE_API_KEY set)
-  2. Local BGE cross-encoder (sentence-transformers CrossEncoder,
-                              model=BAAI/bge-reranker-base, ~280 MB)
-  3. Identity pass-through   (returns input order unchanged)
-"""
 
 from __future__ import annotations
 
@@ -50,7 +37,6 @@ def _load_cross_encoder():
 
 
 class Reranker:
-    """Two-stage retrieval re-ranker."""
 
     def __init__(self):
         self.cohere_key = os.getenv("COHERE_API_KEY", "").strip()
@@ -58,12 +44,6 @@ class Reranker:
 
     async def rerank(self, query: str, docs: List[Dict[str, Any]],
                      top_k: int = 5) -> List[Dict[str, Any]]:
-        """Return the top_k most relevant docs, re-scored.
-
-        Each input doc should have a 'content' key. A 'rerank_score' key is
-        added to each returned doc. Falls through to input order on any
-        failure so retrieval never breaks.
-        """
         if not docs:
             return []
         if len(docs) <= top_k and len(docs) <= 3:

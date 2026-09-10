@@ -1,14 +1,3 @@
-"""
-Local semantic embedder using sentence-transformers all-MiniLM-L6-v2.
-
-Replaces the MD5 hash-bag fallback with true semantic embeddings.
-Model is ~80 MB, runs on CPU, produces 384-dim vectors.
-
-Loaded lazily: first call downloads/loads the model. Downstream code must
-distinguish 384-dim local vectors from 1536-dim API vectors — the pipeline
-stores them in a separate `embedding_local vector(384)` column and queries
-whichever column matches the active embedder path.
-"""
 
 from __future__ import annotations
 
@@ -77,7 +66,6 @@ def _load_model():
 
 
 class LocalSemanticEmbedder:
-    """Thin wrapper around sentence-transformers MiniLM."""
 
     dimension = LOCAL_DIMENSION
 

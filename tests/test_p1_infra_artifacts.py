@@ -1,4 +1,3 @@
-"""P1.3 (ArtifactRegistry handoff), P1.8 (env profile), P1.15 (infra layer)."""
 import pytest
 
 
