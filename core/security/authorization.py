@@ -28,19 +28,21 @@ class TargetScopeValidator:
     """Centralized target scope validator singleton"""
 
     _instance: Optional['TargetScopeValidator'] = None
+    _lock = __import__("threading").RLock()
 
     @classmethod
     def get(cls) -> 'TargetScopeValidator':
-        if cls._instance is None:
-            # Fallback default target if validator has not been set yet
-            from core.common.config import get_config
-            target = get_config().get("TARGET", "example.com")
-            cls._instance = cls([target])
-        return cls._instance
+        with cls._lock:
+            if cls._instance is None:
+                from core.common.config import get_config
+                target = get_config().get("TARGET", "example.com")
+                cls._instance = cls([target])
+            return cls._instance
 
     @classmethod
     def set(cls, validator: 'TargetScopeValidator') -> None:
-        cls._instance = validator
+        with cls._lock:
+            cls._instance = validator
 
     def __init__(self, authorized_targets: List[str]):
         self.authorized_scope = [

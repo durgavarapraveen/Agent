@@ -136,7 +136,8 @@ class ScopeAuthority:
             if self._target_scope_validator is not None:
                 checks_run += 1
                 try:
-                    ok = bool(self._target_scope_validator.validate(target))
+                    self._target_scope_validator.validate(target)
+                    ok = True  # validate() raises on denial, returns None on success
                 except Exception as e:
                     logger.warning("ScopeAuthority: TargetScopeValidator raised %s; failing closed", e)
                     return False
@@ -176,7 +177,9 @@ class ScopeAuthority:
         if hasattr(sm, "validate_url"):
             candidate = target if "://" in target else "http://" + target
             return bool(sm.validate_url(candidate))
-        return True
+        # Unknown interface — fail-closed per platform contract.
+        logger.warning("ScopeAuthority: ScopeManager has no validate_url; failing closed")
+        return False
 
     def _consult_legal(self, target: str) -> bool:
         lv = self._legal_validator
@@ -184,8 +187,9 @@ class ScopeAuthority:
             return bool(lv.is_target_authorized(target))
         if hasattr(lv, "validate"):
             return bool(lv.validate(target))
-        # Legal validator with an unknown interface — don't block.
-        return True
+        # Unknown interface — fail-closed per platform contract.
+        logger.warning("ScopeAuthority: LegalValidator has unknown interface; failing closed")
+        return False
 
     @staticmethod
     def _extract_host(target: str) -> str:

@@ -36,6 +36,10 @@ jobs:
         run: |
           ruff check --output-format=github .
 
+      - name: Architecture inventory staleness check
+        run: |
+          python scripts/inventory_generator.py --check
+
   unit-tests:
     name: Pytest
     runs-on: ubuntu-latest

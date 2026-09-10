@@ -158,11 +158,24 @@ class PolicyEngine:
 
     def __init__(self, audit: Optional[PolicyAuditLogger] = None):
         self._audit = audit or PolicyAuditLogger()
+        from core.security.platform_contract import get_contract
+        self._contract = get_contract()
 
     # ── helpers ──────────────────────────────────────────────────────────
 
     def _emit(self, decision: PolicyDecision) -> PolicyDecision:
         self._audit.log(decision)
+        try:
+            from core.security.platform_contract import _log_enforcement, EnforcementRecord
+            _log_enforcement(EnforcementRecord(
+                rule=f"policy.{decision.action}",
+                passed=decision.allowed,
+                detail=decision.reason,
+                caller="PolicyEngine",
+                context={"target": decision.target, "reason_code": decision.reason_code},
+            ))
+        except Exception:
+            pass
         return decision
 
     def _get_target_scope_validator(self):

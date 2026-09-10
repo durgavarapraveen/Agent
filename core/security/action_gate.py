@@ -78,7 +78,7 @@ class ActionGate:
                 if not TargetScopeValidator.get().is_authorized(host):
                     return GateDecision(False, "scope", f"host {host} out of scope")
             except Exception as e:
-                logger.debug(f"[ActionGate] scope check skipped: {e}")
+                return GateDecision(False, "scope", f"scope check failed (fail-closed): {e}")
 
         # 3) PRECONDITION — light sanity: http-family ops need an http(s) target.
         http_ops = {"http_analysis", "xss_scanning", "sql_injection",

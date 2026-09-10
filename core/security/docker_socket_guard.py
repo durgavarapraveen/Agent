@@ -64,7 +64,7 @@ def check_socket_mount() -> SocketGuardResult:
     return SocketGuardResult(safe=True, reason="no socket detected")
 
 
-def enforce_no_socket(fail_hard: bool = False) -> SocketGuardResult:
+def enforce_no_socket(fail_hard: bool = True) -> SocketGuardResult:
     result = check_socket_mount()
     if not result.safe:
         msg = f"[P0.10] Docker socket violation: {result.reason}"

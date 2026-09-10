@@ -9,12 +9,17 @@ This module is the "enforce reality" side. Every operational check the
 LLM must NOT re-decide lives here: scope, tool health, exit status,
 rate limits, WAF mode, timeouts, duplicate suppression, state
 transitions, whether an endpoint was already tested.
+
+Fail-closed per platform contract: if a dependency is missing, deny.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 class DecisionOwner(str, Enum):
@@ -53,11 +58,19 @@ def who_decides(topic: str) -> DecisionOwner:
     return DecisionOwner.LLM  # default to reasoning if unknown
 
 
+def _fail_closed_import(topic: str, module: str, exc: Exception) -> PolicyVerdict:
+    """Platform contract: missing dependency = deny, not allow."""
+    logger.warning("[decisions.policy_engine] %s: %s unavailable (%s), failing closed", topic, module, exc)
+    return PolicyVerdict(False, f"{module} unavailable (fail-closed per platform contract): {exc}")
+
+
 def enforce(topic: str, ctx: Dict[str, Any]) -> PolicyVerdict:
     """Deterministic gate for a single decision topic.
 
     Returns PolicyVerdict.allow=False whenever an operational rule
     forbids the action, regardless of what the LLM proposes.
+
+    Fail-closed: missing dependencies deny rather than silently allow.
     """
     t = (topic or "").lower()
 
@@ -72,8 +85,8 @@ def enforce(topic: str, ctx: Dict[str, Any]) -> PolicyVerdict:
     if t == "waf_mode":
         try:
             from core.adaptation.waf_state import get_waf_state, WafMode
-        except Exception:
-            return PolicyVerdict(True)
+        except Exception as e:
+            return _fail_closed_import(t, "core.adaptation.waf_state", e)
         mode = get_waf_state().mode_for(ctx.get("target", ""))
         category = (ctx.get("tool_category") or "").lower()
         if not get_waf_state().is_tool_allowed(ctx.get("target", ""), category):
@@ -85,8 +98,8 @@ def enforce(topic: str, ctx: Dict[str, Any]) -> PolicyVerdict:
     if t == "duplicate_suppression":
         try:
             from core.knowledge.freshness import get_freshness
-        except Exception:
-            return PolicyVerdict(True)
+        except Exception as e:
+            return _fail_closed_import(t, "core.knowledge.freshness", e)
         if get_freshness().has_fresh_result(ctx.get("target", ""),
                                             ctx.get("operation", "")):
             return PolicyVerdict(False,
@@ -97,8 +110,8 @@ def enforce(topic: str, ctx: Dict[str, Any]) -> PolicyVerdict:
     if t == "tool_health":
         try:
             from core.tools.tool_health import get_health_manager
-        except Exception:
-            return PolicyVerdict(True)
+        except Exception as e:
+            return _fail_closed_import(t, "core.tools.tool_health", e)
         health = get_health_manager().status_of(ctx.get("tool", ""))
         if health and not health.is_available():
             return PolicyVerdict(False,
@@ -109,8 +122,8 @@ def enforce(topic: str, ctx: Dict[str, Any]) -> PolicyVerdict:
     if t == "timeout_enforcement":
         try:
             from core.tools.timeout_classes import budget_for
-        except Exception:
-            return PolicyVerdict(True)
+        except Exception as e:
+            return _fail_closed_import(t, "core.tools.timeout_classes", e)
         budget = budget_for(ctx.get("class", "standard"))
         elapsed = float(ctx.get("elapsed_seconds", 0))
         if elapsed >= budget:

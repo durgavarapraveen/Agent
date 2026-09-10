@@ -222,7 +222,7 @@ class ExecutionController:
             if not decision.allowed:
                 return decision.reason
         except ImportError:
-            pass
+            return "policy engine unavailable (fail-closed per platform contract)"
         except Exception as e:
             return f"policy check error: {e}"
         return None

@@ -361,7 +361,9 @@ def validate_authored_code(code: str, name: str = "",
             result.blocked_reason = f"policy denied: {decision.reason}"
             return result
     except ImportError:
-        result.warnings.append("PolicyEngine unavailable — skipping policy check")
+        result.blocked = True
+        result.blocked_reason = "PolicyEngine unavailable (fail-closed per platform contract)"
+        return result
     except Exception as e:
         result.blocked = True
         result.blocked_reason = f"policy check error: {e}"
