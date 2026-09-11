@@ -418,6 +418,13 @@ class ScanRequest(BaseModel):
     allow_ambient_auth: bool = False
     phases: List[str] = Field(default_factory=list, max_length=16)
     credentials: List[dict] = Field(default_factory=list, max_length=32)
+    # Grey-box / mobile inputs (Phases 4.4 / 4.5). Paths are server-side (from the
+    # /api/uploads/scan-input endpoint); source_repo is a git URL. Passed to
+    # main.py as list args (no shell), so no injection surface.
+    mobile_app: str = Field(default="", max_length=1024)
+    ipa_app: str = Field(default="", max_length=1024)
+    source_repo: str = Field(default="", max_length=2048)
+    source_path: str = Field(default="", max_length=1024)
 
     @field_validator("target")
     @classmethod
@@ -710,7 +717,9 @@ def _run_scan_process(job_id: str, target: str, tier: str,
                       auto_approve: bool, skip_osint: bool, reset_dedup: bool,
                       resume: bool = False, phases: list = None,
                       credentials: dict = None, allow_shell_operators: bool = False,
-                      allow_ambient_auth: bool = False):
+                      allow_ambient_auth: bool = False,
+                      mobile_app: str = "", ipa_app: str = "",
+                      source_repo: str = "", source_path: str = ""):
     log_file = _scan_log_path(job_id)
     cmd = [sys.executable, str(BASE / "main.py"), "--target", target, "--tier", tier]
     if auto_approve:
@@ -723,6 +732,15 @@ def _run_scan_process(job_id: str, target: str, tier: str,
         cmd.append("--resume")
     if phases:
         cmd.extend(["--phases", ",".join(phases)])
+    # Grey-box / mobile inputs (Phases 4.4 / 4.5).
+    if mobile_app:
+        cmd.extend(["--mobile-app", mobile_app])
+    if ipa_app:
+        cmd.extend(["--ipa-app", ipa_app])
+    if source_repo:
+        cmd.extend(["--source-repo", source_repo])
+    if source_path:
+        cmd.extend(["--source-path", source_path])
     # Credentials must NEVER be passed as command-line arguments — argv is
     # world-readable via /proc/<pid>/cmdline and would echo through every
     # `/api/scans/job/{id}` response (see #046/#047). Instead we write them
@@ -1544,6 +1562,22 @@ def get_benchmarks():
         raise HTTPException(500, f"benchmarks unavailable: {e}")
 
 
+# ── Grey-box SAST↔DAST correlation (Phase 4.5) ──────────────────────────────
+@app.get("/api/scans/{scan_id}/sast-correlation")
+def get_sast_correlation(scan_id: str):
+    try:
+        from core.analysis.sast_bridge import load_correlation
+        data = load_correlation(scan_id)
+        if data is None:
+            return {"scan_id": scan_id, "available": False,
+                    "counts": {"confirmed": 0, "sast_only": 0, "dast_only": 0},
+                    "confirmed": [], "sast_only": [], "dast_only": [],
+                    "message": "No SAST run for this scan (use --source-repo / --source-path)."}
+        return {"available": True, **data}
+    except Exception as e:
+        raise HTTPException(500, f"sast correlation unavailable: {e}")
+
+
 # ── SCAN CHATBOT — LLM Q&A over this scan's collected data ─────────────────
 class ScanChatMessage(BaseModel):
     message: str
@@ -1937,7 +1971,9 @@ def run_scan(body: ScanRequest):
         kwargs={"phases": body.phases if body.phases else None,
                 "credentials": body.credentials if body.credentials else None,
                 "allow_shell_operators": body.allow_shell_operators,
-                "allow_ambient_auth": body.allow_ambient_auth},
+                "allow_ambient_auth": body.allow_ambient_auth,
+                "mobile_app": body.mobile_app, "ipa_app": body.ipa_app,
+                "source_repo": body.source_repo, "source_path": body.source_path},
         daemon=True,
     )
     t.start()
@@ -3147,6 +3183,40 @@ async def rag_ingest_uploaded(file: UploadFile = File(...), metadata: str = Form
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
+
+
+# ── Scan input upload — APK / IPA for mobile backend analysis (Phase 4.4) ───
+_ALLOWED_SCAN_UPLOAD_SUFFIXES = {".apk", ".ipa"}
+_MAX_SCAN_UPLOAD_BYTES = 300 * 1024 * 1024  # 300 MB
+
+@app.post("/api/uploads/scan-input")
+async def upload_scan_input(file: UploadFile = File(...)):
+    """Receive an APK/IPA to analyze, store it server-side under data/uploads/,
+    and return a path the scan can be launched with (`mobile_app` / `ipa_app`)."""
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in _ALLOWED_SCAN_UPLOAD_SUFFIXES:
+        raise HTTPException(400, f"unsupported file type '{suffix}' (allow: .apk, .ipa)")
+    uploads = BASE / "data" / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    dest = uploads / f"{uuid.uuid4().hex}{suffix}"
+    size = 0
+    with open(dest, "wb") as out:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > _MAX_SCAN_UPLOAD_BYTES:
+                out.close()
+                try:
+                    dest.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise HTTPException(413, "file too large (max 300MB)")
+            out.write(chunk)
+    kind = "ipa" if suffix == ".ipa" else "apk"
+    logger.info("scan-input uploaded: %s (%d bytes) → %s", file.filename, size, dest)
+    return {"path": str(dest), "kind": kind, "filename": file.filename, "size": size}
 
 
 @app.post("/api/rag/ingest/text")

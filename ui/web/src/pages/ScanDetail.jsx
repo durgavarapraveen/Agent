@@ -15,6 +15,7 @@ import RegressionPanel from "../components/RegressionPanel";
 import FixSuggestionsPanel from "../components/FixSuggestionsPanel";
 import AttackRecordingsPanel from "../components/AttackRecordingsPanel";
 import SurfaceDiffPanel from "../components/SurfaceDiffPanel";
+import SastPanel from "../components/SastPanel";
 import { OsintSection } from "../components/ReconPanel";
 import { methodColor } from "../components/utils";
 
@@ -54,6 +55,7 @@ export default function ScanDetail() {
     { id: "regressions", label: "Regressions" },
     { id: "diff", label: "Diff vs baseline" },
     { id: "surface-diff", label: "Surface Diff" },
+    { id: "sast", label: "Grey-box (SAST)" },
     { id: "post-exploit", label: "Post-Exploit" },
     { id: "recon", label: "Recon Data" },
     { id: "tool-outputs", label: "Tool Outputs" },
@@ -109,6 +111,7 @@ export default function ScanDetail() {
       {tab === "regressions" && <RegressionPanel scanId={scanId} />}
       {tab === "diff" && <ScanDiffPanel scanId={scanId} />}
       {tab === "surface-diff" && <SurfaceDiffPanel scanId={scanId} />}
+      {tab === "sast" && <SastPanel scanId={scanId} />}
       {tab === "post-exploit" && <PostExploitTab scanId={scanId} />}
       {tab === "recon" && <ReconPanel context={context} scanId={scanId} />}
       {tab === "tool-outputs" && <ToolOutputsTab scanId={scanId} />}

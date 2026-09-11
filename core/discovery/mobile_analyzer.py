@@ -157,6 +157,29 @@ class MobileAnalyzer:
         return self.analyze_extracted(out_dir, source=apk_path)
 
 
+def inject_endpoints_into_context(ctx: Any, urls: List[str],
+                                  source: str = "mobile_apk") -> int:
+    """Merge mobile-derived backend endpoints into a scan's shared context so
+    they are scanned like any other discovered endpoint. Scope enforcement still
+    applies at request time — out-of-scope hosts are blocked, not auto-authorized.
+    Returns the number of endpoints added."""
+    eps = [{"url": u, "method": "GET", "params": "", "source": source}
+           for u in (urls or []) if u]
+    if not eps:
+        return 0
+    if hasattr(ctx, "add_endpoints"):
+        try:
+            ctx.add_endpoints(eps, source=source)
+            return len(eps)
+        except Exception as e:
+            logger.debug("inject_endpoints: add_endpoints failed (%s); falling back", e)
+    cur = getattr(ctx, "endpoints", None)
+    if isinstance(cur, list):
+        cur.extend(eps)
+        return len(eps)
+    return 0
+
+
 def _dedup_secrets(secrets: List[Dict[str, str]]) -> List[Dict[str, str]]:
     seen, out = set(), []
     for s in secrets:
