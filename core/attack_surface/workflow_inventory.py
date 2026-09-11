@@ -2,7 +2,6 @@ from typing import List, Dict
 from core.domain.asset import Workflow
 from core.domain.request import CapturedRequest
 import logging
-import uuid
 
 logger = logging.getLogger(__name__)
 

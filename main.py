@@ -1,6 +1,7 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import sys, os
 from pathlib import Path
@@ -134,6 +135,47 @@ async def run_multi(targets: list, auth_file: str | None = None):
     await meta.run_all()
 
 
+def _analyze_mobile_apps(args) -> list:
+    """Phase 4.4: analyze an APK/IPA (if supplied) and return discovered backend
+    endpoint dicts. Guarded — never fails the run if analysis tools are absent."""
+    endpoints = []
+    apk = getattr(args, "mobile_app", "") or ""
+    ipa = getattr(args, "ipa_app", "") or ""
+    try:
+        if apk:
+            from core.discovery.mobile_analyzer import MobileAnalyzer
+            analysis = MobileAnalyzer().analyze(apk)
+            endpoints += analysis.to_endpoints()
+            logger.info("APK %s: %d endpoints, %d secrets, %d deeplinks (cert_pinning=%s)",
+                        apk, len(analysis.endpoints), len(analysis.secrets),
+                        len(analysis.deeplinks), analysis.cert_pinning)
+        if ipa:
+            from core.discovery.ipa_analyzer import IPAAnalyzer
+            analysis = IPAAnalyzer().analyze(ipa)
+            endpoints += analysis.to_endpoints()
+            logger.info("IPA %s: %d endpoints, %d secrets, %d deeplinks",
+                        ipa, len(analysis.endpoints), len(analysis.secrets),
+                        len(analysis.deeplinks))
+    except Exception as e:
+        logger.warning("Mobile app analysis failed: %s", e)
+    return endpoints
+
+
+def _run_sast(args) -> list:
+    """Phase 4.5: run grey-box SAST if --source-repo/--source-path given. Guarded
+    — returns [] and never fails the run when Semgrep/git are unavailable."""
+    repo = getattr(args, "source_repo", "") or ""
+    path = getattr(args, "source_path", "") or ""
+    if not (repo or path):
+        return []
+    try:
+        from core.analysis.sast_bridge import SastBridge
+        return SastBridge().analyze(source_path=path, source_repo=repo)
+    except Exception as e:
+        logger.warning("Grey-box SAST failed: %s", e)
+        return []
+
+
 def main():
     try:
         from core.security.anon_gate import enforce_or_die
@@ -192,7 +234,37 @@ Examples:
                          help="Schedule recurring scans every N hours (0 = disabled)")
     parser.add_argument("--sarif", action="store_true",
                          help="Also export findings in SARIF format to reports/findings.sarif")
+    parser.add_argument("--mobile-app", default="",
+                         help="Path to an Android .apk to analyze; discovered backend "
+                              "endpoints are fed into the scan (Phase 4.4)")
+    parser.add_argument("--ipa-app", default="",
+                         help="Path to an iOS .ipa to analyze for backend endpoints (Phase 4.4)")
+    parser.add_argument("--source-repo", default="",
+                         help="Grey-box: git URL of the target's source to run SAST on (Phase 4.5)")
+    parser.add_argument("--source-path", default="",
+                         help="Grey-box: local path to the target's source for SAST (Phase 4.5)")
+    parser.add_argument("--incremental", action="store_true",
+                         help="Incremental scan: diff against the saved attack-surface "
+                              "baseline and test only new/changed endpoints (Phase 6.2)")
     args = parser.parse_args()
+
+    if args.incremental:
+        os.environ["ANTIGRAVITY_INCREMENTAL"] = "1"
+        logger.info("Incremental scanning enabled — will diff against the saved baseline.")
+
+    # Phase 4.4: mobile app backend analysis — enrich scope with discovered endpoints.
+    mobile_endpoints = _analyze_mobile_apps(args)
+    if mobile_endpoints:
+        os.environ["ANTIGRAVITY_MOBILE_ENDPOINTS"] = json.dumps([e["url"] for e in mobile_endpoints])
+        logger.info("Mobile analysis surfaced %d backend endpoint(s) for the scan.",
+                    len(mobile_endpoints))
+
+    # Phase 4.5: grey-box SAST — findings correlated with DAST later in reporting.
+    sast_findings = _run_sast(args)
+    if sast_findings:
+        os.environ["ANTIGRAVITY_SAST_FINDINGS"] = json.dumps(sast_findings)
+        logger.info("SAST surfaced %d source finding(s) for SAST/DAST correlation.",
+                    len(sast_findings))
 
     if args.auto_approve:
         os.environ["AUTO_APPROVE_EXPLOITS"] = "true"

@@ -1,5 +1,5 @@
 import logging
-from core.identity.session_manager import SessionArtifact, SessionManager
+from core.identity.session_manager import SessionManager
 
 logger = logging.getLogger(__name__)
 

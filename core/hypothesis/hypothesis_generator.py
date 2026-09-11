@@ -1,6 +1,6 @@
 import logging
 import uuid
-from typing import List, Dict, Optional
+from typing import List, Optional
 from core.coverage.coverage_engine import CoverageEngine
 from core.attack_surface.graph import AttackSurfaceGraph
 from core.domain.hypothesis import SecurityHypothesis

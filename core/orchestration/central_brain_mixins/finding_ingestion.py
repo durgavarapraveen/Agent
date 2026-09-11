@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import Any
@@ -212,7 +211,7 @@ class FindingIngestionMixin:
             # P1-3: classify each subdomain with a lightweight heuristic
             # profile so the orchestrator can route to the right workflow.
             try:
-                from core.intelligence.asset_classifier import classify, AssetProfile, workflow_for
+                from core.intelligence.asset_classifier import classify, AssetProfile
                 asset_map = getattr(self.ctx, "asset_classes", None) or {}
                 for sub in discovered_subs:
                     prof = AssetProfile(host=sub, status_code=200, content_type="text/html",

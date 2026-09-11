@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from core.domain.endpoint import Endpoint
 from core.fuzzing.models import ToolResult, ToolStatus
 from core.fuzzing.adapters import SQLMapAdapter, NucleiAdapter, DalfoxAdapter

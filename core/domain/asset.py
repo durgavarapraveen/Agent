@@ -1,5 +1,5 @@
 from core.domain.base import DomainModel
-from typing import List, Optional
+from typing import List
 from pydantic import Field
 
 class Technology(DomainModel):

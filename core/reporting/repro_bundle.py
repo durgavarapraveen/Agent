@@ -2,8 +2,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 

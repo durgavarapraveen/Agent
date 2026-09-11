@@ -1,8 +1,5 @@
 from __future__ import annotations
-import json
 import logging
-from datetime import datetime
-from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +100,6 @@ class ReconContextMixin:
 
     def _write_live_results(self):
         try:
-            import json as _json
             subs = getattr(self.ctx, "subdomains", []) or []
             eps = getattr(self.ctx, "endpoints", []) or []
             ports = getattr(self.ctx, "ports", []) or []

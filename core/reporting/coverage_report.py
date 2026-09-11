@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from core.coverage.coverage_matrix import CoverageMatrix, CoverageState
 from core.findings.finding_store import FindingStore

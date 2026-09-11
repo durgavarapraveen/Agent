@@ -7,7 +7,6 @@ from core.domain.endpoint import Endpoint
 from core.domain.evidence import SecurityEvidence
 from typing import List, Dict, Optional
 from datetime import datetime
-import json
 import os
 
 logger = logging.getLogger(__name__)

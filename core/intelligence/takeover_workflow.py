@@ -4,7 +4,7 @@ import re
 import socket
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 
 class TakeoverStage(str, Enum):

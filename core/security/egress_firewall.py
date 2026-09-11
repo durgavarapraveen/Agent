@@ -5,7 +5,6 @@ import contextvars
 import ipaddress
 import logging
 import os
-import re
 import socket
 from typing import Iterable, List, Optional, Set
 from urllib.parse import urlparse

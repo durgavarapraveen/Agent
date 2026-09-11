@@ -7,9 +7,11 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import httpx
+
+from core.security.scoped_http import get_scoped_client  # scope-enforced client factory
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +152,8 @@ class AuthSessionManager:
                 ok = self._auth_static_cookie()
             elif t == "json":
                 ok = await self._auth_json_login()
+            elif t == "oauth":
+                ok = self._auth_oauth()
             else:
                 ok = await self._auth_form_login()
         except Exception as e:
@@ -164,6 +168,30 @@ class AuthSessionManager:
         else:
             logger.warning(f"[Auth] authentication failed via {t}")
         return ok
+
+    def _auth_oauth(self) -> bool:
+        """OAuth client-credentials (or refresh) via oauth_flows.OAuthClient.
+        Discovers endpoints from the issuer when configured, then stores the
+        access token as a bearer header. See core.authentication.oauth_flows."""
+        try:
+            from core.authentication.oauth_flows import OAuthClient, OAuthConfig
+        except Exception as e:
+            logger.warning("[Auth] oauth_flows unavailable: %s", e)
+            return False
+        cfg = OAuthConfig.from_env()
+        client = OAuthClient(cfg)
+        if cfg.issuer and not cfg.token_url:
+            client.discover()
+        if not cfg.token_url:
+            logger.warning("[Auth] OAuTH: no token_url/issuer configured")
+            return False
+        tokens = client.client_credentials()
+        hdrs = client.authorized_headers()
+        if hdrs:
+            self.headers.update(hdrs)
+            self._jwt_exp = _decode_jwt_exp(tokens.get("access_token", ""))
+            return True
+        return False
 
     def _auth_static_bearer(self) -> bool:
         if not self.config.token:
@@ -190,7 +218,7 @@ class AuthSessionManager:
             self.config.password_field: self.config.password,
             **self.config.extra_fields,
         }
-        async with httpx.AsyncClient(timeout=self.config.timeout, follow_redirects=True) as client:
+        async with get_scoped_client(timeout=self.config.timeout, follow_redirects=True) as client:
             resp = await client.post(self.config.login_url, data=data)
             for name, value in resp.cookies.items():
                 self.cookies[name] = value
@@ -208,7 +236,7 @@ class AuthSessionManager:
             self.config.password_field: self.config.password,
             **self.config.extra_fields,
         }
-        async with httpx.AsyncClient(timeout=self.config.timeout, follow_redirects=True) as client:
+        async with get_scoped_client(timeout=self.config.timeout, follow_redirects=True) as client:
             resp = await client.post(self.config.login_url, json=body)
             for name, value in resp.cookies.items():
                 self.cookies[name] = value
@@ -247,7 +275,7 @@ class AuthSessionManager:
         if not url:
             return self._authenticated
         try:
-            async with httpx.AsyncClient(timeout=self.config.timeout) as client:
+            async with get_scoped_client(timeout=self.config.timeout) as client:
                 resp = await client.get(url, headers=self.auth_headers())
                 return resp.status_code not in (401, 403)
         except Exception:
@@ -263,7 +291,7 @@ class AuthSessionManager:
     async def request(self, method: str, url: str, **kwargs) -> httpx.Response:
         await self.ensure_valid()
         headers = {**self.auth_headers(), **kwargs.pop("headers", {})}
-        async with httpx.AsyncClient(timeout=self.config.timeout, follow_redirects=True) as client:
+        async with get_scoped_client(timeout=self.config.timeout, follow_redirects=True) as client:
             resp = await client.request(method, url, headers=headers, **kwargs)
             if resp.status_code in (401, 403):
                 logger.info("[Auth] got 401/403 — re-authenticating and retrying once")

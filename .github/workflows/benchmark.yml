@@ -1,0 +1,38 @@
+name: Benchmarks (Juice Shop / DVWA / Token)
+
+# Weekly regression benchmark + on-demand. Scores are archived; alert on drops.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * 1"   # Mondays 05:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark-logic:
+    # Always-green unit tests for the benchmark catalog + scoring.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python -m pytest tests/test_p11_benchmarks.py -q
+
+  live-benchmark:
+    # Full scan against disposable targets; scores archived as an artifact.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run benchmark stack
+        run: docker compose -f docker-compose.benchmark.yml up --abort-on-container-exit --exit-code-from benchmark | tee benchmark.log
+        continue-on-error: true
+      - name: Archive scores
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-scores
+          path: benchmark.log
+          if-no-files-found: ignore

@@ -1,4 +1,4 @@
-from typing import List, Dict, Any
+from typing import List, Any
 from urllib.parse import parse_qs, urlparse
 from core.domain.parameter import Parameter, ParameterType
 from core.domain.request import CapturedRequest

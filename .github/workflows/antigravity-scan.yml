@@ -1,0 +1,55 @@
+name: AntiGravity Scan (Juice Shop)
+
+# Exercises the reusable action against a disposable OWASP Juice Shop instance.
+# Runs on demand and weekly; never against production.
+on:
+  workflow_dispatch:
+    inputs:
+      fail-on:
+        description: "Severity gate"
+        required: false
+        default: "critical"
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays 06:00 UTC
+
+permissions:
+  contents: read
+  security-events: write   # upload-sarif
+  pull-requests: write     # PR comment
+
+jobs:
+  scan-juice-shop:
+    runs-on: ubuntu-latest
+    services:
+      juiceshop:
+        image: bkimminich/juice-shop:latest
+        ports:
+          - 3000:3000
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wait for Juice Shop
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/ >/dev/null; then echo "up"; exit 0; fi
+            sleep 3
+          done
+          echo "Juice Shop did not become ready"; exit 1
+
+      - name: Run AntiGravity scan
+        uses: ./.github/actions/antigravity-scan
+        with:
+          target: "http://localhost:3000"
+          tier: "POC"
+          fail-on: ${{ github.event.inputs.fail-on || 'critical' }}
+          scan-id: "juiceshop-ci"
+
+      - name: Archive results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: antigravity-results
+          path: |
+            antigravity.sarif
+            antigravity-findings.json
+          if-no-files-found: ignore

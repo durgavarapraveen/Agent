@@ -68,7 +68,7 @@ from core.exploitation.poc_generator import POCGenerator
 
 from core.coverage.coverage_engine import CoverageEngine
 from core.coverage.catalog import SecurityTestCatalog
-from core.hypothesis import HypothesisGenerator, HypothesisRanker
+from core.hypothesis import HypothesisGenerator
 from core.convergence import ConvergenceEngine, CompletionValidator
 from core.learning import ExperienceLearner
 from core.decisions import DecisionGuardV2
@@ -99,13 +99,11 @@ from core.security.authorization_service import AuthorizationService, Authorizat
 from core.reasoning.reasoning_engine import ReasoningEngine
 
 # P1a — Experiment Model
-from core.domain.experiment import SecurityExperiment, ExperimentState
-from core.domain.task_state_machine import TaskStateMachine, TaskState
+from core.domain.experiment import SecurityExperiment
 from core.scheduling.experiment_scheduler import ExperimentScheduler as ExperimentSchedulerV2
 from core.scheduling.duplicate_detector import DuplicateDetector
 
 # P1b — Deterministic Executors
-from core.execution.executors.base import ExecutorBase, ExecutionResult as ExecutorResult, ExecutionStatus
 from core.execution.executors.authentication import AuthenticationExecutor
 from core.execution.executors.authorization import AuthorizationExecutor
 from core.execution.executors.sql_injection import SQLiExecutor
@@ -151,21 +149,14 @@ from core.execution.executors.differential_research import (
     DifferentialResearchExecutor, MetamorphicConsistencyExecutor,
     InvariantOracleExecutor,
 )
-from core.tools.tool_portfolio import ToolPortfolio
 
 # P1c — Evidence / Oracle / Finding
-from core.evidence.evidence import Evidence
-from core.evidence.oracle import (
-    DifferentialResponseOracle, ErrorSignatureOracle,
-    ReflectionOracle, TimingDifferenceOracle, DOMExecutionOracle,
-)
 from core.evidence.validator import EvidenceValidator
-from core.findings.finding import Finding as FindingV2, FindingState
 from core.findings.finding_state_machine import FindingStateMachine
 from core.findings.finding_store import FindingStore as FindingStoreV2
 
 # P2 — Coverage
-from core.coverage.security_test_catalog import SecurityTestCatalog as SecurityTestCatalogV2, build_default_catalog
+from core.coverage.security_test_catalog import build_default_catalog
 from core.coverage.applicability_engine import ApplicabilityEngine
 from core.coverage.coverage_matrix import CoverageMatrix, CoverageState
 from core.coverage.convergence_engine import ConvergenceEngine as ConvergenceEngineV2
@@ -176,7 +167,7 @@ from core.execution.execution_pipeline import ExecutionPipelineV2
 from core.reasoning.hypothesis_engine import HypothesisEngine
 from core.knowledge.knowledge_graph import KnowledgeGraph
 from core.reporting.coverage_report import CoverageReport
-from core.failure.failure_taxonomy import FailureClassifier, FailureType
+from core.failure.failure_taxonomy import FailureClassifier
 from core.recovery.recovery_policy import RecoveryPolicy, RetryAction
 
 # P4-P8 — Canonical pipeline modules
@@ -187,25 +178,24 @@ from core.coverage.feedback_loop import FeedbackLoopEngine
 from core.orchestration.parallel_executor import ParallelExecutor
 from core.orchestration.target_health_manager import TargetHealthManager
 from core.learning.structured_learning import StructuredLearningEngine
-from core.exploitation.exploit_chain import ExploitChain, POCGate
+from core.exploitation.exploit_chain import POCGate
 from core.reporting.canonical_reporter import CanonicalReporter
 from core.validation.tool_argument_validator import ToolArgumentValidator
 from core.attack_surface.spa_detector import SPADetector
 
 # ── Phase 2-10 hardening components ──
 from core.security.authorization_authority import AuthorizationAuthority, AuthorizationScope
-from core.security.execution_contract import ExecutionContract
 from core.security.connection_pinning import ConnectionPinning, EgressTelemetry
 from core.intelligence.application_model import ApplicationModel
 from core.knowledge.semantic_inference import SemanticInferenceEngine
-from core.identity.session_model import IdentityManager as SessionIdentityManager, SecretsVault
+from core.identity.session_model import IdentityManager as SessionIdentityManager
 from core.identity.authorization_matrix import AuthorizationMatrix, AccessTester
 from core.workflows.state_machine import WorkflowStateMachine
 from core.workflows.concurrency_engine import ConcurrencyEngine
 from core.coverage.hypothesis_ledger import HypothesisLedger
 from core.reasoning.typed_planner import TypedActionPlanner
 from core.evidence.evidence_graph import EvidenceGraph
-from core.evidence.oracle import OracleEngine, get_oracle_engine
+from core.evidence.oracle import get_oracle_engine
 from core.browser.browser_worker import BrowserWorker, BrowserSecurityPolicy
 
 # ── Phase 11-15 hardening components ──
@@ -233,11 +223,6 @@ from core.security.secret_lifecycle import SecretLifecycleManager
 from core.validation.readiness_gate import AutonomousReadinessGate, ReadinessStatus
 from core.security.deployment_architecture import DeploymentThreatModel, ServiceAccessController
 
-from core.workflows.browser_workflows import (
-    create_login_workflow, create_admin_workflow,
-    create_file_upload_workflow, create_csrf_workflow,
-    create_token_refresh_workflow,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -744,6 +729,10 @@ class CentralBrain(
 
         # ── Phase 6.2: Semantic Inference Engine ──
         self.semantic_inference = SemanticInferenceEngine()
+
+        # ── Phase 1.5: LLM semantic app understanding (business-domain layer) ──
+        from core.intelligence.app_understanding import AppUnderstandingEngine
+        self.app_understanding = AppUnderstandingEngine()
 
         # ── Phase 7.1: Identity/Session Model (vault-backed) ──
         self.session_identity_manager = SessionIdentityManager()
@@ -1638,6 +1627,25 @@ class CentralBrain(
         except Exception as _ste:
             logger.debug(f"[SpecialistTeam] Posting skipped: {_ste}")
 
+        # 6. Phase 1.5: Business-domain app understanding + test hypotheses.
+        # Uses the deterministic heuristic here (no network/LLM in the sync path);
+        # the LLM path can be run separately via app_understanding.analyze().
+        try:
+            if hasattr(self, "app_understanding") and self.app_understanding:
+                from core.intelligence.app_understanding import AppSignals
+                signals = AppSignals.from_context(self.ctx)
+                understanding = self.app_understanding.heuristic(signals)
+                specs = self.app_understanding.to_test_specs(
+                    understanding, base_endpoints=signals.endpoints[:50])
+                self.ctx.app_understanding = understanding.to_dict()
+                self.ctx.business_test_specs = specs
+                logger.info(
+                    f"[AppUnderstanding] domain={understanding.business_domain} "
+                    f"(conf={understanding.domain_confidence:.2f}), "
+                    f"{len(specs)} business-logic test specs generated")
+        except Exception as _aue:
+            logger.debug(f"[AppUnderstanding] skipped: {_aue}")
+
     def _sync_scanning_to_advanced_engines(self):
         """Synchronizes ACTIVE_SCANNING results to ResourceGovernor, DifferentialEngine, AnomalyPipeline, and SpecialistTeam."""
         # 1. Resource Governor
@@ -2141,7 +2149,6 @@ class CentralBrain(
                 from core.rag.pipeline import get_rag
                 rag = get_rag()
                 if rag:
-                    import asyncio
                     confirmed = [v for v in self.ctx.vulnerabilities
                                  if v.get("status") in ("CONFIRMED", "EXPLOITED")]
                     if confirmed:
@@ -3202,7 +3209,7 @@ class CentralBrain(
             # Strix Pattern #4: Auto-calculate confidence scores
             if self.ctx.vulnerabilities:
                 try:
-                    from core.scoring.confidence_scorer import ResponseSample, EvidenceType
+                    from core.scoring.confidence_scorer import ResponseSample
                     for v in self.ctx.vulnerabilities:
                         proof = str(v.get("proof", "") or v.get("evidence", "") or "")
                         payload = str(v.get("payload", "") or "")
@@ -4080,7 +4087,7 @@ class CentralBrain(
             ]) if task_history else "None yet"
 
             # Phase 33: Build structured state bundle for LLM decision-making
-            from core.orchestration.decision_pipeline import StructuredStateBuilder, DecisionValidator as V2DecisionValidator
+            from core.orchestration.decision_pipeline import StructuredStateBuilder
             v2_state = StructuredStateBuilder.build(
                 attack_surface=getattr(self.ctx, 'attack_surface', None),
                 target_health=getattr(self, 'target_health_manager', None),

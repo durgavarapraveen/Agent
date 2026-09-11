@@ -5,7 +5,6 @@ import logging
 import os
 import re
 from abc import ABC, abstractmethod
-from enum import Enum
 from typing import Optional, Dict, Any, List, Tuple
 
 import httpx

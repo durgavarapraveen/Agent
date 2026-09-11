@@ -8,13 +8,12 @@ expected value, not arbitrary loop counts.
 from __future__ import annotations
 
 import logging
-import math
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 

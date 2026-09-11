@@ -1294,6 +1294,40 @@ def get_recon(scan_id: str):
         raise HTTPException(500, f"recon data unavailable: {e}")
 
 
+# ── LLM COST (Phase 6.1) ──────────────────────────────────────────────────
+@app.get("/api/scans/{scan_id}/cost")
+def get_scan_cost(scan_id: str):
+    """Per-scan LLM spend breakdown. Reads the in-process cost log, falling back
+    to the llm_cost_log table when the scan ran in another process."""
+    try:
+        from core.economics.cost_log import get_cost_log
+        breakdown = get_cost_log().get_cost_breakdown(scan_id)
+        if breakdown.get("requests"):
+            return breakdown
+        # Fallback: aggregate from the DB table if the log is empty here.
+        try:
+            from core.memory.database import DatabaseManager
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT provider, model, SUM(input_tokens), SUM(output_tokens), "
+                        "SUM(cost_usd), COUNT(*) FROM llm_cost_log WHERE scan_id=%s "
+                        "GROUP BY provider, model", (scan_id,))
+                    rows = cur.fetchall()
+            by_model, total = {}, 0.0
+            for prov, model, itok, otok, cost, cnt in rows:
+                by_model[f"{prov}/{model}"] = {"requests": cnt, "input_tokens": itok,
+                                               "output_tokens": otok, "cost_usd": float(cost or 0)}
+                total += float(cost or 0)
+            return {"scan_id": scan_id, "total_cost_usd": round(total, 6),
+                    "requests": sum(v["requests"] for v in by_model.values()),
+                    "by_model": by_model}
+        except Exception:
+            return breakdown  # empty but well-formed
+    except Exception as e:
+        raise HTTPException(500, f"cost data unavailable: {e}")
+
+
 # ── LIVE CHAIN-OF-THOUGHT — per-agent reasoning stream ────────────────────
 @app.get("/api/scans/{scan_id}/agents/reasoning")
 def list_agent_reasoning(scan_id: str, agent_id: str = "", limit: int = 100):

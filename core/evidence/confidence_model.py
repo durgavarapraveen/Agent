@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from time import time
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 
 # Source reliability: how often the source lies.

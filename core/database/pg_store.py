@@ -1,13 +1,10 @@
 
 import hashlib
-import json
 import logging
 import re
-import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
-from contextlib import contextmanager
 
 import psycopg2
 import psycopg2.extras
@@ -1057,8 +1054,8 @@ class VulnRepo:
                 try:
                     from core.observability.scan_metrics import get_metrics
                     get_metrics().inc("duplicate_findings", by=(len(vulns) - len(collapsed)))
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.warning("pg_store.py: swallowed exception: %s", _e)
                 logger.info(
                     "VulnRepo.bulk_insert: pre-persist dedup collapsed %d -> %d",
                     len(vulns), len(collapsed))
@@ -1165,8 +1162,8 @@ class VulnRepo:
                     except Exception as row_exc:
                         try:
                             cur.execute("ROLLBACK TO SAVEPOINT sp_vuln")
-                        except Exception:
-                            pass
+                        except Exception as _e:
+                            logger.warning("pg_store.py: swallowed exception: %s", _e)
                         dropped.append({"finding_id": row[1], "error": str(row_exc)[:200]})
                 conn.commit()
                 if dropped:
@@ -1182,10 +1179,19 @@ class VulnRepo:
                 return [dict(r) for r in cur.fetchall()]
 
     @staticmethod
-    def get_all() -> List[Dict]:
+    def get_all(limit: int = 1000, cursor: Optional[int] = None) -> List[Dict]:
+        """Keyset (cursor) pagination on id DESC. Pass the last returned row's
+        ``id`` as ``cursor`` to fetch the next page. Replaces the previous
+        hardcoded ``LIMIT 1000`` (which silently truncated large scans)."""
+        limit = max(1, min(int(limit or 1000), 5000))
         with DatabaseManager.get_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("SELECT * FROM vulnerabilities ORDER BY created_at DESC LIMIT 1000")
+                if cursor is not None:
+                    cur.execute("SELECT * FROM vulnerabilities WHERE id < %s "
+                                "ORDER BY id DESC LIMIT %s", (int(cursor), limit))
+                else:
+                    cur.execute("SELECT * FROM vulnerabilities ORDER BY id DESC LIMIT %s",
+                                (limit,))
                 return [dict(r) for r in cur.fetchall()]
 
     @staticmethod
@@ -1573,8 +1579,8 @@ class ToolOutputRepo:
                           command[:2000], stdout[:50000], stderr[:10000],
                           exit_code, duration_s))
                     conn.commit()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("pg_store.py: swallowed exception: %s", _e)
 
     @staticmethod
     def list_by_scan(scan_id: str) -> List[Dict]:
@@ -1612,8 +1618,8 @@ class CapturedRequestRepo:
                           _dumps(headers or {}),
                           (post_data or "")[:4000], source))
                     conn.commit()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("pg_store.py: swallowed exception: %s", _e)
 
     @staticmethod
     def save_batch(scan_id: str, requests: list) -> int:
@@ -1650,8 +1656,8 @@ class CapturedRequestRepo:
                         if cur.rowcount:
                             saved += 1
                     conn.commit()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("pg_store.py: swallowed exception: %s", _e)
         return saved
 
     @staticmethod
@@ -1689,8 +1695,8 @@ class ToolExecutionRepo:
                     """, (scan_id, tool, command[:2000], target,
                           capability, success, stdout_bytes, duration_s))
                     conn.commit()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("pg_store.py: swallowed exception: %s", _e)
 
     @staticmethod
     def save_batch(scan_id: str, executions: list) -> int:
@@ -1719,8 +1725,8 @@ class ToolExecutionRepo:
                         if cur.rowcount:
                             saved += 1
                     conn.commit()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("pg_store.py: swallowed exception: %s", _e)
         return saved
 
     @staticmethod
@@ -1760,8 +1766,8 @@ class ActivityLogRepo:
                           rec.get("status", "ok"), rec.get("duration_s", 0),
                           _dumps(rec.get("metadata", {}), default=str)))
                     conn.commit()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("pg_store.py: swallowed exception: %s", _e)
 
     @staticmethod
     def list_by_scan(scan_id: str, limit: int = 500) -> List[Dict]:
@@ -2249,8 +2255,8 @@ class LiveAgentRepo:
                           findings_count or 0, cost_usd or 0.0,
                           started, finished, _dumps(metadata or {})))
                     conn.commit()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("pg_store.py: swallowed exception: %s", _e)
 
     @staticmethod
     def list_by_scan(scan_id: str) -> List[Dict[str, Any]]:
@@ -2298,8 +2304,8 @@ class LLMMemoryRepo:
                         VALUES (%s, %s, %s, %s, %s, %s)
                     """, (scan_id, phase or "", kind, content[:16000], tool or "", target or ""))
                     conn.commit()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("pg_store.py: swallowed exception: %s", _e)
 
     @staticmethod
     def get_by_scan(scan_id: str, kind: Optional[str] = None,

@@ -1,10 +1,8 @@
 from typing import Dict, Optional
 from core.domain.session import Session
-from core.domain.identity import Identity, AuthenticationState
+from core.domain.identity import Identity
 from core.replay.identity_store import IdentityStore
 import logging
-import uuid
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 

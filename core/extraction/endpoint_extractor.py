@@ -1,7 +1,7 @@
 import re
 import uuid
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict
 from urllib.parse import urlparse
 from core.domain.endpoint import Endpoint
 from core.domain.request import CapturedRequest

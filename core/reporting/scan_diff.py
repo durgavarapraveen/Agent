@@ -1,7 +1,6 @@
 from __future__ import annotations
 import hashlib
-from typing import Any, Dict, List
-from urllib.parse import urlparse
+from typing import Any, Dict
 
 
 def _key(v: Dict) -> str:
@@ -15,7 +14,7 @@ def _key(v: Dict) -> str:
 
 
 def compare_scans(scan_a: str, scan_b: str) -> Dict[str, Any]:
-    from core.database.pg_store import VulnRepo, ScanRepo, DatabaseManager
+    from core.database.pg_store import VulnRepo, DatabaseManager
     import psycopg2.extras
 
     va = VulnRepo.get_by_scan(scan_a) or []

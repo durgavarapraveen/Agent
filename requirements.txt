@@ -56,3 +56,9 @@ sentence-transformers>=3.0.0
 
 # Web search for RAG "Search & Ingest" (core/rag/ingestion.py: from ddgs import DDGS)
 ddgs>=6.0
+
+# ── Optional: grey-box SAST (Phase 4.5) ──
+# Not installed by default (heavy). Enable source-aware scanning with:
+#   pip install semgrep
+# core.analysis.sast_bridge degrades gracefully (skips SAST) when it is absent.
+# semgrep>=1.0

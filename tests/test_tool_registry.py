@@ -36,6 +36,7 @@ def test_structured_http_ops_registered() -> None:
     assert not missing, f"structured HTTP ops missing from registry: {sorted(missing)}"
 
 
+@pytest.mark.integration
 def test_tool_router_resolves_capability_to_tool() -> None:
     from core.tools.tool_registry import ToolRegistry
     from core.tools.tool_router import ToolRouter

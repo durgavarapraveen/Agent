@@ -1,0 +1,40 @@
+# Phase 11 — benchmark harness: scanner + disposable vulnerable targets.
+# Usage: docker compose -f docker-compose.benchmark.yml up --abort-on-container-exit
+version: "3.8"
+
+services:
+  juiceshop:
+    image: bkimminich/juice-shop:latest
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  dvwa:
+    image: vulnerables/web-dvwa:latest
+    ports:
+      - "8081:80"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/login.php"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  benchmark:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      juiceshop:
+        condition: service_healthy
+    environment:
+      - ANTIGRAVITY_ENV=ci
+      - JUICE_SHOP_URL=http://juiceshop:3000
+      - DVWA_URL=http://dvwa:80
+    # Runs the Juice Shop + token benchmarks and prints scores.
+    command: >
+      python -c "from tests.benchmarks.juice_shop_benchmark import run_benchmark;
+      import json; print('JUICE_SHOP_SCORE=' + json.dumps(run_benchmark('http://juiceshop:3000')))"

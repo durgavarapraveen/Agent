@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from core.validation.benchmark_corpus import BenchmarkCorpus, BenchmarkFixture, FixturePolarity
+from core.validation.benchmark_corpus import BenchmarkCorpus
 
 logger = logging.getLogger(__name__)
 

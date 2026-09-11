@@ -6,7 +6,6 @@ endpoint discovery into one deduplicated inventory. Respects scope at every step
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import threading
 import time

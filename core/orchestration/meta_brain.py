@@ -3,14 +3,13 @@ import asyncio
 import json
 import logging
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, List
 
 from core.orchestration.central_brain import CentralBrain
 from core.common.config import get_config
 from core.observability.correlation import CorrelationContext
 from core.security.tenant_isolation import TenantContext
-from core.validation.readiness_gate import AutonomousReadinessGate, ReadinessStatus
+from core.validation.readiness_gate import AutonomousReadinessGate
 
 logger = logging.getLogger(__name__)
 

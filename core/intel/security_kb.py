@@ -2,7 +2,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +128,6 @@ def query_kb(topic: str, tech_stack: str = "", top_k: int = _KB_TOP_K) -> str:
                 asyncio.get_event_loop().run_until_complete(rag.retrieve(query, top_k=top_k))
     except RuntimeError:
         # Called inside an already-running loop: schedule + wait via a task
-        import concurrent.futures
         try:
             from core.rag.pipeline import get_rag
             rag = get_rag()

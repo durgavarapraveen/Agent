@@ -5,6 +5,7 @@ import inspect
 import pytest
 
 
+@pytest.mark.integration
 def test_central_brain_constructs() -> None:
     from core.orchestration.central_brain import CentralBrain
     brain = CentralBrain(target="http://example.com", scope={"domains": ["example.com"]})

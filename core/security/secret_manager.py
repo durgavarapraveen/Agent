@@ -2,9 +2,8 @@ import base64
 import json
 import logging
 import os
-import shutil
 from pathlib import Path
-from typing import Optional, Dict, Any, Protocol
+from typing import Optional, Dict
 
 from core.security.encryption import encrypt, decrypt, get_encryption_key
 

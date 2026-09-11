@@ -50,8 +50,8 @@ class DatabaseManager:
             try:
                 # roll back the aborted transaction so the connection is reusable
                 conn.rollback()
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("database.py: swallowed exception: %s", _e)
             logger.warning(f"pgvector extension not enabled (vector memory disabled, core DB unaffected): {e}")
 
     @classmethod
@@ -61,6 +61,17 @@ class DatabaseManager:
             cls.initialize()
 
         conn = cls._pool.getconn()
+        # Set an explicit transaction isolation level once per physical
+        # connection (Postgres' default is already READ COMMITTED; making it
+        # explicit avoids surprises if the server default is changed).
+        if not getattr(conn, "_ag_isolation_set", False):
+            try:
+                with conn.cursor() as _c:
+                    _c.execute("SET SESSION default_transaction_isolation = 'read committed'")
+                conn.commit()
+                conn._ag_isolation_set = True
+            except Exception as _iso_e:
+                logger.debug("Could not set transaction isolation: %s", _iso_e)
         broken = False
         try:
             yield conn
@@ -102,8 +113,8 @@ class MemoryDatabase:
         try:
             from core.database.pg_store import _init_schema
             _init_schema()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("database.py: swallowed exception: %s", _e)
 
     def get_connection(self):
         return DatabaseManager.get_connection()

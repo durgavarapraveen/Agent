@@ -1,5 +1,4 @@
 import logging
-import json
 from typing import List, Dict, Any, Optional
 from core.domain.hypothesis import SecurityHypothesis
 from core.llm.llm_router import LLMRouter

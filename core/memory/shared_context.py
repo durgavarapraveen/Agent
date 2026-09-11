@@ -172,7 +172,7 @@ class SharedContextV2:
             # only evidence is a noisy status (HTTP 500/406) is INCONCLUSIVE, not
             # proof — this label is authoritative for the mirror guard below.
             try:
-                from core.analysis.finding_confidence import classify, FindingConfidence
+                from core.analysis.finding_confidence import classify
                 label = classify(vuln)
                 vuln.setdefault("confidence_label", label)
             except Exception:

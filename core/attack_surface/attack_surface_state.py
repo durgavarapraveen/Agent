@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from core.domain.asset import Application, Host, Technology, Workflow
+from core.domain.asset import Application, Technology, Workflow
 from core.domain.endpoint import DiscoveryState, Endpoint
 from core.domain.identity import Identity
 from core.domain.parameter import Parameter

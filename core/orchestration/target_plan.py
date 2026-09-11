@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import List
 
 
 PRIORITY_ORDER = ("P1", "P2", "P3", "P4")
