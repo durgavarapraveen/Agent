@@ -132,6 +132,8 @@ class FindingIngestionMixin:
             "jenkins": "CRITICAL", "gitlab": "HIGH",
             "reflected": "HIGH", "postmessage": "HIGH",
             "clickjacking": "MEDIUM",
+            # Business-logic / mobile / API executors (Phases 1.3/1.4/4.2)
+            "ecommerce": "HIGH", "role": "CRITICAL", "llm": "HIGH",
         }
         test_prefix = test_id.split("_")[0] if "_" in test_id else test_id
         default_sev = SEVERITY_MAP.get(test_prefix, "MEDIUM")
@@ -144,15 +146,22 @@ class FindingIngestionMixin:
             for item in items:
                 if not isinstance(item, dict):
                     continue
-                test_name = item.get("test", test_id)
+                test_name = item.get("test", item.get("strategy", item.get("technique", test_id)))
+                # Honor a per-finding severity when the executor supplies one
+                # (business-logic / role-escalation / llm executors do); else the
+                # test-id-prefix default. High/critical affirmative findings are
+                # marked CONFIRMED, as is a 2xx status.
+                item_sev = str(item.get("severity", "") or "").upper()
+                sev = item_sev if item_sev else default_sev
+                confirmed = item.get("status") in (200, 201) or item_sev in ("CRITICAL", "HIGH")
                 vuln = {
                     "type": test_id.upper(),
-                    "title": f"Deterministic test: {test_name} on {item.get('path', item.get('endpoint', target))}",
-                    "severity": default_sev,
-                    "status": "CONFIRMED" if item.get("status") in (200, 201) else "UNCONFIRMED",
+                    "title": f"Deterministic test: {test_name} on {item.get('path', item.get('url', item.get('endpoint', target)))}",
+                    "severity": sev,
+                    "status": "CONFIRMED" if confirmed else "UNCONFIRMED",
                     "target": target,
-                    "location": item.get("path", item.get("endpoint", "")),
-                    "evidence": item.get("body_snippet", ""),
+                    "location": item.get("path", item.get("url", item.get("endpoint", ""))),
+                    "evidence": item.get("body_snippet", item.get("description", "")),
                     "source": "deterministic_executor",
                     "test_id": test_id,
                 }

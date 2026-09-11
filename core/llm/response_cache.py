@@ -125,3 +125,14 @@ class LLMResponseCache:
 
 def _estimate_tokens(text: str) -> int:
     return max(1, len(text or "") // 4)  # ~4 chars/token
+
+
+_GLOBAL_CACHE: Optional[LLMResponseCache] = None
+
+
+def get_response_cache() -> LLMResponseCache:
+    """Process-wide response cache shared by the LLM harness."""
+    global _GLOBAL_CACHE
+    if _GLOBAL_CACHE is None:
+        _GLOBAL_CACHE = LLMResponseCache()
+    return _GLOBAL_CACHE

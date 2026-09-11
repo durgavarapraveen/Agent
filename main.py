@@ -89,6 +89,9 @@ async def run_single(target: str, auth_file: str | None = None, tier: str = "POC
     else:
         brain = CentralBrain(target=target, scope=scope)
 
+    # Expose the scan id so the LLM harness records per-scan cost (Phase 6.1).
+    os.environ["ANTIGRAVITY_SCAN_ID"] = str(scan_id or getattr(brain, "_scan_id", "") or target)
+
     if credentials:
         cred_list = credentials if isinstance(credentials, list) else [credentials]
         # Feed the multi-role auth manager: one live session per role.
@@ -127,12 +130,19 @@ async def run_single(target: str, auth_file: str | None = None, tier: str = "POC
 
     try:
         await brain.run_main_loop(auth_document=auth_document, phases=phases if phases is not None else [])
+        # Phase 2.1: synthesize exploit chains and re-score findings by chain
+        # membership BEFORE the final persist so upgraded severities are stored.
+        _post_scan_chain_analysis(brain)
     finally:
         try:
             if hasattr(brain, "_persist_vulnerabilities"):
                 await brain._persist_vulnerabilities()
         except Exception as e:
             logger.error(f"Final vulnerability flush failed: {e}")
+
+    # Phase 3.1 / 3.3: persist the attack-surface baseline for future incremental
+    # diffs, and check for regressions against tracked fixed findings.
+    _post_scan_surface_and_regression(brain, scan_id or getattr(brain, "_scan_id", None) or target)
 
     # Phase 4.5: correlate grey-box SAST findings with the scan's DAST findings.
     _sast = os.getenv("ANTIGRAVITY_SAST_FINDINGS", "")
@@ -184,6 +194,51 @@ def _analyze_mobile_apps(args) -> list:
     except Exception as e:
         logger.warning("Mobile app analysis failed: %s", e)
     return endpoints
+
+
+def _post_scan_chain_analysis(brain) -> None:
+    """Phase 2.1: re-score findings by chain membership + attach chain narratives.
+    Guarded — never breaks the scan. Mutates ctx.vulnerabilities in place."""
+    try:
+        from core.exploitation.chain_builder import ChainBuilder
+        vulns = list(getattr(brain.ctx, "vulnerabilities", []) or [])
+        if not vulns:
+            return
+        result = ChainBuilder().synthesize(vulns)   # rescores vuln dicts in place
+        if getattr(brain, "ctx", None) is not None:
+            brain.ctx.chain_analysis = result
+        up = result.get("rescore", {}).get("upgraded_count", 0)
+        logger.info("Chain synthesis: %d chains, %d finding(s) re-scored by chain membership",
+                    result.get("chain_count", 0), up)
+    except Exception as e:
+        logger.warning("Post-scan chain analysis failed: %s", e)
+    # Phase 5.2: attach AI fix-code to each finding before persist.
+    try:
+        from core.reporting.fix_generator import FixGenerator
+        FixGenerator().annotate_findings(list(getattr(brain.ctx, "vulnerabilities", []) or []))
+    except Exception as e:
+        logger.warning("Fix-code annotation failed: %s", e)
+
+
+def _post_scan_surface_and_regression(brain, scan_id) -> None:
+    """Phase 3.1/3.3: save the attack-surface baseline and run a regression check."""
+    try:
+        from core.monitoring.surface_baseline import SurfaceBaseline
+        bl = SurfaceBaseline()
+        snap = bl.snapshot(brain.ctx, target=getattr(brain, "target", ""))
+        bl.save(snap)
+        logger.info("Attack-surface baseline saved (%d endpoints).", len(snap.endpoints))
+    except Exception as e:
+        logger.warning("Surface baseline save failed: %s", e)
+    try:
+        from core.monitoring.regression_detector import RegressionDetector
+        det = RegressionDetector(store_path=f"data/regression/{scan_id}.json")
+        det.load()
+        for v in (getattr(brain.ctx, "vulnerabilities", []) or []):
+            det.track(v)
+        det.save()
+    except Exception as e:
+        logger.warning("Regression tracking failed: %s", e)
 
 
 def _run_standalone_analysis(args) -> int:
