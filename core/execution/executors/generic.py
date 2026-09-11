@@ -354,25 +354,30 @@ class BusinessLogicExecutor(GenericHTTPExecutor):
         auth_hdrs = self._auth_headers(experiment)
         json_hdrs = {**auth_hdrs, "Content-Type": "application/json"}
 
-        # 1. Negative/zero/overflow values on all state-changing endpoints
-        state_eps = self._state_changing_endpoints(experiment)
-        negative_payloads = [
-            {"quantity": -1}, {"amount": -100}, {"price": 0},
-            {"count": 999999}, {"total": -0.01}, {"quantity": 0},
-        ]
-        for ep in state_eps[:15]:
-            for payload in negative_payloads:
-                status, body, _ = self._probe(
-                    f"{base}{ep}", method="POST",
-                    headers=json_hdrs, data=json.dumps(payload).encode())
-                if status in (200, 201) and len(body) > 5:
-                    findings.append({
-                        "test": "negative_value", "path": ep,
-                        "payload": payload, "status": status,
-                        "body_snippet": body[:256],
-                    })
+        # 1. Business-logic mutation engine (Phase 1.1): take a real captured
+        #    request sequence (or a baseline per state-changing endpoint),
+        #    tamper mutable params (price / quantity / discount / id / token),
+        #    replay through the executor's HTTP primitive and diff vs baseline.
+        #    Replaces the previous static negative-payload shotgun with real
+        #    request interception + mutation.
+        from core.exploitation.workflow_interceptor import ReplayResponse, WorkflowInterceptor
+
+        def _bl_replayer(req: Dict[str, Any]) -> ReplayResponse:
+            method = (req.get("method") or "GET").upper()
+            pd = req.get("post_data") or ""
+            data = pd.encode("utf-8") if (pd and method != "GET") else None
+            hdrs = {**json_hdrs, **(req.get("headers") or {})}
+            status, body, _ = self._probe(req.get("url", ""), method=method,
+                                          headers=hdrs, data=data)
+            return ReplayResponse(status=status, body=body or "")
+
+        sequence = self._build_bl_sequence(experiment, base, json_hdrs)
+        if sequence:
+            for f in WorkflowInterceptor(replayer=_bl_replayer).analyze(sequence):
+                findings.append(f.to_dict())
 
         # 2. Race condition — rapid duplicate POST to same endpoint
+        state_eps = self._state_changing_endpoints(experiment)
         for ep in state_eps[:5]:
             responses = []
             for _ in range(5):
@@ -409,6 +414,36 @@ class BusinessLogicExecutor(GenericHTTPExecutor):
         elapsed = (time.monotonic() - start) * 1000
         return ExecutionResult(status=ExecutionStatus.SUCCESS, evidence=evidence,
                                execution_time_ms=elapsed)
+
+    def _build_bl_sequence(self, experiment: SecurityExperiment, base: str,
+                           json_hdrs: Dict[str, str]) -> List[Dict[str, Any]]:
+        """Request sequence for the mutation engine (Phase 1.1).
+
+        Prefers a real captured request flow when the experiment carries one
+        (``input_parameters['captured_requests']``, as produced by
+        RequestCapturer); otherwise falls back to a benign baseline body per
+        state-changing endpoint so the interceptor can tamper individual fields
+        and diff the response against that baseline.
+        """
+        captured = experiment.input_parameters.get("captured_requests")
+        seq: List[Dict[str, Any]] = []
+        if isinstance(captured, list) and captured:
+            for c in captured[:25]:
+                if isinstance(c, dict) and c.get("url"):
+                    seq.append({
+                        "method": (c.get("method") or "GET").upper(),
+                        "url": c["url"],
+                        "headers": c.get("headers") or {},
+                        "post_data": c.get("post_data") or c.get("body") or "",
+                    })
+            if seq:
+                return seq
+        baseline_body = json.dumps({"quantity": 1, "price": 1, "amount": 1,
+                                    "total": 1, "count": 1, "discount": 0})
+        for ep in self._state_changing_endpoints(experiment)[:15]:
+            seq.append({"method": "POST", "url": f"{base}{ep}",
+                        "headers": {}, "post_data": baseline_body})
+        return seq
 
 
 class PathTraversalExecutor(GenericHTTPExecutor):

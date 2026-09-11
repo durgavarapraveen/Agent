@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import re
 import ipaddress
 import time
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)

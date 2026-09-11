@@ -3,7 +3,7 @@ from __future__ import annotations
 import contextvars
 from dataclasses import dataclass, field
 import uuid
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 _correlation_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     "correlation_id", default=""

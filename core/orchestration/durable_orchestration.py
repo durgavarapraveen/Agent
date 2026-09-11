@@ -14,7 +14,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -278,7 +278,11 @@ class DurableOrchestrator:
         now = time.time()
         with self._lock:
             for job in self._jobs.values():
-                if job.state in (JobState.LEASED, JobState.RUNNING) and job.lease_expires < now:
+                # `<=` so a lease whose expiry is the current instant counts as
+                # expired. Matters for lease_duration_s=0 and on platforms with a
+                # coarse time.time() resolution (Windows ~15ms), where lease time
+                # and `now` can be identical.
+                if job.state in (JobState.LEASED, JobState.RUNNING) and job.lease_expires <= now:
                     job.state = JobState.RETRYING
                     job.lease_holder = ""
                     expired.append(job.job_id)

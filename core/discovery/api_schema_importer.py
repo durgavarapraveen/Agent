@@ -1,9 +1,7 @@
 
 import json
 import logging
-import re
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urlparse, urljoin
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +180,6 @@ class APISchemaImporter:
         return None
 
     def parse_openapi(self, spec: Dict) -> List[Dict]:
-        from core.domain.parameter import ParameterType
 
         base_url = self.target
         # Extract server base from spec

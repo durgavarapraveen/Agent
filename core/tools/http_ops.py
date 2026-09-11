@@ -4,7 +4,7 @@ import json
 import re
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 import urllib.request
 import urllib.error

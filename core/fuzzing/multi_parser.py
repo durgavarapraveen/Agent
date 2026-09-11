@@ -13,7 +13,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, urlencode
 
 logger = logging.getLogger(__name__)

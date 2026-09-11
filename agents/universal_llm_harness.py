@@ -1,6 +1,5 @@
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -51,6 +50,7 @@ class ProviderType(Enum):
     GROQ = "groq"
     OLLAMA = "ollama"
     AZURE = "azure"
+    BEDROCK = "bedrock"
     CUSTOM = "custom"
 
 
@@ -1158,6 +1158,20 @@ class UniversalLLMHarness:
                 small_model=self.provider_config.get("ollama_small_model", "mistral"),
                 large_model=self.provider_config.get("ollama_large_model", "llama2"),
                 budget=self.budget
+            )
+
+        elif provider_type == ProviderType.BEDROCK:
+            # Lazy import so boto3 is only needed when Bedrock is actually used.
+            from agents.providers.bedrock_provider import BedrockProvider
+            return BedrockProvider(
+                small_model=self.provider_config.get(
+                    "aws_bedrock_small_model", os.getenv("AWS_BEDROCK_SMALL_MODEL",
+                                                         "us.anthropic.claude-haiku-4-5-v1")),
+                large_model=self.provider_config.get(
+                    "aws_bedrock_large_model", os.getenv("AWS_BEDROCK_LARGE_MODEL",
+                                                         "us.anthropic.claude-sonnet-4-v1")),
+                region=self.provider_config.get("aws_region", os.getenv("AWS_REGION", "us-east-1")),
+                budget=self.budget,
             )
 
         else:

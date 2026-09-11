@@ -5,7 +5,7 @@ import logging
 import os
 import threading
 import time
-from typing import Dict, Optional
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 

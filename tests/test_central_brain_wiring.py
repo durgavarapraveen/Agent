@@ -20,6 +20,7 @@ from core.security.secret_lifecycle import SecretState
 from core.orchestration.specialist_agents import SpecialistRole
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_central_brain_run_alias_and_contexts():
     """Verify CentralBrain has .run() and executes with correlation & tenant contexts."""
@@ -48,6 +49,7 @@ async def test_central_brain_run_alias_and_contexts():
         assert mock_impl.called
 
 
+@pytest.mark.integration
 def test_recon_phase_sync_advanced_engines():
     """Verify RECON phase synchronizes endpoints and intel into advanced engines."""
     target = "https://example.com"
@@ -87,6 +89,7 @@ def test_recon_phase_sync_advanced_engines():
     assert artifacts[0].artifact_type == "recon_inventory"
 
 
+@pytest.mark.integration
 def test_active_scanning_phase_sync_advanced_engines():
     """Verify ACTIVE_SCANNING syncs quotas, baselines, and findings."""
     target = "https://example.com"
@@ -119,6 +122,7 @@ def test_active_scanning_phase_sync_advanced_engines():
     assert artifacts[0].data["finding_count"] == 2
 
 
+@pytest.mark.integration
 def test_exploitation_phase_sync_advanced_engines():
     """Verify EXPLOITATION syncs hypotheses, cryptographic evidence graph, and secret lifecycle."""
     target = "https://example.com"

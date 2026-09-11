@@ -1,7 +1,6 @@
 import requests
 import logging
-from typing import Dict, Any, Optional
-from urllib.parse import urlparse, urlunparse, urlencode, parse_qsl
+from typing import Dict, Any
 from core.domain.request import CapturedRequest, ResponseData
 
 logger = logging.getLogger(__name__)

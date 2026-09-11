@@ -1,7 +1,6 @@
 from datetime import datetime
 import uuid
 from pydantic import BaseModel, Field
-import json
 
 class DomainModel(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))

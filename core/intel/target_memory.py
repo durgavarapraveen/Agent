@@ -1,7 +1,7 @@
 from __future__ import annotations
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -116,7 +116,6 @@ def record_scan_intel(target: str, ctx, scan_id: str) -> None:
 async def verify_and_refresh(ctx, target: str,
                                 fingerprint_threshold_days: int = 3) -> Dict[str, Any]:
     import httpx, asyncio as _aio
-    from urllib.parse import urlparse
     stats = {"fingerprint_changed": False, "endpoints_dropped": 0,
              "endpoints_kept": 0, "subs_dropped": 0, "subs_kept": 0}
     intel = load_intel(target)

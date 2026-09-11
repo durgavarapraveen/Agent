@@ -9,7 +9,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -483,7 +483,6 @@ class NetworkBroker:
     async def request(self, method: str, url: str,
                       follow_redirects: bool = True,
                       **kwargs) -> Any:
-        import httpx
 
         decision = self.check_url(url)
         if not decision.allowed:

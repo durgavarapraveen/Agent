@@ -1,7 +1,6 @@
 from __future__ import annotations
 import re
 from typing import Any, Dict, List, Set
-from urllib.parse import urlparse
 
 # Keyword classifiers — each role has a set of substrings we look for in the
 # lower-cased path. Multi-word hits ("user/login") count as one role assignment.

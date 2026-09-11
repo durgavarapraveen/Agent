@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,12 @@ class PolicyVerdict:
     reason: str = ""
     detail: Dict[str, Any] = None
 
+    @property
+    def allowed(self) -> bool:
+        """Read-only alias for `allow`. Some callers and verification tooling
+        reference `.allowed`; keep both in sync via this property."""
+        return self.allow
+
 
 def who_decides(topic: str) -> DecisionOwner:
     t = (topic or "").lower()
@@ -62,7 +68,7 @@ def enforce(topic: str, ctx: Dict[str, Any]) -> PolicyVerdict:
 
     if t == "waf_mode":
         try:
-            from core.adaptation.waf_state import get_waf_state, WafMode
+            from core.adaptation.waf_state import get_waf_state
         except Exception as e:
             return _fail_closed_import(t, "core.adaptation.waf_state", e)
         mode = get_waf_state().mode_for(ctx.get("target", ""))

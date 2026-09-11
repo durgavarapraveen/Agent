@@ -1,8 +1,8 @@
-from typing import List, Dict, Set
+from typing import List, Dict
 from core.domain.endpoint import Endpoint
 from core.domain.request import CapturedRequest
 from core.domain.parameter import Parameter
-from core.domain.asset import Workflow, Page, DataObject
+from core.domain.asset import Workflow, Page
 from core.attack_surface.request_inventory import RequestInventory
 from core.attack_surface.parameter_inventory import ParameterInventory
 from core.attack_surface.object_inventory import ObjectInventory

@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 class CircuitOpen(RuntimeError):
+    """Raised when an LLM provider circuit is open (too many recent failures)."""
 
 
 _STREAK_TRIP = int(os.environ.get("LLM_BREAKER_STREAK", "3"))

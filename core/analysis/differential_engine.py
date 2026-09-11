@@ -6,14 +6,11 @@ Identity-aware and state-aware comparisons with configurable noise thresholds.
 """
 from __future__ import annotations
 
-import hashlib
 import logging
-import re
 import threading
-import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 

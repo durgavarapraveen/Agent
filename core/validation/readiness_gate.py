@@ -17,7 +17,6 @@ or has failing automated evidence. Generates human-readable Markdown and machine
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -253,8 +252,7 @@ class AutonomousReadinessGate:
 
     def _check_secret_governance(self) -> Tuple[bool, str, Dict[str, Any]]:
         try:
-            from core.security.secret_lifecycle import SecretLifecycleManager, SecretLifecycleRule, SecretState
-            from core.security.tenant_isolation import TenantContext
+            from core.security.secret_lifecycle import SecretLifecycleManager, SecretLifecycleRule
             mgr = SecretLifecycleManager()
             rule = SecretLifecycleRule(name="db_rule", max_age_seconds=300.0, revoke_on_leak=True)
             mgr.register_rule(rule)
@@ -271,7 +269,7 @@ class AutonomousReadinessGate:
 
     def _check_evidence_integrity(self) -> Tuple[bool, str, Dict[str, Any]]:
         try:
-            from core.evidence.evidence_graph import EvidenceGraph, EvidenceNode
+            from core.evidence.evidence_graph import EvidenceGraph
             graph = EvidenceGraph()
             node_id = graph.add_node("http_exchange", {"url": "https://example.com/test", "status": 200})
             node = graph.nodes[node_id]

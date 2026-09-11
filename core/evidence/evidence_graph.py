@@ -2,7 +2,7 @@ import logging
 import hashlib
 import json
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 import uuid
 
 from core.observability.correlation import get_context as _get_correlation_context

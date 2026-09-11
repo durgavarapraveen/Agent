@@ -1,7 +1,7 @@
 import logging
 import time
 from enum import Enum
-from typing import List, Dict, Optional, Tuple
+from typing import List, Optional
 from core.coverage.coverage_engine import CoverageEngine
 from core.coverage.test_definition import SecurityTestDefinition
 from core.domain.coverage import TestState

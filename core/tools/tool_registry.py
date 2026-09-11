@@ -6,7 +6,6 @@ import ssl
 import asyncio
 from typing import Dict, List, Optional
 
-import httpx
 
 from agents.kali_executor import KaliDockerExecutor
 

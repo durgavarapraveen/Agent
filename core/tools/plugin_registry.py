@@ -7,11 +7,9 @@ Unknown tools cannot execute. Plugin upgrades are compatibility-tested.
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import threading
 import time
-import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple

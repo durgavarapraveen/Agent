@@ -92,7 +92,6 @@ def process_file(filepath):
         
     print(f"Cleaned {sum(removal_flags)} comments from {filepath}")
 
-import concurrent.futures
 
 def main():
     target_dirs = ["core", "agents", "scripts", "tests", "ui"]

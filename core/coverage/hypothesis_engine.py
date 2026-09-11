@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from core.attack_surface.attack_surface_state import AttackSurfaceState
     from core.coverage.security_test_catalog import SecurityTestCatalog
-    from core.domain.hypothesis import SecurityHypothesis
 
 logger = logging.getLogger(__name__)
 

@@ -11,7 +11,7 @@ from core.memory.database import DatabaseManager
 from core.rag.embedder import DIMENSION, Embedder, EmbedResult
 from core.rag.hyde import transform_query as hyde_transform
 from core.rag.ingestion import (
-    chunk_parent_child, chunk_text, content_hash, extract_text_from_file,
+    chunk_parent_child, content_hash, extract_text_from_file,
     fetch_url_text, search_and_extract,
 )
 from core.rag.knowledge_seeder import get_all_knowledge

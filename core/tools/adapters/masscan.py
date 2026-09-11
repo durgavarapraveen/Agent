@@ -1,6 +1,5 @@
 import subprocess
 import time
-import uuid
 from typing import Dict, Any, Tuple, List
 from core.tools.adapters.base import BaseAdapter
 from core.tools.models import ToolAttempt, ExecutionStatus

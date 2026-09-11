@@ -1,6 +1,6 @@
 import logging
 from typing import Dict, Any, List, Optional, Set, Tuple
-from .session_model import IdentityManager, SessionModel
+from .session_model import IdentityManager
 
 logger = logging.getLogger(__name__)
 

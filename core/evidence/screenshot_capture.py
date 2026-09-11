@@ -107,8 +107,8 @@ class ScreenshotCapture:
                     shell=False, capture_output=True, timeout=10
                 )
                 return Path(output_file).exists()
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.warning("screenshot_capture.py: swallowed exception: %s", _e)
 
         return False
 
@@ -132,8 +132,8 @@ class ScreenshotCapture:
                         shell=False, capture_output=True, timeout=10
                     )
                     return Path(output_file).exists()
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.warning("screenshot_capture.py: swallowed exception: %s", _e)
         return False
 
     def _capture_with_curl(self, url: str, output_file: str, timeout: int = 10) -> bool:
@@ -146,8 +146,8 @@ class ScreenshotCapture:
             try:
                 Path(txt_file).write_text(result["stdout"][:50000], encoding="utf-8")
                 return True
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.warning("screenshot_capture.py: swallowed exception: %s", _e)
         return False
 
     def capture_screenshot(self, url: str, finding_title: str, timeout: int = 15) -> ScreenshotResult:
@@ -195,8 +195,8 @@ class ScreenshotCapture:
                         result.artifact_id = aid
                     except Exception as e:
                         logger.debug(f"[Screenshot] DB persist failed: {e}")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.warning("screenshot_capture.py: swallowed exception: %s", _e)
 
         if result.success:
             logger.info(f"[Screenshot] Captured: {finding_title} -> {result.screenshot_path}")

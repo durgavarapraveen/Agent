@@ -9,7 +9,6 @@ import logging
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
-import httpx
 
 logger = logging.getLogger(__name__)
 

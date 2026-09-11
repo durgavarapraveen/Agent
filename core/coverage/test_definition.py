@@ -1,7 +1,7 @@
 from core.domain.base import DomainModel
 from core.domain.endpoint import Endpoint
 from pydantic import Field, field_validator
-from typing import List, Dict, Any, Callable
+from typing import List, Dict
 
 class ApplicabilityRule(DomainModel):
     condition: str = Field(...)

@@ -32,8 +32,7 @@ def _load_llm_memory(scan_id: str) -> str:
 
 
 def _load_fact_index(scan_id: str) -> Dict[str, Any]:
-    from core.database.pg_store import (VulnRepo, AuthBypassRepo, ScanRepo,
-        ReconRepo, DatabaseManager)
+    from core.database.pg_store import (VulnRepo, AuthBypassRepo, ReconRepo, DatabaseManager)
     import psycopg2.extras
 
     try:
@@ -149,8 +148,7 @@ async def answer_question(scan_id: str, message: str,
         return {"answer": f"LLM call failed: {e}", "context_stats": {}}
 
     # Fact index counts for the UI header
-    from core.database.pg_store import (VulnRepo, AuthBypassRepo, ReconRepo,
-        LLMMemoryRepo)
+    from core.database.pg_store import (VulnRepo, AuthBypassRepo, LLMMemoryRepo)
     return {
         "answer": answer,
         "cost_usd": cost,

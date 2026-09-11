@@ -1721,7 +1721,7 @@ RULES:
     def _auto_detect_vulns(self, method: str, url: str, req_body: str, status: int, resp_text: str):
         import re as _re
         from urllib.parse import urlparse, unquote
-        from core.utils.sanitize import is_http_success, is_http_redirect
+        from core.utils.sanitize import is_http_success
         # Generic success detection — 2xx (200/201/202/204/206...), not just 200.
         # POSTs that store a payload return 201; accepted state-changes return
         # 202/204. Keying only on 200 silently dropped those confirmations.
@@ -2581,7 +2581,6 @@ RULES:
         endpoints = args.get("endpoints", [])
         keep_patterns = args.get("keep_patterns", [])
 
-        import re
 
         static_extensions = {
             '.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico',

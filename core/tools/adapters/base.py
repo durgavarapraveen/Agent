@@ -1,6 +1,6 @@
 import logging
 from typing import Dict, Any, Tuple, List
-from core.tools.models import ToolAttempt, ExecutionStatus
+from core.tools.models import ToolAttempt
 from core.domain.finding import SecurityFinding
 
 logger = logging.getLogger(__name__)

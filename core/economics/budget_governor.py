@@ -81,6 +81,21 @@ class BudgetGovernor:
     def set_phase_cap(self, phase: str, cap_usd: float) -> None:
         self._phase_caps[phase] = float(cap_usd)
 
+    # Phase 8.6: standard per-phase budget reservations (fractions of total).
+    PHASE_RESERVATIONS = {"RECON": 0.15, "ACTIVE_SCANNING": 0.40,
+                          "EXPLOITATION": 0.30, "REPORTING": 0.15}
+
+    def reserve_phases(self, reservations: Optional[Dict[str, float]] = None) -> Dict[str, float]:
+        """Set per-phase spend caps as fractions of the total budget so an
+        early phase can't starve later ones. Returns the caps set."""
+        reservations = reservations or self.PHASE_RESERVATIONS
+        caps = {}
+        for phase, frac in reservations.items():
+            cap = round(self.max_budget * float(frac), 6)
+            self.set_phase_cap(phase, cap)
+            caps[phase] = cap
+        return caps
+
     def start_phase(self, phase: str) -> None:
         self._current_phase = phase
         self._phase_spend_start[phase] = self.spent
