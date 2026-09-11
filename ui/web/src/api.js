@@ -357,6 +357,10 @@ export const api = {
     request(`/api/scans/${scanId}/sast-correlation`)
       .catch(() => ({ scan_id: scanId, available: false, counts: { confirmed: 0, sast_only: 0, dast_only: 0 }, confirmed: [], sast_only: [], dast_only: [] })),
 
+  // Standalone (individual) analysis — no scan/target.
+  analyzeMobile: (path) => post("/api/analyze/mobile", { path }),
+  analyzeSource: (source_repo, source_path) => post("/api/analyze/source", { source_repo, source_path }),
+
   // Upload an APK/IPA for mobile backend analysis; returns { path, kind, filename }.
   uploadScanInput: async (file) => {
     const form = new FormData();
