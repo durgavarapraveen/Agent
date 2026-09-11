@@ -55,6 +55,26 @@ class FindingIngestionMixin:
             self.ctx.add_vulnerability(v)
         except Exception as e:
             logger.warning(f"add_vulnerability failed: {e}")
+        # Persist finding to Postgres immediately (crash-safe)
+        try:
+            if hasattr(self, "finding_store_v2") and self.finding_store_v2:
+                import uuid as _uuid
+                from core.findings.finding import Finding as _F
+                f = _F.from_dict({
+                    "finding_id": v.get("finding_id") or v.get("id") or str(_uuid.uuid4()),
+                    "title": v.get("title") or v.get("type") or "Untitled",
+                    "description": v.get("description") or v.get("details") or "",
+                    "severity": v.get("severity", "INFO"),
+                    "state": v.get("status", "discovered").lower(),
+                    "category": v.get("type") or v.get("attack_type") or "",
+                    "affected_endpoint": v.get("location") or v.get("affected_endpoint") or v.get("url") or "",
+                    "source": v.get("tool") or source or "",
+                    "confidence": float(v.get("confidence_score") or v.get("confidence") or 0.0),
+                    "proof": v.get("proof") or v.get("evidence") or "",
+                })
+                self.finding_store_v2.store(f)
+        except Exception as _pe:
+            logger.debug(f"[FindingPersist] inline persist failed: {_pe}")
         # P2-3: mark the endpoint as tested for this vuln class so the
         # planner doesn't re-request the same probe next iteration.
         try:

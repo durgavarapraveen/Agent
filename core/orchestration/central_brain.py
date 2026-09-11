@@ -2143,6 +2143,48 @@ class CentralBrain(
                    f"Exploits: {len(self.ctx.exploit_results)}",
             duration_s=duration)
 
+        # Persist all findings to Postgres via FindingStoreV2
+        if self.ctx.vulnerabilities:
+            try:
+                from core.findings.finding import Finding as FindingObj
+                finding_objs = []
+                for v in self.ctx.vulnerabilities:
+                    try:
+                        f = FindingObj.from_dict({
+                            "finding_id": v.get("finding_id") or v.get("id") or str(uuid.uuid4()),
+                            "title": v.get("title") or v.get("type") or "Untitled",
+                            "description": v.get("description") or v.get("details") or "",
+                            "severity": v.get("severity", "INFO"),
+                            "state": v.get("status", "discovered").lower(),
+                            "category": v.get("type") or v.get("attack_type") or "",
+                            "cwe": v.get("cwe", ""),
+                            "cve": v.get("cve", ""),
+                            "affected_asset": v.get("target") or v.get("host") or self.ctx.target,
+                            "affected_endpoint": v.get("location") or v.get("affected_endpoint") or v.get("url") or "",
+                            "parameter": v.get("parameter", ""),
+                            "source": v.get("tool") or v.get("source") or "",
+                            "confidence": float(v.get("confidence_score") or v.get("confidence") or 0.0),
+                            "evidence_ids": v.get("evidence_ids") or [],
+                            "proof": v.get("proof") or v.get("evidence") or "",
+                            "remediation": v.get("remediation", ""),
+                            "metadata": {k: v2 for k, v2 in v.items()
+                                         if k not in ("finding_id", "id", "title", "description",
+                                                       "severity", "status", "type", "attack_type",
+                                                       "cwe", "cve", "target", "host", "location",
+                                                       "affected_endpoint", "url", "parameter",
+                                                       "tool", "source", "confidence_score",
+                                                       "confidence", "evidence_ids", "proof",
+                                                       "evidence", "remediation")},
+                        })
+                        finding_objs.append(f)
+                    except Exception as _fe:
+                        logger.debug(f"[FindingPersist] skip vuln: {_fe}")
+                if finding_objs:
+                    stats = self.finding_store_v2.bulk_store(finding_objs)
+                    logger.info(f"[FindingPersist] Flushed to DB: {stats}")
+            except Exception as e:
+                logger.warning(f"[FindingPersist] DB flush failed (non-fatal): {e}")
+
         # Ingest confirmed findings into RAG knowledge base for future scans
         if not stopped and self.ctx.vulnerabilities:
             try:
