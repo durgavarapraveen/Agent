@@ -328,6 +328,32 @@ export const api = {
   // Repro bundles regenerate
   regenerateReproBundles: (scanId) => post(`/api/scans/${scanId}/repro-bundles/regenerate`, {}),
 
+  // ── New analysis surfaces (Phases 2/3/5/6) ──
+  getScanCost: (scanId) =>
+    request(`/api/scans/${scanId}/cost`)
+      .catch(() => ({ scan_id: scanId, total_cost_usd: 0, requests: 0, by_model: {}, by_provider: {} })),
+  getScanRisk: (scanId) =>
+    request(`/api/scans/${scanId}/risk`)
+      .catch(() => ({ scan_id: scanId, total_risk_usd: 0, by_severity: {}, top_findings: [], trend: {} })),
+  getChainAnalysis: (scanId) =>
+    request(`/api/scans/${scanId}/chain-analysis`)
+      .catch(() => ({ chain_count: 0, rescore: { upgraded_count: 0, upgrades: [] }, narratives: [] })),
+  getScanRegression: (scanId) =>
+    request(`/api/scans/${scanId}/regression`)
+      .catch(() => ({ tracked: 0, by_status: {}, regression_rate: 0, mean_time_to_fix_hours: {} })),
+  getFixSuggestions: (scanId) =>
+    request(`/api/scans/${scanId}/fix-suggestions`)
+      .catch(() => ({ scan_id: scanId, stack: {}, count: 0, fixes: [] })),
+  getAttackRecordings: (scanId) =>
+    request(`/api/scans/${scanId}/attack-recordings`)
+      .catch(() => ({ scan_id: scanId, count: 0, recordings: [] })),
+  getSurfaceDiff: (scanId) =>
+    request(`/api/scans/${scanId}/surface-diff`)
+      .catch(() => ({ scan_id: scanId, has_baseline: false, diff: null })),
+  getBenchmarks: () =>
+    request("/api/benchmarks")
+      .catch(() => ({ juice_shop: { total: 0, categories: [], challenges: [] }, dvwa: {}, token_budget_limit: 0 })),
+
   // Review queue — one canonical entry
   getReviewQueue: () => request("/api/review-queue"),
   getReviewSuccesses: () => request("/api/review-queue/successes"),

@@ -11,6 +11,7 @@ import Compare from "./pages/Compare";
 import Settings from "./pages/Settings";
 import Analytics from "./pages/Analytics";
 import KnowledgeBase from "./pages/KnowledgeBase";
+import Benchmarks from "./pages/Benchmarks";
 import SourceIpBadge from "./components/SourceIpBadge";
 import { getApiKey } from "./api";
 
@@ -140,6 +141,7 @@ export default function App() {
             <NavLink to="/review"><ReviewIcon /> Review Queue</NavLink>
             <NavLink to="/compare"><CompareIcon /> Compare</NavLink>
             <NavLink to="/analytics"><AnalyticsIcon /> Analytics</NavLink>
+            <NavLink to="/benchmarks"><AnalyticsIcon /> Benchmarks</NavLink>
             <NavLink to="/audit"><AuditIcon /> Audit Trail</NavLink>
           </div>
 
@@ -171,6 +173,7 @@ export default function App() {
             <Route path="/review" element={<ReviewQueue />} />
             <Route path="/compare" element={<Compare />} />
             <Route path="/analytics" element={<Analytics />} />
+            <Route path="/benchmarks" element={<Benchmarks />} />
             <Route path="/audit" element={<AuditTrail />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/knowledge" element={<KnowledgeBase />} />
