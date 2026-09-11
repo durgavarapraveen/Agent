@@ -1432,7 +1432,7 @@ class CentralBrain(
             logger.info(f"[V2Sync] Fed {count} endpoint records into EndpointInventoryV2 "
                         f"({uniq} unique)")
             self.security_context_v2.endpoints = {
-                ep.get("endpoint_id", ep.get("url", "")): ep
+                str(ep.get("endpoint_id") or ep.get("url") or ""): ep
                 for ep in self.endpoint_inventory.list_endpoints()
             }
 

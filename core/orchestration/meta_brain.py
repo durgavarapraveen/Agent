@@ -41,7 +41,7 @@ class MetaBrain:
         # Pre-flight readiness check across all targets
         try:
             gate = AutonomousReadinessGate()
-            eval_result = gate.evaluate_readiness()
+            eval_result = gate.evaluate_all()
             logger.info(f"[MetaBrain] Pre-flight readiness status: {eval_result.status.value} (score={eval_result.readiness_score:.1f}%)")
         except Exception as _ge:
             logger.debug(f"[MetaBrain] Readiness gate check skipped: {_ge}")
@@ -83,7 +83,7 @@ class MetaBrain:
 
         # Aggregate
         for target, result in zip(self.targets, results):
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 self.results[target] = {
                     "status": "error", "error": str(result)
                 }
