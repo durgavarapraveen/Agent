@@ -12,6 +12,7 @@ import Settings from "./pages/Settings";
 import Analytics from "./pages/Analytics";
 import KnowledgeBase from "./pages/KnowledgeBase";
 import Benchmarks from "./pages/Benchmarks";
+import Analyze from "./pages/Analyze";
 import SourceIpBadge from "./components/SourceIpBadge";
 import { getApiKey } from "./api";
 
@@ -134,6 +135,7 @@ export default function App() {
             <NavLink to="/targets"><TargetIcon /> Targets</NavLink>
             <NavLink to="/live"><LiveIcon /> Live Scans</NavLink>
             <NavLink to="/scans"><ScanIcon /> Scan History</NavLink>
+            <NavLink to="/analyze"><ScanIcon /> Analyze (APK / Source)</NavLink>
           </div>
 
           <div className="nav-section">
@@ -174,6 +176,7 @@ export default function App() {
             <Route path="/compare" element={<Compare />} />
             <Route path="/analytics" element={<Analytics />} />
             <Route path="/benchmarks" element={<Benchmarks />} />
+            <Route path="/analyze" element={<Analyze />} />
             <Route path="/audit" element={<AuditTrail />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/knowledge" element={<KnowledgeBase />} />

@@ -1578,6 +1578,45 @@ def get_sast_correlation(scan_id: str):
         raise HTTPException(500, f"sast correlation unavailable: {e}")
 
 
+# ── Standalone (individual) analysis — APK/IPA or source, no scan/target ─────
+class AnalyzeMobileRequest(BaseModel):
+    path: str = Field(..., max_length=1024)
+
+
+class AnalyzeSourceRequest(BaseModel):
+    source_repo: str = Field(default="", max_length=2048)
+    source_path: str = Field(default="", max_length=1024)
+
+
+@app.post("/api/analyze/mobile")
+async def analyze_mobile_endpoint(body: AnalyzeMobileRequest):
+    """Analyze a previously-uploaded APK/IPA on its own (no scan). `path` must be
+    a file produced by /api/uploads/scan-input (restricted to data/uploads)."""
+    from core.analysis.standalone_analysis import analyze_mobile
+    uploads = (BASE / "data" / "uploads").resolve()
+    p = Path(body.path).resolve()
+    if p.parent != uploads:
+        raise HTTPException(400, "path must be an uploaded file under data/uploads")
+    if not p.exists():
+        raise HTTPException(404, "uploaded file not found")
+    try:
+        return await asyncio.to_thread(analyze_mobile, str(p))
+    except Exception as e:
+        raise HTTPException(500, f"mobile analysis failed: {e}")
+
+
+@app.post("/api/analyze/source")
+async def analyze_source_endpoint(body: AnalyzeSourceRequest):
+    """Run grey-box SAST on a repo URL / server path on its own (no scan)."""
+    from core.analysis.standalone_analysis import analyze_source
+    if not (body.source_repo or body.source_path):
+        raise HTTPException(400, "provide source_repo or source_path")
+    try:
+        return await asyncio.to_thread(analyze_source, body.source_repo, body.source_path)
+    except Exception as e:
+        raise HTTPException(500, f"source analysis failed: {e}")
+
+
 # ── SCAN CHATBOT — LLM Q&A over this scan's collected data ─────────────────
 class ScanChatMessage(BaseModel):
     message: str

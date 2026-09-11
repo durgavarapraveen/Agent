@@ -186,6 +186,32 @@ def _analyze_mobile_apps(args) -> list:
     return endpoints
 
 
+def _run_standalone_analysis(args) -> int:
+    """Individual APK/IPA/source analysis with no target. Writes a JSON report to
+    reports/ and prints it. Returns a process exit code."""
+    import time
+    from core.analysis.standalone_analysis import run_standalone
+    report = run_standalone(mobile_app=args.mobile_app, ipa_app=args.ipa_app,
+                            source_repo=args.source_repo, source_path=args.source_path)
+    reports_dir = Path("reports")
+    reports_dir.mkdir(exist_ok=True)
+    out = reports_dir / f"standalone_analysis_{int(time.time())}.json"
+    try:
+        out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        logger.info("Standalone analysis report written to %s", out)
+    except Exception as e:
+        logger.warning("Could not write standalone report: %s", e)
+    if report.get("mobile"):
+        m = report["mobile"]
+        logger.info("APK/IPA: %s endpoints, %s secrets, %s deeplinks",
+                    m.get("endpoint_count", 0), m.get("secret_count", 0), m.get("deeplink_count", 0))
+    if report.get("source"):
+        logger.info("SAST: %s findings %s", report["source"].get("finding_count", 0),
+                    report["source"].get("by_class", {}))
+    print(json.dumps(report, indent=2))
+    return 0
+
+
 def _run_sast(args) -> list:
     """Phase 4.5: run grey-box SAST if --source-repo/--source-path given. Guarded
     — returns [] and never fails the run when Semgrep/git are unavailable."""
@@ -222,7 +248,9 @@ Examples:
   python main.py --targets-file targets.txt --tier POC
         """
     )
-    group = parser.add_mutually_exclusive_group(required=True)
+    # Not required at parse time: a standalone --mobile-app / --source-* run needs
+    # no target. Post-parse validation below enforces "target OR standalone input".
+    group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument("--target", help="Single target domain or URL")
     group.add_argument("--targets", help="Comma-separated list of targets")
     group.add_argument("--targets-file", help="File with one target per line")
@@ -272,6 +300,16 @@ Examples:
                          help="Incremental scan: diff against the saved attack-surface "
                               "baseline and test only new/changed endpoints (Phase 6.2)")
     args = parser.parse_args()
+
+    # Standalone (individual) analysis mode: analyze an APK/IPA or source tree on
+    # its own — no target, no scan. Requires at least one input overall.
+    _has_target = bool(args.target or args.targets or args.targets_file)
+    _has_analysis_input = bool(args.mobile_app or args.ipa_app or args.source_repo or args.source_path)
+    if not _has_target and not _has_analysis_input:
+        parser.error("provide a --target/--targets/--targets-file, or a standalone "
+                     "input (--mobile-app / --ipa-app / --source-repo / --source-path)")
+    if not _has_target and _has_analysis_input:
+        sys.exit(_run_standalone_analysis(args))
 
     if args.incremental:
         os.environ["ANTIGRAVITY_INCREMENTAL"] = "1"
