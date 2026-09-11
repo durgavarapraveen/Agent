@@ -1396,6 +1396,154 @@ def regenerate_repro_bundles(scan_id: str, min_severity: str = "HIGH"):
         raise HTTPException(500, f"bundle generation failed: {e}")
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# NEW ANALYSIS SURFACES (Phases 2/3/5/6 backend → UI)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _scan_vulns(scan_id: str) -> list:
+    """Best-effort fetch of a scan's findings; [] if the DB is unavailable."""
+    try:
+        return VulnRepo.get_by_scan(scan_id) or []
+    except Exception as e:
+        logger.debug("scan vulns unavailable for %s: %s", scan_id, e)
+        return []
+
+
+def _scan_meta(scan_id: str) -> dict:
+    try:
+        return (ScanRepo.get(scan_id) or {}) if hasattr(ScanRepo, "get") else {}
+    except Exception:
+        return {}
+
+
+# ── Executive risk in dollars (Phase 5.3) ──────────────────────────────────
+@app.get("/api/scans/{scan_id}/risk")
+def get_scan_risk(scan_id: str):
+    try:
+        from core.reporting.risk_calculator import RiskCalculator, RiskContext
+        vulns = _scan_vulns(scan_id)
+        meta = _scan_meta(scan_id)
+        ctx = RiskContext(
+            industry=str(meta.get("industry", "generic") or "generic"),
+            regulations=list(meta.get("regulations", []) or []),
+        )
+        history = meta.get("risk_history", []) or []
+        return RiskCalculator().to_dashboard_dict(vulns, ctx, historical_totals=history)
+    except Exception as e:
+        raise HTTPException(500, f"risk unavailable: {e}")
+
+
+# ── Chain analysis: re-scoring + narratives + end-to-end CVSS (Phase 2.1) ───
+@app.get("/api/scans/{scan_id}/chain-analysis")
+def get_chain_analysis(scan_id: str):
+    try:
+        from core.exploitation.chain_builder import ChainBuilder
+        return ChainBuilder().synthesize(_scan_vulns(scan_id))
+    except Exception as e:
+        raise HTTPException(500, f"chain analysis unavailable: {e}")
+
+
+# ── Regression tracking (Phase 3.3) ────────────────────────────────────────
+@app.get("/api/scans/{scan_id}/regression")
+def get_scan_regression(scan_id: str):
+    try:
+        from core.monitoring.regression_detector import RegressionDetector
+        det = RegressionDetector(store_path=f"data/regression/{scan_id}.json")
+        det.load()
+        return det.summary()
+    except Exception as e:
+        raise HTTPException(500, f"regression data unavailable: {e}")
+
+
+# ── AI-generated fix code per finding (Phase 5.2) ───────────────────────────
+@app.get("/api/scans/{scan_id}/fix-suggestions")
+def get_fix_suggestions(scan_id: str):
+    try:
+        from core.reporting.fix_generator import FixGenerator, detect_stack
+        vulns = _scan_vulns(scan_id)
+        meta = _scan_meta(scan_id)
+        stack = detect_stack(headers=meta.get("response_headers", {}) or {},
+                             body=str(meta.get("error_sample", "") or ""))
+        gen = FixGenerator()
+        out = []
+        for v in vulns:
+            fix = gen.generate_fix(v, stack)
+            if fix.get("fix_code"):
+                out.append({"finding": v.get("title") or v.get("type"),
+                            "severity": v.get("severity"), **fix})
+        return {"scan_id": scan_id, "stack": {"language": stack.language, "framework": stack.framework},
+                "count": len(out), "fixes": out}
+    except Exception as e:
+        raise HTTPException(500, f"fix suggestions unavailable: {e}")
+
+
+# ── Attack recordings / narratives (Phase 5.1) ──────────────────────────────
+@app.get("/api/scans/{scan_id}/attack-recordings")
+def get_attack_recordings(scan_id: str):
+    """Recorded exploit narratives + evidence. Sources persisted recordings when
+    present; otherwise builds narratives from confirmed high/critical findings."""
+    try:
+        from core.reporting.attack_recorder import AttackRecorder
+        vulns = [v for v in _scan_vulns(scan_id)
+                 if str(v.get("severity", "")).lower() in ("critical", "high")
+                 and str(v.get("status", "")).upper() == "CONFIRMED"]
+        recordings = []
+        for v in vulns[:25]:
+            rec = AttackRecorder(v.get("id") or v.get("title", "finding"),
+                                 v.get("title") or v.get("type", "finding"),
+                                 severity=str(v.get("severity", "high")).lower())
+            if v.get("location") or v.get("target"):
+                rec.add_step("Navigate to", v.get("location") or v.get("target", ""))
+            if v.get("proof"):
+                rec.add_step("Exploit", v.get("location") or v.get("target", ""),
+                             note=str(v.get("proof"))[:160])
+            recordings.append(rec.build().to_dict())
+        return {"scan_id": scan_id, "count": len(recordings), "recordings": recordings}
+    except Exception as e:
+        raise HTTPException(500, f"attack recordings unavailable: {e}")
+
+
+# ── Attack-surface diff vs a baseline (Phases 3.1 / 6.2) ────────────────────
+@app.get("/api/scans/{scan_id}/surface-diff")
+def get_surface_diff(scan_id: str, target: str = ""):
+    try:
+        from core.monitoring.surface_baseline import SurfaceBaseline
+        meta = _scan_meta(scan_id)
+        tgt = target or str(meta.get("target", "") or "")
+        bl = SurfaceBaseline()
+        baseline = bl.load_latest(tgt) if tgt else None
+        if baseline is None:
+            return {"scan_id": scan_id, "target": tgt, "has_baseline": False,
+                    "diff": None, "message": "No stored baseline for this target yet."}
+        current = bl.snapshot(meta, target=tgt)
+        return {"scan_id": scan_id, "target": tgt, "has_baseline": True,
+                "diff": bl.diff(baseline, current)}
+    except Exception as e:
+        raise HTTPException(500, f"surface diff unavailable: {e}")
+
+
+# ── Benchmark catalog / scores (Phase 11) ───────────────────────────────────
+@app.get("/api/benchmarks")
+def get_benchmarks():
+    try:
+        from tests.benchmarks.juice_shop_benchmark import JUICE_SHOP_CHALLENGES, categories
+        from tests.benchmarks.dvwa_benchmark import DVWA_CASES, SECURITY_LEVELS
+        from tests.benchmarks.token_benchmark import TOKEN_BUDGET_LIMIT
+        return {
+            "juice_shop": {
+                "total": len(JUICE_SHOP_CHALLENGES),
+                "categories": sorted(categories()),
+                "challenges": [{"id": c.id, "name": c.name, "category": c.category,
+                                "difficulty": c.difficulty, "executor": c.executor}
+                               for c in JUICE_SHOP_CHALLENGES],
+            },
+            "dvwa": {"cases": len(DVWA_CASES), "levels": list(SECURITY_LEVELS)},
+            "token_budget_limit": TOKEN_BUDGET_LIMIT,
+        }
+    except Exception as e:
+        raise HTTPException(500, f"benchmarks unavailable: {e}")
+
+
 # ── SCAN CHATBOT — LLM Q&A over this scan's collected data ─────────────────
 class ScanChatMessage(BaseModel):
     message: str

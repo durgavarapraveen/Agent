@@ -9,6 +9,12 @@ import LiveAgentsPanel from "../components/LiveAgentsPanel";
 import ScanChatPanel from "../components/ScanChatPanel";
 import AttackChainsPanel from "../components/AttackChainsPanel";
 import ScanDiffPanel from "../components/ScanDiffPanel";
+import ChainAnalysisPanel from "../components/ChainAnalysisPanel";
+import CostRiskPanel from "../components/CostRiskPanel";
+import RegressionPanel from "../components/RegressionPanel";
+import FixSuggestionsPanel from "../components/FixSuggestionsPanel";
+import AttackRecordingsPanel from "../components/AttackRecordingsPanel";
+import SurfaceDiffPanel from "../components/SurfaceDiffPanel";
 import { OsintSection } from "../components/ReconPanel";
 import { methodColor } from "../components/utils";
 
@@ -41,7 +47,13 @@ export default function ScanDetail() {
     { id: "exploits", label: `Exploits (${exploits.length})` },
     { id: "artifacts", label: "Artifacts / PoC" },
     { id: "chains", label: "Attack Chains" },
+    { id: "chain-analysis", label: "Chain Analysis" },
+    { id: "cost-risk", label: "Cost & Risk" },
+    { id: "fixes", label: "Fix Code" },
+    { id: "recordings", label: "Recordings" },
+    { id: "regressions", label: "Regressions" },
     { id: "diff", label: "Diff vs baseline" },
+    { id: "surface-diff", label: "Surface Diff" },
     { id: "post-exploit", label: "Post-Exploit" },
     { id: "recon", label: "Recon Data" },
     { id: "tool-outputs", label: "Tool Outputs" },
@@ -90,7 +102,13 @@ export default function ScanDetail() {
       {tab === "exploits" && <ExploitsTab exploits={exploits} scanId={scanId} />}
       {tab === "artifacts" && <ArtifactsPanel scanId={scanId} />}
       {tab === "chains" && <AttackChainsPanel scanId={scanId} />}
+      {tab === "chain-analysis" && <ChainAnalysisPanel scanId={scanId} />}
+      {tab === "cost-risk" && <CostRiskPanel scanId={scanId} />}
+      {tab === "fixes" && <FixSuggestionsPanel scanId={scanId} />}
+      {tab === "recordings" && <AttackRecordingsPanel scanId={scanId} />}
+      {tab === "regressions" && <RegressionPanel scanId={scanId} />}
       {tab === "diff" && <ScanDiffPanel scanId={scanId} />}
+      {tab === "surface-diff" && <SurfaceDiffPanel scanId={scanId} />}
       {tab === "post-exploit" && <PostExploitTab scanId={scanId} />}
       {tab === "recon" && <ReconPanel context={context} scanId={scanId} />}
       {tab === "tool-outputs" && <ToolOutputsTab scanId={scanId} />}
