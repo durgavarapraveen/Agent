@@ -145,6 +145,9 @@ from core.execution.executors.generic import (
     LiveDOMXSSExecutor, LivePostMessageAbuseDetector,
     LiveClickjackingDetector, LiveCSPBypassAttempt,
 )
+from core.execution.executors.ecommerce import EcommerceExecutor
+from core.execution.executors.role_escalation import RoleEscalationExecutor
+from core.execution.executors.llm_app_testing import LLMAppTestingExecutor
 from core.execution.executors.differential_research import (
     DifferentialResearchExecutor, MetamorphicConsistencyExecutor,
     InvariantOracleExecutor,
@@ -848,6 +851,9 @@ class CentralBrain(
         self.graphql_executor = GraphQLExecutor(timeout_seconds=15)
         self.ws_executor = WebSocketExecutor(timeout_seconds=15)
         self.bizlogic_executor = BusinessLogicExecutor(timeout_seconds=30)
+        self.ecommerce_executor = EcommerceExecutor(timeout_seconds=30)
+        self.role_escalation_executor = RoleEscalationExecutor(timeout_seconds=30)
+        self.llm_app_executor = LLMAppTestingExecutor(timeout_seconds=60)
         self.pathtraversal_executor = PathTraversalExecutor(timeout_seconds=15)
         self.jwt_executor = JWTExecutor(timeout_seconds=30)
         self.nosqli_executor = NoSQLiExecutor(timeout_seconds=30)
@@ -925,6 +931,13 @@ class CentralBrain(
         self.metamorphic_executor = MetamorphicConsistencyExecutor(timeout_seconds=60)
         self.invariant_oracle_executor = InvariantOracleExecutor(timeout_seconds=45)
         self.executor_registry = {
+            # ── Business-logic / mobile / API executors (Phases 1.3 / 1.4 / 4.2) ──
+            "ecommerce_tampering_01": self.ecommerce_executor,
+            "ecommerce_coupon_01": self.ecommerce_executor,
+            "role_escalation_bola_01": self.role_escalation_executor,
+            "role_escalation_vertical_01": self.role_escalation_executor,
+            "llm_app_injection_01": self.llm_app_executor,
+            "llm_app_extraction_01": self.llm_app_executor,
             # ── PHASE 5 research executors (spec Points A/B/C, P1.4-1.7) ──
             "differential_representation_01": self.differential_research_executor,
             "parser_differential_01": self.differential_research_executor,
@@ -1645,6 +1658,42 @@ class CentralBrain(
                     f"{len(specs)} business-logic test specs generated")
         except Exception as _aue:
             logger.debug(f"[AppUnderstanding] skipped: {_aue}")
+
+        # 6b. Phase 1.2: build workflow state machines + negative test cases from
+        # captured multi-step flows (guarded; empty when nothing was captured).
+        try:
+            captured = getattr(self.ctx, "captured_requests", None) or getattr(self.ctx, "endpoints", None)
+            if captured:
+                from core.discovery.workflow_crawler import WorkflowCrawler
+                crawler = WorkflowCrawler()
+                sm = crawler.build_from_requests(captured if isinstance(captured, list) else [])
+                if len(sm.steps) >= 2:
+                    self.ctx.workflow_test_cases = [c.__dict__ for c in crawler.generate_test_cases(sm)]
+                    logger.info("[WorkflowCrawler] %d workflow test case(s) generated",
+                                len(self.ctx.workflow_test_cases))
+        except Exception as _wce:
+            logger.debug(f"[WorkflowCrawler] skipped: {_wce}")
+
+        # 7. Phase 6.2: incremental scanning. When ANTIGRAVITY_INCREMENTAL=1 and a
+        # saved baseline exists, narrow ctx.endpoints to the new/changed ones.
+        # Conservative: only prunes when the result is non-empty — otherwise the
+        # full endpoint set is kept (never turns a scan into a no-op).
+        try:
+            import os as _os
+            if _os.getenv("ANTIGRAVITY_INCREMENTAL") == "1":
+                from core.monitoring.incremental import IncrementalScanner
+                scanner = IncrementalScanner()
+                plan = scanner.plan(getattr(self, "target", ""), self.ctx, incremental=True)
+                if not plan.full_scan and plan.endpoints_to_scan:
+                    kept = IncrementalScanner.filter_endpoints(self.ctx.endpoints or [], plan)
+                    if kept:
+                        logger.info("[Incremental] re-scanning %d changed/new endpoint(s) "
+                                    "(was %d).", len(kept), len(self.ctx.endpoints or []))
+                        self.ctx.endpoints = kept
+                elif not plan.full_scan and not plan.endpoints_to_scan:
+                    logger.info("[Incremental] attack surface unchanged since baseline.")
+        except Exception as _ie:
+            logger.debug(f"[Incremental] skipped: {_ie}")
 
     def _sync_scanning_to_advanced_engines(self):
         """Synchronizes ACTIVE_SCANNING results to ResourceGovernor, DifferentialEngine, AnomalyPipeline, and SpecialistTeam."""
