@@ -65,7 +65,7 @@ class ScanScheduler:
             logger.warning(f"[Scheduler] Failed to save schedules: {e}")
 
     def add_schedule(self, target: str, interval_hours: int = 24,
-                     tier: str = "POC", phases: list = None) -> ScanSchedule:
+                     tier: str = "POC", phases: list | None = None) -> ScanSchedule:
         import hashlib
         schedule_id = hashlib.md5(f"{target}:{time.time()}".encode()).hexdigest()[:12]
 

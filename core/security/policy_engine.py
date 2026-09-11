@@ -400,18 +400,16 @@ class PolicyEngine:
                 DenyReason.POLICY_ERROR, target=target,
             ))
 
-        # 3) Tier check via AuthorizationManager
+        # 3) Tier check via config
         try:
-            from agents.authorization import AuthorizationManager, ExploitTier
-            tier_map = {"POC": ExploitTier.POC, "SHALLOW": ExploitTier.SHALLOW,
-                        "DEEP": ExploitTier.DEEP}
-            exploit_tier = tier_map.get(tier.upper(), ExploitTier.POC)
-            auth_mgr = AuthorizationManager()
-            if not auth_mgr.verify_tier(exploit_tier):
+            from core.common.config import load_config
+            tier_order = {"POC": 1, "SHALLOW": 2, "DEEP": 3}
+            max_allowed = load_config().config.get("MAX_EXPLOITATION_TIER", "POC")
+            if tier_order.get(tier.upper(), 1) > tier_order.get(max_allowed, 1):
                 return self._emit(_deny(
-                    action, f"tier '{tier}' exceeds max authorized tier",
+                    action, f"tier '{tier}' exceeds max authorized tier '{max_allowed}'",
                     DenyReason.TIER_EXCEEDED, target=target,
-                    detail={"requested_tier": tier},
+                    detail={"requested_tier": tier, "max_tier": max_allowed},
                 ))
         except ImportError:
             pass

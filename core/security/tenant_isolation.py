@@ -101,7 +101,7 @@ class TenantBoundary:
             from core.observability.metrics import TENANT_BOUNDARY_VIOLATIONS
             TENANT_BOUNDARY_VIOLATIONS.inc()
         except ImportError:
-            pass
+            logger.debug("TENANT_BOUNDARY_VIOLATIONS metric not available")
 
     def get_resources(self, tenant_id: str) -> Set[str]:
         with self._lock:

@@ -62,14 +62,16 @@ class BrowserActuator:
             try:
                 from core.common.config import get_config
                 host_override = get_config().get("BROWSER_HOST_OVERRIDE", "host.docker.internal")
-            except Exception:
+            except Exception as e:
+                logger.debug("config import for BROWSER_HOST_OVERRIDE failed: %s", e)
                 host_override = "host.docker.internal"
         self.host_override = host_override
         if scope_validator is None:
             try:
                 from core.security.authorization import TargetScopeValidator
                 scope_validator = TargetScopeValidator.get()
-            except Exception:
+            except Exception as e:
+                logger.debug("TargetScopeValidator import failed: %s", e)
                 scope_validator = None
         self.scope_validator = scope_validator
 

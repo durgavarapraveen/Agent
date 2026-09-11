@@ -110,5 +110,6 @@ def enforce(topic: str, ctx: Dict[str, Any]) -> PolicyVerdict:
                 {"budget_seconds": budget, "elapsed": elapsed})
         return PolicyVerdict(True, detail={"budget_seconds": budget})
 
-    # Unknown topics default to allow — LLM territory.
-    return PolicyVerdict(True, reason="topic outside deterministic policy")
+    # Unknown topics fail-closed.
+    logger.warning("[decisions.policy_engine] unknown topic %r — denied by default", t)
+    return PolicyVerdict(False, reason=f"unknown policy topic {t!r} — denied by default")

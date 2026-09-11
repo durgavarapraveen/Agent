@@ -119,7 +119,8 @@ class ObjectiveAgentLoop:
                 "from these responses, and (2) the concrete next manual steps to try. Be specific."
             )
             return await self.harness.generate_text(prompt, max_tokens=300)
-        except Exception:
+        except Exception as e:
+            logger.warning("manual guidance generation failed: %s", e)
             return ""
 
     def _record_review(self, objective: str, category: str, result: Dict[str, Any],
@@ -159,7 +160,8 @@ class ObjectiveAgentLoop:
         try:
             from agents.universal_llm_harness import TaskTier
             tier = TaskTier.LARGE
-        except Exception:
+        except Exception as e:
+            logger.warning("TaskTier import failed, using default: %s", e)
             tier = None
 
         history: List[Dict[str, Any]] = []
@@ -195,8 +197,8 @@ class ObjectiveAgentLoop:
                         if record:
                             self._record_review(objective, category, res, scan_id=scan_id)
                         return res
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("verifier raised during agent loop: %s", e)
 
         # No external verifier → success is whether the agent demonstrated a finding.
         success = bool(self.findings) if self.verifier is None else False

@@ -807,10 +807,9 @@ def _init_schema():
                     ON tool_executions(scan_id, tool, command, COALESCE(target, ''));
                 """)
                 # vulnerabilities — case-variant / path-variant duplicates of
-                # site-level findings ("FTP directory listing exposed —
-                # demo.owasp-juice.shop" with type=INFORMATION_DISCLOSURE vs
-                # information_disclosure vs ENDPOINT). Collapse by lower-title +
-                # host (strip scheme+port+path).
+                # site-level findings (e.g. "FTP directory listing exposed"
+                # with type=INFORMATION_DISCLOSURE vs ENDPOINT). Collapse by
+                # lower-title + host (strip scheme+port+path).
                 cur.execute("""
                     WITH ranked AS (
                         SELECT id,

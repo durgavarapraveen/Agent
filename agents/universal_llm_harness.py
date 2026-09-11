@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -363,7 +364,7 @@ class DeepSeekProvider(LLMProvider):
         api_key: str,
         small_model: str = "deepseek-v4-flash",
         large_model: str = "deepseek-v4-pro",
-        base_url: str = "https://api.deepseek.com",
+        base_url: str = None,
         budget: Optional[TokenBudget] = None,
         reasoning_effort: str = "high",
         user_id: Optional[str] = None,
@@ -372,7 +373,7 @@ class DeepSeekProvider(LLMProvider):
         self.api_key = api_key
         self.small_model = self.MODEL_ALIASES.get(small_model, small_model)
         self.large_model = self.MODEL_ALIASES.get(large_model, large_model)
-        self.base_url = base_url.rstrip("/")
+        self.base_url = (base_url or os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")).rstrip("/")
         self.reasoning_effort = reasoning_effort
         self.timeout = 180
         self.user_id = user_id
@@ -854,7 +855,7 @@ class GroqProvider(LLMProvider):
         self.api_key = api_key
         self.small_model = small_model
         self.large_model = large_model
-        self.base_url = "https://api.groq.com/openai/v1"
+        self.base_url = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
     
     async def is_available(self) -> bool:
         try:

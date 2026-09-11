@@ -80,8 +80,8 @@ class AuthConfig:
         if raw_extra:
             try:
                 extra = json.loads(raw_extra)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("AUTH_EXTRA_FIELDS JSON parse failed: %s", e)
 
         return cls(
             enabled=cfg.get_bool("AUTH_ENABLED", False),
@@ -215,8 +215,8 @@ class AuthSessionManager:
             token = None
             try:
                 token = self._extract_json_path(resp.json(), self.config.token_json_path)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("token extraction from login response failed: %s", e)
             if token:
                 self.headers[self.config.header_name] = f"{self.config.token_prefix}{token}"
                 self._jwt_exp = _decode_jwt_exp(str(token))

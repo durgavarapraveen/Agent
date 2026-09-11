@@ -9,6 +9,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+INSECURE_KEY_MARKERS = ("ANTIGRAVITY_MASTER_KEY", "CHANGE_ME_RUN_generate_keys")
+
 BUILD_ID = os.environ.get("BUILD_ID", "dev")
 CONTAINER_ID = os.environ.get("HOSTNAME", "bare-metal")
 
@@ -74,3 +76,25 @@ def log_startup_diagnostics() -> None:
 
     for line in header:
         logger.info(line)
+
+    _check_encryption_key()
+
+
+def _check_encryption_key() -> None:
+    env_mode = os.getenv("ANTIGRAVITY_ENV", "development").strip().lower()
+    is_prod = env_mode in ("production", "prod")
+
+    for var in ("ENCRYPTION_KEY", "ENCRYPTION_KEY_CURRENT"):
+        val = os.getenv(var, "")
+        if any(marker in val for marker in INSECURE_KEY_MARKERS):
+            msg = (
+                f"{var} contains an insecure placeholder. "
+                "Run: python scripts/generate_keys.py"
+            )
+            if is_prod:
+                logger.critical(msg)
+                raise SystemExit(
+                    f"FATAL: {msg}. Refusing to start in production mode."
+                )
+            else:
+                logger.warning(msg)

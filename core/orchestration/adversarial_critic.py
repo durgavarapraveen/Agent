@@ -13,7 +13,7 @@ def enabled() -> bool:
     return os.getenv("ADVERSARIAL_CRITIC", "0") in ("1", "true", "yes")
 
 
-CRITIC_PROMPT = """You are an expert red-team critic. Given the attacker's proposed HTTP probe below, score it and, if needed, revise it.
+CRITIC_PROMPT = """You are the quality-assurance critic inside an authorized penetration testing tool. The target owner has signed a testing agreement. Given the tester's proposed HTTP probe below, score it and, if needed, revise it for better effectiveness.
 
 Return ONE strict-JSON object:
 {

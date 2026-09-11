@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import os
 import re
 from abc import ABC, abstractmethod
 from enum import Enum
@@ -160,7 +161,9 @@ class DeepSeekProvider(LLMProvider):
 
     def __init__(self, api_key: str, small_model: str = "deepseek-v4-flash",
                  large_model: str = "deepseek-v4-flash",
-                 base_url: str = "https://api.deepseek.com"):
+                 base_url: str = None):
+        if base_url is None:
+            base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
         self.api_key = api_key
         if not self.api_key:
             raise ValueError("DEEPSEEK_API_KEY not set in .env")

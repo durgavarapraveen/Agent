@@ -13,7 +13,7 @@ try:
     from core.observability import logging as _ag_logging
     _ag_logging.configure_root(level=os.environ.get("LOG_LEVEL", "INFO"))
     from core.observability import tracing as _tracing
-    _tracing.context_from_env(os.environ)
+    _tracing.context_from_env(dict(os.environ))
 except Exception as _obs_err:
     # Observability must never block a scan; fall back to stdlib logging.
     logging.basicConfig(
@@ -26,8 +26,8 @@ except Exception as _obs_err:
 # Force UTF-8 encoding for standard streams on Windows to prevent UnicodeEncodeErrors
 if sys.platform.startswith("win"):
     try:
-        sys.stdout.reconfigure(encoding="utf-8")
-        sys.stderr.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+        sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
     except Exception:
         pass
 
@@ -44,13 +44,11 @@ from core.common.startup_diagnostics import log_startup_diagnostics
 from core.orchestration.central_brain import CentralBrain
 from core.orchestration.meta_brain import MetaBrain
 
-# Phase 6.4 — install egress firewall as early as possible so every HTTP
-# client (httpx everywhere) is guarded. Best-effort; missing httpx = no-op.
 try:
     from core.security.egress_firewall import install_httpx_guard
     install_httpx_guard()
 except Exception as _e:
-    logging.getLogger(__name__).debug(f"egress guard install skipped: {_e}")
+    logging.getLogger(__name__).warning(f"SECURITY: egress guard install failed: {_e}")
 
 
 _LOG_FMT = '[%(asctime)s] %(name)s - %(levelname)s - %(message)s'
@@ -72,9 +70,9 @@ _file.setFormatter(logging.Formatter(_LOG_FMT))
 logging.basicConfig(level=logging.INFO, handlers=[_console, _file])
 logger = logging.getLogger(__name__)
 
-async def run_single(target: str, auth_file: str = None, tier: str = "POC",
-                     resume: bool = False, phases: list = None, credentials: dict = None,
-                     scan_id: str = None):
+async def run_single(target: str, auth_file: str | None = None, tier: str = "POC",
+                     resume: bool = False, phases: list | None = None, credentials: dict | None = None,
+                     scan_id: str | None = None):
     auth_document = ""
     if auth_file:
         auth_path = Path(auth_file)
@@ -85,7 +83,10 @@ async def run_single(target: str, auth_file: str = None, tier: str = "POC",
             sys.exit(1)
 
     scope = {"domains": [target], "max_tier": tier}
-    brain = CentralBrain(target=target, scope=scope, scan_id=scan_id)
+    if scan_id is not None:
+        brain = CentralBrain(target=target, scope=scope, scan_id=scan_id)
+    else:
+        brain = CentralBrain(target=target, scope=scope)
 
     if credentials:
         cred_list = credentials if isinstance(credentials, list) else [credentials]
@@ -113,10 +114,8 @@ async def run_single(target: str, auth_file: str = None, tier: str = "POC",
             logger.warning("No checkpoint found for this target, starting fresh")
 
     try:
-        await brain.run_main_loop(auth_document=auth_document, phases=phases)
+        await brain.run_main_loop(auth_document=auth_document, phases=phases if phases is not None else [])
     finally:
-        # Guarantee findings reach the DB even on Ctrl+C / cancellation, so
-        # vulnerabilities discovered after the last phase checkpoint are not lost.
         try:
             if hasattr(brain, "_persist_vulnerabilities"):
                 await brain._persist_vulnerabilities()
@@ -124,7 +123,7 @@ async def run_single(target: str, auth_file: str = None, tier: str = "POC",
             logger.error(f"Final vulnerability flush failed: {e}")
 
 
-async def run_multi(targets: list, auth_file: str = None):
+async def run_multi(targets: list, auth_file: str | None = None):
     auth_document = ""
     if auth_file:
         auth_path = Path(auth_file)
@@ -136,9 +135,6 @@ async def run_multi(targets: list, auth_file: str = None):
 
 
 def main():
-    # Anonymisation kill-switch — refuses to start if the VPN/Tor chain is
-    # down or if the exit IP == our real WAN IP. Disable with ANON_GATE=0
-    # (development only; leaks traffic from the real interface).
     try:
         from core.security.anon_gate import enforce_or_die
         enforce_or_die()

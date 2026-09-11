@@ -105,8 +105,8 @@ class Actuators:
                 tok = _extract_token(j) if isinstance(j, (dict, list)) else None
                 if tok:
                     self.session_headers["Authorization"] = f"Bearer {tok}"
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("token extraction from response body failed: %s", e)
             for k, v in r.cookies.items():
                 cur = self.session_headers.get("Cookie", "")
                 self.session_headers["Cookie"] = (cur + f"; {k}={v}").strip("; ")

@@ -18,25 +18,14 @@ class ExploitTier(Enum):
 
 class AuthorizationManager:
 
-    def __init__(self, scope_file: str = ".pentest_scope.json", audit_dir: str = ".audit_logs"):
-        self.scope_file = Path(scope_file)
+    def __init__(self, scope: Dict = None, audit_dir: str = ".audit_logs"):
         self.audit_dir = Path(audit_dir)
         self.audit_dir.mkdir(exist_ok=True)
-        self.scope = self._load_scope()
-
-    def _load_scope(self) -> Dict:
-        if not self.scope_file.exists():
-            logger.warning(f"Scope file not found: {self.scope_file}")
-            return {}
-
-        try:
-            with open(self.scope_file, 'r') as f:
-                scope = json.load(f)
-                logger.info(f"Loaded scope: {len(scope.get('domains', []))} authorized domains")
-                return scope
-        except Exception as e:
-            logger.error(f"Failed to load scope: {e}")
-            return {}
+        if scope and scope.get("domains"):
+            self.scope = scope
+        else:
+            self.scope = {}
+            logger.warning("AuthorizationManager created with no scope — all domain checks will fail")
 
     def verify_domain(self, domain: str) -> bool:
         from core.security.authorization import TargetScopeValidator
@@ -168,32 +157,9 @@ class AuthorizationManager:
             f.write(json.dumps(entry, default=str) + "\n")
 
     @staticmethod
-    def create_scope_file(
-        domains: List[str],
-        max_tier: str = "POC",
-        output_file: str = ".pentest_scope.json"
-    ):
-        scope = {
+    def create_scope(domains: List[str], max_tier: str = "POC") -> Dict:
+        return {
             "created": datetime.now().isoformat(),
             "domains": domains,
             "max_tier": max_tier,
-            "note": "Authorized domains for penetration testing",
         }
-        with open(output_file, 'w') as f:
-            json.dump(scope, f, indent=2)
-        print(f"Scope file created: {output_file}")
-        print(f"Domains: {domains}")
-        print(f"Max tier: {max_tier}")
-
-
-# Example usage
-if __name__ == "__main__":
-    # Create scope file
-    AuthorizationManager.create_scope_file(
-        domains=["example.com", "test.example.com", "preview.owasp-juice.shop"],
-        max_tier="SHALLOW",  # Can test, but no RCE
-    )
-
-    auth = AuthorizationManager()
-    print(auth.verify_domain("api.example.com"))
-    print(auth.verify_domain("attacker.com"))

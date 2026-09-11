@@ -26,8 +26,9 @@ from core.observability import tracing as _tracing
 try:
     from core.security.egress_firewall import install_httpx_guard as _install_egress
     _install_egress()
-except Exception:
-    pass
+except Exception as _egress_err:
+    __import__("logging").getLogger(__name__).warning(
+        "SECURITY: egress guard install failed: %s", _egress_err)
 
 logger = logging.getLogger("antigravity.api")
 

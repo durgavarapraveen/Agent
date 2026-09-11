@@ -10,11 +10,6 @@ from core.security.encryption import encrypt, decrypt, get_encryption_key
 logger = logging.getLogger(__name__)
 
 
-# On-disk envelope:
-# Enveloping lets us stamp a key version so a checkpoint saved with key vN
-# can be recognised (and refused with a clear error) when the process is
-# now running with key vN+1. Previously an ENCRYPTION_KEY rotation without a
-# separate file migration produced an opaque "decrypt failed" on load.
 CHECKPOINT_STORE_VERSION = 1
 
 

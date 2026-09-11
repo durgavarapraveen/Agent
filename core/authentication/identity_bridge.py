@@ -82,8 +82,8 @@ def build_replay_sessions(
     if shared_context is not None:
         try:
             shared_context.identities = identity_manager.identities
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[IdentityBridge] failed to set shared_context.identities: %s", e)
 
     logger.info(f"[IdentityBridge] wired {len(roles_loaded)} real role sessions into "
                 f"replay/access-control engine: {roles_loaded}")
