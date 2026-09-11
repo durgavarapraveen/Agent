@@ -101,6 +101,17 @@ async def run_single(target: str, auth_file: str | None = None, tier: str = "POC
             logger.info(f"Total credential sets loaded: {len(brain.ctx.auth_credentials)} "
                         f"(roles: {', '.join(c.get('role','?') for c in brain.ctx.auth_credentials)})")
 
+    # Phase 4.4: merge mobile-app-derived backend endpoints into the scan scope.
+    _mobile_eps = os.getenv("ANTIGRAVITY_MOBILE_ENDPOINTS", "")
+    if _mobile_eps:
+        try:
+            from core.discovery.mobile_analyzer import inject_endpoints_into_context
+            n = inject_endpoints_into_context(brain.ctx, json.loads(_mobile_eps), "mobile_apk")
+            logger.info("Injected %d mobile-derived endpoint(s) into scan scope "
+                        "(out-of-scope hosts still blocked at request time).", n)
+        except Exception as e:
+            logger.warning("Mobile endpoint injection failed: %s", e)
+
     if resume:
         cp_path = brain.checkpointer.get_latest_checkpoint(target)
         if cp_path:
@@ -122,6 +133,20 @@ async def run_single(target: str, auth_file: str | None = None, tier: str = "POC
                 await brain._persist_vulnerabilities()
         except Exception as e:
             logger.error(f"Final vulnerability flush failed: {e}")
+
+    # Phase 4.5: correlate grey-box SAST findings with the scan's DAST findings.
+    _sast = os.getenv("ANTIGRAVITY_SAST_FINDINGS", "")
+    if _sast:
+        try:
+            from core.analysis.sast_bridge import correlate_and_persist
+            sid = scan_id or getattr(brain, "_scan_id", None) or target
+            dast = list(getattr(brain.ctx, "vulnerabilities", []) or [])
+            summary = correlate_and_persist(sid, json.loads(_sast), dast)
+            logger.info("SAST↔DAST correlation: %d confirmed, %d SAST-only, %d DAST-only",
+                        summary["counts"]["confirmed"], summary["counts"]["sast_only"],
+                        summary["counts"]["dast_only"])
+        except Exception as e:
+            logger.warning("SAST/DAST correlation failed: %s", e)
 
 
 async def run_multi(targets: list, auth_file: str | None = None):

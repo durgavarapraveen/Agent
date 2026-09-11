@@ -353,6 +353,22 @@ export const api = {
   getBenchmarks: () =>
     request("/api/benchmarks")
       .catch(() => ({ juice_shop: { total: 0, categories: [], challenges: [] }, dvwa: {}, token_budget_limit: 0 })),
+  getSastCorrelation: (scanId) =>
+    request(`/api/scans/${scanId}/sast-correlation`)
+      .catch(() => ({ scan_id: scanId, available: false, counts: { confirmed: 0, sast_only: 0, dast_only: 0 }, confirmed: [], sast_only: [], dast_only: [] })),
+
+  // Upload an APK/IPA for mobile backend analysis; returns { path, kind, filename }.
+  uploadScanInput: async (file) => {
+    const form = new FormData();
+    form.append("file", file);
+    const res = await fetch(`${BASE}/api/uploads/scan-input`, {
+      method: "POST",
+      headers: _authHeaders(),   // don't set Content-Type; browser sets multipart boundary
+      body: form,
+    });
+    await _checkResponse(res, "/api/uploads/scan-input");
+    return res.json();
+  },
 
   // Review queue — one canonical entry
   getReviewQueue: () => request("/api/review-queue"),

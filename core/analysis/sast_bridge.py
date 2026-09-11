@@ -21,9 +21,45 @@ import re
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def correlate_and_persist(scan_id: str, sast_findings: List[Dict[str, Any]],
+                          dast_findings: List[Dict[str, Any]],
+                          out_dir: str = "data/sast_correlation") -> Dict[str, Any]:
+    """Correlate SAST↔DAST for a scan and persist the result to
+    ``{out_dir}/{scan_id}.json`` so the report/UI can read it back. Returns the
+    correlation dict (confirmed / sast_only / dast_only + counts)."""
+    result = correlate_sast_dast(sast_findings or [], dast_findings or [])
+    summary = {
+        "scan_id": scan_id,
+        "confirmed": result["confirmed"],
+        "sast_only": result["sast_only"],
+        "dast_only": result["dast_only"],
+        "counts": {"confirmed": len(result["confirmed"]),
+                   "sast_only": len(result["sast_only"]),
+                   "dast_only": len(result["dast_only"])},
+    }
+    try:
+        p = Path(out_dir) / f"{scan_id}.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning("sast_bridge: could not persist correlation (%s)", e)
+    return summary
+
+
+def load_correlation(scan_id: str, out_dir: str = "data/sast_correlation") -> Optional[Dict[str, Any]]:
+    p = Path(out_dir) / f"{scan_id}.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 # Map Semgrep check_id / CWE → internal vuln class.
 _CWE_CLASS = {

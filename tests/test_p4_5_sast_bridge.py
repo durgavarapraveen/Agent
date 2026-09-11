@@ -6,7 +6,9 @@ import json
 from core.analysis.sast_bridge import (
     SastBridge,
     classify_rule,
+    correlate_and_persist,
     correlate_sast_dast,
+    load_correlation,
     parse_semgrep_output,
 )
 
@@ -80,3 +82,20 @@ def test_run_semgrep_graceful_without_tool(monkeypatch):
 
 def test_analyze_returns_empty_for_missing_path():
     assert SastBridge().analyze(source_path="/nonexistent/path/xyz") == []
+
+
+def test_correlate_and_persist_roundtrip(tmp_path):
+    sast = parse_semgrep_output(SEMGREP_JSON)
+    dast = [{"vuln_class": "sqli", "url": "https://app.test/api/orders/1", "severity": "high"}]
+    out = str(tmp_path)
+    summary = correlate_and_persist("scan42", sast, dast, out_dir=out)
+    assert summary["scan_id"] == "scan42"
+    assert summary["counts"]["confirmed"] == 1
+    # Persisted + reloadable.
+    loaded = load_correlation("scan42", out_dir=out)
+    assert loaded is not None
+    assert loaded["counts"]["confirmed"] == 1
+
+
+def test_load_correlation_missing(tmp_path):
+    assert load_correlation("nope", out_dir=str(tmp_path)) is None

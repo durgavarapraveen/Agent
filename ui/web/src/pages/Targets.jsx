@@ -127,6 +127,12 @@ function ScanModal({ target, onClose, onStarted }) {
   const [resetDedup, setResetDedup] = useState(false);
   const [allowShellOperators, setAllowShellOperators] = useState(false);
   const [allowAmbientAuth, setAllowAmbientAuth] = useState(false);
+  // Grey-box / mobile inputs (Phases 4.4 / 4.5)
+  const [greyBox, setGreyBox] = useState(false);
+  const [mobileUpload, setMobileUpload] = useState(null); // {path, kind, filename}
+  const [uploading, setUploading] = useState(false);
+  const [sourceRepo, setSourceRepo] = useState("");
+  const [sourcePath, setSourcePath] = useState("");
   const [selectedPhases, setSelectedPhases] = useState(["RECON", "ACTIVE_SCANNING", "EXPLOITATION", "REPORTING"]);
   const [showCreds, setShowCreds] = useState(false);
   const [credList, setCredList] = useState([{ role: "admin", username: "", password: "", login_url: "" }]);
@@ -162,6 +168,21 @@ function ScanModal({ target, onClose, onStarted }) {
     else setSelectedPhases(["RECON", "ACTIVE_SCANNING", "EXPLOITATION", "REPORTING"]);
   };
 
+  const handleMobileUpload = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setUploading(true);
+    setError("");
+    try {
+      const res = await api.uploadScanInput(file);
+      setMobileUpload(res);
+    } catch (err) {
+      setError(err.message || "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const startScan = async () => {
     setState("launching");
     setError("");
@@ -177,6 +198,10 @@ function ScanModal({ target, onClose, onStarted }) {
         allow_ambient_auth: allowAmbientAuth,
         phases: selectedPhases,
         credentials: validCreds,
+        mobile_app: mobileUpload && mobileUpload.kind === "apk" ? mobileUpload.path : "",
+        ipa_app: mobileUpload && mobileUpload.kind === "ipa" ? mobileUpload.path : "",
+        source_repo: sourceRepo.trim(),
+        source_path: sourcePath.trim(),
       });
       setScanId(data.scan_id || data.job_id);
       setState("running");
@@ -328,6 +353,38 @@ function ScanModal({ target, onClose, onStarted }) {
                 ))}
                 <button className="btn btn-sm" onClick={() => setCredList([...credList, { role: "user", username: "", password: "", login_url: "" }])}
                   style={{ alignSelf: "flex-start", fontSize: 11, padding: "4px 12px" }}>+ Add another role</button>
+              </div>
+            )}
+
+            <h3 style={{ marginTop: 20, cursor: "pointer" }} onClick={() => setGreyBox(!greyBox)}>
+              Grey-box & Mobile {greyBox ? "▾" : "▸"} <span style={{ fontSize: 11, color: "var(--text-dim)", fontWeight: 400 }}>(optional — analyze an APK/IPA or source code)</span>
+            </h3>
+            {greyBox && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: 10, borderRadius: 8, border: "1px solid var(--border)", background: "rgba(247,249,250,0.03)" }}>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-h)" }}>Mobile app (.apk / .ipa)</span>
+                  <span style={{ fontSize: 11, color: "var(--text-dim)" }}>Backend endpoints extracted from the app are merged into the scan scope (out-of-scope hosts stay blocked). APK decompile needs apktool/jadx on the server.</span>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <input type="file" accept=".apk,.ipa" onChange={handleMobileUpload} disabled={uploading}
+                      style={{ fontSize: 12, color: "var(--text)" }} />
+                    {uploading && <span style={{ fontSize: 12, color: "var(--text-dim)" }}>Uploading…</span>}
+                    {mobileUpload && !uploading && (
+                      <span style={{ fontSize: 12, color: "var(--green)" }}>
+                        ✓ {mobileUpload.filename} ({mobileUpload.kind})
+                        <button className="btn btn-sm" style={{ marginLeft: 8, padding: "2px 8px", fontSize: 11 }}
+                          onClick={() => setMobileUpload(null)}>clear</button>
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: 10, borderRadius: 8, border: "1px solid var(--border)", background: "rgba(247,249,250,0.03)" }}>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-h)" }}>Source code (grey-box SAST)</span>
+                  <span style={{ fontSize: 11, color: "var(--text-dim)" }}>Runs Semgrep and correlates SAST findings with runtime (DAST) results. Needs semgrep on the server; a git URL also needs git.</span>
+                  <input type="url" placeholder="Source repo URL (https://github.com/org/repo)" value={sourceRepo} onChange={(e) => setSourceRepo(e.target.value)}
+                    style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-card)", color: "var(--text)", fontSize: 12 }} />
+                  <input type="text" placeholder="…or a source path already on the server (/path/to/repo)" value={sourcePath} onChange={(e) => setSourcePath(e.target.value)}
+                    style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-card)", color: "var(--text)", fontSize: 12 }} />
+                </div>
               </div>
             )}
 
