@@ -95,6 +95,34 @@ _HOST_LEVEL_CATEGORIES = {"cors", "ftp_listing", "directory_listing", "default_c
                            "metrics_exposure", "info_leak", "clickjacking"}
 
 
+def _attack_subtype(category: str, title: str) -> str:
+    """Extract the attack sub-type from a title to separate genuinely distinct
+    findings at the same endpoint (e.g. UNION SQLi vs blind SQLi) while
+    collapsing LLM wording variations."""
+    t = title.lower()
+    _SUBTYPES = {
+        "sqli": [
+            ("union", ("union", "dump", "exfiltrat")),
+            ("blind", ("blind", "time-based", "boolean", "sleep")),
+            ("error", ("error", "stack", "verbose")),
+            ("auth", ("auth", "bypass", "login", "credential")),
+        ],
+        "xss": [
+            ("dom", ("dom",)),
+            ("stored", ("stored", "persistent")),
+            ("reflected", ("reflected",)),
+        ],
+        "auth_bypass": [
+            ("admin", ("admin",)),
+            ("jwt", ("jwt", "token")),
+        ],
+    }
+    for sub_name, keywords in _SUBTYPES.get(category, []):
+        if any(kw in t for kw in keywords):
+            return sub_name
+    return "general"
+
+
 def finding_uid(scan_id: str, v: Dict[str, Any]) -> str:
     title_raw = str(v.get("title") or "").lower().strip()
     loc_raw = str(v.get("location") or v.get("target") or v.get("affected_endpoint") or "")
@@ -104,19 +132,18 @@ def finding_uid(scan_id: str, v: Dict[str, Any]) -> str:
     category = _vuln_category(title_raw)
 
     if category in _PER_ENDPOINT_CATEGORIES:
-        # A short hash of the title separates "UNION dump" from "auth bypass"
-        # from "error-based probe" on the same URL — all legitimately distinct.
-        title_key = hashlib.sha1(title_raw.encode("utf-8", "ignore")).hexdigest()[:8]
-        content = "|".join([category, _normalize_location(loc_raw), title_key, cve])
+        sub = _attack_subtype(category, title_raw)
+        content = "|".join([category, sub, _normalize_location(loc_raw), cve])
     elif category in _HOST_LEVEL_CATEGORIES:
         content = "|".join([category, _host_only(loc_raw), cve])
     elif category:
-        # Fallback for any category not explicitly classified above — treat as
-        # per-endpoint (safe default: prefer preserving distinct proofs).
-        title_key = hashlib.sha1(title_raw.encode("utf-8", "ignore")).hexdigest()[:8]
-        content = "|".join([category, _normalize_location(loc_raw), title_key, cve])
+        sub = _attack_subtype(category, title_raw)
+        content = "|".join([category, sub, _normalize_location(loc_raw), cve])
     else:
-        content = "|".join([vtype, title_raw, _normalize_location(loc_raw), cve])
+        norm_title = re.sub(r'https?://\S+', '', title_raw)
+        norm_title = re.sub(r'[^a-z\s]', '', norm_title).strip()
+        norm_title = ' '.join(norm_title.split()[:5])
+        content = "|".join([vtype, norm_title, _normalize_location(loc_raw), cve])
     h = hashlib.sha1(content.encode("utf-8", "ignore")).hexdigest()[:16]
     return f"{scan_id}::{h}"
 
@@ -1076,26 +1103,29 @@ class VulnRepo:
         # dedupe by `finding_id` WITHIN THE BATCH before handing it to
         # `execute_values`. Later rows for the same fid win because "later"
         # usually means more evidence.
+        def _strip_nul(s):
+            return s.replace("\x00", "") if isinstance(s, str) else s
+
         by_fid: Dict[str, tuple] = {}
         for v in vulns:
             if v.get("finding_id"):
                 v.setdefault("orig_finding_id", v["finding_id"])
             fid = finding_uid(scan_id, v)
             row = (
-                scan_id, fid, v.get("title", ""), v.get("type", ""),
+                scan_id, fid, _strip_nul(v.get("title", "")), _strip_nul(v.get("type", "")),
                 (v.get("severity") or "INFO").upper(),
                 (v.get("status") or "UNCONFIRMED").upper(),
-                v.get("target", ""), v.get("location", ""),
-                v.get("details", ""), str(v.get("proof", "")),
-                v.get("remediation", ""), v.get("tool", ""),
+                _strip_nul(v.get("target", "")), _strip_nul(v.get("location", "")),
+                _strip_nul(v.get("details", "")), _strip_nul(str(v.get("proof", ""))),
+                _strip_nul(v.get("remediation", "")), _strip_nul(v.get("tool", "")),
                 v.get("cwe_id", ""), v.get("cve_id", ""),
                 v.get("confidence_score", 0.5),
-                _dumps({k: v.get(k) for k in v
+                _strip_nul(_dumps({k: v.get(k) for k in v
                             if k not in ("title", "type", "severity", "status",
                                           "target", "location", "details", "proof",
                                           "remediation", "tool", "cwe_id", "cve_id",
                                           "confidence_score", "finding_id")},
-                            default=str),
+                            default=str)),
             )
             # Prefer the row with the LONGER details/proof, since the
             # ON CONFLICT DO UPDATE picks the longer of the two anyway.

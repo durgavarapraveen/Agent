@@ -55,6 +55,38 @@ def _fail_closed_import(topic: str, module: str, exc: Exception) -> PolicyVerdic
     return PolicyVerdict(False, f"{module} unavailable (fail-closed per platform contract): {exc}")
 
 
+_CAPABILITY_TO_WAF = {
+    "technology_fingerprinting": "fingerprint",
+    "waf_detection": "fingerprint",
+    "tls_analysis": "passive",
+    "http_analysis": "passive",
+    "subdomain_enumeration": "recon",
+    "dns_enumeration": "recon",
+    "dns_intelligence": "recon",
+    "port_scanning": "recon",
+    "endpoint_discovery": "crawl",
+    "web_crawling": "crawl",
+    "javascript_analysis": "crawl",
+    "vulnerability_scanning": "active",
+    "sql_injection": "active",
+    "xss_scanning": "active",
+    "authentication_testing": "active",
+    "directory_bruteforce": "brute",
+    "parameter_discovery": "brute",
+    "employee_enumeration": "osint",
+    "github_scanning": "osint",
+    "threat_intelligence": "osint",
+}
+
+
+def _capability_to_waf_category(raw: str) -> str:
+    if raw in _CAPABILITY_TO_WAF:
+        return _CAPABILITY_TO_WAF[raw]
+    # Unmapped capabilities: allow safely by defaulting to "active" so they
+    # run in NORMAL/CAUTIOUS but stop in LOW_RATE/PASSIVE_ONLY.
+    return "active" if raw else "passive"
+
+
 def enforce(topic: str, ctx: Dict[str, Any]) -> PolicyVerdict:
     t = (topic or "").lower()
 
@@ -72,7 +104,8 @@ def enforce(topic: str, ctx: Dict[str, Any]) -> PolicyVerdict:
         except Exception as e:
             return _fail_closed_import(t, "core.adaptation.waf_state", e)
         mode = get_waf_state().mode_for(ctx.get("target", ""))
-        category = (ctx.get("tool_category") or "").lower()
+        raw_category = (ctx.get("tool_category") or "").lower()
+        category = _capability_to_waf_category(raw_category)
         if not get_waf_state().is_tool_allowed(ctx.get("target", ""), category):
             return PolicyVerdict(False,
                 f"WAF mode {mode.value} forbids category {category!r}",

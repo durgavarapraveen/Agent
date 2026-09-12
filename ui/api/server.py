@@ -334,6 +334,8 @@ from core.database.pg_store import (
     _init_schema, TargetRepo, ScanRepo, VulnRepo, LiveDataRepo,
     FindingV2Repo, DedupRepo, AuditRepo, ScheduleRepo, CampaignRepo,
     ExploitResultRepo, ScanArtifactRepo, AuthBypassRepo, LiveAgentRepo, make_run_id,
+    _vuln_category, _normalize_location, _host_only,
+    _PER_ENDPOINT_CATEGORIES, _HOST_LEVEL_CATEGORIES,
 )
 try:
     _init_schema()
@@ -947,6 +949,76 @@ def _empty_live_results():
     }
 
 
+def _dedup_vulns(vulns: list) -> list:
+    """Collapse near-duplicate vulnerabilities by (category + endpoint/host).
+
+    LLM agents frequently produce multiple findings for the same underlying
+    vulnerability with slightly different titles. This groups them by
+    semantic category and location, keeping the entry with the most evidence.
+    """
+    import re as _re
+
+    def _dedup_key(v: dict) -> str:
+        title = (v.get("title") or "").lower().strip()
+        cat = _vuln_category(title)
+        loc = str(v.get("location") or v.get("affected_endpoint") or v.get("target") or "")
+        if cat in _HOST_LEVEL_CATEGORIES:
+            return f"{cat}|{_host_only(loc)}"
+        if cat in _PER_ENDPOINT_CATEGORIES:
+            norm_loc = _normalize_location(loc)
+            sub_type = ""
+            if cat == "sqli":
+                if any(kw in title for kw in ("union", "dump", "exfiltrat")):
+                    sub_type = "union"
+                elif any(kw in title for kw in ("blind", "time-based", "boolean")):
+                    sub_type = "blind"
+                elif any(kw in title for kw in ("error", "stack")):
+                    sub_type = "error"
+                elif "auth" in title or "bypass" in title or "login" in title:
+                    sub_type = "auth"
+                else:
+                    sub_type = "general"
+            elif cat == "xss":
+                if "dom" in title:
+                    sub_type = "dom"
+                elif "stored" in title or "persistent" in title:
+                    sub_type = "stored"
+                elif "reflected" in title:
+                    sub_type = "reflected"
+                else:
+                    sub_type = "general"
+            return f"{cat}:{sub_type}|{norm_loc}"
+        if cat:
+            return f"{cat}|{_normalize_location(loc)}"
+        vtype = (v.get("type") or v.get("vuln_type") or "").upper().strip()
+        norm_title = _re.sub(r'https?://\S+', '', title)
+        norm_title = _re.sub(r'[^a-z\s]', '', norm_title).strip()
+        norm_title = ' '.join(norm_title.split()[:6])
+        return f"{vtype}|{norm_title}|{_host_only(loc)}"
+
+    def _evidence_score(v: dict) -> int:
+        score = 0
+        score += len(str(v.get("details") or v.get("description") or ""))
+        score += len(str(v.get("proof") or v.get("evidence") or "")) * 2
+        if str(v.get("status") or "").upper() == "CONFIRMED":
+            score += 10000
+        score += int(float(v.get("confidence_score") or v.get("confidence") or 0) * 100)
+        sev_bonus = {"CRITICAL": 500, "HIGH": 400, "MEDIUM": 300, "LOW": 200, "INFO": 100}
+        score += sev_bonus.get((v.get("severity") or "INFO").upper(), 0)
+        return score
+
+    groups: dict = {}
+    for v in vulns:
+        key = _dedup_key(v)
+        if key not in groups:
+            groups[key] = v
+        else:
+            existing = groups[key]
+            if _evidence_score(v) > _evidence_score(existing):
+                groups[key] = v
+    return list(groups.values())
+
+
 def _live_singleton_scan_id() -> str:
     try:
         from core.database.pg_store import DatabaseManager
@@ -1017,6 +1089,7 @@ def get_live_results(scan_id: str = ""):
                         existing_titles.add(t)
             except Exception:
                 pass
+        data["vulnerabilities"] = _dedup_vulns(data.get("vulnerabilities", []))
         return data
     except Exception:
         return _empty_live_results()
@@ -1248,6 +1321,8 @@ def get_scan(scan_id: str):
         t = (rv.get("title") or "").strip().lower()
         if t and t not in db_titles:
             vulns.append(rv)
+
+    vulns = _dedup_vulns(vulns)
 
     severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
     for v in vulns:
@@ -1845,7 +1920,7 @@ def get_tool_outputs(scan_id: str, grouped: bool = False):
 
 @app.get("/api/scans/{scan_id}/vulnerabilities")
 def get_vulnerabilities(scan_id: str):
-    return VulnRepo.get_by_scan(scan_id)
+    return _dedup_vulns(VulnRepo.get_by_scan(scan_id) or [])
 
 
 @app.get("/api/scans/{scan_id}/activity")

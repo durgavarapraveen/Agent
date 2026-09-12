@@ -145,6 +145,9 @@ from core.execution.executors.generic import (
     LiveDOMXSSExecutor, LivePostMessageAbuseDetector,
     LiveClickjackingDetector, LiveCSPBypassAttempt,
 )
+from core.execution.executors.ecommerce import EcommerceExecutor
+from core.execution.executors.role_escalation import RoleEscalationExecutor
+from core.execution.executors.llm_app_testing import LLMAppTestingExecutor
 from core.execution.executors.differential_research import (
     DifferentialResearchExecutor, MetamorphicConsistencyExecutor,
     InvariantOracleExecutor,
@@ -848,6 +851,9 @@ class CentralBrain(
         self.graphql_executor = GraphQLExecutor(timeout_seconds=15)
         self.ws_executor = WebSocketExecutor(timeout_seconds=15)
         self.bizlogic_executor = BusinessLogicExecutor(timeout_seconds=30)
+        self.ecommerce_executor = EcommerceExecutor(timeout_seconds=30)
+        self.role_escalation_executor = RoleEscalationExecutor(timeout_seconds=30)
+        self.llm_app_executor = LLMAppTestingExecutor(timeout_seconds=60)
         self.pathtraversal_executor = PathTraversalExecutor(timeout_seconds=15)
         self.jwt_executor = JWTExecutor(timeout_seconds=30)
         self.nosqli_executor = NoSQLiExecutor(timeout_seconds=30)
@@ -925,6 +931,13 @@ class CentralBrain(
         self.metamorphic_executor = MetamorphicConsistencyExecutor(timeout_seconds=60)
         self.invariant_oracle_executor = InvariantOracleExecutor(timeout_seconds=45)
         self.executor_registry = {
+            # ── Business-logic / mobile / API executors (Phases 1.3 / 1.4 / 4.2) ──
+            "ecommerce_tampering_01": self.ecommerce_executor,
+            "ecommerce_coupon_01": self.ecommerce_executor,
+            "role_escalation_bola_01": self.role_escalation_executor,
+            "role_escalation_vertical_01": self.role_escalation_executor,
+            "llm_app_injection_01": self.llm_app_executor,
+            "llm_app_extraction_01": self.llm_app_executor,
             # ── PHASE 5 research executors (spec Points A/B/C, P1.4-1.7) ──
             "differential_representation_01": self.differential_research_executor,
             "parser_differential_01": self.differential_research_executor,
@@ -1628,23 +1641,129 @@ class CentralBrain(
             logger.debug(f"[SpecialistTeam] Posting skipped: {_ste}")
 
         # 6. Phase 1.5: Business-domain app understanding + test hypotheses.
-        # Uses the deterministic heuristic here (no network/LLM in the sync path);
-        # the LLM path can be run separately via app_understanding.analyze().
+        # Try async LLM path first for richer inference; fall back to heuristic.
         try:
             if hasattr(self, "app_understanding") and self.app_understanding:
                 from core.intelligence.app_understanding import AppSignals
                 signals = AppSignals.from_context(self.ctx)
-                understanding = self.app_understanding.heuristic(signals)
+                try:
+                    import asyncio as _aio
+                    loop = _aio.get_event_loop()
+                    if loop.is_running():
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                            understanding = pool.submit(
+                                _aio.run, self.app_understanding.analyze(signals)
+                            ).result(timeout=30)
+                    else:
+                        understanding = loop.run_until_complete(
+                            self.app_understanding.analyze(signals))
+                except Exception:
+                    understanding = self.app_understanding.heuristic(signals)
                 specs = self.app_understanding.to_test_specs(
                     understanding, base_endpoints=signals.endpoints[:50])
                 self.ctx.app_understanding = understanding.to_dict()
                 self.ctx.business_test_specs = specs
+                self._app_understanding = understanding
+                self.app_understanding.populate_app_model(understanding)
                 logger.info(
                     f"[AppUnderstanding] domain={understanding.business_domain} "
-                    f"(conf={understanding.domain_confidence:.2f}), "
-                    f"{len(specs)} business-logic test specs generated")
+                    f"(conf={understanding.domain_confidence:.2f}, src={understanding.source}), "
+                    f"{len(specs)} business-logic test specs, "
+                    f"{len(understanding.entities)} entities, "
+                    f"{len(understanding.security_invariants)} invariants")
         except Exception as _aue:
             logger.debug(f"[AppUnderstanding] skipped: {_aue}")
+
+        # 6b. Phase 1.2: build workflow state machines + negative test cases from
+        # captured multi-step flows (guarded; empty when nothing was captured).
+        try:
+            captured = getattr(self.ctx, "captured_requests", None) or getattr(self.ctx, "endpoints", None)
+            if captured:
+                from core.discovery.workflow_crawler import WorkflowCrawler
+                crawler = WorkflowCrawler()
+                sm = crawler.build_from_requests(captured if isinstance(captured, list) else [])
+                if len(sm.steps) >= 2:
+                    self.ctx.workflow_test_cases = [c.__dict__ for c in crawler.generate_test_cases(sm)]
+                    logger.info("[WorkflowCrawler] %d workflow test case(s) generated",
+                                len(self.ctx.workflow_test_cases))
+        except Exception as _wce:
+            logger.debug(f"[WorkflowCrawler] skipped: {_wce}")
+
+        # 6c. P1-19: domain-aware workflow generation + negative testing.
+        # Uses inferred domain model (entities, state transitions) to build
+        # multi-step browser workflows, execute them, and run negative test
+        # cases (skip-step, reorder, replay, direct-access) for biz-logic bugs.
+        try:
+            understanding = getattr(self, "_app_understanding", None)
+            captured = getattr(self.ctx, "captured_requests", None)
+            if understanding or captured:
+                from core.workflows.workflow_generator import WorkflowGenerator
+                from core.workflows.workflow_executor import WorkflowExecutor
+
+                creds = {}
+                if hasattr(self.ctx, "harvested_creds") and self.ctx.harvested_creds:
+                    c = self.ctx.harvested_creds[0] if isinstance(self.ctx.harvested_creds, list) else {}
+                    creds = {"username": c.get("username", ""), "password": c.get("password", "")}
+
+                gen = WorkflowGenerator(
+                    target_url=str(self.ctx.target),
+                    understanding=understanding,
+                    captured_requests=captured if isinstance(captured, list) else [],
+                    credentials=creds,
+                )
+                workflows = gen.generate_all()
+                if workflows:
+                    executor = WorkflowExecutor(
+                        target_url=str(self.ctx.target),
+                        scan_id=getattr(self.ctx, "_scan_id", "") or getattr(self.ctx, "scan_id", ""),
+                    )
+                    import asyncio as _aio2
+                    _coro = executor.execute_all(workflows, captured if isinstance(captured, list) else [])
+                    try:
+                        _loop2 = _aio2.get_event_loop()
+                        if _loop2.is_running():
+                            import concurrent.futures as _cf2
+                            with _cf2.ThreadPoolExecutor(1) as _pool2:
+                                wf_results = _pool2.submit(_aio2.run, _coro).result(timeout=120)
+                        else:
+                            wf_results = _loop2.run_until_complete(_coro)
+                    except Exception:
+                        wf_results = _aio2.run(_coro)
+                    biz_findings = []
+                    for wr in wf_results:
+                        biz_findings.extend(wr.findings)
+                    if biz_findings:
+                        for f in biz_findings:
+                            self.ctx.vulnerabilities.append(f)
+                        logger.info("[P1-19] %d business-logic finding(s) from %d workflow(s)",
+                                    len(biz_findings), len(workflows))
+                    else:
+                        logger.info("[P1-19] %d workflow(s) executed, no business-logic issues found",
+                                    len(workflows))
+        except Exception as _wfe:
+            logger.debug(f"[P1-19 WorkflowExecutor] skipped: {_wfe}")
+
+        # 7. Phase 6.2: incremental scanning. When ANTIGRAVITY_INCREMENTAL=1 and a
+        # saved baseline exists, narrow ctx.endpoints to the new/changed ones.
+        # Conservative: only prunes when the result is non-empty — otherwise the
+        # full endpoint set is kept (never turns a scan into a no-op).
+        try:
+            import os as _os
+            if _os.getenv("ANTIGRAVITY_INCREMENTAL") == "1":
+                from core.monitoring.incremental import IncrementalScanner
+                scanner = IncrementalScanner()
+                plan = scanner.plan(getattr(self, "target", ""), self.ctx, incremental=True)
+                if not plan.full_scan and plan.endpoints_to_scan:
+                    kept = IncrementalScanner.filter_endpoints(self.ctx.endpoints or [], plan)
+                    if kept:
+                        logger.info("[Incremental] re-scanning %d changed/new endpoint(s) "
+                                    "(was %d).", len(kept), len(self.ctx.endpoints or []))
+                        self.ctx.endpoints = kept
+                elif not plan.full_scan and not plan.endpoints_to_scan:
+                    logger.info("[Incremental] attack surface unchanged since baseline.")
+        except Exception as _ie:
+            logger.debug(f"[Incremental] skipped: {_ie}")
 
     def _sync_scanning_to_advanced_engines(self):
         """Synchronizes ACTIVE_SCANNING results to ResourceGovernor, DifferentialEngine, AnomalyPipeline, and SpecialistTeam."""

@@ -475,6 +475,7 @@ class NetworkBroker:
 
         return httpx.AsyncClient(
             transport=transport,
+            verify=False,
             follow_redirects=False,  # we validate each redirect
             timeout=httpx.Timeout(timeout_val),
             **kwargs,

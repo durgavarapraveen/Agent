@@ -146,18 +146,11 @@ class ToolGateway:
         # tools entirely; cautious mode blocks brute-force.
         try:
             from core.adaptation.waf_state import get_waf_state
+            from core.decisions.policy_engine import _capability_to_waf_category
             waf = get_waf_state()
             _tgt = invocation.target or ""
             _cap = (invocation.operation or "").lower()
-            # Coarse category mapping — mirrors DEFAULT_CLASS keys.
-            _brute = _cap in ("directory_bruteforce", "endpoint_discovery",
-                              "parameter_discovery")
-            _active = _cap in ("vulnerability_scanning", "sql_injection",
-                               "xss_scanning", "web_crawling")
-            _passive = _cap in ("technology_fingerprinting", "waf_detection",
-                                "tls_analysis", "http_analysis",
-                                "subdomain_enumeration", "dns_enumeration")
-            cat = "brute" if _brute else ("active" if _active else ("passive" if _passive else "recon"))
+            cat = _capability_to_waf_category(_cap)
             if _tgt and not waf.is_tool_allowed(_tgt, cat):
                 from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus, ErrorInfo, ErrorType
                 logger.warning(f"WAF_BLOCKED: operation={_cap} category={cat} "

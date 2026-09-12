@@ -61,8 +61,8 @@ class TargetWafState:
 
 class WafStateMachine:
 
-    def __init__(self, block_thresholds=(1, 3, 5), recovery_successes: int = 10,
-                 cooloff_seconds: int = 300):
+    def __init__(self, block_thresholds=(5, 15, 30), recovery_successes: int = 5,
+                 cooloff_seconds: int = 60):
         self._states: Dict[str, TargetWafState] = {}
         self._lock = Lock()
         self.thresholds = block_thresholds

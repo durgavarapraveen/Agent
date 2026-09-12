@@ -308,7 +308,20 @@ class LLMProvider(ABC):
                         return json.loads(match.group(0))
                     except:
                         pass
-        
+
+        # Phase 10.2: last-resort structured-output repair (trailing commas,
+        # unquoted keys, single quotes, Python literals, JSON-in-prose) — helps
+        # small local models that emit not-quite-JSON.
+        if resp.content:
+            try:
+                from core.llm.json_enforcer import parse_with_repair
+                repaired, method = parse_with_repair(resp.content)
+                if repaired is not None:
+                    logger.info(f"[JSON] recovered via json_enforcer ({method})")
+                    return repaired
+            except Exception:
+                pass
+
         logger.warning(f"Failed to parse JSON from response: {resp.content[:200]}")
         return {}
     
@@ -1210,6 +1223,23 @@ class UniversalLLMHarness:
                                    model=model_hint, error="Budget governor: hard stop reached")
             tier = self.governor.adjust_tier(tier)
 
+        _model_hint = self.active_provider.get_model_for_tier(tier) if self.active_provider else ""
+
+        # Response cache (Phase 8.1) — opt-in via ANTIGRAVITY_LLM_CACHE=1. Off by
+        # default: a cached answer keyed on the prompt template could otherwise be
+        # reused across endpoint instances, which is unsafe for per-endpoint
+        # conclusions. When on, identical prompt-templates are served from cache.
+        _cache = None
+        if os.getenv("ANTIGRAVITY_LLM_CACHE") == "1":
+            try:
+                from core.llm.response_cache import get_response_cache
+                _cache = get_response_cache()
+                cached = _cache.get(prompt, model=_model_hint, system=system or "")
+                if cached is not None:
+                    return cached
+            except Exception:
+                _cache = None
+
         resp = await self.active_provider.generate_response(
             prompt, system, max_tokens, temperature, response_format, tier
         )
@@ -1217,9 +1247,29 @@ class UniversalLLMHarness:
         if resp.error and self._is_fatal_provider_error(resp.error):
             fallback = await self._try_fallback_provider(resp.error)
             if fallback:
-                return await self.active_provider.generate_response(
+                resp = await self.active_provider.generate_response(
                     prompt, system, max_tokens, temperature, response_format, tier
                 )
+
+        # Phase 6.1: durable per-scan LLM cost log (keyed by ANTIGRAVITY_SCAN_ID).
+        try:
+            sid = os.getenv("ANTIGRAVITY_SCAN_ID", "")
+            if sid and resp is not None and not resp.error:
+                from core.economics.cost_log import get_cost_log
+                _u = resp.usage or {}
+                get_cost_log().record(
+                    sid, resp.provider, resp.model,
+                    input_tokens=int(_u.get("input_tokens", 0) or 0),
+                    output_tokens=int(_u.get("output_tokens", 0) or 0),
+                    cost_usd=float(resp.cost_usd or 0.0))
+        except Exception:
+            pass
+
+        if _cache is not None and resp is not None and not resp.error:
+            try:
+                _cache.set(prompt, resp, model=_model_hint, system=system or "")
+            except Exception:
+                pass
 
         return resp
 
@@ -1268,8 +1318,20 @@ class UniversalLLMHarness:
         resp = await self.generate_response(
             prompt, system, max_tokens, 0.1, "json", tier
         )
-        return resp.structured_output or {}
-    
+        if resp.structured_output:
+            return resp.structured_output
+        # Phase 10.2: repair not-quite-JSON content from smaller/local models
+        # (fences, trailing commas, unquoted keys, single quotes, JSON-in-prose).
+        if resp.content:
+            try:
+                from core.llm.json_enforcer import parse_with_repair
+                parsed, _method = parse_with_repair(resp.content)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+        return {}
+
     async def generate_with_tools(
         self,
         messages: List[Dict[str, Any]],
