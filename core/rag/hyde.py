@@ -59,35 +59,20 @@ async def _generate_hypothetical(query: str) -> Optional[str]:
     except Exception as e:
         logger.debug(f"[HyDE] harness path failed: {e}")
 
-    # Fallback: raw DeepSeek call.
+    # Fallback: use the adapter harness directly.
     try:
-        import httpx
-        api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-        if not api_key:
-            return None
-        url = os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1").rstrip("/")
-        model = os.getenv("DEEPSEEK_SMALL_MODEL", "deepseek-chat")
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            r = await client.post(
-                f"{url}/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}",
-                         "Content-Type": "application/json"},
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": _HYDE_SYSTEM},
-                        {"role": "user", "content": query},
-                    ],
-                    "temperature": 0.2,
-                    "max_tokens": 280,
-                },
-            )
-            if r.status_code == 200:
-                data = r.json()
-                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                return _clean(content)
+        from agents.llm_harness_adapter import get_llm, initialize_llm
+        harness = get_llm()
+        if not harness:
+            await initialize_llm()
+            harness = get_llm()
+        if harness:
+            text = await harness.generate_text(
+                query, system=_HYDE_SYSTEM, max_tokens=280)
+            if text:
+                return _clean(text)
     except Exception as e:
-        logger.debug(f"[HyDE] deepseek fallback failed: {e}")
+        logger.debug(f"[HyDE] adapter fallback failed: {e}")
 
     return None
 

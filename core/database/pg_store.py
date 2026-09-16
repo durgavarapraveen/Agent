@@ -131,18 +131,23 @@ def finding_uid(scan_id: str, v: Dict[str, Any]) -> str:
 
     category = _vuln_category(title_raw)
 
+    # Normalize the title: strip URLs, keep only alpha words, take first 8
+    # tokens. This collapses LLM wording variants ("SQL Injection on endpoint"
+    # vs "SQL Injection at endpoint") while preserving genuinely different
+    # findings ("UNION-based SQLi" vs "Error-based SQL Injection").
+    norm_title = re.sub(r'https?://\S+', '', title_raw)
+    norm_title = re.sub(r'[^a-z\s]', '', norm_title).strip()
+    norm_title = ' '.join(norm_title.split()[:8])
+
     if category in _PER_ENDPOINT_CATEGORIES:
         sub = _attack_subtype(category, title_raw)
-        content = "|".join([category, sub, _normalize_location(loc_raw), cve])
+        content = "|".join([category, sub, _normalize_location(loc_raw), norm_title, cve])
     elif category in _HOST_LEVEL_CATEGORIES:
-        content = "|".join([category, _host_only(loc_raw), cve])
+        content = "|".join([category, _host_only(loc_raw), norm_title, cve])
     elif category:
         sub = _attack_subtype(category, title_raw)
-        content = "|".join([category, sub, _normalize_location(loc_raw), cve])
+        content = "|".join([category, sub, _normalize_location(loc_raw), norm_title, cve])
     else:
-        norm_title = re.sub(r'https?://\S+', '', title_raw)
-        norm_title = re.sub(r'[^a-z\s]', '', norm_title).strip()
-        norm_title = ' '.join(norm_title.split()[:5])
         content = "|".join([vtype, norm_title, _normalize_location(loc_raw), cve])
     h = hashlib.sha1(content.encode("utf-8", "ignore")).hexdigest()[:16]
     return f"{scan_id}::{h}"

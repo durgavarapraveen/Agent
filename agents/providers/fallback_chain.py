@@ -44,7 +44,7 @@ class FallbackChain:
         self.factory = factory
 
     @classmethod
-    def from_env(cls, factory: Callable[[str], Any], default: str = "deepseek") -> "FallbackChain":
+    def from_env(cls, factory: Callable[[str], Any], default: str = "bedrock") -> "FallbackChain":
         chain = os.getenv("LLM_FALLBACK_CHAIN", default)
         return cls([p for p in chain.split(",")], factory)
 

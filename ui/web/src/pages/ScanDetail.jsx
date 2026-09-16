@@ -46,22 +46,10 @@ export default function ScanDetail() {
     { id: "access", label: "Access Gained" },
     { id: "agents", label: "Parallel Agents" },
     { id: "exploits", label: `Exploits (${exploits.length})` },
-    { id: "artifacts", label: "Artifacts / PoC" },
-    { id: "chains", label: "Attack Chains" },
-    { id: "chain-analysis", label: "Chain Analysis" },
-    { id: "cost-risk", label: "Cost & Risk" },
-    { id: "fixes", label: "Fix Code" },
     { id: "recordings", label: "Recordings" },
-    { id: "regressions", label: "Regressions" },
-    { id: "diff", label: "Diff vs baseline" },
-    { id: "surface-diff", label: "Surface Diff" },
-    { id: "sast", label: "Grey-box (SAST)" },
-    { id: "post-exploit", label: "Post-Exploit" },
     { id: "recon", label: "Recon Data" },
     { id: "tool-outputs", label: "Tool Outputs" },
     { id: "activity", label: "Agent Activity" },
-    { id: "requests", label: `HTTP Requests (${context.captured_requests?.http_requests?.length || 0})` },
-    { id: "coverage", label: "Coverage" },
     { id: "collected", label: "Collected Data" },
     { id: "logs", label: "Execution Log" },
   ];
@@ -136,10 +124,6 @@ function OverviewTab({ metadata, severity_counts, test_results, scope, context, 
         <div className="stat-card">
           <span className="label">Duration</span>
           <span className="value">{fmtDur(metadata.duration_seconds)}</span>
-        </div>
-        <div className="stat-card">
-          <span className="label">Agents Spawned</span>
-          <span className="value">{metadata.agents_used}</span>
         </div>
         <div className="stat-card">
           <span className="label">Findings</span>

@@ -120,7 +120,7 @@ async def answer_question(scan_id: str, message: str,
             pass
         llm = get_llm()
     if llm is None:
-        return {"answer": "LLM unavailable — chat is offline. Check DEEPSEEK_API_KEY in .env.",
+        return {"answer": "LLM unavailable — chat is offline. Check AWS Bedrock credentials in .env.",
                 "context_stats": {}}
 
     stable_prefix = _build_stable_prefix(scan_id)

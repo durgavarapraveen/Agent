@@ -722,10 +722,60 @@ class AgenticExecutor:
         logger.info(f"[AgenticExecutor] Available tools: {sorted(available)}")
         return available
 
+    TOOL_ARG_ALLOWLIST: Dict[str, set] = {
+        "nmap": {"-p", "-sV", "-sC", "-sS", "-sT", "-sU", "-A", "-O", "-T0", "-T1", "-T2", "-T3", "-T4", "-T5",
+                 "--top-ports", "--script", "--open", "-Pn", "-n", "--min-rate", "--max-rate", "-oN", "-oX", "-oG"},
+        "sqlmap": {"--batch", "--level", "--risk", "--dbs", "--tables", "--dump", "--forms", "--crawl",
+                   "--random-agent", "--technique", "--tamper", "-p", "--data", "--cookie", "--headers",
+                   "--method", "--threads", "--timeout", "--retries", "--dbms", "--os"},
+        "nuclei": {"-t", "--tags", "-s", "--severity", "-as", "--automatic-scan", "-rl", "--rate-limit",
+                   "-c", "--concurrency", "-H", "--header", "--follow-redirects", "-j", "--jsonl"},
+        "dalfox": {"--blind", "--cookie", "--header", "--data", "--method", "--mining-dict",
+                   "--follow-redirects", "--timeout", "--delay", "--only-discovery", "-p"},
+        "ffuf": {"-w", "-mc", "-fc", "-fs", "-fw", "-fl", "-t", "-p", "-H", "-X", "-d", "-r",
+                 "-recursion", "-recursion-depth", "-e", "-ac", "-timeout"},
+        "gobuster": {"-w", "-t", "-x", "-s", "-b", "-r", "--timeout", "--delay", "-k", "-a"},
+        "nikto": {"-C", "-T", "-p", "-ssl", "-timeout", "-Plugins", "-maxtime"},
+        "wpscan": {"--enumerate", "--plugins-detection", "--force", "--disable-tls-checks",
+                   "--random-user-agent", "--stealthy"},
+        "hydra": {"-l", "-L", "-p", "-P", "-t", "-w", "-f", "-s", "-V"},
+        "katana": {"-d", "-jc", "-kf", "-ef", "-ct", "-rl", "-timeout", "-H", "-xhr"},
+    }
+
+    @staticmethod
+    def _sanitize_tool_args(tool_id: str, raw_args: str) -> str:
+        """Validate CLI args against per-tool allowlist. Strip disallowed flags."""
+        if not raw_args or not raw_args.strip():
+            return ""
+        import shlex
+        try:
+            tokens = shlex.split(raw_args)
+        except ValueError:
+            tokens = raw_args.split()
+
+        allowlist = AgenticExecutor.TOOL_ARG_ALLOWLIST.get(tool_id)
+        if not allowlist:
+            return raw_args
+
+        sanitized = []
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            flag_base = tok.split("=")[0] if "=" in tok else tok
+            if flag_base in allowlist:
+                sanitized.append(tokens[i])
+            elif not tok.startswith("-"):
+                sanitized.append(tokens[i])
+            else:
+                logger.warning(f"[ToolSanitize] Stripped disallowed arg {tok!r} for {tool_id}")
+            i += 1
+        return " ".join(sanitized)
+
     async def _run_security_tool(self, args: Dict[str, Any]) -> str:
         tool_id = args.get("tool", "")
         target = args.get("target", self.ctx.target)
-        extra_args = args.get("args", "")
+        raw_args = args.get("args", "")
+        extra_args = self._sanitize_tool_args(tool_id, raw_args)
 
         if self._available_tools and tool_id not in self._available_tools:
             self.result.errors_encountered.append(f"{tool_id}: not available")

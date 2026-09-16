@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 class LLMRouter:
-    def __init__(self, api_key: str = "", model: str = "deepseek-reasoner"):
+    def __init__(self, api_key: str = "", model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"):
         # api_key/model kept for backward compat with existing callers; the
         # harness is authoritative for provider + model selection.
         self.api_key = api_key

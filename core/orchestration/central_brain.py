@@ -2713,6 +2713,12 @@ class CentralBrain(
             except Exception as _sync_err:
                 logger.debug(f"[AdvancedSync] Scanning sync failed (non-fatal): {_sync_err}")
 
+            # ── Pα: Dynamic Hypothesis Engine — first-order cycle ──
+            try:
+                await self._run_dynamic_hypothesis_cycle("first_order")
+            except Exception as _pa_err:
+                logger.warning(f"[Pα] First-order cycle failed (non-fatal): {_pa_err}")
+
         elif phase == ExecutionPhase.EXPLOITATION.value:
             # P0.1: Unified PolicyEngine gate (delegates to ComplianceGate internally)
             try:
@@ -2792,6 +2798,136 @@ class CentralBrain(
                 await self._run_authz_phase()
             except Exception as e:
                 logger.warning(f"[AUTHZ] cross-role replay failed (non-fatal): {e}")
+
+            # ── P6: Systematic AuthZ Matrix (IDOR/BOLA/BFLA) ──
+            try:
+                from core.exploitation.authz_matrix import run_authz_matrix
+                p6_findings = await run_authz_matrix(self.ctx)
+                for f in p6_findings:
+                    self.ctx.add_vulnerability(f)
+                if p6_findings:
+                    logger.info(f"[P6-AuthzMatrix] {len(p6_findings)} authorization bypass findings")
+                self._log_activity("authz_matrix", f"P6: {len(p6_findings)} authz bypass findings",
+                                   tool="authz_matrix")
+            except Exception as e:
+                logger.warning(f"[P6-AuthzMatrix] failed (non-fatal): {e}")
+
+            # ── P7: Authenticated Parameter Fuzzing ──
+            try:
+                from core.exploitation.param_fuzzer import run_param_fuzzer
+                p7_findings = await run_param_fuzzer(self.ctx)
+                for f in p7_findings:
+                    self.ctx.add_vulnerability(f)
+                if p7_findings:
+                    logger.info(f"[P7-ParamFuzzer] {len(p7_findings)} parameter fuzzing findings")
+                self._log_activity("param_fuzzer", f"P7: {len(p7_findings)} param fuzz findings",
+                                   tool="param_fuzzer")
+            except Exception as e:
+                logger.warning(f"[P7-ParamFuzzer] failed (non-fatal): {e}")
+
+            # ── P0: Race Condition Probe ──
+            try:
+                from core.exploitation.race_probe import run_race_probe
+                p0_findings = await run_race_probe(self.ctx)
+                for f in p0_findings:
+                    self.ctx.add_vulnerability(f)
+                if p0_findings:
+                    logger.info(f"[P0-RaceProbe] {len(p0_findings)} race condition findings")
+                self._log_activity("race_probe", f"P0: {len(p0_findings)} race condition findings",
+                                   tool="race_probe")
+            except Exception as e:
+                logger.warning(f"[P0-RaceProbe] failed (non-fatal): {e}")
+
+            # ── P1: Crypto/JWT Chain Analysis ──
+            try:
+                from core.exploitation.crypto_chain import run_crypto_chain
+                p1_findings = await run_crypto_chain(self.ctx)
+                for f in p1_findings:
+                    self.ctx.add_vulnerability(f)
+                if p1_findings:
+                    logger.info(f"[P1-CryptoChain] {len(p1_findings)} crypto findings")
+                self._log_activity("crypto_chain", f"P1: {len(p1_findings)} crypto findings",
+                                   tool="crypto_chain")
+            except Exception as e:
+                logger.warning(f"[P1-CryptoChain] failed (non-fatal): {e}")
+
+            # ── P2: Chatbot/LLM Exploitation ──
+            try:
+                from core.exploitation.chatbot_exploit import run_chatbot_exploit
+                p2_findings = await run_chatbot_exploit(self.ctx)
+                for f in p2_findings:
+                    self.ctx.add_vulnerability(f)
+                if p2_findings:
+                    logger.info(f"[P2-ChatbotExploit] {len(p2_findings)} chatbot findings")
+                self._log_activity("chatbot_exploit", f"P2: {len(p2_findings)} chatbot findings",
+                                   tool="chatbot_exploit")
+            except Exception as e:
+                logger.warning(f"[P2-ChatbotExploit] failed (non-fatal): {e}")
+
+            # ── P3: LLM-Driven Browser Agent ──
+            try:
+                from core.actuation.browser_agent import run_browser_agent
+                p3_findings = await run_browser_agent(self.ctx)
+                for f in p3_findings:
+                    self.ctx.add_vulnerability(f)
+                if p3_findings:
+                    logger.info(f"[P3-BrowserAgent] {len(p3_findings)} client-side findings")
+                self._log_activity("browser_agent", f"P3: {len(p3_findings)} client-side findings",
+                                   tool="browser_agent")
+            except Exception as e:
+                logger.warning(f"[P3-BrowserAgent] failed (non-fatal): {e}")
+
+            # ── P4: Identity Intelligence ──
+            try:
+                from core.intelligence.identity_intel import run_identity_intel
+                p4_findings = await run_identity_intel(self.ctx)
+                for f in p4_findings:
+                    self.ctx.add_vulnerability(f)
+                if p4_findings:
+                    logger.info(f"[P4-IdentityIntel] {len(p4_findings)} identity findings")
+                self._log_activity("identity_intel", f"P4: {len(p4_findings)} identity findings",
+                                   tool="identity_intel")
+            except Exception as e:
+                logger.warning(f"[P4-IdentityIntel] failed (non-fatal): {e}")
+
+            # ── P5: Web3/Smart Contract Probe ──
+            try:
+                from core.exploitation.web3_probe import run_web3_probe
+                p5_findings = await run_web3_probe(self.ctx)
+                for f in p5_findings:
+                    self.ctx.add_vulnerability(f)
+                if p5_findings:
+                    logger.info(f"[P5-Web3Probe] {len(p5_findings)} web3 findings")
+                self._log_activity("web3_probe", f"P5: {len(p5_findings)} web3 findings",
+                                   tool="web3_probe")
+            except Exception as e:
+                logger.warning(f"[P5-Web3Probe] failed (non-fatal): {e}")
+
+            # ── Second-Order Injection Probe ──
+            try:
+                from core.exploitation.second_order import run_second_order_probe
+                so_findings = await run_second_order_probe(self.ctx)
+                for f in so_findings:
+                    self.ctx.add_vulnerability(f)
+                if so_findings:
+                    logger.info(f"[SecondOrder] {len(so_findings)} second-order findings")
+                self._log_activity("second_order", f"SecondOrder: {len(so_findings)} findings",
+                                   tool="second_order_probe")
+            except Exception as e:
+                logger.warning(f"[SecondOrder] failed (non-fatal): {e}")
+
+            # ── Session Management Probe ──
+            try:
+                from core.exploitation.session_probe import run_session_probe
+                sess_findings = await run_session_probe(self.ctx)
+                for f in sess_findings:
+                    self.ctx.add_vulnerability(f)
+                if sess_findings:
+                    logger.info(f"[SessionProbe] {len(sess_findings)} session findings")
+                self._log_activity("session_probe", f"Session: {len(sess_findings)} findings",
+                                   tool="session_probe")
+            except Exception as e:
+                logger.warning(f"[SessionProbe] failed (non-fatal): {e}")
 
             # ── Semantic fuzzer + coverage-guided loop (Phase 1.4 + 4.1) ──
             try:
@@ -3238,6 +3374,12 @@ class CentralBrain(
             except Exception as _sync_err:
                 logger.debug(f"[AdvancedSync] Exploit sync failed (non-fatal): {_sync_err}")
 
+            # ── Pα: Dynamic Hypothesis Engine — second-order cycle (chained exploits) ──
+            try:
+                await self._run_dynamic_hypothesis_cycle("second_order")
+            except Exception as _pa_err:
+                logger.warning(f"[Pα] Second-order cycle failed (non-fatal): {_pa_err}")
+
         elif phase == ExecutionPhase.REPORTING.value:
             # Convergence validation before reporting
             try:
@@ -3418,6 +3560,24 @@ class CentralBrain(
                         ]
                 except Exception as cs_err:
                     logger.warning(f"[ConfidenceScorer] Scoring failed (non-fatal): {cs_err}")
+
+            # ── P8: Compliance Mapping & CVSS Scoring ──
+            if self.ctx.vulnerabilities:
+                try:
+                    from core.reporting.compliance_cvss import ComplianceCVSSEngine
+                    p8_engine = ComplianceCVSSEngine(ctx=self.ctx)
+                    p8_engine.enrich_findings(self.ctx.vulnerabilities)
+                    exec_summary = p8_engine.generate_executive_summary(
+                        self.ctx.vulnerabilities, target=self.ctx.target)
+                    self.ctx.update("executive_summary", exec_summary)
+                    logger.info(f"[P8-ComplianceCVSS] Enriched {len(self.ctx.vulnerabilities)} findings, "
+                                f"risk_score={exec_summary.get('risk_score', 0)}")
+                    self._log_activity("compliance_cvss",
+                        f"P8: risk_score={exec_summary.get('risk_score', 0)}, "
+                        f"avg_cvss={exec_summary.get('avg_cvss', 0)}",
+                        tool="compliance_cvss")
+                except Exception as e:
+                    logger.warning(f"[P8-ComplianceCVSS] failed (non-fatal): {e}")
 
             # Persist final validated vulnerabilities back to DB so the stored data
             # reflects post-retest/critic/validator filtering (not stale pre-validation state).
@@ -6256,6 +6416,19 @@ class CentralBrain(
                     "rationale": probe.get("rationale", ""),
                 }, topic="format_probe_ready")
 
+    async def _run_dynamic_hypothesis_cycle(self, cycle_name: str = "first_order") -> None:
+        """Pα: Run a dynamic hypothesis engine cycle to discover novel attack surfaces."""
+        from core.intelligence.dynamic_hypothesis import DynamicHypothesisEngine
+        engine = DynamicHypothesisEngine(ctx=self.ctx)
+        findings = await engine.run_cycle(cycle_name=cycle_name)
+        for f in findings:
+            self.ctx.add_vulnerability(f)
+        stats = engine.stats()
+        logger.info(f"[Pα] {cycle_name}: tested={stats['hypotheses_tested']}, "
+                    f"confirmed={stats['hypotheses_confirmed']}, findings={stats['findings']}")
+        self._log_activity("pa_engine", f"Pα {cycle_name}: {stats['findings']} findings from "
+                           f"{stats['hypotheses_tested']} hypotheses", tool="dynamic_hypothesis")
+
     async def _run_authz_phase(self) -> None:
         try:
             from core.exploitation.cross_role_replay import run_cross_role_replay
@@ -7387,7 +7560,7 @@ CRITICAL RULES:
             run_id = self._scan_id
             ScanRepo.create(run_id, self.ctx.target, self.tier)
             ScanRepo.save_report(run_id, report)
-            VulnRepo.bulk_insert(run_id, validated["reported"])
+            VulnRepo.bulk_insert(run_id, list(self.ctx.vulnerabilities))
         except Exception as pg_err:
             logger.warning(f"[report] PG persist failed (non-fatal): {pg_err}")
 

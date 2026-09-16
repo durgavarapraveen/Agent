@@ -962,8 +962,13 @@ def _dedup_vulns(vulns: list) -> list:
         title = (v.get("title") or "").lower().strip()
         cat = _vuln_category(title)
         loc = str(v.get("location") or v.get("affected_endpoint") or v.get("target") or "")
+        # Normalize title: strip URLs, keep alpha words, take first 8 tokens.
+        # Collapses LLM wording variants while preserving distinct findings.
+        norm_title = _re.sub(r'https?://\S+', '', title)
+        norm_title = _re.sub(r'[^a-z\s]', '', norm_title).strip()
+        norm_title = ' '.join(norm_title.split()[:8])
         if cat in _HOST_LEVEL_CATEGORIES:
-            return f"{cat}|{_host_only(loc)}"
+            return f"{cat}|{_host_only(loc)}|{norm_title}"
         if cat in _PER_ENDPOINT_CATEGORIES:
             norm_loc = _normalize_location(loc)
             sub_type = ""
@@ -987,13 +992,10 @@ def _dedup_vulns(vulns: list) -> list:
                     sub_type = "reflected"
                 else:
                     sub_type = "general"
-            return f"{cat}:{sub_type}|{norm_loc}"
+            return f"{cat}:{sub_type}|{norm_loc}|{norm_title}"
         if cat:
-            return f"{cat}|{_normalize_location(loc)}"
+            return f"{cat}|{_normalize_location(loc)}|{norm_title}"
         vtype = (v.get("type") or v.get("vuln_type") or "").upper().strip()
-        norm_title = _re.sub(r'https?://\S+', '', title)
-        norm_title = _re.sub(r'[^a-z\s]', '', norm_title).strip()
-        norm_title = ' '.join(norm_title.split()[:6])
         return f"{vtype}|{norm_title}|{_host_only(loc)}"
 
     def _evidence_score(v: dict) -> int:
@@ -1751,7 +1753,8 @@ def backfill_scan_findings(scan_id: str):
                     cur.execute("SELECT report_data FROM scans WHERE scan_id = %s", (scan_id,))
                     r = cur.fetchone()
                     if r and isinstance(r.get("report_data"), dict):
-                        report_added = _add(r["report_data"].get("vulnerabilities", []))
+                        rd = r["report_data"]
+                        report_added = _add(rd.get("vulnerabilities_all", rd.get("vulnerabilities", [])))
         except Exception:
             pass
         # recon_data.vulnerabilities (sometimes populated by mixins)
@@ -3135,7 +3138,7 @@ async def _ensure_rag():
         return rag
     from core.common.config import get_config
     config = get_config()
-    rag = SecurityRAGPipeline(api_key=config.get("DEEPSEEK_API_KEY"))
+    rag = SecurityRAGPipeline()
     await rag.initialize()
     return rag
 
@@ -3183,7 +3186,7 @@ async def rag_init():
             return {"status": "already_initialized", **rag.stats()}
         from core.common.config import get_config
         config = get_config()
-        rag = SecurityRAGPipeline(api_key=config.get("DEEPSEEK_API_KEY"))
+        rag = SecurityRAGPipeline()
         await rag.initialize()
         return {"status": "initialized", **rag.stats()}
     except Exception as e:

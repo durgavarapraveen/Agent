@@ -91,7 +91,7 @@ async def _ensure_seeded():
         from core.common.config import get_config
         rag = get_rag()
         if rag is None:
-            rag = SecurityRAGPipeline(api_key=get_config().get("DEEPSEEK_API_KEY"))
+            rag = SecurityRAGPipeline()
             await rag.initialize()
         for topic, tags, title, content in _SEED_ENTRIES:
             body = f"[{topic.upper()}] {title}\nTech: {tags}\n\n{content}"

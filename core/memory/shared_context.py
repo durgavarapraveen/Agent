@@ -51,6 +51,7 @@ class SharedContextV2:
         self.persistence_plan: Dict[str, Any] = {}
         self.mitre_mappings: List[Dict] = []
         self.has_shell_access: bool = False
+        self.shell_access: List[Dict] = []
         # P0-5: endpoints on hosts outside the authorised scope are kept here for
         # context (so the operator can see what the app depends on) but never
         # enter endpoints/hypotheses/test queues.
@@ -294,8 +295,9 @@ class SharedContextV2:
                 return True  # no host → relative path on the target
             from core.security.authorization import TargetScopeValidator
             return TargetScopeValidator.get().is_authorized(host)
-        except Exception:
-            return True  # fail open: never drop a real endpoint on a scope error
+        except Exception as e:
+            logger.warning(f"[Scope] endpoint scope check crashed for {url!r}: {e} — rejecting (fail-closed)")
+            return False
 
     def add_endpoints(self, eps: List, source: str = None):
         with self._state_lock:
