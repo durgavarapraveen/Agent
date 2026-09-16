@@ -2929,6 +2929,266 @@ class CentralBrain(
             except Exception as e:
                 logger.warning(f"[SessionProbe] failed (non-fatal): {e}")
 
+            # ── CORS Misconfiguration Probe ──
+            try:
+                from core.exploitation.cors_probe import run_cors_probe
+                cors_findings = await run_cors_probe(self.ctx)
+                for f in cors_findings:
+                    self.ctx.add_vulnerability(f)
+                if cors_findings:
+                    logger.info(f"[CORSProbe] {len(cors_findings)} CORS misconfiguration findings")
+                self._log_activity("cors_probe", f"CORS: {len(cors_findings)} findings",
+                                   tool="cors_probe")
+            except Exception as e:
+                logger.warning(f"[CORSProbe] failed (non-fatal): {e}")
+
+            # ── HTTP Request Smuggling Probe ──
+            try:
+                from core.exploitation.smuggling_probe import run_smuggling_probe
+                smuggle_findings = await run_smuggling_probe(self.ctx)
+                for f in smuggle_findings:
+                    self.ctx.add_vulnerability(f)
+                if smuggle_findings:
+                    logger.info(f"[SmugglingProbe] {len(smuggle_findings)} request smuggling findings")
+                self._log_activity("smuggling_probe", f"Smuggling: {len(smuggle_findings)} findings",
+                                   tool="smuggling_probe")
+            except Exception as e:
+                logger.warning(f"[SmugglingProbe] failed (non-fatal): {e}")
+
+            # ── Host Header Injection Probe ──
+            try:
+                from core.exploitation.host_header_probe import run_host_header_probe
+                hhi_findings = await run_host_header_probe(self.ctx)
+                for f in hhi_findings:
+                    self.ctx.add_vulnerability(f)
+                if hhi_findings:
+                    logger.info(f"[HostHeaderProbe] {len(hhi_findings)} host header injection findings")
+                self._log_activity("host_header_probe", f"HostHeader: {len(hhi_findings)} findings",
+                                   tool="host_header_probe")
+            except Exception as e:
+                logger.warning(f"[HostHeaderProbe] failed (non-fatal): {e}")
+
+            # ── Open Redirect Probe ──
+            try:
+                from core.exploitation.open_redirect_probe import run_open_redirect_probe
+                redir_findings = await run_open_redirect_probe(self.ctx)
+                for f in redir_findings:
+                    self.ctx.add_vulnerability(f)
+                if redir_findings:
+                    logger.info(f"[OpenRedirectProbe] {len(redir_findings)} open redirect findings")
+                self._log_activity("open_redirect_probe", f"OpenRedirect: {len(redir_findings)} findings",
+                                   tool="open_redirect_probe")
+            except Exception as e:
+                logger.warning(f"[OpenRedirectProbe] failed (non-fatal): {e}")
+
+            # ── Clickjacking Probe ──
+            try:
+                from core.exploitation.clickjack_probe import run_clickjack_probe
+                click_findings = await run_clickjack_probe(self.ctx)
+                for f in click_findings:
+                    self.ctx.add_vulnerability(f)
+                if click_findings:
+                    logger.info(f"[ClickjackProbe] {len(click_findings)} clickjacking findings")
+                self._log_activity("clickjack_probe", f"Clickjacking: {len(click_findings)} findings",
+                                   tool="clickjack_probe")
+            except Exception as e:
+                logger.warning(f"[ClickjackProbe] failed (non-fatal): {e}")
+
+            # ── File Upload Vulnerability Probe ──
+            try:
+                from core.exploitation.file_upload_probe import run_file_upload_probe
+                upload_findings = await run_file_upload_probe(self.ctx)
+                for f in upload_findings:
+                    self.ctx.add_vulnerability(f)
+                if upload_findings:
+                    logger.info(f"[FileUploadProbe] {len(upload_findings)} file upload findings")
+                self._log_activity("file_upload_probe", f"FileUpload: {len(upload_findings)} findings",
+                                   tool="file_upload_probe")
+            except Exception as e:
+                logger.warning(f"[FileUploadProbe] failed (non-fatal): {e}")
+
+            # ── Cache Poisoning / Web Cache Deception Probe ──
+            try:
+                from core.exploitation.cache_poison_probe import run_cache_poison_probe
+                cache_findings = await run_cache_poison_probe(self.ctx)
+                for f in cache_findings:
+                    self.ctx.add_vulnerability(f)
+                if cache_findings:
+                    logger.info(f"[CachePoisonProbe] {len(cache_findings)} cache poisoning findings")
+                self._log_activity("cache_poison_probe", f"CachePoison: {len(cache_findings)} findings",
+                                   tool="cache_poison_probe")
+            except Exception as e:
+                logger.warning(f"[CachePoisonProbe] failed (non-fatal): {e}")
+
+            # ── SSTI (Server-Side Template Injection) Probe ──
+            try:
+                from core.exploitation.ssti_probe import run_ssti_probe
+                ssti_findings = await run_ssti_probe(self.ctx)
+                for f in ssti_findings:
+                    self.ctx.add_vulnerability(f)
+                if ssti_findings:
+                    logger.info(f"[SSTIProbe] {len(ssti_findings)} SSTI findings")
+                self._log_activity("ssti_probe", f"SSTI: {len(ssti_findings)} findings",
+                                   tool="ssti_probe")
+            except Exception as e:
+                logger.warning(f"[SSTIProbe] failed (non-fatal): {e}")
+
+            # ── XXE (XML External Entity) Probe ──
+            try:
+                from core.exploitation.xxe_probe import run_xxe_probe
+                xxe_findings = await run_xxe_probe(self.ctx)
+                for f in xxe_findings:
+                    self.ctx.add_vulnerability(f)
+                if xxe_findings:
+                    logger.info(f"[XXEProbe] {len(xxe_findings)} XXE findings")
+                self._log_activity("xxe_probe", f"XXE: {len(xxe_findings)} findings",
+                                   tool="xxe_probe")
+            except Exception as e:
+                logger.warning(f"[XXEProbe] failed (non-fatal): {e}")
+
+            # ── Mass Assignment Probe ──
+            try:
+                from core.exploitation.mass_assign_probe import run_mass_assign_probe
+                mass_findings = await run_mass_assign_probe(self.ctx)
+                for f in mass_findings:
+                    self.ctx.add_vulnerability(f)
+                if mass_findings:
+                    logger.info(f"[MassAssignProbe] {len(mass_findings)} mass assignment findings")
+                self._log_activity("mass_assign_probe", f"MassAssign: {len(mass_findings)} findings",
+                                   tool="mass_assign_probe")
+            except Exception as e:
+                logger.warning(f"[MassAssignProbe] failed (non-fatal): {e}")
+
+            # ── API Rate Limiting Probe ──
+            try:
+                from core.exploitation.rate_limit_probe import run_rate_limit_probe
+                rate_findings = await run_rate_limit_probe(self.ctx)
+                for f in rate_findings:
+                    self.ctx.add_vulnerability(f)
+                if rate_findings:
+                    logger.info(f"[RateLimitProbe] {len(rate_findings)} missing rate limit findings")
+                self._log_activity("rate_limit_probe", f"RateLimit: {len(rate_findings)} findings",
+                                   tool="rate_limit_probe")
+            except Exception as e:
+                logger.warning(f"[RateLimitProbe] failed (non-fatal): {e}")
+
+            # ── HTTP Parameter Pollution Probe ──
+            try:
+                from core.exploitation.hpp_probe import run_hpp_probe
+                hpp_findings = await run_hpp_probe(self.ctx)
+                for f in hpp_findings:
+                    self.ctx.add_vulnerability(f)
+                if hpp_findings:
+                    logger.info(f"[HPPProbe] {len(hpp_findings)} HPP findings")
+                self._log_activity("hpp_probe", f"HPP: {len(hpp_findings)} findings",
+                                   tool="hpp_probe")
+            except Exception as e:
+                logger.warning(f"[HPPProbe] failed (non-fatal): {e}")
+
+            # ── WebSocket Security Probe ──
+            try:
+                from core.exploitation.websocket_probe import run_websocket_probe
+                ws_findings = await run_websocket_probe(self.ctx)
+                for f in ws_findings:
+                    self.ctx.add_vulnerability(f)
+                if ws_findings:
+                    logger.info(f"[WebSocketProbe] {len(ws_findings)} WebSocket findings")
+                self._log_activity("websocket_probe", f"WebSocket: {len(ws_findings)} findings",
+                                   tool="websocket_probe")
+            except Exception as e:
+                logger.warning(f"[WebSocketProbe] failed (non-fatal): {e}")
+
+            # ── Email Header Injection Probe ──
+            try:
+                from core.exploitation.email_inject_probe import run_email_inject_probe
+                email_findings = await run_email_inject_probe(self.ctx)
+                for f in email_findings:
+                    self.ctx.add_vulnerability(f)
+                if email_findings:
+                    logger.info(f"[EmailInjectProbe] {len(email_findings)} email injection findings")
+                self._log_activity("email_inject_probe", f"EmailInject: {len(email_findings)} findings",
+                                   tool="email_inject_probe")
+            except Exception as e:
+                logger.warning(f"[EmailInjectProbe] failed (non-fatal): {e}")
+
+            # ── Cookie Security Probe ──
+            try:
+                from core.exploitation.cookie_probe import run_cookie_probe
+                cookie_findings = await run_cookie_probe(self.ctx)
+                for f in cookie_findings:
+                    self.ctx.add_vulnerability(f)
+                if cookie_findings:
+                    logger.info(f"[CookieProbe] {len(cookie_findings)} cookie security findings")
+                self._log_activity("cookie_probe", f"Cookie: {len(cookie_findings)} findings",
+                                   tool="cookie_probe")
+            except Exception as e:
+                logger.warning(f"[CookieProbe] failed (non-fatal): {e}")
+
+            # ── GraphQL Query Depth/Complexity DoS Probe ──
+            try:
+                from core.exploitation.graphql_dos_probe import run_graphql_dos_probe
+                gql_dos_findings = await run_graphql_dos_probe(self.ctx)
+                for f in gql_dos_findings:
+                    self.ctx.add_vulnerability(f)
+                if gql_dos_findings:
+                    logger.info(f"[GraphQLDoSProbe] {len(gql_dos_findings)} GraphQL DoS findings")
+                self._log_activity("graphql_dos_probe", f"GraphQLDoS: {len(gql_dos_findings)} findings",
+                                   tool="graphql_dos_probe")
+            except Exception as e:
+                logger.warning(f"[GraphQLDoSProbe] failed (non-fatal): {e}")
+
+            # ── Insecure Deserialization Probe ──
+            try:
+                from core.exploitation.deserial_probe import run_deserial_probe
+                deserial_findings = await run_deserial_probe(self.ctx)
+                for f in deserial_findings:
+                    self.ctx.add_vulnerability(f)
+                if deserial_findings:
+                    logger.info(f"[DeserialProbe] {len(deserial_findings)} deserialization findings")
+                self._log_activity("deserial_probe", f"Deserialization: {len(deserial_findings)} findings",
+                                   tool="deserial_probe")
+            except Exception as e:
+                logger.warning(f"[DeserialProbe] failed (non-fatal): {e}")
+
+            # ── DNS Rebinding Probe ──
+            try:
+                from core.exploitation.dns_rebind_probe import run_dns_rebind_probe
+                dns_findings = await run_dns_rebind_probe(self.ctx)
+                for f in dns_findings:
+                    self.ctx.add_vulnerability(f)
+                if dns_findings:
+                    logger.info(f"[DNSRebindProbe] {len(dns_findings)} DNS rebinding findings")
+                self._log_activity("dns_rebind_probe", f"DNSRebind: {len(dns_findings)} findings",
+                                   tool="dns_rebind_probe")
+            except Exception as e:
+                logger.warning(f"[DNSRebindProbe] failed (non-fatal): {e}")
+
+            # ── Server-Side Prototype Pollution Probe ──
+            try:
+                from core.exploitation.prototype_pollution_probe import run_prototype_pollution_probe
+                pp_findings = await run_prototype_pollution_probe(self.ctx)
+                for f in pp_findings:
+                    self.ctx.add_vulnerability(f)
+                if pp_findings:
+                    logger.info(f"[PrototypePollutionProbe] {len(pp_findings)} prototype pollution findings")
+                self._log_activity("prototype_pollution_probe", f"ProtoPollution: {len(pp_findings)} findings",
+                                   tool="prototype_pollution_probe")
+            except Exception as e:
+                logger.warning(f"[PrototypePollutionProbe] failed (non-fatal): {e}")
+
+            # ── Logging/Monitoring Failure Detection Probe ──
+            try:
+                from core.exploitation.logging_detect_probe import run_logging_detect_probe
+                log_findings = await run_logging_detect_probe(self.ctx)
+                for f in log_findings:
+                    self.ctx.add_vulnerability(f)
+                if log_findings:
+                    logger.info(f"[LoggingDetectProbe] {len(log_findings)} logging/monitoring findings")
+                self._log_activity("logging_detect_probe", f"LoggingDetect: {len(log_findings)} findings",
+                                   tool="logging_detect_probe")
+            except Exception as e:
+                logger.warning(f"[LoggingDetectProbe] failed (non-fatal): {e}")
+
             # ── Semantic fuzzer + coverage-guided loop (Phase 1.4 + 4.1) ──
             try:
                 await self._run_semantic_fuzz_with_coverage()

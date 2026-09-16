@@ -1,0 +1,15 @@
+﻿{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "text": "Hello. Reply with exactly: Bedrock works."
+        }
+      ]
+    }
+  ],
+  "inferenceConfig": {
+    "maxTokens": 50
+  }
+}
