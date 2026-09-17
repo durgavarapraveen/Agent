@@ -46,7 +46,9 @@ class ParameterExtractor:
         # Heuristic based on content type or ability to parse json
         if request.body:
             try:
-                body_str = request.body.decode('utf-8')
+                body_str = (request.body.decode('utf-8')
+                            if isinstance(request.body, (bytes, bytearray))
+                            else str(request.body))
                 data = json.loads(body_str)
                 if isinstance(data, dict):
                     for key, val in data.items():

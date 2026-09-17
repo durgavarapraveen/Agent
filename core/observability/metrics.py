@@ -165,6 +165,44 @@ REDACTION_EVENTS = _counter(
     "Secret redaction events across logs, evidence, and reports.",
     labelnames=("source",),
 )
+# ── Hypothesis / coverage tracking ───────────────────────────────────
+HYPOTHESES_GENERATED = _counter(
+    "antigravity_hypotheses_generated_total",
+    "Hypotheses generated, labeled by vuln_class.",
+    labelnames=("vuln_class",),
+)
+HYPOTHESES_RESOLVED = _counter(
+    "antigravity_hypotheses_resolved_total",
+    "Hypotheses resolved, labeled by vuln_class and state (confirmed/rejected/...).",
+    labelnames=("vuln_class", "state"),
+)
+COVERAGE_TRANSITIONS = _counter(
+    "antigravity_coverage_transitions_total",
+    "Coverage matrix cell state transitions, labeled by resulting state.",
+    labelnames=("state",),
+)
+
+
+def record_hypothesis_generated(vuln_class: str = "unknown") -> None:
+    try:
+        HYPOTHESES_GENERATED.labels(vuln_class=str(vuln_class or "unknown")).inc()
+    except Exception:
+        pass
+
+
+def record_hypothesis_resolved(vuln_class: str = "unknown", state: str = "unknown") -> None:
+    try:
+        HYPOTHESES_RESOLVED.labels(vuln_class=str(vuln_class or "unknown"),
+                                   state=str(state or "unknown")).inc()
+    except Exception:
+        pass
+
+
+def record_coverage_transition(state: str = "unknown") -> None:
+    try:
+        COVERAGE_TRANSITIONS.labels(state=str(state or "unknown")).inc()
+    except Exception:
+        pass
 
 
 def render() -> tuple[bytes, str]:

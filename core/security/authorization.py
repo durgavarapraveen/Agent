@@ -98,10 +98,14 @@ class TargetScopeValidator:
         # Strip path
         if "/" in target:
             target = target.split("/", 1)[0]
+        # Strip userinfo (user:pass@host) — the host is AFTER the last '@'
+        if "@" in target:
+            target = target.rsplit("@", 1)[1]
         # Strip port
         if ":" in target:
             target = target.split(":", 1)[0]
-        return target.lower()
+        # Normalize FQDN trailing dot so "example.com." == "example.com"
+        return target.rstrip(".").lower()
 
     def add_target(self, target: str) -> None:
         norm = self._normalize_target(target)
@@ -185,13 +189,19 @@ class TargetScopeValidator:
             
         logger.debug(f"[TargetScopeValidator] Checking targets in command: {command}")
         
-        # 1. Extract URLs
-        urls = re.findall(r'https?://[a-zA-Z0-9\-\.\:]+', command)
+        # 1. Extract URLs — capture the FULL authority (incl. any userinfo) so
+        # urlparse resolves the REAL host. A truncated class that stops at '@'
+        # lets http://authorized.com@evil.com be read as authorized.com (SSRF
+        # scope bypass); use parsed.hostname, never the raw netloc.
+        urls = re.findall(r'https?://[^\s"\'<>\\]+', command)
         targets = []
         for url in urls:
             try:
                 parsed = urlparse(url)
-                if parsed.netloc:
+                host = parsed.hostname  # strips userinfo + port; real target host
+                if host:
+                    targets.append(host)
+                elif parsed.netloc:
                     targets.append(parsed.netloc)
             except Exception as e:
                 raise SystemError(f"Policy enforcement failed: {e}") from e

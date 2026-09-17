@@ -71,6 +71,12 @@ class BenchmarkCorpus:
     def categories_represented(self) -> Set[AppCategory]:
         return {f.category for f in self.fixtures}
 
+    def coverage_gaps(self) -> List[AppCategory]:
+        """AppCategory values not represented by any fixture (used by the
+        eval harness report). Previously missing -> export_report() crashed."""
+        represented = self.categories_represented()
+        return [c for c in AppCategory if c not in represented]
+
     @classmethod
     def create_default_corpus(cls) -> "BenchmarkCorpus":
         return build_default_corpus()

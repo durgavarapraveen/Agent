@@ -7,6 +7,23 @@ from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+
+def _scan_id(brain) -> str:
+    """Stable per-target key for KG persistence (resume reloads same key)."""
+    return getattr(brain, "scan_id", None) or getattr(brain, "run_id", None) or brain.target
+
+
+def _collect_hypotheses(brain) -> list:
+    """Best-effort gather of hypothesis dicts from whichever engine exposes them."""
+    out = []
+    for attr in ("hypothesis_engine", "hypothesis_engine_v2"):
+        eng = getattr(brain, attr, None)
+        gen = getattr(eng, "_generated", None) if eng else None
+        if isinstance(gen, list):
+            out.extend(gen)
+    return out
+
+
 class Checkpointer:
 
     def __init__(self, checkpoints_dir: str = None):
@@ -17,10 +34,57 @@ class Checkpointer:
         self.checkpoints_dir = Path(checkpoints_dir)
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
+    def _persist_knowledge_graph(self, brain) -> None:
+        """P0: persist KnowledgeGraph + hypotheses to Postgres on every checkpoint."""
+        kg = getattr(brain, "knowledge_graph", None)
+        if kg is None:
+            return
+        try:
+            from core.knowledge.pg_knowledge_store import PgKnowledgeStore
+            store = PgKnowledgeStore()
+            sid = _scan_id(brain)
+            # Unify AttackSurfaceGraph + EndpointInventoryV2 into the KG so one
+            # persisted graph holds every endpoint/asset (P0 unified KG).
+            try:
+                store.unify_asset_inventory(kg, brain)
+            except Exception as e:
+                logger.debug(f"asset unify skipped: {e}")
+            store.save_graph(sid, kg)
+            hyps = _collect_hypotheses(brain)
+            if hyps:
+                store.save_hypotheses(sid, hyps)
+        except Exception as e:
+            logger.warning(f"Knowledge graph persistence skipped: {e}")
+
+    def _restore_knowledge_graph(self, brain) -> None:
+        """P0: reload persisted KnowledgeGraph + hypotheses on resume."""
+        kg = getattr(brain, "knowledge_graph", None)
+        if kg is None:
+            return
+        try:
+            from core.knowledge.pg_knowledge_store import PgKnowledgeStore
+            store = PgKnowledgeStore()
+            sid = _scan_id(brain)
+            snapshot = store.load_graph(sid).to_serializable()
+            kg.merge_serializable(snapshot)
+            eng = getattr(brain, "hypothesis_engine", None)
+            if eng is not None and isinstance(getattr(eng, "_generated", None), list):
+                saved = store.load_hypotheses(sid)
+                if saved:
+                    have = {h.get("id") or h.get("hypothesis_id") or h.get("hyp_id")
+                            for h in eng._generated}
+                    for h in saved:
+                        if (h.get("id") or h.get("hypothesis_id") or h.get("hyp_id")) not in have:
+                            eng._generated.append(h)
+            logger.info("Knowledge graph restored from Postgres for %s", sid)
+        except Exception as e:
+            logger.warning(f"Knowledge graph restore skipped: {e}")
+
     def save_checkpoint(self, brain) -> str:
         # Opt-out: set CHECKPOINT_TO_FILE=false to skip file checkpoints (resume via
         # --resume depends on them, so leaving them on is recommended).
         if os.getenv("CHECKPOINT_TO_FILE", "true").lower() in ("false", "0", "no", "off"):
+            self._persist_knowledge_graph(brain)  # DB persistence independent of file checkpoints
             return ""
         target_slug = brain.target.replace('://', '_').replace('/', '_').replace(':', '_')
         checkpoint_id = f"checkpoint_{target_slug}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -72,6 +136,7 @@ class Checkpointer:
                 json.dump({"path": str(filepath), "timestamp": state["timestamp"]}, f)
 
             logger.info(f"Checkpoint saved: {filepath}")
+            self._persist_knowledge_graph(brain)
             return str(filepath)
 
         except Exception as e:
@@ -132,6 +197,7 @@ class Checkpointer:
             if "target_profile" in ctx_state and hasattr(brain.ctx, 'update'):
                 brain.ctx.update('target_profile', ctx_state["target_profile"])
 
+            self._restore_knowledge_graph(brain)
             logger.info("Checkpoint state applied to brain context.")
 
         except Exception as e:

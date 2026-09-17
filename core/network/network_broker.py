@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import os
 import re
 import socket
 import threading
@@ -12,6 +13,22 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+
+def _private_targets_allowed() -> bool:
+    """Opt-in for scanning private/loopback targets (labs: Juice Shop, DVWA,
+    internal apps). Default OFF (anti-SSRF hard wall stays). When ON, the
+    private-IP/loopback block is lifted ONLY for hosts that are ALSO in the
+    authorized scope — scope enforcement is never bypassed."""
+    return os.getenv("ALLOW_PRIVATE_TARGETS", "false").lower() in ("true", "1", "yes", "on")
+
+
+def _host_in_scope(host: str) -> bool:
+    try:
+        from core.security.authorization import TargetScopeValidator
+        return bool(TargetScopeValidator.get().is_authorized(host))
+    except Exception:
+        return False
 
 _LOCALHOST_NAMES = frozenset({
     "localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback",
@@ -288,13 +305,17 @@ class NetworkBroker:
                 reason="no hostname in URL", reason_code="SCHEMA_INVALID",
             )
 
-        # Localhost alias check
+        # Localhost alias check — hard block unless private targets are
+        # explicitly enabled AND this host is in the authorized scope.
         if _is_localhost_name(host):
-            return NetworkDecision(
-                allowed=False, url=url,
-                reason=f"localhost alias blocked: {host}",
-                reason_code="PRIVATE_IP_BLOCKED",
-            )
+            if not (_private_targets_allowed() and _host_in_scope(host)):
+                return NetworkDecision(
+                    allowed=False, url=url,
+                    reason=f"localhost alias blocked: {host}",
+                    reason_code="PRIVATE_IP_BLOCKED",
+                )
+            logger.warning("[NetworkBroker] private/loopback target %s allowed "
+                           "(ALLOW_PRIVATE_TARGETS + in-scope)", host)
 
         # DNS resolution with pinning
         resolved = self._resolver.resolve(host)
@@ -305,9 +326,11 @@ class NetworkBroker:
                 reason_code="DNS_REBIND_BLOCKED",
             )
 
-        # IP safety check — ALL resolved IPs must be safe
+        # IP safety check — ALL resolved IPs must be safe, unless private
+        # targets are explicitly enabled AND this host is in authorized scope.
+        _allow_private = _private_targets_allowed() and _host_in_scope(host)
         for ip in resolved.ips:
-            if _is_dangerous_ip(ip):
+            if _is_dangerous_ip(ip) and not _allow_private:
                 return NetworkDecision(
                     allowed=False, url=url, resolved=resolved,
                     reason=f"resolved IP {ip} is private/reserved",
@@ -425,9 +448,23 @@ class NetworkBroker:
                     logger.debug(f"[NetworkBroker] Pinned TCP connection: {host} -> {ip}")
                     host_to_connect = ip
                 else:
-                    host_to_connect = host
-                    logger.warning(f"[NetworkBroker] Pinned TCP connection failed to find cached IP for {host}, falling back to default resolution")
-                    
+                    # Cache miss: do NOT fall back to unpinned transport resolution
+                    # (that would let the OS resolve to a rebind/internal IP with no
+                    # check). Resolve through the guarded resolver and fail CLOSED.
+                    try:
+                        fresh = broker._resolver.resolve(canonical)
+                    except Exception as e:
+                        raise RuntimeError(
+                            f"[NetworkBroker] blocked {host}: guarded resolution failed ({e})") from e
+                    if not (fresh and fresh.ips):
+                        raise RuntimeError(f"[NetworkBroker] blocked {host}: no resolvable IP")
+                    ip = fresh.ips[0]
+                    if _is_dangerous_ip(ip) and not (_private_targets_allowed() and _host_in_scope(host)):
+                        raise RuntimeError(
+                            f"[NetworkBroker] blocked {host}: resolves to dangerous IP {ip}")
+                    host_to_connect = ip
+                    logger.debug(f"[NetworkBroker] Pinned via fresh resolve: {host} -> {ip}")
+
                 return await self._original.connect_tcp(host_to_connect, port, timeout=timeout, local_address=local_address, **kwargs)
                 
             async def connect_unix_socket(self, path: str, timeout: Optional[float] = None, **kwargs) -> httpcore.AsyncNetworkStream:

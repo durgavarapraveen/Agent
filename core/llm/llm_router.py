@@ -15,6 +15,7 @@ class LLMRouter:
         # harness is authoritative for provider + model selection.
         self.api_key = api_key
         self.model = model
+        self._fallback_streak = 0
 
     def _fallback_heuristic(self, task_type: str, candidates: List[Any]) -> Dict[str, Any]:
         logger.warning(f"Using local fallback heuristic for {task_type}")
@@ -82,6 +83,17 @@ class LLMRouter:
         prompt = ContextBuilder.format_as_prompt(context, candidates, instruction)
         system = ("You are a deterministic security orchestrator. "
                   "You output ONLY valid JSON without markdown wrapping.")
+
+        # Fail safe: if Bedrock isn't actually available, don't attempt the call
+        # and don't pretend — return the heuristic fallback tagged as such.
+        try:
+            from core.orchestration.execution_mode import get_execution_config
+            if not get_execution_config().is_bedrock_available():
+                return self._fallback_response(task_type, candidates,
+                                               reason="bedrock_unavailable")
+        except Exception:
+            pass
+
         try:
             from agents.llm_harness_adapter import get_llm
             from core.common.schemas import TaskTier
@@ -94,18 +106,28 @@ class LLMRouter:
             )
             if not isinstance(data, dict) or not data:
                 raise RuntimeError("Empty/invalid JSON from harness")
+            self._fallback_streak = 0
             return LLMResponse(
                 reasoning_trace="", structured_data=data,
                 raw_response=json.dumps(data),
             )
         except Exception as e:
             logger.error(f"LLM routing failed for {task_type}: {e}")
-            fallback = self._fallback_heuristic(task_type, candidates)
-            return LLMResponse(
-                reasoning_trace="LLM Failed. Fallback executed.",
-                structured_data=fallback,
-                raw_response=json.dumps(fallback),
-            )
+            return self._fallback_response(task_type, candidates, reason=str(e))
+
+    def _fallback_response(self, task_type: str, candidates: List[Any], reason: str) -> LLMResponse:
+        # Track consecutive fallbacks so a persistent Bedrock outage is surfaced
+        # as a scan-level problem instead of looking like normal operation.
+        self._fallback_streak += 1
+        if self._fallback_streak in (1, 5) or self._fallback_streak % 25 == 0:
+            logger.warning("LLM fallback in effect (streak=%d, reason=%s) — results "
+                           "are heuristic, not LLM-derived.", self._fallback_streak, reason)
+        fallback = self._fallback_heuristic(task_type, candidates)
+        return LLMResponse(
+            reasoning_trace=f"LLM unavailable ({reason}). Fallback executed.",
+            structured_data=fallback,
+            raw_response=json.dumps(fallback),
+        )
 
     def parse_llm_response(self, response: LLMResponse, schema: Any) -> Any:
         try:

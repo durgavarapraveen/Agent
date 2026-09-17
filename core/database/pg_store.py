@@ -271,6 +271,58 @@ def _init_schema():
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
 
+                -- P0: persistent knowledge graph (survives crash/resume)
+                CREATE TABLE IF NOT EXISTS kg_nodes (
+                    scan_id TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    node_type TEXT NOT NULL,
+                    data JSONB DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    PRIMARY KEY (scan_id, node_type, node_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS kg_edges (
+                    scan_id TEXT NOT NULL,
+                    from_id TEXT NOT NULL,
+                    to_id TEXT NOT NULL,
+                    edge_type TEXT NOT NULL,
+                    data JSONB DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    PRIMARY KEY (scan_id, from_id, to_id, edge_type)
+                );
+
+                CREATE TABLE IF NOT EXISTS kg_hypotheses (
+                    scan_id TEXT NOT NULL,
+                    hypothesis_id TEXT NOT NULL,
+                    data JSONB DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    PRIMARY KEY (scan_id, hypothesis_id)
+                );
+
+                -- P1: adaptive payload catalog (payloads as versioned data)
+                CREATE TABLE IF NOT EXISTS payloads (
+                    payload_id TEXT PRIMARY KEY,
+                    vuln_class TEXT NOT NULL,
+                    subclass TEXT DEFAULT '',
+                    context TEXT DEFAULT 'url',
+                    payload_text TEXT NOT NULL,
+                    encoding TEXT DEFAULT 'none',
+                    evasion_tags TEXT[] DEFAULT '{}',
+                    source TEXT DEFAULT 'custom',
+                    effectiveness_score REAL DEFAULT 0.5,
+                    false_positive_rate REAL DEFAULT 0.0,
+                    waf_bypass_for TEXT[] DEFAULT '{}',
+                    confirm_patterns TEXT[] DEFAULT '{}',
+                    severity TEXT DEFAULT 'MEDIUM',
+                    times_used INTEGER DEFAULT 0,
+                    times_confirmed INTEGER DEFAULT 0,
+                    last_updated TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_payloads_class_ctx
+                    ON payloads (vuln_class, context);
+
                 CREATE TABLE IF NOT EXISTS findings_dedup (
                     signature TEXT PRIMARY KEY,
                     tool TEXT NOT NULL,

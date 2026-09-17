@@ -141,15 +141,58 @@ class FalsePositiveFilter:
 
         return np.array([[code, length, time_ms, tool_id, depth, has_error, waf]])
 
+    # ── Feedback loop (P5): auto-bootstrap the training set from scan outcomes ──
+    _FEATURE_HEADER = ["status_code", "content_length", "response_time_ms",
+                       "tool_id", "url_depth", "has_error", "waf", "is_false_positive"]
+
+    @staticmethod
+    def _training_file() -> str:
+        tf = "training_data.csv"
+        if not os.path.exists(tf) and os.path.isdir("data"):
+            return os.path.join("data", tf)
+        return tf
+
+    def record_outcome(self, finding: Dict[str, Any], response_meta: Optional[Dict[str, Any]] = None,
+                       is_false_positive: bool = False) -> None:
+        """Append one labelled row derived from a finalized finding. Over N scans
+        the CSV crosses FP_MODEL_MIN_ROWS and the ML model bootstraps itself."""
+        try:
+            feats = self.extract_feature_vector(finding, response_meta).flatten().tolist()
+            row = [f"{v:.4f}" for v in feats] + [str(int(bool(is_false_positive)))]
+            path = self._training_file()
+            new = not os.path.exists(path)
+            os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(path) else None
+            with open(path, "a", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                if new:
+                    w.writerow(self._FEATURE_HEADER)
+                w.writerow(row)
+        except Exception as e:
+            logger.debug("[FPFilter] record_outcome failed: %s", e)
+
+    def retrain(self) -> None:
+        """Re-run load/train against the (now larger) training CSV."""
+        self._load_or_train_model()
+
     def check_signature_fp(self, finding: Dict[str, Any], response_meta: Optional[Dict[str, Any]] = None) -> bool:
         meta = response_meta or {}
         code = meta.get("status_code", finding.get("status_code"))
         length = meta.get("content_length", finding.get("content_length"))
+        try:
+            code = int(code) if code is not None else None
+        except (TypeError, ValueError):
+            code = None
+        try:
+            length = int(length) if length is not None else None
+        except (TypeError, ValueError):
+            length = None
         tool = str(finding.get("tool") or finding.get("tool_name", "")).lower()
         loc = str(finding.get("location") or finding.get("url") or "").lower()
+        vtype = str(finding.get("type") or finding.get("vuln_type") or "").lower()
 
-        # Rule 1: Empty response with 200
-        if code == 200 and length == 0:
+        # Rule 1: Empty 200 — only a FP signal for reflection-style checks.
+        # Blind SSRF / blind injection / IDOR / race legitimately return empty 200.
+        if code == 200 and length == 0 and any(t in vtype for t in ("reflect", "xss", "sqli", "sql_injection")):
             return True
         # Rule 2: Redirect loop to login
         if code == 302 and "login" in loc:

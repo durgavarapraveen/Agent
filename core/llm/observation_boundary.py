@@ -53,6 +53,16 @@ _INJECTION_PATTERNS = [
     re.compile(r"forget\s+(everything|all)", re.IGNORECASE),
     re.compile(r"\[INST\]", re.IGNORECASE),
     re.compile(r"</?s>", re.IGNORECASE),
+    # Strengthened: more exfiltration / role-hijack / tool-abuse markers.
+    re.compile(r"reveal\s+(your\s+)?(system\s+)?prompt", re.IGNORECASE),
+    re.compile(r"print\s+(your\s+)?(instructions?|system\s+prompt)", re.IGNORECASE),
+    re.compile(r"assistant\s*:\s*", re.IGNORECASE),
+    re.compile(r"<\|(system|user|assistant)\|>", re.IGNORECASE),
+    re.compile(r"do\s+anything\s+now|DAN\s+mode", re.IGNORECASE),
+    re.compile(r"begin\s+(admin|developer|root)\s+mode", re.IGNORECASE),
+    re.compile(r"exfiltrat|send\s+.*\s+to\s+https?://", re.IGNORECASE),
+    re.compile(r"curl\s+https?://|wget\s+https?://", re.IGNORECASE),
+    re.compile(r"api[_\-\s]?key|secret[_\-\s]?key|password\s*[:=]", re.IGNORECASE),
 ]
 
 DEFAULT_BOUNDARY_CONFIG: Dict[str, Any] = {
@@ -161,7 +171,7 @@ class ObservationBoundary:
         for section in sections:
             if section.trust_level in UNTRUSTED_LEVELS:
                 labeled = self.label_content(
-                    section.content, section.trust_level, label=section.label,
+                    section.content, section.trust_level, source=section.label,
                 )
                 section.content = labeled.sanitized
 

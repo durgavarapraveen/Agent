@@ -44,6 +44,12 @@ class CoverageMatrix:
             "evidence_id": evidence_id,
             "timestamp": time.time(),
         }
+        # Observability: track coverage transitions (P4 hypothesis/coverage metrics).
+        try:
+            from core.observability.metrics import record_coverage_transition
+            record_coverage_transition(getattr(state, "name", str(state)))
+        except Exception:
+            pass
 
     def get_state(self, endpoint_id: str, test_id: str) -> CoverageState:
         ep = self._matrix.get(endpoint_id, {})
@@ -89,6 +95,21 @@ class CoverageMatrix:
                 if cell["state"] == CoverageState.NOT_TESTED:
                     gaps.append((ep_id, test_id))
         return gaps
+
+    def get_stalled(self, ttl_seconds: float = 900.0) -> List[Tuple[str, str]]:
+        """Cells stuck in a non-terminal state (SCHEDULED/RUNNING/INCONCLUSIVE)
+        past ``ttl_seconds`` — e.g. a crashed worker that never wrote a terminal
+        state. These depress coverage% invisibly; surface them so they can be
+        re-queued or reported as blind spots."""
+        now = time.time()
+        stuck_states = (CoverageState.SCHEDULED, CoverageState.RUNNING,
+                        CoverageState.INCONCLUSIVE)
+        out = []
+        for ep_id, tests in self._matrix.items():
+            for test_id, cell in tests.items():
+                if cell["state"] in stuck_states and (now - cell.get("timestamp", now)) >= ttl_seconds:
+                    out.append((ep_id, test_id))
+        return out
 
     def get_not_discovered(self) -> List[Tuple[str, str]]:
         nd = []

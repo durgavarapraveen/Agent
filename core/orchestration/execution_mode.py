@@ -25,15 +25,35 @@ class ExecutionConfig:
     def _init_config(self):
         self.mode = ExecutionMode.DETERMINISTIC
         self.fallback_on_error = False
-        self._validate()
+        self.bedrock_available = self._detect_bedrock()
         self._log_config()
 
-    def _validate(self):
-        if not os.getenv("AWS_ACCESS_KEY_ID"):
-            logger.warning("AWS credentials not set.")
+    def _detect_bedrock(self) -> bool:
+        """True only when Bedrock can plausibly be called: credentials (explicit
+        keys OR a role/profile) AND a region. Fail-safe — when this is False,
+        callers must treat the LLM layer as unavailable and stay deterministic
+        rather than silently substituting heuristic output for real LLM output."""
+        has_creds = bool(
+            os.getenv("AWS_ACCESS_KEY_ID")
+            or os.getenv("AWS_ROLE_ARN")
+            or os.getenv("AWS_PROFILE")
+            or os.getenv("AWS_WEB_IDENTITY_TOKEN_FILE")
+            or os.getenv("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")  # ECS/task role
+        )
+        has_region = bool(os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION"))
+        if not (has_creds and has_region):
+            logger.warning("Bedrock unavailable (creds=%s, region=%s) — LLM layer "
+                           "disabled; running deterministic paths only.",
+                           has_creds, has_region)
+            return False
+        return True
+
+    def is_bedrock_available(self) -> bool:
+        return bool(getattr(self, "bedrock_available", False))
 
     def _log_config(self):
-        logger.info(f"Execution Config: Mode={self.mode.name}, Provider=bedrock")
+        logger.info("Execution Config: Mode=%s, Provider=bedrock, bedrock_available=%s",
+                    self.mode.name, self.bedrock_available)
 
     def is_mode_a_enabled(self) -> bool:
         return True

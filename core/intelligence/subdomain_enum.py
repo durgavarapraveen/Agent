@@ -332,7 +332,7 @@ class CertificateTransparencyScanner:
             try:
                 url = f"https://crt.sh/?q=%25.{domain}&output=json"
                 req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
-                resp = urllib.request.urlopen(req, timeout=12)
+                resp = await asyncio.to_thread(lambda: urllib.request.urlopen(req, timeout=12))
                 data = json.loads(resp.read().decode())
                 
                 discovered_names: Set[str] = set()
@@ -373,7 +373,7 @@ class CertificateTransparencyScanner:
         try:
             url = f"https://api.certspotter.com/v1/issuances?domain={domain}&include_subdomains=true&expand=dns_names"
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            resp = urllib.request.urlopen(req, timeout=10)
+            resp = await asyncio.to_thread(lambda: urllib.request.urlopen(req, timeout=10))
             data = json.loads(resp.read().decode())
             seen = set()
             if isinstance(data, list):
@@ -402,11 +402,14 @@ class CertificateTransparencyScanner:
         try:
             url = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/passive_dns"
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            resp = urllib.request.urlopen(req, timeout=10)
+            resp = await asyncio.to_thread(lambda: urllib.request.urlopen(req, timeout=10))
             data = json.loads(resp.read().decode())
-            
+            if not isinstance(data, dict):
+                logger.warning("[CertificateTransparencyScanner] OTX returned %s, not an object",
+                               type(data).__name__)
+                return subdomains
             seen = set()
-            for entry in data.get("passive_dns", []):
+            for entry in data.get("passive_dns", []) or []:
                 hostname = entry.get("hostname", "").strip().lstrip("*.").lower()
                 ip = entry.get("address", "")
                 if hostname and hostname not in seen and (hostname.endswith(f".{domain}") or hostname == domain):
@@ -429,7 +432,7 @@ class CertificateTransparencyScanner:
         try:
             url = f"https://api.hackertarget.com/hostsearch/?q={domain}"
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            resp = urllib.request.urlopen(req, timeout=10)
+            resp = await asyncio.to_thread(lambda: urllib.request.urlopen(req, timeout=10))
             lines = resp.read().decode('utf-8', errors='ignore').splitlines()
             
             seen = set()
@@ -457,7 +460,7 @@ class CertificateTransparencyScanner:
         try:
             url = f"https://jldc.me/anubis/subdomains/{domain}"
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            resp = urllib.request.urlopen(req, timeout=10)
+            resp = await asyncio.to_thread(lambda: urllib.request.urlopen(req, timeout=10))
             data = json.loads(resp.read().decode())
             if isinstance(data, list):
                 seen = set()
@@ -548,13 +551,23 @@ class CDNAnalyzer:
             f"{domain.replace('.', '-')}-backup",
         ]
         
-        # S3 bucket enumeration
+        # S3 bucket enumeration — scope-gated like core/recon/cloud_enum:
+        # never probe a cloud host that isn't authorized in the engagement scope.
+        try:
+            from core.security.authorization import TargetScopeValidator
+            _validator = TargetScopeValidator.get()
+        except Exception:
+            _validator = None
         for pattern in bucket_patterns:
             try:
                 # Check S3
-                url = f"https://{pattern}.s3.amazonaws.com"
+                s3_host = f"{pattern}.s3.amazonaws.com"
+                if _validator is not None and not _validator.is_authorized(s3_host):
+                    logger.debug("[CDNAnalyzer] %s out of scope; not probing", s3_host)
+                    continue
+                url = f"https://{s3_host}"
                 req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                resp = urllib.request.urlopen(req, timeout=5)
+                resp = await asyncio.to_thread(lambda: urllib.request.urlopen(req, timeout=5))
                 
                 bucket = CloudStorageBucket(
                     bucket_name=pattern,

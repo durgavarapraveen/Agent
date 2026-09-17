@@ -113,10 +113,21 @@ class DedupStore:
         target_norm = self._normalize_target(target_val)
         title_val = finding.get("title") or finding.get("name") or ""
         type_val = finding.get("type") or finding.get("vuln_type") or ""
-        fp = fingerprint(
-            finding.get("cve_id", ""), finding.get("file_path", finding.get("location", "")),
-            finding.get("function_name", ""), finding.get("package_version", ""),
-            target=target_val, title=title_val, vuln_type=type_val)
+        loc_val = finding.get("file_path") or finding.get("location") or finding.get("url") or ""
+        cve_val = finding.get("cve_id", "")
+        # Collision guard: if EVERY discriminating field is empty, fingerprint()
+        # would collapse to a constant hash and merge unrelated findings. Fall
+        # back to hashing the whole finding so distinct ones stay distinct.
+        if not any([cve_val, loc_val, title_val, type_val, target_val,
+                    finding.get("function_name"), finding.get("package_version")]):
+            import json as _json
+            fp = hashlib.sha256(
+                _json.dumps(finding, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        else:
+            fp = fingerprint(
+                cve_val, finding.get("file_path", finding.get("location", "")),
+                finding.get("function_name", ""), finding.get("package_version", ""),
+                target=target_val, title=title_val, vuln_type=type_val)
         severity = str(finding.get("severity", "")).upper()
         now = time.time()
 
@@ -126,30 +137,29 @@ class DedupStore:
                     "SELECT severity, first_seen FROM findings_history WHERE fingerprint=%s",
                     (fp,))
                 row = c.fetchone()
+                is_new = row is None
+                # Atomic upsert — avoids a PRIMARY KEY violation when two
+                # concurrent scans classify the same fingerprint at once.
+                c.execute(
+                    "INSERT INTO findings_history(fingerprint, cve_id, file_path, "
+                    "function_name, package_version, severity, first_seen, last_seen, "
+                    "last_scan_id, status, target) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                    "ON CONFLICT(fingerprint) DO UPDATE SET "
+                    "severity=EXCLUDED.severity, last_seen=EXCLUDED.last_seen, "
+                    "last_scan_id=EXCLUDED.last_scan_id, status=%s, "
+                    "target=COALESCE(NULLIF(findings_history.target,''), EXCLUDED.target)",
+                    (fp, cve_val, finding.get("file_path", finding.get("location", "")),
+                     finding.get("function_name", ""), finding.get("package_version", ""),
+                     severity, now, now, scan_id, (NEW if is_new else RECURRING), target_norm,
+                     RECURRING))
+                conn.commit()
 
-                if row is None:
-                    c.execute(
-                        "INSERT INTO findings_history(fingerprint, cve_id, file_path, "
-                        "function_name, package_version, severity, first_seen, last_seen, "
-                        "last_scan_id, status, target) "
-                        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                        (fp, finding.get("cve_id", ""),
-                         finding.get("file_path", finding.get("location", "")),
-                         finding.get("function_name", ""),
-                         finding.get("package_version", ""),
-                         severity, now, now, scan_id, NEW, target_norm))
-                    conn.commit()
+                if is_new:
                     return DedupResult(fp, NEW, severity, "", False, False, now, now)
-
                 prev_sev = str(row[0] or "").upper()
                 first_seen = row[1] or now
                 changed = prev_sev != severity
-                c.execute(
-                    "UPDATE findings_history SET severity=%s, last_seen=%s, "
-                    "last_scan_id=%s, status=%s, target=COALESCE(NULLIF(target,''),%s) "
-                    "WHERE fingerprint=%s",
-                    (severity, now, scan_id, RECURRING, target_norm, fp))
-                conn.commit()
                 return DedupResult(
                     fp, RECURRING, severity, prev_sev, changed,
                     suppressed=not changed, first_seen=first_seen, last_seen=now)
@@ -178,7 +188,8 @@ class DedupStore:
         return fps
 
     def process_scan(self, findings: List[Dict], scan_id: str,
-                     include_recurring: bool = False, target: str = None) -> Dict:
+                     include_recurring: bool = False, target: str = None,
+                     full_scan: bool = False) -> Dict:
         results, report, suppressed_findings = [], [], []
         suppressed = 0
         for f in findings:
@@ -210,14 +221,22 @@ class DedupStore:
         # one. This preserves backward compatibility for callers that don't yet pass
         # target while keeping the safety property: mark_resolved refuses to run
         # without a target.
-        target_for_sweep = target
-        if not target_for_sweep:
-            for f in findings:
-                t = f.get("target") or f.get("host") or f.get("domain")
-                if t:
-                    target_for_sweep = t
-                    break
-        resolved = self.mark_resolved(scan_id, target=target_for_sweep)
+        # Only auto-resolve prior findings on a FULL scan. A partial/incremental
+        # scan does not re-test every endpoint, so sweeping would silently mark
+        # still-present vulns as resolved just because they weren't re-run.
+        resolved: List[str] = []
+        if full_scan:
+            target_for_sweep = target
+            if not target_for_sweep:
+                for f in findings:
+                    t = f.get("target") or f.get("host") or f.get("domain")
+                    if t:
+                        target_for_sweep = t
+                        break
+            resolved = self.mark_resolved(scan_id, target=target_for_sweep)
+        else:
+            logger.debug("process_scan: full_scan=False; skipping resolve sweep "
+                         "(partial coverage must not auto-close findings)")
         return {"results": results, "report": report,
                 "suppressed_findings": suppressed_findings,
                 "suppressed": suppressed, "resolved": resolved}

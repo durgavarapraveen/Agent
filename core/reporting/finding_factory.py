@@ -97,7 +97,7 @@ class FindingFactory:
             "confidence_score": 0.5,
             "target": target,
             "location": location or target,
-            "evidence": evidence[:2000],
+            "evidence": str(evidence or "")[:2000],
             "cwe": "",
             "source": source,
             "tool": tool,

@@ -212,6 +212,21 @@ def _post_scan_chain_analysis(brain) -> None:
                     result.get("chain_count", 0), up)
     except Exception as e:
         logger.warning("Post-scan chain analysis failed: %s", e)
+    # P0: capability-based attack-chain reasoning (precondition/postcondition).
+    # Auto-populates related_findings and surfaces partial-chain missing links.
+    try:
+        from core.exploitation.chain_reasoner import ChainReasoner
+        vulns = list(getattr(brain.ctx, "vulnerabilities", []) or [])
+        if vulns:
+            reasoner = ChainReasoner()
+            chains = reasoner.analyze(vulns)  # mutates related_findings in place
+            if getattr(brain, "ctx", None) is not None:
+                brain.ctx.attack_chains_reasoned = [c.to_dict() for c in chains]
+                brain.ctx.chain_missing_links = reasoner.suggest_next_tests(vulns)
+            logger.info("Chain reasoning: %d capability chains (%d complete)",
+                        len(chains), sum(1 for c in chains if c.complete))
+    except Exception as e:
+        logger.warning("Chain reasoning failed: %s", e)
     # Phase 5.2: attach AI fix-code to each finding before persist.
     try:
         from core.reporting.fix_generator import FixGenerator

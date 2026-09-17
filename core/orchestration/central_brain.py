@@ -274,6 +274,7 @@ RULES:
 
 
 class ExecutionPhase(str, Enum):
+    UNDERSTAND = "UNDERSTAND"          # §3 comprehension-first: features/workflows/roles
     RECON = "RECON"
     ACTIVE_SCANNING = "ACTIVE_SCANNING"
     EXPLOITATION = "EXPLOITATION"
@@ -307,6 +308,18 @@ class CentralBrain(
         logger.info(f"BRAIN_PHASE_TRANSITION: old_phase='{old_phase}' -> new_phase='{new_phase}'")
 
     def _evaluate_phase_transition(self) -> Optional[ExecutionPhase]:
+        # P3: evidence-based transitions (coverage %, finding/discovery rates,
+        # unvalidated HIGH+ findings) via AdaptivePlanner. Falls back to the
+        # original count/presence logic if the planner errors.
+        try:
+            planner = self._adaptive_planner
+            decision = planner.should_transition_phase(self)
+            if decision is not None:
+                return decision
+            return None
+        except Exception as e:
+            logger.debug(f"AdaptivePlanner transition failed, using fallback: {e}")
+
         if self.current_phase == ExecutionPhase.RECON:
             if self.ctx.endpoints or self.ctx.subdomains or self.ctx.ports or len(self.ctx.agents_spawned) >= 3:
                 return ExecutionPhase.ACTIVE_SCANNING
@@ -317,6 +330,61 @@ class CentralBrain(
             if self.ctx.exploit_results or len(self.ctx.agents_spawned) >= 10:
                 return ExecutionPhase.REPORTING
         return None
+
+    @property
+    def _adaptive_planner(self):
+        planner = getattr(self, "__adaptive_planner", None)
+        if planner is None:
+            from core.orchestration.adaptive_planner import AdaptivePlanner
+            planner = AdaptivePlanner()
+            self.__adaptive_planner = planner
+        return planner
+
+    async def _run_universal_probe_engine(self, max_endpoints: int = 25):
+        """P1: run the catalog-driven UniversalProbeEngine across discovered
+        endpoints for the core vuln classes. Bounded; findings are added to ctx
+        by the engine. Payloads come from the PayloadCatalog (seed + ingested
+        PayloadsAllTheThings / nuclei), so no hardcoded payload lists here."""
+        from core.payloads.probe_engine import UniversalProbeEngine
+        engine = UniversalProbeEngine()
+        # Injection-style classes the generic engine can place into a request
+        # (query/body/header) and confirm via the Oracle. Non-injection classes
+        # (idor, jwt, file_upload, race, graphql) are handled by specialized
+        # probes. Override with UPE_CLASSES="sqli,xss,...".
+        default_classes = ["sqli", "nosqli", "xss", "ssti", "ssrf", "lfi", "rce",
+                           "xxe", "open_redirect", "prototype_pollution",
+                           "cors_misconfiguration", "host_header_injection",
+                           "email_injection", "cache_poisoning"]
+        env_classes = os.getenv("UPE_CLASSES", "").strip()
+        classes = [c.strip() for c in env_classes.split(",") if c.strip()] or default_classes
+        # Per-(endpoint,class) payload budget. UPE_BUDGET=0 -> send ALL payloads
+        # of that class (exhaustive; noisy but leaves nothing untested).
+        try:
+            upe_budget = int(os.getenv("UPE_BUDGET", "25"))
+        except ValueError:
+            upe_budget = 25
+        try:
+            endpoints = self.ctx.get_endpoints() if hasattr(self.ctx, "get_endpoints") else []
+        except Exception:
+            endpoints = []
+        all_findings = []
+        for e in endpoints[:max_endpoints]:
+            url = e if isinstance(e, str) else (
+                e.get("url") if isinstance(e, dict) else getattr(e, "url", ""))
+            if not url:
+                continue
+            param = "q"
+            if isinstance(e, dict) and e.get("parameters"):
+                p0 = e["parameters"]
+                param = (p0[0] if isinstance(p0, list) and p0 else
+                         next(iter(p0), "q") if isinstance(p0, dict) else "q")
+            for vc in classes:
+                try:
+                    all_findings.extend(await engine.probe(url, vc, self.ctx,
+                                                           parameter=param, budget=upe_budget))
+                except Exception as ex:
+                    logger.debug(f"UPE probe {vc} on {url} failed: {ex}")
+        return all_findings
         
     def _should_exit_phase(self) -> bool:
         if not hasattr(self, 'phase_state') or not hasattr(self, 'phase_config'):
@@ -433,8 +501,24 @@ class CentralBrain(
                 nm = getattr(p, "value", None) or getattr(p, "phase_name", None)
                 if nm:
                     completed.add(nm if isinstance(nm, str) else getattr(nm, "value", str(nm)))
+            # Mark the CURRENT phase completed ONLY when its own completion
+            # predicate is satisfied (e.g. EXPLOITATION needs exploit_results) —
+            # otherwise dependents like REPORTING would unlock prematurely while
+            # HIGH+ findings are still unvalidated. A stall cap preserves forward
+            # progress so a phase that can't complete still eventually advances.
             if getattr(self, "current_phase", None):
-                completed.add(self.current_phase.value)
+                cur_name = self.current_phase.value
+                try:
+                    _node = default_dag().get(cur_name)
+                    _done = _node.completion_predicate(self.ctx) if _node else True
+                except Exception:
+                    _done = True
+                _stall = len(getattr(self.ctx, "agents_spawned", []) or []) >= 15
+                if _done or _stall:
+                    completed.add(cur_name)
+                    if _stall and not _done:
+                        logger.info("PHASE_STALL_ADVANCE: %s completion predicate "
+                                    "unmet but stall cap hit; advancing", cur_name)
             # P0.6: controlled re-entry — a completed phase may be re-run ONLY
             # when a genuine dependency event (new host/endpoint/finding/auth
             # context) appeared since the last transition, and only within a
@@ -707,7 +791,19 @@ class CentralBrain(
 
         # ── Phase 2.1: Unified Authorization Authority ──
         self.auth_authority = AuthorizationAuthority.get()
-        _default_scope = AuthorizationScope(hosts=set(auth_targets), lab_mode=bool(self.scope.get("lab_mode")))
+        # P4: contract/authorization expiry — bound the engagement to a time
+        # window so a stale authorization can't be replayed later. Enforced by
+        # AuthorizationAuthority.authorize_execution (live path). Configurable
+        # via AUTHZ_CONTRACT_TTL_HOURS (default 24h; 0 disables the window).
+        import time as _time
+        _ttl_h = float(os.getenv("AUTHZ_CONTRACT_TTL_HOURS", "24") or 0)
+        _now = _time.time()
+        _win_end = (_now + _ttl_h * 3600.0) if _ttl_h > 0 else 0.0
+        _default_scope = AuthorizationScope(
+            hosts=set(auth_targets), lab_mode=bool(self.scope.get("lab_mode")),
+            time_window_start=_now if _ttl_h > 0 else 0.0,
+            time_window_end=_win_end,
+        )
         self.auth_authority.register_scope("default", _default_scope)
 
         # ── Phase 3.2: Connection Pinning & Egress Telemetry ──
@@ -2085,6 +2181,18 @@ class CentralBrain(
         logger.info("AUTONOMOUS PENTESTING BRAIN (STATE MACHINE)")
         logger.info("=" * 60)
 
+        # P1: refresh the payload catalog from community sources (nuclei /
+        # PayloadsAllTheThings) so probes test current payloads, not stale code.
+        # No-op unless the *_DIR env vars point at checkouts; always guarded.
+        try:
+            from core.payloads.updater import PayloadUpdater
+            # interval-guarded: pulls PATT/nuclei + re-ingests at most once/day
+            counts = PayloadUpdater().maybe_update()
+            if any(counts.values()):
+                logger.info(f"[PayloadUpdater] ingested {counts}")
+        except Exception as e:
+            logger.debug(f"[PayloadUpdater] skipped: {e}")
+
         # Pre-flight autonomous readiness gate check
         try:
             readiness = self.readiness_gate.evaluate_readiness()
@@ -2263,6 +2371,16 @@ class CentralBrain(
             duration_s=duration)
 
         # Persist all findings to Postgres via FindingStoreV2
+        # P2: post-scan blind-spot audit — record what was NOT tested so the
+        # report can carry a "Coverage & Confidence" section.
+        try:
+            from core.coverage.blind_spot_detector import BlindSpotDetector
+            blind = BlindSpotDetector().audit(self)
+            self.ctx.blind_spots = blind
+            logger.info(f"[BlindSpot] {blind.get('blind_spot_count', 0)} untested items flagged")
+        except Exception as e:
+            logger.warning(f"[BlindSpot] audit failed (non-fatal): {e}")
+
         if self.ctx.vulnerabilities:
             try:
                 from core.findings.finding import Finding as FindingObj
@@ -2362,6 +2480,27 @@ class CentralBrain(
                 await self._run_phase("OSINT_RECONNAISSANCE")
             await self._run_phase("DEEP_RECONNAISSANCE")
             await self._persist_recon_findings()
+
+            # P2: network-layer discovery (port scan) + cloud asset enumeration.
+            # Both scope-enforced and non-fatal.
+            try:
+                from core.recon.network_discovery import run_network_discovery
+                nd = await run_network_discovery(self.ctx)
+                for f in nd:
+                    self.ctx.add_vulnerability(f)
+                if nd:
+                    logger.info(f"[NetworkDiscovery] {len(nd)} exposed-service findings")
+            except Exception as e:
+                logger.warning(f"[NetworkDiscovery] failed (non-fatal): {e}")
+            try:
+                from core.recon.cloud_enum import run_cloud_enum
+                ce = await run_cloud_enum(self.ctx)
+                for f in ce:
+                    self.ctx.add_vulnerability(f)
+                if ce:
+                    logger.info(f"[CloudEnum] {len(ce)} exposed cloud assets")
+            except Exception as e:
+                logger.warning(f"[CloudEnum] failed (non-fatal): {e}")
             # Phase 1.1 + 1.2: after RECON completes, extract routes/endpoints
             # from the app's JS bundles (webpack + sourcemap) and observe DOM
             # sinks via headless Chrome. Both are non-fatal; missing tools =>
@@ -2798,6 +2937,80 @@ class CentralBrain(
                 await self._run_authz_phase()
             except Exception as e:
                 logger.warning(f"[AUTHZ] cross-role replay failed (non-fatal): {e}")
+
+            # ── §0/§2/§4: Surface-driven unified injection (Dispatcher) ──
+            # SurfaceClassifier derives real surfaces + injection points from
+            # observed data; Dispatcher runs the full applicable battery at each
+            # real point (no guessed ?q=). This is the primary injection path;
+            # UPE below is the endpoint-level fallback.
+            surface_findings = []
+            try:
+                from core.orchestration.dispatcher import run_dispatcher
+                surface_findings = await run_dispatcher(self.ctx)
+                if surface_findings:
+                    logger.info(f"[Dispatcher] {len(surface_findings)} surface-driven findings")
+                self._log_activity("dispatcher",
+                                   f"Dispatcher: {len(surface_findings)} findings", tool="dispatcher")
+            except Exception as e:
+                logger.warning(f"[Dispatcher] failed (non-fatal): {e}")
+
+            # ── P1: Universal Probe Engine (endpoint-level fallback) ──
+            try:
+                upe_findings = await self._run_universal_probe_engine()
+                if upe_findings:
+                    logger.info(f"[UPE] {len(upe_findings)} catalog-driven findings")
+                self._log_activity("universal_probe_engine",
+                                   f"UPE: {len(upe_findings)} findings", tool="universal_probe_engine")
+            except Exception as e:
+                logger.warning(f"[UPE] failed (non-fatal): {e}")
+
+            # ── P2: Differential Authorization Testing (cross-identity) ──
+            try:
+                from core.identity.differential_tester import DifferentialAuthorizationTester
+                diff_findings = await DifferentialAuthorizationTester(self).test_all(self.ctx)
+                if diff_findings:
+                    logger.info(f"[DiffAuthZ] {len(diff_findings)} authorization discrepancies")
+                self._log_activity("differential_authz", f"DiffAuthZ: {len(diff_findings)} findings",
+                                   tool="differential_authz_tester")
+            except Exception as e:
+                logger.warning(f"[DiffAuthZ] failed (non-fatal): {e}")
+
+            # ── P4: API-specific testing (method tamper, missing-auth, BOLA) ──
+            try:
+                from core.exploitation.api_probe import run_api_probe
+                api_findings = await run_api_probe(self.ctx)
+                for f in api_findings:
+                    self.ctx.add_vulnerability(f)
+                if api_findings:
+                    logger.info(f"[APIProbe] {len(api_findings)} API findings")
+                self._log_activity("api_probe", f"API: {len(api_findings)} findings", tool="api_probe")
+            except Exception as e:
+                logger.warning(f"[APIProbe] failed (non-fatal): {e}")
+
+            # ── P3: Business-logic violation testing ──
+            try:
+                from core.exploitation.business_logic_probe import run_business_logic_probe
+                bl_findings = await run_business_logic_probe(self.ctx)
+                for f in bl_findings:
+                    self.ctx.add_vulnerability(f)
+                if bl_findings:
+                    logger.info(f"[BusinessLogic] {len(bl_findings)} logic findings")
+                self._log_activity("business_logic", f"BizLogic: {len(bl_findings)} findings",
+                                   tool="business_logic_probe")
+            except Exception as e:
+                logger.warning(f"[BusinessLogic] failed (non-fatal): {e}")
+
+            # ── §1: Workflow learning + violation testing (state-machine abuse:
+            # value tamper / replay / step-skip over the observed user journey) ──
+            try:
+                from core.workflow.violation_tester import run_workflow_probe
+                wf_findings = await run_workflow_probe(self.ctx)
+                if wf_findings:
+                    logger.info(f"[Workflow] {len(wf_findings)} business-logic violations")
+                self._log_activity("workflow", f"Workflow: {len(wf_findings)} findings",
+                                   tool="workflow_violation_tester")
+            except Exception as e:
+                logger.warning(f"[Workflow] failed (non-fatal): {e}")
 
             # ── P6: Systematic AuthZ Matrix (IDOR/BOLA/BFLA) ──
             try:
@@ -3811,6 +4024,19 @@ class CentralBrain(
                         f"{len(reportable)} reportable, {len(needs_review)} review, {len(rejected)} rejected",
                         tool="confidence_scorer")
 
+                    # P5: false-positive feedback loop — record confirmed vs
+                    # rejected outcomes so the ML FP model bootstraps over scans.
+                    try:
+                        from core.reporting.fp_filter import FalsePositiveFilter
+                        fpf = FalsePositiveFilter()
+                        for v in reportable:
+                            fpf.record_outcome(v, None, is_false_positive=False)
+                        for v in rejected:
+                            fpf.record_outcome(v, None, is_false_positive=True)
+                        fpf.retrain()
+                    except Exception as fp_err:
+                        logger.debug(f"[FPFeedback] skipped: {fp_err}")
+
                     # Enforce confidence gate: keep only reportable + needs_review
                     if rejected:
                         logger.info(f"[ConfidenceGate] Removing {len(rejected)} rejected findings from vulnerabilities")
@@ -4342,6 +4568,16 @@ class CentralBrain(
         }
 
         objective = phase_objectives.get(phase, f"Perform {phase} phase testing on {self.ctx.target}. Use available tools to find security issues.")
+
+        # P3: hypothesis-driven task generation — augment the static objective
+        # with evidence-based prioritized next tests (chain links, hypotheses,
+        # coverage gaps) so the LLM validates a plan instead of improvising.
+        try:
+            hint = self._adaptive_planner.objective_hint(self)
+            if hint:
+                objective = f"{objective}\n\n{hint}"
+        except Exception as _e:
+            logger.debug(f"objective_hint skipped: {_e}")
 
         context_hint = ""
         if self.ctx.vulnerabilities:
@@ -7787,6 +8023,29 @@ CRITICAL RULES:
             "scheduled_scan": AutomationEngine.schedule_config(self.ctx.target),
             "brain_log": self.ctx.brain_log,
             "agents": self.ctx.agents_spawned,
+        }
+
+        # P2: Coverage & Confidence section — blind spots (what was NOT tested),
+        # unified coverage %, and capability-based attack-chain reasoning. Makes
+        # the report state its own confidence instead of implying completeness.
+        try:
+            from core.coverage.unified_coverage import UnifiedCoverage
+            cov = UnifiedCoverage.from_brain(self).summary()
+        except Exception:
+            cov = {}
+        chains = []
+        try:
+            from core.exploitation.chain_reasoner import ChainReasoner
+            vulns = list(getattr(self.ctx, "vulnerabilities", []) or [])
+            if vulns:
+                chains = [c.to_dict() for c in ChainReasoner().analyze(vulns)]
+        except Exception:
+            chains = []
+        report["coverage_confidence"] = {
+            "coverage": cov,
+            "blind_spots": getattr(self.ctx, "blind_spots", {}) or {},
+            "attack_chains_reasoned": chains,
+            "note": "Findings reflect executed tests only; see blind_spots for untested surface.",
         }
 
         # Generate automated exploit POC reproduction scripts (Python, cURL, Markdown).

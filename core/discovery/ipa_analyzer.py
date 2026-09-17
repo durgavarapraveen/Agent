@@ -18,6 +18,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List
 
+import os
+
+
+def _safe_extractall(z: "zipfile.ZipFile", out_dir: str) -> None:
+    """Zip-slip-safe extraction: reject entries that escape out_dir."""
+    base = os.path.realpath(out_dir)
+    for member in z.namelist():
+        dest = os.path.realpath(os.path.join(out_dir, member))
+        if dest != base and not dest.startswith(base + os.sep):
+            logging.getLogger(__name__).warning(
+                "ipa_analyzer: skipping zip-slip entry %r", member)
+            continue
+        z.extract(member, out_dir)
+
 from core.discovery.mobile_analyzer import (
     _TEXT_EXTS,
     _dedup_secrets,
@@ -114,7 +128,7 @@ class IPAAnalyzer:
         out_dir = tempfile.mkdtemp(prefix="ipa_")
         try:
             with zipfile.ZipFile(ipa_path) as z:
-                z.extractall(out_dir)
+                _safe_extractall(z, out_dir)  # zip-slip guarded
         except Exception as e:
             logger.warning("ipa_analyzer: unzip failed (%s)", e)
             return IPAAnalysis(source=ipa_path)

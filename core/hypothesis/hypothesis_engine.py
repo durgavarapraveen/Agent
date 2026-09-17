@@ -44,6 +44,11 @@ class HypothesisEngine:
     def add(self, h: Hypothesis) -> str:
         with self._lock:
             self._store[h.hyp_id] = h
+        try:
+            from core.observability.metrics import record_hypothesis_generated
+            record_hypothesis_generated(getattr(h, "vuln_class", "unknown"))
+        except Exception:
+            pass
         return h.hyp_id
 
     def get(self, hyp_id: str) -> Optional[Hypothesis]:
@@ -61,6 +66,12 @@ class HypothesisEngine:
                 for e in add_evidence:
                     if e not in h.evidence_ids:
                         h.evidence_ids.append(e)
+        try:
+            from core.observability.metrics import record_hypothesis_resolved
+            record_hypothesis_resolved(getattr(h, "vuln_class", "unknown"),
+                                       getattr(new_state, "value", str(new_state)))
+        except Exception:
+            pass
 
     def next_best_action(self) -> Optional[Hypothesis]:
         with self._lock:

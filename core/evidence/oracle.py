@@ -373,7 +373,384 @@ def _oracle_csrf(ev: Dict[str, Any], cfg: dict) -> OracleResult:
     return OracleResult(False, 0.0, [], "No CSRF indicators.")
 
 
+def _oracle_cors_misconfig(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    origin = ev.get("request_origin", "")
+    acao = ev.get("acao", ev.get("access_control_allow_origin", ""))
+    acac = ev.get("acac", ev.get("access_control_allow_credentials", False))
+    acac = str(acac).lower() in ("true", "1")
+    if acao == "*" and acac:
+        return OracleResult(True, 0.9, [ev.get("evidence_id")], "Wildcard ACAO with credentials allowed.")
+    if origin and acao and (acao == origin or acao == "null") and acac:
+        return OracleResult(True, 0.9, [ev.get("evidence_id")], f"Reflected origin '{acao}' with credentials.")
+    return OracleResult(False, 0.0, [], "No exploitable CORS misconfiguration.")
+
+
+def _oracle_jwt(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    if ev.get("status_code") == 200 and (ev.get("jwt_alg_none_accepted") or ev.get("jwt_signature_stripped_accepted")):
+        return OracleResult(True, 0.95, [ev.get("evidence_id")], "Forged JWT (alg=none / stripped signature) accepted.")
+    if ev.get("jwt_weak_secret_cracked"):
+        return OracleResult(True, 0.9, [ev.get("evidence_id")], "JWT signed with crackable weak secret.")
+    return OracleResult(False, 0.0, [], "No JWT weakness indicators.")
+
+
+def _oracle_graphql(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    body = str(ev.get("response_body", ""))
+    if ev.get("introspection_enabled") or "__schema" in body or "__type" in body:
+        return OracleResult(True, 0.8, [ev.get("evidence_id")], "GraphQL introspection exposed.",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No GraphQL abuse indicators.")
+
+
+def _oracle_api_abuse(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    if ev.get("no_rate_limit") and ev.get("status_code") == 200:
+        return OracleResult(True, 0.7, [ev.get("evidence_id")], "No rate limiting on repeated requests.",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No API abuse indicators.")
+
+
+def _oracle_business_logic(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    if ev.get("workflow_step_skipped") or ev.get("state_changed_unexpectedly"):
+        return OracleResult(True, 0.8, [ev.get("evidence_id")], "Workflow step skipped / invalid state transition accepted.",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No business-logic bypass indicators.")
+
+
+def _oracle_race_condition(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    if ev.get("duplicate_success_count", 0) > 1 or ev.get("double_spend"):
+        return OracleResult(True, 0.85, [ev.get("evidence_id")],
+                            f"Concurrent requests yielded {ev.get('duplicate_success_count', 2)} successes (race).")
+    return OracleResult(False, 0.0, [], "No race-condition indicators.")
+
+
+_SECRET_RE = re.compile(
+    r"(AKIA[0-9A-Z]{16}|ghp_[0-9A-Za-z]{36}|xox[baprs]-[0-9A-Za-z-]+|-----BEGIN (?:RSA |EC )?PRIVATE KEY-----|"
+    r"(?:api[_-]?key|secret|token|passwd|password)\s*[:=]\s*['\"][^'\"]{8,})", re.IGNORECASE)
+
+
+def _oracle_secret_exposure(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    body = str(ev.get("response_body", ""))
+    if _SECRET_RE.search(body):
+        return OracleResult(True, 0.85, [ev.get("evidence_id")], "Credential/secret pattern exposed in response.",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No exposed secrets.")
+
+
+_INFO_LEAK_RE = re.compile(
+    r"(Traceback \(most recent call last\)|Warning: .* on line \d+|Exception in thread|"
+    r"at [\w.$]+\([\w.]+\.java:\d+\)|/(?:home|var|usr|etc)/[\w./-]+|"
+    r"(?:nginx|apache|php|express|django)/[\d.]+)", re.IGNORECASE)
+
+
+def _oracle_info_disclosure(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    body = str(ev.get("response_body", ""))
+    if _INFO_LEAK_RE.search(body):
+        return OracleResult(True, 0.75, [ev.get("evidence_id")], "Stack trace / internal path / version disclosed.",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No information disclosure.")
+
+
+def _oracle_misconfiguration(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    body = str(ev.get("response_body", ""))
+    if ev.get("debug_enabled") or ev.get("directory_listing") or re.search(r"Index of /", body):
+        return OracleResult(True, 0.8, [ev.get("evidence_id")], "Debug mode / directory listing exposed.")
+    return OracleResult(False, 0.0, [], "No misconfiguration indicators.")
+
+
+def _oracle_weak_crypto(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    if ev.get("weak_cipher") or ev.get("tls_version") in ("SSLv2", "SSLv3", "TLSv1.0"):
+        return OracleResult(True, 0.8, [ev.get("evidence_id")], f"Weak crypto: {ev.get('tls_version') or ev.get('weak_cipher')}.")
+    if re.search(r"\b(MD5|SHA1|DES|RC4)\b", str(ev.get("response_body", ""))):
+        return OracleResult(True, 0.6, [ev.get("evidence_id")], "Weak algorithm referenced in response.",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No weak-crypto indicators.")
+
+
+def _oracle_session(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    if ev.get("session_id_unchanged_after_login") or ev.get("session_fixation"):
+        return OracleResult(True, 0.85, [ev.get("evidence_id")], "Session ID not rotated after auth (fixation).")
+    return OracleResult(False, 0.0, [], "No session-hijacking indicators.")
+
+
+def _oracle_identity_spoofing(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    if ev.get("status_code") == 200 and ev.get("spoofed_identity_accepted"):
+        return OracleResult(True, 0.85, [ev.get("evidence_id")], "Spoofed identity header accepted (e.g. X-Forwarded-For / X-User).")
+    return OracleResult(False, 0.0, [], "No identity-spoofing indicators.")
+
+
+def _oracle_dom_manipulation(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    for event in ev.get("dom_events", []):
+        if event.get("type") in ("alert", "sink_write", "dom_xss"):
+            return OracleResult(True, 0.9, [event.get("evidence_id")], "Client-side sink executed attacker input.")
+    return OracleResult(False, 0.0, [], "No DOM manipulation observed.")
+
+
+def _oracle_dependency_vuln(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    if ev.get("cve_matched") and ev.get("component_version"):
+        cves = ev.get("cve_matched")
+        return OracleResult(True, 0.8, [ev.get("evidence_id")],
+                            f"{ev.get('component')} {ev.get('component_version')} matches {cves}.",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No known-vulnerable dependency matched.")
+
+
+def _oracle_websocket(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    if ev.get("cross_origin_ws_accepted") or ev.get("ws_missing_origin_check"):
+        return OracleResult(True, 0.85, [ev.get("evidence_id")], "Cross-origin WebSocket handshake accepted (CSWSH).")
+    return OracleResult(False, 0.0, [], "No WebSocket-hijacking indicators.")
+
+
+def _oracle_file_upload(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    body = str(ev.get("response_body", ""))
+    canary = ev.get("expected_result", "")
+    if ev.get("uploaded_file_executed") or (canary and canary in body):
+        return OracleResult(True, 0.9, [ev.get("evidence_id")], "Uploaded file executed / accessible (unrestricted upload).")
+    return OracleResult(False, 0.0, [], "No file-upload exploitation indicators.")
+
+
+def _oracle_credential_bruteforce(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    if ev.get("no_lockout") and ev.get("auth_attempts", 0) >= cfg.get("bruteforce_attempt_threshold", 10):
+        return OracleResult(True, 0.7, [ev.get("evidence_id")], "No account lockout / throttling on repeated auth attempts.",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "Auth throttling appears present.")
+
+
+def _oracle_clickjacking(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    xfo = str(ev.get("x_frame_options", "")).upper()
+    csp = str(ev.get("csp", "")).lower()
+    if not xfo and "frame-ancestors" not in csp:
+        return OracleResult(True, 0.7, [ev.get("evidence_id")], "No X-Frame-Options and no CSP frame-ancestors — framable.",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "Framing protection present.")
+
+
+def _oracle_cache_poisoning(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    body = str(ev.get("response_body", ""))
+    marker = ev.get("injected_marker", "")
+    if ev.get("cache_hit") and marker and marker in body:
+        return OracleResult(True, 0.85, [ev.get("evidence_id")], "Injected input served from cache (poisoning).")
+    return OracleResult(False, 0.0, [], "No cache-poisoning indicators.")
+
+
+def _oracle_host_header_injection(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    injected = ev.get("injected_host", "")
+    body = str(ev.get("response_body", ""))
+    location = str(ev.get("redirect_location", ""))
+    if injected and (injected in body or injected in location):
+        return OracleResult(True, 0.85, [ev.get("evidence_id")], f"Injected Host '{injected}' reflected in response/redirect.")
+    return OracleResult(False, 0.0, [], "No host-header-injection indicators.")
+
+
+def _oracle_http_smuggling(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    threshold = cfg.get("smuggling_time_threshold_ms", 5000)
+    if ev.get("smuggling_time_diff_ms", 0) > threshold or ev.get("smuggling_socket_desync"):
+        return OracleResult(True, 0.8, [ev.get("evidence_id")], "Timing differential / socket desync indicates request smuggling.",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No request-smuggling indicators.")
+
+
+def _oracle_email_injection(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    if ev.get("crlf_header_injected") or ev.get("extra_recipient_accepted"):
+        return OracleResult(True, 0.8, [ev.get("evidence_id")], "CRLF header injection accepted in email field.")
+    return OracleResult(False, 0.0, [], "No email/CRLF injection indicators.")
+
+
+def _oracle_prototype_pollution(ev: Dict[str, Any], cfg: dict) -> OracleResult:
+    body = str(ev.get("response_body", ""))
+    if ev.get("proto_polluted") or "__proto__" in body or ev.get("polluted_property_reflected"):
+        return OracleResult(True, 0.8, [ev.get("evidence_id")], "__proto__ property reflected / pollution observed.",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No prototype-pollution indicators.")
+
+
+# ── §7 per-category oracles (PATT categories previously lacking detection) ──
+# Each stays honest: confirmed only on a real signal, else inconclusive.
+
+_LDAP_ERR_RE = re.compile(r"(LDAP: error code|javax\.naming\.|com\.sun\.jndi|"
+                          r"Invalid DN syntax|LDAPException|Bad search filter)", re.I)
+_XPATH_ERR_RE = re.compile(r"(XPathException|MS\.Internal\.Xml|Expression must evaluate to a node-set|"
+                           r"xmlXPathEval|SimpleXMLElement::xpath|Invalid expression)", re.I)
+_XSLT_ERR_RE = re.compile(r"(xsl:|XSLTProcessor|Sablotron|libxslt|xmlXPathCompOpEval|Saxonc?)", re.I)
+
+
+def _canary_hit(ev) -> bool:
+    canary = ev.get("expected_result", "")
+    return bool(canary) and canary in str(ev.get("response_body", ""))
+
+
+def _oracle_ldap(ev, cfg):
+    if _LDAP_ERR_RE.search(str(ev.get("response_body", ""))):
+        return OracleResult(True, 0.85, [ev.get("evidence_id")], "LDAP error signature in response.")
+    return OracleResult(False, 0.0, [], "No LDAP injection indicators.")
+
+
+def _oracle_xpath(ev, cfg):
+    if _XPATH_ERR_RE.search(str(ev.get("response_body", ""))):
+        return OracleResult(True, 0.85, [ev.get("evidence_id")], "XPath error signature in response.")
+    return OracleResult(False, 0.0, [], "No XPath injection indicators.")
+
+
+def _oracle_xslt(ev, cfg):
+    if _canary_hit(ev):
+        return OracleResult(True, 0.9, [ev.get("evidence_id")], "XSLT expression evaluated (canary in response).")
+    if _XSLT_ERR_RE.search(str(ev.get("response_body", ""))):
+        return OracleResult(True, 0.7, [ev.get("evidence_id")], "XSLT processor error/version disclosed.",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No XSLT injection indicators.")
+
+
+def _oracle_ssi(ev, cfg):
+    if _canary_hit(ev):
+        return OracleResult(True, 0.9, [ev.get("evidence_id")], "SSI directive evaluated (canary in response).")
+    return OracleResult(False, 0.0, [], "No SSI injection indicators.")
+
+
+def _oracle_css_injection(ev, cfg):
+    body = str(ev.get("response_body", "")); payload = ev.get("payload") or ""
+    if payload and payload in body and ("<style" in body.lower() or "style=" in body.lower()):
+        return OracleResult(True, 0.6, [ev.get("evidence_id")], "Payload reflected in CSS context.",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No CSS injection indicators.")
+
+
+def _oracle_csv_injection(ev, cfg):
+    payload = ev.get("payload") or ""
+    if payload[:1] in ("=", "+", "-", "@") and payload in str(ev.get("response_body", "")):
+        return OracleResult(True, 0.6, [ev.get("evidence_id")], "Formula payload stored/reflected (CSV/formula injection).",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No CSV injection indicators.")
+
+
+def _oracle_latex(ev, cfg):
+    if _canary_hit(ev):
+        return OracleResult(True, 0.85, [ev.get("evidence_id")], "LaTeX command output observed (canary).")
+    return OracleResult(False, 0.0, [], "No LaTeX injection indicators.")
+
+
+def _oracle_crlf(ev, cfg):
+    headers = ev.get("headers", {}) or {}
+    injected = ev.get("injected_header") or "x-crlf-test"
+    if any(injected.lower() in str(k).lower() or injected.lower() in str(v).lower()
+           for k, v in headers.items()):
+        return OracleResult(True, 0.85, [ev.get("evidence_id")], "Injected CRLF header reflected in response headers.")
+    payload = ev.get("payload", "")
+    if "\r\n" in payload and "set-cookie" in {str(k).lower() for k in headers}:
+        return OracleResult(True, 0.6, [ev.get("evidence_id")], "CRLF payload produced extra header.",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No CRLF injection indicators.")
+
+
+def _oracle_hpp(ev, cfg):
+    if ev.get("both_values_reflected") or ev.get("hpp_behavior_changed"):
+        return OracleResult(True, 0.6, [ev.get("evidence_id")], "Duplicate parameter altered behavior (HPP).",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No HTTP parameter pollution indicators.")
+
+
+def _oracle_type_juggling(ev, cfg):
+    if ev.get("status_code") == 200 and (ev.get("loose_compare_accepted") or ev.get("auth_bypassed_via_type")):
+        return OracleResult(True, 0.8, [ev.get("evidence_id")], "Loose type comparison accepted forged value.",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No type-juggling indicators.")
+
+
+_ORM_LEAK_RE = re.compile(r'"(password|passwd|hash|salt|ssn|credit_card|secret|api_key|token)"\s*:',
+                          re.I)
+
+
+def _oracle_orm_leak(ev, cfg):
+    if _ORM_LEAK_RE.search(str(ev.get("response_body", ""))):
+        return OracleResult(True, 0.75, [ev.get("evidence_id")], "Sensitive ORM field exposed in response (over-fetch).",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No ORM leak indicators.")
+
+
+def _oracle_cspt(ev, cfg):
+    body = str(ev.get("response_body", "")); payload = ev.get("payload") or ""
+    if payload and payload in body and ("fetch(" in body or "XMLHttpRequest" in body or "src=" in body.lower()):
+        return OracleResult(True, 0.6, [ev.get("evidence_id")], "Traversal reflected into a client-side URL sink.",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No client-side path traversal indicators.")
+
+
+def _oracle_redos(ev, cfg):
+    threshold = cfg.get("redos_time_threshold_ms", 5000)
+    if ev.get("response_time_ms", 0) > threshold:
+        return OracleResult(True, 0.8, [ev.get("evidence_id")], f"Response time >{threshold}ms on crafted regex input (ReDoS).")
+    return OracleResult(False, 0.0, [], "No ReDoS indicators.")
+
+
+def _oracle_prompt_injection(ev, cfg):
+    if _canary_hit(ev):
+        return OracleResult(True, 0.85, [ev.get("evidence_id")], "Injected instruction obeyed by LLM (canary echoed).")
+    return OracleResult(False, 0.0, [], "No prompt-injection indicators.")
+
+
+def _oracle_dom_clobbering(ev, cfg):
+    body = str(ev.get("response_body", "")); payload = ev.get("payload") or ""
+    if payload and payload in body and re.search(r'\b(id|name)\s*=', body):
+        return OracleResult(True, 0.6, [ev.get("evidence_id")], "Attacker id/name attribute reflected (DOM clobbering surface).",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No DOM clobbering indicators.")
+
+
+def _oracle_xs_leak(ev, cfg):
+    if ev.get("cross_origin_observable") or ev.get("status_oracle_diff"):
+        return OracleResult(True, 0.6, [ev.get("evidence_id")], "Cross-site observable difference (status/size/timing).",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No XS-Leak indicators.")
+
+
+def _oracle_saml(ev, cfg):
+    if ev.get("status_code") == 200 and (ev.get("saml_signature_stripped_accepted") or ev.get("saml_assertion_forged_accepted")):
+        return OracleResult(True, 0.9, [ev.get("evidence_id")], "Forged/unsigned SAML assertion accepted.")
+    return OracleResult(False, 0.0, [], "No SAML injection indicators.")
+
+
+def _oracle_zip_slip(ev, cfg):
+    if ev.get("path_traversal_file_written") or _canary_hit(ev):
+        return OracleResult(True, 0.85, [ev.get("evidence_id")], "Archive entry escaped extraction dir (Zip Slip).")
+    return OracleResult(False, 0.0, [], "No Zip Slip indicators.")
+
+
+def _oracle_reverse_proxy(ev, cfg):
+    body = str(ev.get("response_body", ""))
+    if ev.get("internal_path_reachable") or re.search(r"(X-Accel|/server-status|/nginx_status|upstream)", body, re.I):
+        return OracleResult(True, 0.7, [ev.get("evidence_id")], "Reverse-proxy misrouting / internal endpoint reachable.",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No reverse-proxy misconfiguration indicators.")
+
+
+def _oracle_mgmt_interface(ev, cfg):
+    body = str(ev.get("response_body", ""))
+    if ev.get("status_code") == 200 and re.search(r"(phpMyAdmin|Jenkins|Actuator|/manager/html|Kibana|Grafana|Adminer|console)", body, re.I):
+        return OracleResult(True, 0.75, [ev.get("evidence_id")], "Exposed management/admin interface.")
+    return OracleResult(False, 0.0, [], "No exposed management interface.")
+
+
+def _oracle_insecure_random(ev, cfg):
+    if ev.get("token_predictable") or ev.get("low_entropy_token"):
+        return OracleResult(True, 0.7, [ev.get("evidence_id")], "Predictable/low-entropy token observed.",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No insecure-randomness indicators.")
+
+
+def _oracle_tabnabbing(ev, cfg):
+    body = str(ev.get("response_body", ""))
+    if re.search(r'target\s*=\s*["\']_blank["\']', body, re.I) and "noopener" not in body.lower():
+        return OracleResult(True, 0.6, [ev.get("evidence_id")], "target=_blank link without rel=noopener (tabnabbing).",
+                            requires_manual_confirmation=True)
+    return OracleResult(False, 0.0, [], "No tabnabbing indicators.")
+
+
+def _oracle_dns_rebinding(ev, cfg):
+    for interaction in ev.get("oob_interactions", []):
+        if interaction.get("type") in ("dns", "http"):
+            return OracleResult(True, 0.8, [interaction.get("evidence_id")], "OOB interaction confirms DNS rebinding/SSRF.")
+    return _oracle_ssrf(ev, cfg)
+
+
 _DEFAULT_ORACLES: Dict[str, Any] = {
+    # ── original 14 ──
     "SQLI": _oracle_sqli,
     "NOSQLI": _oracle_nosqli,
     "XSS": _oracle_xss,
@@ -388,6 +765,89 @@ _DEFAULT_ORACLES: Dict[str, Any] = {
     "MASS_ASSIGNMENT": _oracle_mass_assignment,
     "ACCESS_CONTROL": _oracle_access_control,
     "CSRF": _oracle_csrf,
+    # ── expansion: keys match hypothesis ATTACK_TYPE_MAP values ──
+    "CORS_MISCONFIGURATION": _oracle_cors_misconfig,
+    "JWT_MANIPULATION": _oracle_jwt,
+    "GRAPHQL_INTROSPECTION": _oracle_graphql,
+    "API_ABUSE": _oracle_api_abuse,
+    "BUSINESS_LOGIC_BYPASS": _oracle_business_logic,
+    "RACE_CONDITION": _oracle_race_condition,
+    "SECRET_EXPOSURE": _oracle_secret_exposure,
+    "INFORMATION_DISCLOSURE": _oracle_info_disclosure,
+    "MISCONFIGURATION": _oracle_misconfiguration,
+    "WEAK_CRYPTO": _oracle_weak_crypto,
+    "SESSION_HIJACKING": _oracle_session,
+    "IDENTITY_SPOOFING": _oracle_identity_spoofing,
+    "DOM_MANIPULATION": _oracle_dom_manipulation,
+    "DEPENDENCY_VULNERABILITY": _oracle_dependency_vuln,
+    "WEBSOCKET_HIJACKING": _oracle_websocket,
+    "FILE_UPLOAD": _oracle_file_upload,
+    "CREDENTIAL_BRUTE_FORCE": _oracle_credential_bruteforce,
+    # ── roadmap-named aliases (same fns, alternate keys callers may use) ──
+    "CORS": _oracle_cors_misconfig,
+    "JWT_WEAKNESS": _oracle_jwt,
+    "JWT": _oracle_jwt,
+    "GRAPHQL_ABUSE": _oracle_graphql,
+    "GRAPHQL": _oracle_graphql,
+    "BUSINESS_LOGIC": _oracle_business_logic,
+    "SECRET_EXPOSURE_LEAK": _oracle_secret_exposure,
+    "SESSION": _oracle_session,
+    "WEBSOCKET_HIJACK": _oracle_websocket,
+    "DEPENDENCY_VULN": _oracle_dependency_vuln,
+    "CLICKJACKING": _oracle_clickjacking,
+    "CACHE_POISONING": _oracle_cache_poisoning,
+    "HOST_HEADER_INJECTION": _oracle_host_header_injection,
+    "HTTP_SMUGGLING": _oracle_http_smuggling,
+    "EMAIL_INJECTION": _oracle_email_injection,
+    "PROTOTYPE_POLLUTION": _oracle_prototype_pollution,
+    # ── §7 full-category coverage ──
+    "LDAP_INJECTION": _oracle_ldap,
+    "XPATH_INJECTION": _oracle_xpath,
+    "XSLT_INJECTION": _oracle_xslt,
+    "SSI_INJECTION": _oracle_ssi,
+    "CSS_INJECTION": _oracle_css_injection,
+    "CSV_INJECTION": _oracle_csv_injection,
+    "LATEX_INJECTION": _oracle_latex,
+    "CRLF_INJECTION": _oracle_crlf,
+    "HTTP_PARAMETER_POLLUTION": _oracle_hpp,
+    "TYPE_JUGGLING": _oracle_type_juggling,
+    "ORM_LEAK": _oracle_orm_leak,
+    "CLIENT_SIDE_PATH_TRAVERSAL": _oracle_cspt,
+    "REDOS": _oracle_redos,
+    "PROMPT_INJECTION": _oracle_prompt_injection,
+    "DOM_CLOBBERING": _oracle_dom_clobbering,
+    "XS_LEAK": _oracle_xs_leak,
+    "SAML_INJECTION": _oracle_saml,
+    "ZIP_SLIP": _oracle_zip_slip,
+    "REVERSE_PROXY_MISCONFIG": _oracle_reverse_proxy,
+    "INSECURE_MANAGEMENT_INTERFACE": _oracle_mgmt_interface,
+    "INSECURE_RANDOMNESS": _oracle_insecure_random,
+    "TABNABBING": _oracle_tabnabbing,
+    "DNS_REBINDING": _oracle_dns_rebinding,
+    # aliases → existing oracles
+    "ACCOUNT_TAKEOVER": _oracle_auth_bypass,
+    "DEPENDENCY_CONFUSION": _oracle_dependency_vuln,
+    "VIRTUAL_HOSTS": _oracle_host_header_injection,
+    "GOOGLE_WEB_TOOLKIT": _oracle_misconfiguration,
+    "JAVA_RMI": _oracle_rce,
+    "COMMAND_INJECTION": _oracle_rce,
+    "DIRECTORY_TRAVERSAL": _oracle_lfi,
+    "FILE_INCLUSION": _oracle_lfi,
+    "DENIAL_OF_SERVICE": _oracle_redos,
+    "REGULAR_EXPRESSION": _oracle_redos,
+    "CVE_EXPLOITS": _oracle_dependency_vuln,
+    "API_KEY_LEAKS": _oracle_secret_exposure,
+    "INSECURE_SOURCE_CODE_MANAGEMENT": _oracle_info_disclosure,
+    "HIDDEN_PARAMETERS": _oracle_api_abuse,
+    "OAUTH_MISCONFIGURATION": _oracle_open_redirect,
+    "WEB_CACHE_DECEPTION": _oracle_cache_poisoning,
+    "REQUEST_SMUGGLING": _oracle_http_smuggling,
+    "EXTERNAL_VARIABLE_MODIFICATION": _oracle_mass_assignment,
+    "BUSINESS_LOGIC_ERRORS": _oracle_business_logic,
+    "BRUTE_FORCE": _oracle_credential_bruteforce,
+    "WEB_SOCKETS": _oracle_websocket,
+    "UPLOAD_INSECURE_FILES": _oracle_file_upload,
+    "SSI": _oracle_ssi,
 }
 
 

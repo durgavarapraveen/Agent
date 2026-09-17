@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+# Node buckets exposed for serialization / persistence. Each maps a node_type
+# to the instance attribute holding that bucket's {node_id: data} dict.
+_BUCKETS = (
+    "findings", "evidence", "endpoints", "identities", "assets",
+    "interfaces", "resources", "roles", "workflows", "observations",
+)
+
+
 class KnowledgeGraph:
 
     def __init__(self) -> None:
@@ -16,6 +24,37 @@ class KnowledgeGraph:
         self._workflows: Dict[str, Dict[str, Any]] = {}
         self._observations: Dict[str, Dict[str, Any]] = {}
         self._edges: List[Dict[str, str]] = []
+
+    # ── Serialization (P0 persistence) ────────────────────────────────
+    def to_serializable(self) -> Dict[str, Any]:
+        """Dump all node buckets + edges to a JSON-able dict."""
+        data: Dict[str, Any] = {b: getattr(self, f"_{b}") for b in _BUCKETS}
+        data["edges"] = self._edges
+        return data
+
+    def merge_serializable(self, data: Dict[str, Any]) -> None:
+        """Merge a serialized snapshot into this graph (idempotent upsert).
+
+        Used on resume so an already-populated graph is not clobbered.
+        """
+        if not data:
+            return
+        for b in _BUCKETS:
+            bucket = getattr(self, f"_{b}")
+            for node_id, node_data in (data.get(b) or {}).items():
+                bucket[node_id] = node_data
+        seen = {(e.get("from"), e.get("to"), e.get("type")) for e in self._edges}
+        for edge in data.get("edges") or []:
+            key = (edge.get("from"), edge.get("to"), edge.get("type"))
+            if key not in seen:
+                self._edges.append(edge)
+                seen.add(key)
+
+    @classmethod
+    def from_serializable(cls, data: Dict[str, Any]) -> "KnowledgeGraph":
+        kg = cls()
+        kg.merge_serializable(data or {})
+        return kg
 
     def add_finding(self, finding: Any) -> None:
         fid = getattr(finding, "finding_id", None) or finding.get("finding_id", "")
