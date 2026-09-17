@@ -317,7 +317,13 @@ class JSAnalyzer:
             return True
         return False
 
+    _MAX_SCAN_CHARS = 2_000_000  # cap regex input; huge/obfuscated bundles → slow
+
     def _regex_extract(self, content: str, source_url: str):
+        # Guard: cap the scanned size before running ~20 greedy patterns to avoid
+        # pathological slowdown / backtracking on multi-MB minified bundles.
+        if content and len(content) > self._MAX_SCAN_CHARS:
+            content = content[:self._MAX_SCAN_CHARS]
         # Extract secrets
         for pattern, description, category, confidence in SECRET_PATTERNS:
             for match in re.finditer(pattern, content):
