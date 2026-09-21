@@ -9,7 +9,7 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 # ── Observability bootstrap ─────────────────────────────────────────────
 # Structured JSON logging with global PII redaction, Prometheus metrics, and
@@ -32,12 +32,20 @@ except Exception as _egress_err:
 
 logger = logging.getLogger("antigravity.api")
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 app = FastAPI(title="AntiGravity Dashboard API", version="1.0.0")
+
+# Extracted route modules (splitting the server.py god-file incrementally).
+try:
+    from ui.api.routers.settings import router as _settings_router
+    app.include_router(_settings_router)
+except Exception as _rr_err:  # never let a router import break the whole API
+    import logging as _l
+    _l.getLogger("antigravity.api").warning("settings router not loaded: %s", _rr_err)
 
 # ── Rate limiting ─────────────────────────────────────────────────────────
 # `slowapi` is a soft dependency. When installed, it caps the abuse-prone
@@ -362,8 +370,8 @@ import ipaddress as _ipaddress
 
 _ALLOWED_TIERS = {"PASSIVE", "SAFE_ACTIVE", "DEEP", "POC"}
 _ALLOWED_PHASES = {
-    "RECON", "OSINT", "DISCOVERY", "SCANNING", "ACTIVE_SCANNING",
-    "EXPLOITATION", "POSTEX", "POST_EXPLOIT", "REPORTING",
+    "BUSINESS_UNDERSTANDING", "RECON", "OSINT", "DISCOVERY", "SCANNING",
+    "ACTIVE_SCANNING", "EXPLOITATION", "POSTEX", "POST_EXPLOIT", "REPORTING",
 }
 # URL schemes accepted on user-facing inputs. `file://`, `gopher://`, `dict://`
 # and other non-HTTP schemes are blocked to prevent SSRF via RAG/URL ingest.
@@ -602,6 +610,23 @@ def source_ip():
                     "chain_up": False, "error": str(e)}
     return {"mode": "direct", "ip": _fetch_direct_ip() or None,
             "is_tor": False, "chain_up": True}
+
+
+@app.post("/control/kill", include_in_schema=True)
+def control_kill(reason: str = "manual via API"):
+    """External kill switch (§46) — terminates the active scan independent of the
+    agent/LLM. The watchdog is consulted on every network call and loop tick, so
+    this halts execution fail-closed."""
+    from core.security.watchdog import get_watchdog
+    get_watchdog().trigger_kill(reason)
+    return {"status": "kill_triggered", "reason": reason, "stats": get_watchdog().stats()}
+
+
+@app.get("/control/watchdog", include_in_schema=True)
+def control_watchdog():
+    """Report current budget consumption / kill state."""
+    from core.security.watchdog import get_watchdog
+    return get_watchdog().stats()
 
 
 @app.get("/api/health", include_in_schema=True)
@@ -866,9 +891,12 @@ def _get_scans() -> list:
         db_scans = ScanRepo.list_all()
         for s in db_scans:
             report = s.get("report_data") or {}
-            vulns = report.get("vulnerabilities", [])
+            # Count the persisted (deduped) vulnerabilities table — the same
+            # authoritative source the detail page shows — so the list count
+            # matches the detail. report_data holds raw, pre-dedup findings.
+            vulns = VulnRepo.get_by_scan(s["scan_id"])
             if not vulns:
-                vulns = VulnRepo.get_by_scan(s["scan_id"])
+                vulns = _dedup_vulns(report.get("vulnerabilities", []))
             severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
             status_counts = {"CONFIRMED": 0, "REJECTED": 0, "UNCONFIRMED": 0}
             for v in vulns:
@@ -882,13 +910,29 @@ def _get_scans() -> list:
                     dur = (s["finished_at"] - s["started_at"]).total_seconds()
                 except Exception:
                     dur = 0
+            domain = ""
+            try:
+                from core.database.pg_store import ScanMetadataRepo
+                _bu = ScanMetadataRepo.get(s["scan_id"], "business_understanding")
+                if isinstance(_bu, dict):
+                    domain = _bu.get("domain_key") or _bu.get("domain") or ""
+            except Exception:
+                domain = ""
+            # Count EVERY sub-agent (recon, OSINT, business, specialist teams,
+            # exploitation) from the authoritative live_agents registry — the stored
+            # agents_used only reflects ctx.agents_spawned (mostly exploitation).
+            try:
+                _live = sum((LiveAgentRepo.counts_by_scan(s["scan_id"]) or {}).values())
+            except Exception:
+                _live = 0
             scans.append({
                 "scan_id": s["scan_id"],
                 "target": s.get("target", "unknown"),
+                "domain": domain,
                 "timestamp": str(s.get("started_at", "")),
                 "status": s.get("status", "unknown"),
                 "duration_seconds": dur,
-                "agents_used": s.get("agents_used", 0),
+                "agents_used": _live or s.get("agents_used", 0),
                 "total_vulns": len(vulns),
                 "severity_counts": severity_counts,
                 "status_counts": status_counts,
@@ -1021,30 +1065,14 @@ def _dedup_vulns(vulns: list) -> list:
     return list(groups.values())
 
 
-def _live_singleton_scan_id() -> str:
-    try:
-        from core.database.pg_store import DatabaseManager
-        import psycopg2.extras
-        with DatabaseManager.get_connection() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("SELECT scan_id FROM live_results WHERE id = 1")
-                row = cur.fetchone()
-                return (row or {}).get("scan_id") or ""
-    except Exception:
-        return ""
-
 
 @app.get("/api/scans/live-progress")
 def get_live_progress(scan_id: str = ""):
     try:
-        data = LiveDataRepo.get_progress()
-        if not data:
-            return {}
-        if scan_id:
-            stored = _live_singleton_scan_id()
-            if stored and stored != scan_id:
-                return {}
-        return data
+        # Scope to the requested scan's own row. A brand-new scan that hasn't
+        # written progress yet returns {} instead of the previous scan's data.
+        data = LiveDataRepo.get_progress(scan_id) if scan_id else LiveDataRepo.get_progress()
+        return data or {}
     except Exception:
         return {}
 
@@ -1052,9 +1080,10 @@ def get_live_progress(scan_id: str = ""):
 @app.get("/api/scans/live-results")
 def get_live_results(scan_id: str = ""):
     try:
-        singleton_scan = _live_singleton_scan_id() if scan_id else ""
-        if scan_id and singleton_scan and singleton_scan != scan_id:
-            data = _empty_live_results()
+        # Scope to the requested scan's own row so a just-started scan shows its
+        # own (empty) data, never the previous scan's, during the first seconds.
+        if scan_id:
+            data = LiveDataRepo.get_results(scan_id) or _empty_live_results()
         else:
             data = LiveDataRepo.get_results() or _empty_live_results()
 
@@ -1275,7 +1304,11 @@ def get_scan(scan_id: str):
         except Exception:
             dur = 0
     meta["duration_seconds"] = dur
-    meta["agents_used"] = scan.get("agents_used") or 0
+    try:
+        _live_agents = sum((LiveAgentRepo.counts_by_scan(scan["scan_id"]) or {}).values())
+    except Exception:
+        _live_agents = 0
+    meta["agents_used"] = _live_agents or (scan.get("agents_used") or 0)
     meta["status"] = scan.get("status", "unknown")
     meta["started_at"] = str(scan.get("started_at", ""))
     meta["finished_at"] = str(scan.get("finished_at", ""))
@@ -1387,6 +1420,29 @@ def get_recon(scan_id: str):
         return recon
     except Exception as e:
         raise HTTPException(500, f"recon data unavailable: {e}")
+
+
+# LLM provider + DeepSeek key settings live in ui/api/routers/settings.py
+# (included below via app.include_router).
+
+
+# ── BUSINESS UNDERSTANDING report (what the model understood + test plan) ──
+@app.get("/api/scans/{scan_id}/understanding")
+def get_understanding(scan_id: str):
+    try:
+        from core.database.pg_store import ScanMetadataRepo
+        val = ScanMetadataRepo.get(scan_id, "business_understanding")
+        if val is None:
+            return {}
+        if isinstance(val, str):
+            import json as _json
+            try:
+                val = _json.loads(val)
+            except Exception:
+                return {}
+        return val or {}
+    except Exception as e:
+        raise HTTPException(500, f"understanding data unavailable: {e}")
 
 
 # ── LLM COST (Phase 6.1) ──────────────────────────────────────────────────
@@ -1529,6 +1585,28 @@ def get_scan_risk(scan_id: str):
 
 
 # ── Chain analysis: re-scoring + narratives + end-to-end CVSS (Phase 2.1) ───
+@app.get("/api/scans/{scan_id}/coverage")
+def get_scan_coverage(scan_id: str):
+    """Coverage ledger (§23/§24): what was TESTED vs BLOCKED/ERRORED/SKIPPED/UNKNOWN,
+    surface coverage, and discovered-but-out-of-scope hosts. UNKNOWN != CLEAN."""
+    # 1. finalized scan → report_data
+    try:
+        scan = ScanRepo.get(scan_id) or {}
+        cov = (scan.get("report_data") or {}).get("coverage")
+        if cov:
+            return cov
+    except Exception:
+        pass
+    # 2. live / most-recent scan → live_results
+    try:
+        live = LiveDataRepo.get_results() or {}
+        if live.get("coverage"):
+            return live["coverage"]
+    except Exception:
+        pass
+    return {"ledger": {}, "surface": {}, "discovered_out_of_scope": [], "dom_sinks": {}}
+
+
 @app.get("/api/scans/{scan_id}/chain-analysis")
 def get_chain_analysis(scan_id: str):
     try:
@@ -1665,6 +1743,46 @@ class AnalyzeSourceRequest(BaseModel):
     source_path: str = Field(default="", max_length=1024)
 
 
+def _persist_analysis(kind: str, source: str, result: dict) -> str:
+    """Store a standalone analysis result and return its id (best-effort)."""
+    try:
+        from core.database.pg_store import AnalysisRepo
+        if kind == "greybox":
+            summary = {"sast_count": result.get("sast_count", 0),
+                       "dast_count": result.get("dast_count", 0),
+                       "dynamic_ran": result.get("dynamic_ran", False),
+                       "correlation": (result.get("correlation") or {}).get("counts", {})}
+        elif kind == "mobile":
+            summary = {k: result.get(k) for k in
+                       ("endpoint_count", "secret_count", "deeplink_count", "cert_pinning")}
+        else:  # sast
+            summary = {"finding_count": result.get("finding_count", 0),
+                       "by_class": result.get("by_class", {}),
+                       "by_severity": result.get("by_severity", {})}
+        return AnalysisRepo.save(kind, source, summary, result)
+    except Exception as e:
+        logger.warning("[analysis] persist failed (non-fatal): %s", e)
+        return ""
+
+
+@app.get("/api/analyses")
+def list_analyses(limit: int = 100):
+    from core.database.pg_store import AnalysisRepo
+    try:
+        return {"analyses": AnalysisRepo.list_all(limit)}
+    except Exception as e:
+        raise HTTPException(500, f"could not list analyses: {e}")
+
+
+@app.get("/api/analyses/{analysis_id}")
+def get_analysis(analysis_id: str):
+    from core.database.pg_store import AnalysisRepo
+    a = AnalysisRepo.get(analysis_id)
+    if not a:
+        raise HTTPException(404, "analysis not found")
+    return a
+
+
 @app.post("/api/analyze/mobile")
 async def analyze_mobile_endpoint(body: AnalyzeMobileRequest):
     """Analyze a previously-uploaded APK/IPA on its own (no scan). `path` must be
@@ -1677,7 +1795,9 @@ async def analyze_mobile_endpoint(body: AnalyzeMobileRequest):
     if not p.exists():
         raise HTTPException(404, "uploaded file not found")
     try:
-        return await asyncio.to_thread(analyze_mobile, str(p))
+        result = await asyncio.to_thread(analyze_mobile, str(p))
+        result["analysis_id"] = _persist_analysis("mobile", p.name, result)
+        return result
     except Exception as e:
         raise HTTPException(500, f"mobile analysis failed: {e}")
 
@@ -1689,9 +1809,192 @@ async def analyze_source_endpoint(body: AnalyzeSourceRequest):
     if not (body.source_repo or body.source_path):
         raise HTTPException(400, "provide source_repo or source_path")
     try:
-        return await asyncio.to_thread(analyze_source, body.source_repo, body.source_path)
+        result = await asyncio.to_thread(analyze_source, body.source_repo, body.source_path)
+        result["analysis_id"] = _persist_analysis("sast", body.source_repo or body.source_path, result)
+        return result
     except Exception as e:
         raise HTTPException(500, f"source analysis failed: {e}")
+
+
+@app.post("/api/analyze/source-zip")
+async def analyze_source_zip_endpoint(file: UploadFile = File(...)):
+    """Upload a codebase as a .zip → extract (zip-slip safe) → grey-box SAST."""
+    import os as _os, zipfile, tempfile, shutil
+    from core.analysis.standalone_analysis import analyze_source
+    if not (file.filename or "").lower().endswith(".zip"):
+        raise HTTPException(400, "please upload a .zip archive")
+    work_root = (BASE / "data" / "uploads" / "src").resolve()
+    work_root.mkdir(parents=True, exist_ok=True)
+    dest = Path(tempfile.mkdtemp(prefix="code_", dir=str(work_root)))
+    zip_path = dest / "upload.zip"
+    try:
+        data = await file.read()
+        if len(data) > 200 * 1024 * 1024:
+            raise HTTPException(400, "archive too large (max 200MB)")
+        zip_path.write_bytes(data)
+        base = dest.resolve()
+        with zipfile.ZipFile(str(zip_path)) as z:
+            for member in z.namelist():
+                target = (dest / member).resolve()
+                if target != base and not str(target).startswith(str(base) + _os.sep):
+                    continue  # skip zip-slip entries
+                z.extract(member, str(dest))
+        try:
+            zip_path.unlink()
+        except OSError:
+            pass
+        result = await asyncio.to_thread(analyze_source, "", str(dest))
+        result["source_zip"] = file.filename
+        result["analysis_id"] = _persist_analysis("sast", file.filename, result)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"source zip analysis failed: {e}")
+    finally:
+        # SAST reads files synchronously above; safe to clean the extract now.
+        try:
+            shutil.rmtree(str(dest), ignore_errors=True)
+        except Exception:
+            pass
+
+
+# ── Grey-box progress jobs ───────────────────────────────────────────────────
+# Grey-box (clone → SAST → build/run → DAST → correlate) is long-running, so it
+# runs as a background job and the UI polls step-by-step progress instead of
+# blocking on one request.
+_greybox_jobs: Dict[str, dict] = {}
+_GREYBOX_JOB_TTL = 3600  # keep finished jobs ~1h for the UI to read the result
+
+
+def _greybox_gc() -> None:
+    now = _time.time()
+    for jid in [k for k, v in _greybox_jobs.items()
+                if v.get("done_at") and (now - v["done_at"]) > _GREYBOX_JOB_TTL]:
+        _greybox_jobs.pop(jid, None)
+
+
+def _persist_job(job_id: str, job: dict) -> None:
+    """Write-through the in-memory job to the DB so its progress survives an API
+    restart (best-effort)."""
+    try:
+        from core.database.pg_store import AnalysisJobRepo
+        AnalysisJobRepo.upsert(job_id, job.get("status", "running"), job.get("steps", []),
+                               label=job.get("label", ""), result=job.get("result"),
+                               error=job.get("error"))
+    except Exception:
+        pass
+
+
+async def _run_greybox_job(job_id: str, source_repo: str, source_path: str,
+                           label: str, cleanup_dir: str = "") -> None:
+    from core.analysis.greybox import run_greybox
+    job = _greybox_jobs[job_id]
+
+    def _on_step(msg: str, status: str):
+        job["steps"].append({"msg": msg, "status": status, "ts": _time.time()})
+        _persist_job(job_id, job)   # write-through each step
+
+    try:
+        result = await run_greybox(source_path=source_path or "",
+                                   source_repo=source_repo or "",
+                                   dynamic=True, on_step=_on_step)
+        result["analysis_id"] = _persist_analysis("greybox", label, result)
+        job["result"] = result
+        job["status"] = "completed"
+    except Exception as e:
+        job["status"] = "failed"
+        job["error"] = str(e)
+        job["steps"].append({"msg": f"Failed: {e}", "status": "error", "ts": _time.time()})
+    finally:
+        job["done_at"] = _time.time()
+        _persist_job(job_id, job)   # final state
+        if cleanup_dir:
+            try:
+                import shutil
+                shutil.rmtree(cleanup_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+
+def _start_greybox_job(source_repo: str, source_path: str, label: str,
+                       cleanup_dir: str = "") -> str:
+    _greybox_gc()
+    job_id = uuid.uuid4().hex[:16]
+    _greybox_jobs[job_id] = {"status": "running", "steps": [], "result": None,
+                             "error": None, "started_at": _time.time(),
+                             "done_at": 0, "label": label}
+    asyncio.create_task(_run_greybox_job(job_id, source_repo, source_path, label, cleanup_dir))
+    return job_id
+
+
+@app.get("/api/analyze/greybox/progress/{job_id}")
+def greybox_progress(job_id: str):
+    job = _greybox_jobs.get(job_id)
+    if job:
+        return {"job_id": job_id, "status": job["status"], "steps": job["steps"],
+                "error": job["error"], "result": job["result"], "label": job["label"]}
+    # Not in memory (API restarted mid-job) — recover the last persisted state.
+    try:
+        from core.database.pg_store import AnalysisJobRepo
+        row = AnalysisJobRepo.get(job_id)
+        if row:
+            return {"job_id": job_id, "status": row.get("status", "unknown"),
+                    "steps": row.get("steps") or [], "error": row.get("error"),
+                    "result": row.get("result"), "label": row.get("label", "")}
+    except Exception:
+        pass
+    raise HTTPException(404, "job not found or expired")
+
+
+@app.post("/api/analyze/greybox")
+async def analyze_greybox_endpoint(body: AnalyzeSourceRequest):
+    """Grey-box = SAST + (build & run → DAST) + correlation. Returns a job_id;
+    poll /api/analyze/greybox/progress/{job_id} for live steps + final result."""
+    if not (body.source_repo or body.source_path):
+        raise HTTPException(400, "provide source_repo or source_path")
+    label = body.source_repo or body.source_path
+    job_id = _start_greybox_job(body.source_repo or "", body.source_path or "", label)
+    return {"job_id": job_id, "status": "running"}
+
+
+@app.post("/api/analyze/greybox-zip")
+async def analyze_greybox_zip_endpoint(file: UploadFile = File(...)):
+    """Upload a codebase .zip → SAST + (build & run → DAST) + correlation."""
+    import os as _os, zipfile, tempfile, shutil
+    from core.analysis.greybox import run_greybox
+    if not (file.filename or "").lower().endswith(".zip"):
+        raise HTTPException(400, "please upload a .zip archive")
+    work_root = (BASE / "data" / "uploads" / "src").resolve()
+    work_root.mkdir(parents=True, exist_ok=True)
+    dest = Path(tempfile.mkdtemp(prefix="gbox_", dir=str(work_root)))
+    try:
+        data = await file.read()
+        if len(data) > 200 * 1024 * 1024:
+            raise HTTPException(400, "archive too large (max 200MB)")
+        zp = dest / "upload.zip"
+        zp.write_bytes(data)
+        base = dest.resolve()
+        with zipfile.ZipFile(str(zp)) as z:
+            for member in z.namelist():
+                target = (dest / member).resolve()
+                if target != base and not str(target).startswith(str(base) + _os.sep):
+                    continue
+                z.extract(member, str(dest))
+        zp.unlink(missing_ok=True)
+        # if the zip has a single top-level dir, analyze that (repo root)
+        entries = [p for p in dest.iterdir() if p.name != "__MACOSX"]
+        root = entries[0] if len(entries) == 1 and entries[0].is_dir() else dest
+        # Run as a background job (live steps); the job removes `dest` when done.
+        job_id = _start_greybox_job("", str(root), file.filename or "upload.zip",
+                                    cleanup_dir=str(dest))
+        return {"job_id": job_id, "status": "running"}
+    except HTTPException:
+        shutil.rmtree(str(dest), ignore_errors=True)
+        raise
+    except Exception as e:
+        shutil.rmtree(str(dest), ignore_errors=True)
+        raise HTTPException(500, f"grey-box zip analysis failed: {e}")
 
 
 # ── SCAN CHATBOT — LLM Q&A over this scan's collected data ─────────────────
@@ -2037,6 +2340,56 @@ def get_stats():
     }
 
 
+@app.get("/api/vulnerabilities/combined")
+def get_combined_vulnerabilities(limit: int = 200):
+    """All vulnerabilities across every scan, aggregated: severity mix, most
+    common types, most-affected targets, and a ranked combined list. Powers the
+    dashboard's cross-scan view."""
+    from collections import Counter
+    _SEV_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+    rows, cursor, pages = [], None, 0
+    try:
+        while pages < 40:  # cap 40 * 5000 = 200k rows hard ceiling
+            batch = VulnRepo.get_all(limit=5000, cursor=cursor)
+            if not batch:
+                break
+            rows.extend(batch)
+            cursor = batch[-1].get("id")
+            pages += 1
+            if len(batch) < 5000:
+                break
+    except Exception as e:
+        raise HTTPException(500, f"combined vulnerabilities unavailable: {e}")
+
+    by_type, by_target, by_sev, by_status = Counter(), Counter(), Counter(), Counter()
+    for v in rows:
+        by_type[(v.get("type") or "UNKNOWN").upper()] += 1
+        by_target[v.get("target") or v.get("location") or "—"] += 1
+        by_sev[(v.get("severity") or "INFO").upper()] += 1
+        by_status[(v.get("status") or "UNCONFIRMED").upper()] += 1
+
+    ranked = sorted(
+        rows,
+        key=lambda v: (_SEV_RANK.get((v.get("severity") or "INFO").upper(), 5),
+                       0 if (v.get("status") or "").upper() == "CONFIRMED" else 1),
+    )[: max(1, min(int(limit or 200), 1000))]
+    top = [{
+        "id": v.get("id"), "title": v.get("title") or v.get("type") or "finding",
+        "type": (v.get("type") or "").upper(), "severity": (v.get("severity") or "INFO").upper(),
+        "status": (v.get("status") or "").upper(), "target": v.get("target") or v.get("location") or "",
+        "scan_id": v.get("scan_id"), "confirmed": bool(v.get("confirmed")),
+    } for v in ranked]
+
+    return {
+        "total": len(rows),
+        "by_severity": dict(by_sev),
+        "by_status": dict(by_status),
+        "top_types": by_type.most_common(10),
+        "top_targets": by_target.most_common(10),
+        "vulnerabilities": top,
+    }
+
+
 @app.get("/api/scans/{scan_id}/report")
 def download_report(scan_id: str):
     scan = ScanRepo.get(scan_id)
@@ -2073,7 +2426,7 @@ def run_scan(body: ScanRequest):
         "log_file": str(_scan_log_path(job_id)),
     }
 
-    _active_scans[job_id]["phases"] = body.phases or ["RECON", "ACTIVE_SCANNING", "EXPLOITATION", "REPORTING"]
+    _active_scans[job_id]["phases"] = body.phases or ["BUSINESS_UNDERSTANDING", "RECON", "ACTIVE_SCANNING", "EXPLOITATION", "REPORTING"]
     try:
         ScanRepo.create(job_id, body.target, body.tier,
                         log_file=str(_scan_log_path(job_id)))
@@ -2124,14 +2477,21 @@ def _resolve_log_file(job_id: str) -> Path:
 
 
 @app.get("/api/scans/job/{job_id}/logs")
-def get_scan_logs(job_id: str, tail: int = 100):
+def get_scan_logs(job_id: str, tail: int = 100, offset: int = -1):
+    """Return log lines + total. With offset>=0, return lines[offset:] for
+    incremental streaming (only new lines since the client's last position);
+    otherwise return the last `tail` lines."""
     try:
         raw = _read_scan_log(job_id)
         if not raw:
-            return {"lines": [], "total": 0}
+            return {"lines": [], "total": 0, "offset": max(offset, 0)}
         text = raw.decode("utf-8", errors="replace")
         all_lines = text.splitlines()
-        return {"lines": all_lines[-tail:], "total": len(all_lines)}
+        total = len(all_lines)
+        if offset >= 0:
+            start = min(offset, total)
+            return {"lines": all_lines[start:], "total": total, "offset": start}
+        return {"lines": all_lines[-tail:], "total": total, "offset": max(total - tail, 0)}
     except Exception as e:
         import traceback
         logger.error(f"get_scan_logs error: {traceback.format_exc()}")

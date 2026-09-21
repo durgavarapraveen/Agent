@@ -88,6 +88,9 @@ class AgenticResult:
     raw_endpoints: List[str] = field(default_factory=list)
     subdomains: List[str] = field(default_factory=list)
     errors_encountered: List[str] = field(default_factory=list)
+    llm_calls: int = 0    # how many LLM decisions the ReAct loop made
+    llm_errors: int = 0   # how many of those failed — lets callers tell
+                          # "LLM unreachable" apart from "nothing to do"
 
 
 # Tool definitions the LLM can call
@@ -430,13 +433,27 @@ class AgenticExecutor:
         except Exception:
             pass
 
-        response = await self.llm.generate_with_tools(
-            messages=messages,
-            tools=PENTESTING_TOOLS,
-            tool_executor=self._execute_tool_call,
-            max_rounds=max_rounds,
-            max_tokens=4096,
-        )
+        self.result.llm_calls += 1
+        try:
+            response = await self.llm.generate_with_tools(
+                messages=messages,
+                tools=PENTESTING_TOOLS,
+                tool_executor=self._execute_tool_call,
+                max_rounds=max_rounds,
+                max_tokens=4096,
+            )
+            if response is None or getattr(response, "error", None):
+                self.result.llm_errors += 1
+        except Exception as _llm_e:
+            self.result.llm_errors += 1
+            logger.warning(f"[AgenticExecutor] LLM tool loop failed: {_llm_e}")
+            raise
+
+        # Providers without native tool-calling (e.g. claude_cli) return a plain
+        # completion instead of tool calls, so the per-tool reasoning rows are never
+        # written and the UI shows "No reasoning captured yet". Keep the model's
+        # thinking from the primary turn so it can be surfaced below.
+        _primary_completion = (getattr(response, "content", "") or "").strip()
 
         # Expert-mode persistence: if the LLM stopped without calling more
         # tools, re-prompt up to REPROMPT_ROUNDS times asking it to enumerate
@@ -484,6 +501,12 @@ class AgenticExecutor:
             response = follow
 
         self.result.total_cost = self.result.total_cost or response.cost_usd
+
+        # No tool call ran (no native tool-calling), so no reasoning row exists —
+        # persist the model's plain completion as the agent's reasoning so the UI
+        # still shows its thinking instead of "No reasoning captured yet".
+        if self.result.steps_taken == 0 and _primary_completion:
+            self._persist_plain_reasoning(_primary_completion)
 
         logger.info(
             f"[AgenticExecutor] Completed: steps={self.result.steps_taken} "
@@ -628,6 +651,36 @@ class AgenticExecutor:
             _result = f"Unknown function: {fn_name}"
 
         _duration_ms = int((_time.monotonic() - _t_start) * 1000)
+        return await self._finish_tool_call(
+            fn_name, fn_args, _result, _thought, _tool_planned, _duration_ms)
+
+    def _persist_plain_reasoning(self, text: str) -> None:
+        """Write the model's plain completion as one agent_reasoning row, for
+        providers with no native tool-calling (claude_cli). Best-effort, async."""
+        if not (self.scan_id and self._tracker and text):
+            return
+        try:
+            import asyncio as _aio
+            def _write(sid, aid, thg):
+                from core.database.pg_store import DatabaseManager
+                from core.utils.sanitize import clean_text
+                with DatabaseManager.get_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO agent_reasoning
+                              (scan_id, agent_id, step, thought, tool_planned,
+                               tool_args, tool_result_preview, tool_status, duration_ms)
+                            VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
+                        """, (sid, aid, 0, clean_text(thg)[:4000],
+                              "(reasoning — no tool call)", "{}", "", 0, 0))
+                        conn.commit()
+            _aio.get_event_loop().create_task(
+                _aio.to_thread(_write, self.scan_id, self._tracker.agent_id, text))
+        except Exception:
+            pass
+
+    async def _finish_tool_call(self, fn_name, fn_args, _result, _thought,
+                                _tool_planned, _duration_ms):
         try:
             if self.scan_id and self._tracker:
                 # Redacted args snapshot for the UI. Strip common secret keys.

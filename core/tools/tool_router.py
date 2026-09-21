@@ -138,7 +138,18 @@ class ToolRouter:
                     elif tname == "wafw00f":
                         invocation.params["command"] = f"wafw00f {t}"
                     elif tname == "sqlmap":
-                        invocation.params["command"] = f"sqlmap -u {t} --batch"
+                        # Strip the SPA fragment ("…/#/") — sqlmap can't test a
+                        # client-side route. With no query param, let sqlmap
+                        # self-discover via crawl+forms instead of no_result.
+                        _sqli_url = target.split("#")[0]
+                        _st = shlex.quote(_sqli_url)
+                        if "?" in _sqli_url:
+                            invocation.params["command"] = (
+                                f"sqlmap -u {_st} --batch --level=2 --risk=2 --random-agent")
+                        else:
+                            invocation.params["command"] = (
+                                f"sqlmap -u {_st} --batch --level=2 --risk=2 "
+                                f"--random-agent --forms --crawl=2")
                     elif tname == "katana":
                         invocation.params["command"] = f"katana -u {t} -d 2 -silent"
                     elif tname == "ffuf":
@@ -476,6 +487,7 @@ class ToolRouter:
             "technology_fingerprinting": ["httpx", "whatweb", "wafw00f"],
             "endpoint_discovery": ["katana", "ffuf", "feroxbuster", "gobuster", "dirsearch", "dirb", "http_request"],
             "vulnerability_scanning": ["nuclei", "nikto", "wpscan", "sqlmap"],
+            "network_vuln_verification": ["msf_scanner"],
             "authentication_testing": ["hydra", "ffuf", "gobuster", "http_request"],
             "sql_injection": ["sqlmap"],
             "tls_analysis": ["sslscan", "sslyze", "ssl_inspect", "openssl"],

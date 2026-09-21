@@ -39,6 +39,8 @@ from core.common.schemas import TaskTier  # noqa: E402 — canonical enum
 
 class ProviderType(Enum):
     BEDROCK = "bedrock"
+    CLAUDE_CLI = "claude_cli"
+    DEEPSEEK = "deepseek"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -57,6 +59,17 @@ PROVIDER_PRICING = {
         "us.anthropic.claude-haiku-4-5-20251001-v1:0": PricingTier(0.80, 4.00, cache_hit=0.08),
         "us.anthropic.claude-sonnet-4-20250514-v1:0": PricingTier(3.00, 15.00, cache_hit=0.30),
         "us.anthropic.claude-opus-4-6-v1": PricingTier(15.00, 75.00, cache_hit=1.50),
+    },
+    # Claude CLI (Max/Pro subscription). Nominal API-equivalent rates for
+    # accounting — marginal cost on a Max plan is $0. Keyed by CLI model alias.
+    "claude_cli": {
+        "haiku": PricingTier(0.80, 4.00, cache_hit=0.08),
+        "sonnet": PricingTier(3.00, 15.00, cache_hit=0.30),
+        "opus": PricingTier(15.00, 75.00, cache_hit=1.50),
+    },
+    "deepseek": {
+        "deepseek-chat": PricingTier(0.27, 1.10, cache_hit=0.07),
+        "deepseek-reasoner": PricingTier(0.55, 2.19, cache_hit=0.14),
     },
 }
 
@@ -234,7 +247,7 @@ class LLMProvider(ABC):
         self,
         prompt: str,
         system: Optional[str] = None,
-        max_tokens: int = 2048,
+        max_tokens: int = 4096,  # 2048 truncated large synth/verify JSON -> unparseable {} (fenced but cut mid-object)
         mandatory_fields: Optional[List[str]] = None,
         tier: TaskTier = TaskTier.SMALL
     ) -> Dict[str, Any]:
@@ -383,6 +396,27 @@ class UniversalLLMHarness:
                 region=self.provider_config.get("aws_region", os.getenv("AWS_REGION", "us-west-2")),
                 budget=self.budget,
             )
+        if provider_type == ProviderType.CLAUDE_CLI:
+            from agents.providers.claude_cli_provider import ClaudeCLIProvider
+            return ClaudeCLIProvider(
+                small_model=self.provider_config.get(
+                    "cli_small_model", os.getenv("CLAUDE_CLI_SMALL_MODEL", "haiku")),
+                large_model=self.provider_config.get(
+                    "cli_large_model", os.getenv("CLAUDE_CLI_LARGE_MODEL", "sonnet")),
+                bin_path=self.provider_config.get("cli_bin", os.getenv("CLAUDE_CLI_BIN", "")),
+                budget=self.budget,
+            )
+        if provider_type == ProviderType.DEEPSEEK:
+            from agents.providers.deepseek_provider import DeepSeekProvider
+            return DeepSeekProvider(
+                small_model=self.provider_config.get(
+                    "deepseek_small_model", os.getenv("DEEPSEEK_SMALL_MODEL", "deepseek-chat")),
+                large_model=self.provider_config.get(
+                    "deepseek_large_model", os.getenv("DEEPSEEK_LARGE_MODEL", "deepseek-chat")),
+                api_key=self.provider_config.get("deepseek_api_key", os.getenv("DEEPSEEK_API_KEY", "")),
+                base_url=self.provider_config.get("deepseek_base_url", os.getenv("DEEPSEEK_BASE_URL", "")),
+                budget=self.budget,
+            )
         raise ValueError(f"Unsupported provider: {provider_type}")
 
     async def generate_response(
@@ -493,16 +527,40 @@ class UniversalLLMHarness:
         resp = await self.generate_response(prompt, system, max_tokens, tier=tier)
         return resp.content if not resp.error else ""
 
+    def supports_native_tools(self) -> bool:
+        """Whether the active provider+model can drive the native agentic tool
+        loop. False → callers use the JSON-planner path (works for any model)."""
+        p = self.active_provider
+        if p is None:
+            return False
+        fn = getattr(p, "supports_native_tools", None)
+        try:
+            return bool(fn()) if callable(fn) else False
+        except Exception:
+            return False
+
     async def generate_json(
         self,
         prompt: str,
         system: Optional[str] = None,
-        max_tokens: int = 2048,
+        max_tokens: int = 4096,  # 2048 truncated large synth/verify JSON -> unparseable {} (fenced but cut mid-object)
+        mandatory_fields: Optional[List[str]] = None,
         tier: TaskTier = TaskTier.SMALL
     ) -> Dict[str, Any]:
+        # `mandatory_fields`: callers may name keys that must appear in the JSON.
+        # We nudge the model with a one-line hint; callers still validate the
+        # result themselves, so this is advisory (kept for signature parity).
+        if mandatory_fields:
+            hint = "Include these keys: " + ", ".join(mandatory_fields) + "."
+            system = f"{system}\n{hint}" if system else hint
         resp = await self.generate_response(
             prompt, system, max_tokens, 0.1, "json", tier
         )
+        # A provider error (429/timeout/subprocess) leaves content empty; surface it
+        # instead of silently returning {} (callers otherwise fall back blind).
+        if resp.error:
+            logger.error("[JSON] request failed: %s", resp.error)
+            return {}
         if resp.structured_output:
             return resp.structured_output
         if resp.content:
@@ -513,6 +571,8 @@ class UniversalLLMHarness:
                     return parsed
             except Exception:
                 pass
+        logger.warning("[JSON] unparseable content -> {} (len=%d head=%r)",
+                       len(resp.content or ""), (resp.content or "")[:200])
         return {}
 
     async def generate_with_tools(
@@ -581,6 +641,15 @@ class UniversalLLMHarness:
     async def close(self):
         if self.active_provider and self.active_provider.session:
             await self.active_provider.session.aclose()
+
+
+def get_llm_client():
+    """Back-compat accessor used by several modules
+    (``from agents.universal_llm_harness import get_llm_client``). Returns the
+    shared harness instance created by the adapter. Lazy import avoids a circular
+    import (the adapter imports this module)."""
+    from agents.llm_harness_adapter import get_llm
+    return get_llm()
 
 
 async def demo():

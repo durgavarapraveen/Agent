@@ -274,6 +274,7 @@ RULES:
 
 
 class ExecutionPhase(str, Enum):
+    BUSINESS_UNDERSTANDING = "BUSINESS_UNDERSTANDING"  # stage 1: LLM learns app + plans engagement
     UNDERSTAND = "UNDERSTAND"          # §3 comprehension-first: features/workflows/roles
     RECON = "RECON"
     ACTIVE_SCANNING = "ACTIVE_SCANNING"
@@ -308,6 +309,26 @@ class CentralBrain(
         logger.info(f"BRAIN_PHASE_TRANSITION: old_phase='{old_phase}' -> new_phase='{new_phase}'")
 
     def _evaluate_phase_transition(self) -> Optional[ExecutionPhase]:
+        # Anti-loop: if the current phase gave up via the no-progress guard, force
+        # advance along the canonical sequence instead of letting the planner
+        # re-enter the same stalled phase (root cause of the ~2h EXPLOITATION loop).
+        try:
+            giveup = getattr(self, "_no_progress_phases", None) or set()
+            if self.current_phase and self.current_phase.value in giveup:
+                _NEXT = {
+                    ExecutionPhase.BUSINESS_UNDERSTANDING: ExecutionPhase.RECON,
+                    ExecutionPhase.RECON: ExecutionPhase.ACTIVE_SCANNING,
+                    ExecutionPhase.ACTIVE_SCANNING: ExecutionPhase.EXPLOITATION,
+                    ExecutionPhase.EXPLOITATION: ExecutionPhase.REPORTING,
+                }
+                nxt = _NEXT.get(self.current_phase)
+                if nxt is not None:
+                    logger.warning(f"Phase {self.current_phase.value} gave up (no "
+                                   f"progress) — forcing advance to {nxt.value}.")
+                    return nxt
+        except Exception as _e:
+            logger.debug(f"no-progress force-advance skipped: {_e}")
+
         # P3: evidence-based transitions (coverage %, finding/discovery rates,
         # unvalidated HIGH+ findings) via AdaptivePlanner. Falls back to the
         # original count/presence logic if the planner errors.
@@ -320,7 +341,9 @@ class CentralBrain(
         except Exception as e:
             logger.debug(f"AdaptivePlanner transition failed, using fallback: {e}")
 
-        if self.current_phase == ExecutionPhase.RECON:
+        if self.current_phase == ExecutionPhase.BUSINESS_UNDERSTANDING:
+            return ExecutionPhase.RECON
+        elif self.current_phase == ExecutionPhase.RECON:
             if self.ctx.endpoints or self.ctx.subdomains or self.ctx.ports or len(self.ctx.agents_spawned) >= 3:
                 return ExecutionPhase.ACTIVE_SCANNING
         elif self.current_phase == ExecutionPhase.ACTIVE_SCANNING:
@@ -357,6 +380,14 @@ class CentralBrain(
                            "email_injection", "cache_poisoning"]
         env_classes = os.getenv("UPE_CLASSES", "").strip()
         classes = [c.strip() for c in env_classes.split(",") if c.strip()] or default_classes
+        # Directive Test Plan: restrict to injection classes of RELEVANT families
+        # (domain-adaptive). Env override always wins; empty plan → full battery.
+        if not env_classes:
+            plan_classes = self._plan_probe_classes()
+            if plan_classes:
+                filtered = [c for c in classes if c in plan_classes]
+                if filtered:
+                    classes = filtered
         # Per-(endpoint,class) payload budget. UPE_BUDGET=0 -> send ALL payloads
         # of that class (exhaustive; noisy but leaves nothing untested).
         try:
@@ -405,7 +436,49 @@ class CentralBrain(
         if state.objective_met:
             logger.info(f"Phase {state.phase_name} objective met.")
             return True
-            
+
+        # Anti-loop no-progress guard: when a phase keeps iterating (planner
+        # re-planning the same space, e.g. re-analyzing a JS bundle) without any
+        # new discoveries, exit early instead of burning the whole TIMEOUT budget.
+        # Progress is phase-type-aware: recon counts discovery (endpoints/subs),
+        # exploitation counts OUTPUT (vulns/exploits) — so re-discovering the same
+        # routes during exploitation does NOT mask a stalled loop.
+        try:
+            _pn = (state.phase_name or "").upper()
+            if any(k in _pn for k in ("RECON", "OSINT", "DISCOVER", "UNDERSTAND")):
+                cur = (len(getattr(self.ctx, "subdomains", []) or [])
+                       + len(getattr(self.ctx, "endpoints", []) or []))
+            else:  # scanning / exploitation: real progress = confirmed output
+                cur = (len(getattr(self.ctx, "vulnerabilities", []) or [])
+                       + len(getattr(self.ctx, "exploit_results", []) or []))
+            if getattr(self, "_progress_phase_name", None) != state.phase_name:
+                self._progress_phase_name = state.phase_name
+                self._phase_progress_count = cur
+                self._no_progress_iters = 0
+            elif cur > getattr(self, "_phase_progress_count", -1):
+                self._phase_progress_count = cur
+                self._no_progress_iters = 0
+            else:
+                self._no_progress_iters = getattr(self, "_no_progress_iters", 0) + 1
+            # Instance-level counter (NOT state.iterations, which resets every time
+            # the state machine re-enters the same phase — that reset is exactly why
+            # the 10-min / 20-iteration caps never fired and the phase looped ~2h).
+            limit = int(os.getenv("PHASE_NO_PROGRESS_LIMIT", "15"))
+            if self._no_progress_iters >= limit:
+                logger.warning(
+                    f"Phase {state.phase_name} made no new progress across "
+                    f"{self._no_progress_iters} checks — exiting early (anti-loop).")
+                # Flag it so the transition logic force-advances instead of the
+                # planner re-entering the same stalled phase (the ~2h loop).
+                gu = getattr(self, "_no_progress_phases", None)
+                if gu is None:
+                    gu = set()
+                    self._no_progress_phases = gu
+                gu.add(state.phase_name)
+                return True
+        except Exception:
+            pass
+
         return False
         
     def request_stop(self):
@@ -514,11 +587,22 @@ class CentralBrain(
                 except Exception:
                     _done = True
                 _stall = len(getattr(self.ctx, "agents_spawned", []) or []) >= 15
-                if _done or _stall:
+                # Re-entry cap: a phase that keeps being re-selected without
+                # meeting its completion predicate (e.g. EXPLOITATION with 0
+                # exploit_results) must still advance, or the scan loops forever.
+                _entries = getattr(self, "_phase_entry_counts", {}).get(cur_name, 0)
+                try:
+                    _entry_cap = int(os.getenv("PHASE_MAX_ENTRIES", "3"))
+                except ValueError:
+                    _entry_cap = 3
+                _reentry = _entries >= _entry_cap
+                if _done or _stall or _reentry:
                     completed.add(cur_name)
-                    if _stall and not _done:
-                        logger.info("PHASE_STALL_ADVANCE: %s completion predicate "
-                                    "unmet but stall cap hit; advancing", cur_name)
+                    if not _done and (_stall or _reentry):
+                        logger.info("PHASE_STALL_ADVANCE: %s completion predicate unmet "
+                                    "but %s; advancing", cur_name,
+                                    "stall cap hit" if _stall else
+                                    f"re-entry cap ({_entries}/{_entry_cap}) hit")
             # P0.6: controlled re-entry — a completed phase may be re-run ONLY
             # when a genuine dependency event (new host/endpoint/finding/auth
             # context) appeared since the last transition, and only within a
@@ -538,6 +622,18 @@ class CentralBrain(
                 if reopened:
                     logger.info(f"PHASE_REENTRY: re-opening {sorted(reopened)} on "
                                 "dependency event(s)")
+                # Anti-loop guard: never let re-entry re-open a phase that has
+                # already hit its entry cap (breaks the EXPLOITATION crawl loop
+                # where each pass mutates ctx and re-triggers re-entry forever).
+                try:
+                    _cap = int(os.getenv("PHASE_MAX_ENTRIES", "3"))
+                except ValueError:
+                    _cap = 3
+                for _p, _c in (getattr(self, "_phase_entry_counts", {}) or {}).items():
+                    if _c >= _cap and _p not in completed:
+                        completed.add(_p)
+                        logger.info("PHASE_REENTRY_CAP: %s at entry cap (%d) — "
+                                    "not re-opening", _p, _c)
             except Exception as _re:
                 logger.debug(f"phase re-entry check skipped: {_re}")
             allowed = set(self._allowed_phases) if self._allowed_phases else None
@@ -568,7 +664,8 @@ class CentralBrain(
             self.current_phase = None
 
     def _skip_to_next_allowed(self, from_phase: ExecutionPhase) -> Optional[ExecutionPhase]:
-        order = [ExecutionPhase.RECON, ExecutionPhase.ACTIVE_SCANNING,
+        order = [ExecutionPhase.BUSINESS_UNDERSTANDING, ExecutionPhase.RECON,
+                 ExecutionPhase.ACTIVE_SCANNING,
                  ExecutionPhase.EXPLOITATION, ExecutionPhase.REPORTING]
         start = order.index(from_phase) if from_phase in order else len(order)
         for p in order[start:]:
@@ -599,6 +696,15 @@ class CentralBrain(
         self._scan_id = scan_id or _make_run_id(target)
         self.ctx.scan_id = self._scan_id
 
+        # Adaptive spawn state: specialist families already launched (so the full
+        # ACTIVE_SCANNING sweep skips them) + a per-scan cap on finding-driven spawns.
+        self._families_spawned = set()
+        self._adaptive_spawns = 0
+        # Coverage ledger: units (phase-scoped families/lanes) that actually ran.
+        # The coverage-gate uses it to force any REQUIRED unit that didn't run
+        # before a phase is allowed to complete. Format: "{phase}:{unit}".
+        self._coverage_ran: set = set()
+
         from core.reporting.agent_activity import get_activity_log
         self._activity = get_activity_log()
 
@@ -615,7 +721,7 @@ class CentralBrain(
             self.report_dir = Path(tempfile.gettempdir()) / "antigravity_disabled_reports"
             # Do not create — writers that need reports must gate on reports_enabled().
         self.failed_tools = set()  # NEW: Brain-level tool failure tracking
-        self.current_phase = ExecutionPhase.RECON
+        self.current_phase = ExecutionPhase.BUSINESS_UNDERSTANDING
         self.phase_config = PhaseConfig()
         self.phase_history = []
         # P0-4: authoritative set of phase VALUES already run. phase_history
@@ -623,6 +729,7 @@ class CentralBrain(
         # it silently yielded an empty set — letting the DAG re-enter RECON
         # forever (RECON has no deps). This set makes the DAG truly forward-only.
         self._completed_phases: set = set()
+        self._phase_entry_counts: dict = {}   # per-phase re-entry guard (anti-loop)
         
         from core.security.compliance_gate import ComplianceGate, ScopeValidator, ComplianceAuditLogger
         scope_val = ScopeValidator(authorized_targets=scope.get("domains") or [target] if scope else [target])
@@ -2170,6 +2277,44 @@ class CentralBrain(
                 return await self._run_main_loop_impl(auth_document=auth_document, phases=phases)
 
     async def _run_main_loop_impl(self, auth_document: str = "", phases: list = None):
+        # §39: start a fresh budget window (requests/runtime/bandwidth/impact/kill)
+        # for this scan. The planner spends within it; it cannot raise it.
+        try:
+            from core.security.watchdog import reset_watchdog, ScanBudget
+            reset_watchdog(ScanBudget.from_env())
+        except Exception as _e:
+            logger.debug(f"watchdog init skipped: {_e}")
+        # Publish the scan id ambiently so low-level tool execution can tag its
+        # raw output (persisted to tool_outputs for the UI).
+        try:
+            from core.observability.scan_context import set_scan_id
+            set_scan_id(getattr(self, "_scan_id", "") or getattr(self.ctx, "scan_id", ""))
+        except Exception:
+            pass
+        # Create the canonical `scans` row UP FRONT (idempotent). The API server
+        # does this before spawning a scan, but a direct CLI run (main.py) did not
+        # — so every mid-scan flush hit a vulnerabilities_scan_id_fkey / live_agents
+        # FK violation and dropped all rows until REPORTING. Creating it here makes
+        # mid-scan persistence, the live view, and interrupted-scan results work on
+        # both launch paths.
+        try:
+            from core.database.pg_store import ScanRepo
+            ScanRepo.create(self._scan_id, self.ctx.target, self.tier)
+            logger.info(f"[DB] scans row ready for {self._scan_id}")
+        except Exception as _e:
+            logger.warning(f"[DB] early scans-row create failed (non-fatal): {_e}")
+        # Initialize the shared LLM harness UP FRONT so every phase (starting with
+        # BUSINESS_UNDERSTANDING) has a live LLM. Previously it was created lazily
+        # deep in a later phase, so the early pipeline ran with get_llm()==None →
+        # heuristic-only understanding and no LLM-driven payloads/findings.
+        try:
+            from agents.llm_harness_adapter import get_llm, initialize_llm, get_provider
+            if get_llm() is None:
+                await initialize_llm()
+            logger.info("[LLM] Harness ready: provider=%s, available=%s",
+                        get_provider(), get_llm() is not None)
+        except Exception as _e:
+            logger.warning(f"[LLM] Harness init failed (LLM features degraded): {_e}")
         self._allowed_phases = None
         if phases:
             valid = {p.upper() for p in phases if p.upper() in [e.value for e in ExecutionPhase]}
@@ -2287,15 +2432,39 @@ class CentralBrain(
             while self.current_phase:
                 if self._check_stop_signal():
                     logger.info(f"STOP: Saving checkpoint at phase {self.current_phase.value} (will resume here)")
+                    await self._flush_partial("stop-signal")
                     self.checkpointer.save_checkpoint(self)
                     stopped = True
                     break
 
+                # §26/§46: external watchdog / kill switch — stop the scan on a
+                # budget breach or out-of-band kill, independent of the LLM.
+                try:
+                    from core.security.watchdog import get_watchdog
+                    _wd = get_watchdog()
+                    if not _wd.should_continue():
+                        logger.critical("WATCHDOG STOP: %s — checkpointing and halting",
+                                        _wd.breach_reason())
+                        self.checkpointer.save_checkpoint(self)
+                        stopped = True
+                        break
+                except Exception as _e:
+                    logger.debug(f"watchdog check skipped: {_e}")
+
                 self._write_progress({"phase": self.current_phase.value, "status": "running"})
-                logger.info(f"\n>>> ENTERING MAIN PHASE: {self.current_phase.value}")
+                # Count entries per phase for the anti-loop re-entry cap.
+                _pn = self.current_phase.value
+                self._phase_entry_counts[_pn] = self._phase_entry_counts.get(_pn, 0) + 1
+                logger.info(f"\n>>> ENTERING MAIN PHASE: {_pn} (entry #{self._phase_entry_counts[_pn]})")
                 self._log_activity("phase", f"Starting phase: {self.current_phase.value}",
                                    detail=f"Beginning {self.current_phase.value} phase on {self.ctx.target}")
                 await self.run_phase(self.current_phase.value)
+
+                # Persist findings discovered in this phase NOW (not only at the
+                # end) so a mid-scan stop/kill/crash still leaves them in the DB
+                # and visible in the UI. Idempotent (upsert), so it's safe to
+                # repeat every phase.
+                await self._flush_partial(f"after {self.current_phase.value}")
 
                 # P0-4: mark this phase completed so the scheduler never re-enters
                 # it (breaks the RECON -> ACTIVE_SCANNING -> RECON loop).
@@ -2316,6 +2485,7 @@ class CentralBrain(
                         logger.info(f"STOP: Saving checkpoint, next phase would be {self.current_phase.value}")
                     else:
                         logger.info("STOP: All phases already complete")
+                    await self._flush_partial("stop-signal")
                     self.checkpointer.save_checkpoint(self)
                     stopped = True
                     break
@@ -2469,48 +2639,406 @@ class CentralBrain(
 
         return {"stopped": stopped, "phase": self.current_phase.value if self.current_phase else None}
 
+    async def _run_phase_business_understanding(self):
+        """Stage 1 — Business Understanding. Before any recon, the LLM learns
+        what the app IS (business domain, sensitive assets, roles) from a light
+        homepage read + the target profile, and turns that into an engagement
+        plan (prioritized hypotheses) that later phases consume. Non-fatal: a
+        deterministic heuristic keeps the phase useful when the LLM is down."""
+        from core.intelligence.app_understanding import AppUnderstandingEngine, AppSignals
+
+        # Register this phase as a tracked sub-agent so it shows in the Agents view
+        # / count alongside recon, OSINT, specialist and exploitation agents.
+        _bu_agent = None
+        try:
+            from core.orchestration.parallel_agents import AgentTracker
+            _bu_agent = AgentTracker(getattr(self, "_scan_id", "") or "",
+                                     agent_id="business_understanding",
+                                     label="Business Understanding",
+                                     phase="BUSINESS_UNDERSTANDING",
+                                     target=getattr(self.ctx, "target", ""))
+            _bu_agent.start(current_step="Analyzing domain, roles & invariants")
+            try:
+                from core.orchestration.family_scheduler import _reason as _bu_reason
+                await _bu_reason(getattr(self, "_scan_id", "") or "", "business_understanding", 0,
+                                 f"Analyzing {getattr(self.ctx, 'target', '')}: domain type, "
+                                 "user roles, business invariants, and which test families are relevant.")
+            except Exception:
+                pass
+        except Exception:
+            _bu_agent = None
+
+        # 1) Light homepage read to seed understanding signals (authorized target,
+        #    routed through the NetworkBroker so scope/watchdog still apply).
+        try:
+            if not getattr(self.ctx, "crawled_text", ""):
+                from core.network.network_broker import get_network_broker
+                resp = await get_network_broker().request("GET", self.ctx.target, timeout=15)
+                body = getattr(resp, "text", "") or ""
+                if body:
+                    import re as _re
+                    # SPA-aware seed: <title>/<meta>/bundle names live in tag
+                    # ATTRIBUTES, so extract them BEFORE stripping tags (an Angular/
+                    # React shell has an empty <body> — stripping alone yields nothing).
+                    parts = []
+                    _t = _re.search(r"<title[^>]*>(.*?)</title>", body, _re.I | _re.S)
+                    if _t:
+                        parts.append("TITLE: " + _re.sub(r"\s+", " ", _t.group(1)).strip())
+                    for _m in _re.finditer(
+                        r'<meta[^>]+(?:name|property)=["\']'
+                        r'(description|keywords|og:title|og:description|application-name|generator)'
+                        r'["\'][^>]*content=["\']([^"\']+)["\']', body, _re.I):
+                        parts.append(f"META[{_m.group(1)}]: {_m.group(2).strip()}")
+                    _scripts = _re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', body, _re.I)
+                    if _scripts:
+                        parts.append("SCRIPTS: " + ", ".join(
+                            s.rstrip("/").split("/")[-1] for s in _scripts[:12]))
+                    text = _re.sub(r"<[^>]+>", " ", body)
+                    text = _re.sub(r"\s+", " ", text).strip()
+                    seed = (" | ".join(parts) + (" || " + text if text else "")) if parts else text
+                    self.ctx.crawled_text = seed[:8000]
+        except Exception as _e:
+            logger.debug(f"[BusinessUnderstanding] homepage read skipped: {_e}")
+
+        # 2) LLM understanding (async) with heuristic fallback.
+        if not getattr(self, "app_understanding", None):
+            self.app_understanding = AppUnderstandingEngine()
+        signals = AppSignals.from_context(self.ctx)
+        try:
+            understanding = await self.app_understanding.analyze(signals)
+        except Exception as _e:
+            logger.debug(f"[BusinessUnderstanding] LLM analyze failed ({_e}); heuristic")
+            understanding = self.app_understanding.heuristic(signals)
+
+        # 3) Persist app model + build the DIRECTIVE, domain-scoped Test Plan that
+        #    ACTIVE_SCANNING/EXPLOITATION consume to run only relevant families.
+        self._engagement_plan = None
+        try:
+            self._app_understanding = understanding
+            self.ctx.app_understanding = understanding.to_dict()
+            try:
+                self.app_understanding.populate_app_model(understanding)
+            except Exception:
+                pass
+            from core.orchestration.test_plan import build_engagement_plan
+            eplan = build_engagement_plan(understanding, self.ctx)
+            self._engagement_plan = eplan
+            self.ctx.engagement_plan = eplan.to_dict()          # structured, directive
+            self.ctx.threat_model = eplan.threat_model          # Phase 1 deliverable
+        except Exception as _e:
+            logger.warning(f"[BusinessUnderstanding] plan build failed: {_e}", exc_info=True)
+
+        domain = getattr(understanding, "business_domain", "generic")
+        relevant = self._engagement_plan.relevant_families() if self._engagement_plan else []
+        skipped = self._engagement_plan.skipped_families() if self._engagement_plan else []
+        self._log_activity("business_understanding",
+                           f"Engagement planned: domain={domain}",
+                           detail=f"relevant={[f.value for f in relevant]}, "
+                                  f"skipped={[f.value for f in skipped]}",
+                           tool="test_plan")
+        logger.info(f"[BusinessUnderstanding] domain={domain} "
+                    f"relevant={[f.value for f in relevant]} "
+                    f"skipped={[f.value for f in skipped]} "
+                    f"(src={getattr(understanding, 'source', '')})")
+
+        # Persist a readable Business-Understanding report for the UI (live
+        # pipeline write — not log parsing). Surfaced at /api/scans/{id}/understanding.
+        try:
+            report = self._build_understanding_report(understanding, self._engagement_plan)
+            self.ctx.business_understanding_report = report
+            from core.database.pg_store import ScanMetadataRepo
+            ScanMetadataRepo.upsert(self._scan_id, "business_understanding", report)
+        except Exception as _e:
+            logger.debug(f"[BusinessUnderstanding] report persist skipped: {_e}")
+
+        try:
+            if _bu_agent is not None:
+                _rel = len(self._engagement_plan.relevant_families()) if self._engagement_plan else 0
+                _bu_agent.heartbeat(steps_taken=1, findings_count=_rel)
+                try:
+                    from core.orchestration.family_scheduler import _reason as _bu_reason
+                    await _bu_reason(getattr(self, "_scan_id", "") or "", "business_understanding", 1,
+                                     f"Understanding complete: {_rel} relevant test family(ies) selected "
+                                     "for this target.", status=1)
+                except Exception:
+                    pass
+                _bu_agent.finish(status="completed")
+        except Exception:
+            pass
+
+    def _build_understanding_report(self, understanding, plan) -> Dict[str, Any]:
+        """Structured report of what the model understood + what the plan requires."""
+        u = understanding
+        rel = plan.relevant_families() if plan else []
+        items = [it for it in (plan.ordered() if plan else []) if it.relevant]
+        return {
+            "domain": getattr(u, "business_domain", "generic"),
+            "domain_confidence": round(float(getattr(u, "domain_confidence", 0.0) or 0.0), 2),
+            "source": getattr(u, "source", ""),
+            "business_rules": list(getattr(u, "business_rules", []) or [])[:20],
+            "data_sensitivity": dict(getattr(u, "data_sensitivity", {}) or {}),
+            "roles": list(getattr(u, "roles", []) or [])[:20],
+            "entities": list(getattr(u, "entities", []) or [])[:20],
+            "security_invariants": list(getattr(u, "security_invariants", []) or [])[:20],
+            "trust_boundaries": list(getattr(u, "trust_boundaries", []) or [])[:20],
+            "threat_model": plan.threat_model if plan else {},
+            # "what is required": the prioritized test plan.
+            "required_testing": [
+                {"family": it.family.value, "priority": it.priority, "why": it.rationale}
+                for it in items
+            ],
+            "relevant_families": [f.value for f in rel],
+            "skipped_families": [f.value for f in (plan.skipped_families() if plan else [])],
+        }
+
+    # ── Engagement-plan accessors (reused by scanners to stay domain-scoped) ──
+    def _get_engagement_plan(self):
+        plan = getattr(self, "_engagement_plan", None)
+        if plan is not None:
+            return plan
+        raw = getattr(self.ctx, "engagement_plan", None)
+        if isinstance(raw, dict) and raw.get("items"):
+            try:
+                from core.orchestration.test_plan import EngagementPlan
+                self._engagement_plan = EngagementPlan.from_dict(raw)
+                return self._engagement_plan
+            except Exception:
+                return None
+        return None
+
+    def _plan_probe_classes(self) -> list:
+        plan = self._get_engagement_plan()
+        try:
+            return plan.probe_classes() if plan else []
+        except Exception:
+            return []
+
+    def _family_probe_allowed(self, module_basename: str) -> bool:
+        """Whether a specialist probe is in-scope per the plan (fail-open)."""
+        plan = self._get_engagement_plan()
+        try:
+            return plan.specialist_allowed(module_basename) if plan else True
+        except Exception:
+            return True
+
+    def _record_family_skipped(self, family: str) -> None:
+        """Record a plan-skipped family so the report reflects coverage-vs-plan
+        (UNKNOWN≠CLEAN: skipped ≠ tested-clean)."""
+        try:
+            s = getattr(self.ctx, "plan_skipped_families", None)
+            if not isinstance(s, list):
+                s = []
+            if family not in s:
+                s.append(family)
+            self.ctx.plan_skipped_families = s
+        except Exception:
+            pass
+
+    def _build_poc_bundles(self) -> int:
+        """Assemble a normalized, report-grade PoC bundle on each confirmed finding
+        from evidence already captured — request/proof, response snapshot,
+        screenshot path, technique, and reproduction steps. Idempotent; non-fatal."""
+        n = 0
+        for v in (getattr(self.ctx, "vulnerabilities", []) or []):
+            if not isinstance(v, dict) or v.get("poc"):
+                continue
+            det = v.get("details", {}) if isinstance(v.get("details"), dict) else {}
+            url = v.get("url") or v.get("location") or det.get("url") or ""
+            proof = v.get("proof") or v.get("evidence") or det.get("proof") or ""
+            resp = det.get("response_snippet") or det.get("error_snippet") or v.get("response") or ""
+            shot = (v.get("screenshot") or v.get("screenshot_path")
+                    or (v.get("evidence", {}) or {}).get("screenshot")
+                    if isinstance(v.get("evidence"), dict) else v.get("screenshot"))
+            steps = [s for s in [
+                f"Target the endpoint: {url}" if url else "",
+                f"Send the proving request ({det.get('technique', v.get('sub_type', 'payload'))}).",
+                f"Observe: {str(proof)[:160]}" if proof else "",
+                ("Out-of-band callback received (blind confirmation)."
+                 if det.get("oob") else ""),
+            ] if s]
+            v["poc"] = {
+                "url": url,
+                "technique": det.get("technique") or v.get("sub_type") or "",
+                "request_proof": str(proof)[:500],
+                "response_snapshot": str(resp)[:500],
+                "screenshot": shot or "",
+                "oob": det.get("oob") or [],
+                "confirmed": bool(v.get("confirmed") or v.get("status") == "CONFIRMED"),
+                "steps": steps,
+            }
+            n += 1
+        if n:
+            logger.info(f"[PoC] built {n} reproduction bundle(s)")
+        return n
+
+    async def _run_attack_chaining(self) -> None:
+        """Combine confirmed findings into scored end-to-end attack chains (graph
+        detector + LLM-proposed), rescore findings by chain membership, persist, and
+        stash the report-ready result on ctx. Non-fatal."""
+        try:
+            from core.exploitation.chain_builder import ChainBuilder
+        except Exception:
+            return
+        vulns = list(getattr(self.ctx, "vulnerabilities", []) or [])
+        if len(vulns) < 2:
+            return
+        cb = ChainBuilder()
+        result = cb.synthesize(vulns)  # graph chains + rescore + narratives
+        try:
+            llm_chains = await cb.llm_propose_chains(vulns)
+        except Exception:
+            llm_chains = []
+        if llm_chains:
+            result.setdefault("narratives", []).extend(llm_chains)
+            result["llm_chain_count"] = len(llm_chains)
+        self.ctx.attack_chains = result
+        try:
+            from core.database.pg_store import AttackChainRepo
+            scan_id = getattr(self, "_scan_id", "") or getattr(self.ctx, "scan_id", "") or ""
+            rows = [{"chain_id": n.get("chain_id"),
+                     "description": " → ".join(n.get("steps", []))[:500],
+                     "score": n.get("cvss", 0), "status": "detected",
+                     "steps": n.get("steps", []), "impact": n.get("severity", "")}
+                    for n in result.get("narratives", [])]
+            AttackChainRepo.bulk_upsert(scan_id, rows)
+        except Exception as e:
+            logger.debug(f"[Chaining] persist skipped: {e}")
+        logger.info("[Chaining] %d graph + %d llm chain(s); %d finding(s) upgraded by chain",
+                    result.get("chain_count", 0), result.get("llm_chain_count", 0),
+                    result.get("rescore", {}).get("upgraded_count", 0))
+
+    async def _assert_phase_coverage(self, phase: str) -> None:
+        """Coverage-gate: a phase is not done until every REQUIRED coverage unit
+        for it has actually run. Derives required units from the app model /
+        engagement plan, compares against the run ledger (self._coverage_ran), and
+        forces any missing unit to run before the phase closes. Non-fatal."""
+        phase = (phase or "").lower()
+        ran = {u.split(":", 1)[1] for u in self._coverage_ran
+               if u.startswith(f"{phase}:")}
+
+        if phase == "recon":
+            required = {"osint_recon", "web_recon", "infra_recon", "api_recon"}
+            missing = required - ran
+            if missing:
+                logger.warning("COVERAGE_GAP: phase=recon missing=%s (lane did not run)",
+                               sorted(missing))
+            logger.info("PHASE_COVERAGE: phase=recon required=%d ran=%d gaps=%s",
+                        len(required), len(ran & required), sorted(missing))
+            return
+
+        if phase in ("active_scanning", "analyze"):
+            plan = self._get_engagement_plan()
+            required = {f.value for f in (plan.relevant_families() if plan else [])}
+            if not required:
+                logger.info("PHASE_COVERAGE: phase=active_scanning no plan — skipped")
+                return
+            missing = required - ran
+            if missing:
+                logger.warning("COVERAGE_GAP: phase=active_scanning missing=%s — forcing",
+                               sorted(missing))
+                from core.orchestration.family_scheduler import spawn_family_team
+                from core.orchestration.test_plan import TestFamily
+                for fam_val in sorted(missing):
+                    try:
+                        fam = TestFamily(fam_val)
+                    except Exception:
+                        continue
+                    self._families_spawned.discard(fam)  # allow the missing one to run
+                    await spawn_family_team(self, fam, reason="coverage-gate")
+                ran = {u.split(":", 1)[1] for u in self._coverage_ran
+                       if u.startswith("active_scanning:")}
+                missing = required - ran
+            logger.info("PHASE_COVERAGE: phase=active_scanning required=%d ran=%d gaps=%s",
+                        len(required), len(ran & required), sorted(missing))
+            return
+
+        if phase in ("exploitation", "exploit"):
+            required = {"expert_probes"}
+            missing = required - ran
+            if missing:
+                logger.warning("COVERAGE_GAP: phase=exploitation missing=%s", sorted(missing))
+            logger.info("PHASE_COVERAGE: phase=exploitation required=%d ran=%d gaps=%s",
+                        len(required), len(ran & required), sorted(missing))
+            return
+
+    async def _adaptive_spawn_from_recon(self) -> None:
+        """Hybrid pipeline hook: as soon as RECON knows the attack surface, launch
+        specialist teams for the highest-value discovered signals NOW (concurrently,
+        ahead of the ACTIVE_SCANNING sweep) instead of waiting. Bounded by
+        ADAPTIVE_SPAWN_MAX (default 6) and deduped; the sweep skips what ran here."""
+        try:
+            from core.orchestration.family_scheduler import family_for_signal, spawn_family_team
+            cap = int(os.getenv("ADAPTIVE_SPAWN_MAX", "6"))
+            if self._adaptive_spawns >= cap:
+                return
+            # Collect endpoint/surface signals (dicts or strings) discovered in recon.
+            eps = getattr(self.ctx, "endpoints", None)
+            signals: List[str] = []
+            if isinstance(eps, dict):
+                for v in eps.values():
+                    signals.append(v.get("url", "") if isinstance(v, dict) else str(v))
+            elif isinstance(eps, (list, tuple, set)):
+                for v in eps:
+                    signals.append(v.get("url", "") if isinstance(v, dict) else str(v))
+
+            # First relevant, not-yet-spawned family per signal → one team each,
+            # capped. Launch concurrently; recon/next phase continues meanwhile.
+            from collections import OrderedDict
+            picks: "OrderedDict[Any, str]" = OrderedDict()
+            for sig in signals:
+                fam = family_for_signal(sig)
+                if fam is None or fam in self._families_spawned or fam in picks:
+                    continue
+                picks[fam] = sig
+                if self._adaptive_spawns + len(picks) >= cap:
+                    break
+            if not picks:
+                return
+            self._adaptive_spawns += len(picks)
+            logger.info("[AdaptiveSpawn] recon surfaced %d specialist team(s): %s",
+                        len(picks), [f.value for f in picks])
+            await asyncio.gather(
+                *[spawn_family_team(self, fam, reason=f"recon signal: {sig[:80]}")
+                  for fam, sig in picks.items()],
+                return_exceptions=True)
+        except Exception as e:
+            logger.debug(f"[AdaptiveSpawn] skipped: {e}")
+
     async def run_phase(self, phase: str):
         self.phase_state = PhaseState(phase_name=phase)
-        
-        if phase == ExecutionPhase.RECON.value:
+
+        if phase == ExecutionPhase.BUSINESS_UNDERSTANDING.value:
+            await self._run_phase_business_understanding()
+
+        elif phase == ExecutionPhase.RECON.value:
             await self._run_phase("recon")
-            enable_osint = os.getenv("ENABLE_OSINT", os.getenv("OSINT_ENABLE", "true")).lower() in ("true", "1", "yes", "on")
-            if enable_osint:
-                logger.info("Running OSINT Reconnaissance...")
-                await self._run_phase("OSINT_RECONNAISSANCE")
+
+            # Recon as PARALLEL specialist lanes (OSINT ∥ Web ∥ Infra → API), each
+            # a tracked live agent. Reuses the crawler, JS bundle/DOM analysis,
+            # network + cloud discovery, and OSINT — run concurrently instead of the
+            # old sequential block, mirroring four pentesters working recon at once.
+            try:
+                from core.orchestration.family_scheduler import run_recon_teams
+                await run_recon_teams(self)
+            except Exception as e:
+                logger.warning(f"[ReconTeams] failed (non-fatal): {e}")
+
             await self._run_phase("DEEP_RECONNAISSANCE")
             await self._persist_recon_findings()
 
-            # P2: network-layer discovery (port scan) + cloud asset enumeration.
-            # Both scope-enforced and non-fatal.
+            # Hybrid: recon now knows the surface — fire specialist teams for the
+            # highest-value discovered signals immediately (bounded), ahead of the
+            # full ACTIVE_SCANNING sweep. Non-fatal.
             try:
-                from core.recon.network_discovery import run_network_discovery
-                nd = await run_network_discovery(self.ctx)
-                for f in nd:
-                    self.ctx.add_vulnerability(f)
-                if nd:
-                    logger.info(f"[NetworkDiscovery] {len(nd)} exposed-service findings")
+                await self._adaptive_spawn_from_recon()
             except Exception as e:
-                logger.warning(f"[NetworkDiscovery] failed (non-fatal): {e}")
+                logger.debug(f"[AdaptiveSpawn] recon hook skipped: {e}")
+
+            # Coverage-gate: recon is not done until all 4 specialist lanes ran.
             try:
-                from core.recon.cloud_enum import run_cloud_enum
-                ce = await run_cloud_enum(self.ctx)
-                for f in ce:
-                    self.ctx.add_vulnerability(f)
-                if ce:
-                    logger.info(f"[CloudEnum] {len(ce)} exposed cloud assets")
+                await self._assert_phase_coverage("recon")
             except Exception as e:
-                logger.warning(f"[CloudEnum] failed (non-fatal): {e}")
-            # Phase 1.1 + 1.2: after RECON completes, extract routes/endpoints
-            # from the app's JS bundles (webpack + sourcemap) and observe DOM
-            # sinks via headless Chrome. Both are non-fatal; missing tools =>
-            # skip and log. Adds to ctx.endpoints so downstream SCAN/EXPLOIT
-            # phases see the app's real attack surface, not just the URLs
-            # katana/ffuf crawled statically.
-            try:
-                await self._run_bundle_and_dom_analysis()
-            except Exception as e:
-                logger.warning(f"[BundleDOM] analysis failed (non-fatal): {e}")
+                logger.debug(f"[CoverageGate] recon skipped: {e}")
             # Phase 3.1 + 3.2 + 3.3 + 3.4 + 3.5: SAST unlock. If an exposed
             # .git/config or sourcemap was found in RECON, clone/rehydrate
             # the source, run semgrep (and codeql if installed), and feed
@@ -2751,6 +3279,18 @@ class CentralBrain(
                 logger.debug(f"[AdvancedSync] Recon sync failed (non-fatal): {_sync_err}")
 
         elif phase == ExecutionPhase.ACTIVE_SCANNING.value:
+            # Kick the systematic specialist sweep off NOW (recon is complete, so
+            # probes are already well-targeted) to run CONCURRENTLY with the
+            # scanners below, instead of waiting for phase end. It is idempotent
+            # (dedups the adaptive teams via _families_spawned); the end-of-phase
+            # sweep joins this task first, then backstops any late stragglers.
+            self._early_sweep_task = None
+            try:
+                self._early_sweep_task = asyncio.create_task(
+                    self._safe_specialist_sweep("active_scanning_start"))
+            except Exception as e:
+                logger.debug(f"[FamilyScheduler] early sweep kickoff skipped: {e}")
+
             from core.tools.nuclei_runner import NucleiRunner
             nuclei_runner = NucleiRunner()
             await nuclei_runner.scan_context_technologies(self.ctx, timeout=60)
@@ -2858,6 +3398,43 @@ class CentralBrain(
             except Exception as _pa_err:
                 logger.warning(f"[Pα] First-order cycle failed (non-fatal): {_pa_err}")
 
+            # ── Systematic specialist family coverage AT THE END OF ACTIVE_SCANNING.
+            #    Previously this only ran in EXPLOITATION, so a stalled/skipped
+            #    exploitation phase (e.g. planner degraded) left most plan-relevant
+            #    families untested. Running it here guarantees every relevant family
+            #    gets a live specialist agent. Idempotent: run_specialist_probes
+            #    dedups via _families_spawned and the gate via _coverage_ran, so the
+            #    EXPLOITATION-phase calls become no-ops for families already covered.
+            # Join the early sweep started at phase entry so it fully stamps its
+            # families into _families_spawned BEFORE the backstop sweep runs —
+            # otherwise two concurrent sweeps could double-spawn the same family.
+            _early = getattr(self, "_early_sweep_task", None)
+            if _early is not None:
+                try:
+                    await _early
+                except Exception as e:
+                    logger.debug(f"[FamilyScheduler] early sweep join failed: {e}")
+            try:
+                from core.orchestration.family_scheduler import run_specialist_probes
+                await run_specialist_probes(self)
+            except Exception as e:
+                logger.warning(f"[FamilyScheduler] active_scanning sweep failed (non-fatal): {e}")
+            # Metasploit auxiliary-scanner verification for open network services
+            # (SMB/RDP/SSH/FTP/SMTP/...). Opt-in (NEO_ENABLE_MSF) + allow-listed.
+            try:
+                await self._run_network_verification()
+            except Exception as e:
+                logger.warning(f"[MSF] network verification failed (non-fatal): {e}")
+            try:
+                await self._assert_phase_coverage("active_scanning")
+            except Exception as e:
+                logger.debug(f"[CoverageGate] active_scanning skipped: {e}")
+            try:
+                from core.orchestration.family_scheduler import run_authenticated_battery
+                await run_authenticated_battery(self)
+            except Exception as e:
+                logger.warning(f"[AuthedBattery] active_scanning pass failed (non-fatal): {e}")
+
         elif phase == ExecutionPhase.EXPLOITATION.value:
             # P0.1: Unified PolicyEngine gate (delegates to ComplianceGate internally)
             try:
@@ -2872,6 +3449,26 @@ class CentralBrain(
                 if not check.authorized:
                     logger.warning(f"Compliance check failed: {check.reason}. Skipping EXPLOIT phase.")
                     return
+
+            # RESILIENCE: run the LLM-independent expert-probe battery FIRST, so
+            # EXPLOITATION always produces agents + findings even if the LLM
+            # planner returns nothing and the fuzzer loop below stalls (that is
+            # exactly what starved this phase to 0 agents in prior scans). It
+            # spawns its own agent cards and persists findings; idempotent via
+            # _coverage_ran so the later expert-sweep call becomes a no-op.
+            try:
+                if "exploitation:expert_probes" not in self._coverage_ran:
+                    from core.exploitation.expert_probes import run_all_expert_probes
+                    _early_ef = await run_all_expert_probes(self.ctx)
+                    self._coverage_ran.add("exploitation:expert_probes")
+                    logger.info(f"[ExpertProbes] early guaranteed sweep: "
+                                f"{len(_early_ef or [])} finding(s)")
+                    try:
+                        await self._flush_partial("expert_probes_early")
+                    except Exception:
+                        pass
+            except Exception as _e:
+                logger.warning(f"[ExpertProbes] early sweep failed (non-fatal): {_e}")
 
             # Hypothesis generation from coverage gaps
             try:
@@ -2892,8 +3489,12 @@ class CentralBrain(
             # Convergence check
             try:
                 conv_score = self.convergence_engine.calculate_convergence()
-                conv_state = self.convergence_engine.get_state()
-                logger.info(f"[Convergence] Score={conv_score:.1f}% State={conv_state.value}")
+                # get_state exists only on some engine variants bound here; degrade
+                # cleanly rather than emitting a non-fatal AttributeError warning.
+                conv_state = (self.convergence_engine.get_state()
+                              if hasattr(self.convergence_engine, "get_state") else None)
+                _state_str = getattr(conv_state, "value", conv_state) if conv_state is not None else "n/a"
+                logger.info(f"[Convergence] Score={conv_score:.1f}% State={_state_str}")
             except Exception as e:
                 logger.warning(f"[Convergence] Check failed (non-fatal): {e}")
 
@@ -2901,6 +3502,15 @@ class CentralBrain(
             try:
                 as_endpoints = self.attack_surface.api_endpoints()
                 if as_endpoints:
+                    # Prioritize injectable endpoints: those with parameters or a
+                    # query string come first, SPA catch-all routes last. Without
+                    # this, the first-10 slice was param-less admin routes and
+                    # sqlmap/dalfox always returned no_result.
+                    def _inject_rank(ep):
+                        has_params = bool(getattr(ep, "parameters", None)) or ("?" in (getattr(ep, "url", "") or ""))
+                        catch_all = bool(getattr(ep, "is_spa_catch_all", False))
+                        return (0 if has_params else 1, 1 if catch_all else 0)
+                    as_endpoints = sorted(as_endpoints, key=_inject_rank)
                     fuzz_count = 0
                     for ep in as_endpoints[:10]:
                         for test_type in ["sqli", "xss"]:
@@ -2913,7 +3523,29 @@ class CentralBrain(
                                 try:
                                     result = await asyncio.to_thread(
                                         self.fuzzer_orchestrator.run_fuzzing, test_type, ep, params)
-                                    if result and getattr(result, 'success', False):
+                                    # Ingest confirmed findings — previously the
+                                    # fuzzer's SecurityFindings (sqlmap/dalfox/nuclei
+                                    # confirmations) were computed then DISCARDED here
+                                    # (only success/failure was recorded), so sqli/xss
+                                    # never persisted. Stamp+persist each one.
+                                    _fnds = list(getattr(result, "findings", None) or []) if result else []
+                                    for sf in _fnds:
+                                        ev = getattr(sf, "evidence", None) or {}
+                                        proof = ""
+                                        if isinstance(ev, dict):
+                                            proof = (ev.get("output") or ev.get("payload") or "")
+                                        self._stamp_and_add_vuln({
+                                            "title": getattr(sf, "title", "") or f"{test_type} injection",
+                                            "type": test_type,
+                                            "severity": getattr(sf, "severity", "HIGH") or "HIGH",
+                                            "status": "CONFIRMED",
+                                            "proof": str(proof)[:2000],
+                                            "location": getattr(ep, "url", ""),
+                                            "evidence": ev,
+                                            "description": getattr(sf, "description", ""),
+                                            "tool": tools[0] if tools else "fuzzer",
+                                        }, source=(tools[0] if tools else "fuzzer"), parser="regex")
+                                    if result and (getattr(result, 'success', False) or _fnds):
                                         fuzz_count += 1
                                         self.experience_learner.record_success(
                                             test_type, tools[0], {"endpoint": getattr(ep, 'url', '')})
@@ -2975,432 +3607,30 @@ class CentralBrain(
             except Exception as e:
                 logger.warning(f"[DiffAuthZ] failed (non-fatal): {e}")
 
-            # ── P4: API-specific testing (method tamper, missing-auth, BOLA) ──
+            # ── Specialist battery: parallel, tiered, plan-scoped family tracks.
+            #    Relevant families only (domain-adaptive), junior/senior tiers, net
+            #    probes concurrent + browser serial. See family_scheduler.py.
             try:
-                from core.exploitation.api_probe import run_api_probe
-                api_findings = await run_api_probe(self.ctx)
-                for f in api_findings:
-                    self.ctx.add_vulnerability(f)
-                if api_findings:
-                    logger.info(f"[APIProbe] {len(api_findings)} API findings")
-                self._log_activity("api_probe", f"API: {len(api_findings)} findings", tool="api_probe")
+                from core.orchestration.family_scheduler import run_specialist_probes
+                await run_specialist_probes(self)
             except Exception as e:
-                logger.warning(f"[APIProbe] failed (non-fatal): {e}")
+                logger.warning(f"[FamilyScheduler] failed (non-fatal): {e}")
 
-            # ── P3: Business-logic violation testing ──
+            # Coverage-gate: force any plan-relevant family that didn't run before
+            # ACTIVE_SCANNING is allowed to close.
             try:
-                from core.exploitation.business_logic_probe import run_business_logic_probe
-                bl_findings = await run_business_logic_probe(self.ctx)
-                for f in bl_findings:
-                    self.ctx.add_vulnerability(f)
-                if bl_findings:
-                    logger.info(f"[BusinessLogic] {len(bl_findings)} logic findings")
-                self._log_activity("business_logic", f"BizLogic: {len(bl_findings)} findings",
-                                   tool="business_logic_probe")
+                await self._assert_phase_coverage("active_scanning")
             except Exception as e:
-                logger.warning(f"[BusinessLogic] failed (non-fatal): {e}")
+                logger.debug(f"[CoverageGate] active_scanning skipped: {e}")
 
-            # ── §1: Workflow learning + violation testing (state-machine abuse:
-            # value tamper / replay / step-skip over the observed user journey) ──
+            # Authenticated pass: re-run identity-sensitive families AS each logged-in
+            # role so probes reach functionality behind login (real IDOR/business-
+            # logic/mass-assign). No-op when no authenticated identities exist.
             try:
-                from core.workflow.violation_tester import run_workflow_probe
-                wf_findings = await run_workflow_probe(self.ctx)
-                if wf_findings:
-                    logger.info(f"[Workflow] {len(wf_findings)} business-logic violations")
-                self._log_activity("workflow", f"Workflow: {len(wf_findings)} findings",
-                                   tool="workflow_violation_tester")
+                from core.orchestration.family_scheduler import run_authenticated_battery
+                await run_authenticated_battery(self)
             except Exception as e:
-                logger.warning(f"[Workflow] failed (non-fatal): {e}")
-
-            # ── P6: Systematic AuthZ Matrix (IDOR/BOLA/BFLA) ──
-            try:
-                from core.exploitation.authz_matrix import run_authz_matrix
-                p6_findings = await run_authz_matrix(self.ctx)
-                for f in p6_findings:
-                    self.ctx.add_vulnerability(f)
-                if p6_findings:
-                    logger.info(f"[P6-AuthzMatrix] {len(p6_findings)} authorization bypass findings")
-                self._log_activity("authz_matrix", f"P6: {len(p6_findings)} authz bypass findings",
-                                   tool="authz_matrix")
-            except Exception as e:
-                logger.warning(f"[P6-AuthzMatrix] failed (non-fatal): {e}")
-
-            # ── P7: Authenticated Parameter Fuzzing ──
-            try:
-                from core.exploitation.param_fuzzer import run_param_fuzzer
-                p7_findings = await run_param_fuzzer(self.ctx)
-                for f in p7_findings:
-                    self.ctx.add_vulnerability(f)
-                if p7_findings:
-                    logger.info(f"[P7-ParamFuzzer] {len(p7_findings)} parameter fuzzing findings")
-                self._log_activity("param_fuzzer", f"P7: {len(p7_findings)} param fuzz findings",
-                                   tool="param_fuzzer")
-            except Exception as e:
-                logger.warning(f"[P7-ParamFuzzer] failed (non-fatal): {e}")
-
-            # ── P0: Race Condition Probe ──
-            try:
-                from core.exploitation.race_probe import run_race_probe
-                p0_findings = await run_race_probe(self.ctx)
-                for f in p0_findings:
-                    self.ctx.add_vulnerability(f)
-                if p0_findings:
-                    logger.info(f"[P0-RaceProbe] {len(p0_findings)} race condition findings")
-                self._log_activity("race_probe", f"P0: {len(p0_findings)} race condition findings",
-                                   tool="race_probe")
-            except Exception as e:
-                logger.warning(f"[P0-RaceProbe] failed (non-fatal): {e}")
-
-            # ── P1: Crypto/JWT Chain Analysis ──
-            try:
-                from core.exploitation.crypto_chain import run_crypto_chain
-                p1_findings = await run_crypto_chain(self.ctx)
-                for f in p1_findings:
-                    self.ctx.add_vulnerability(f)
-                if p1_findings:
-                    logger.info(f"[P1-CryptoChain] {len(p1_findings)} crypto findings")
-                self._log_activity("crypto_chain", f"P1: {len(p1_findings)} crypto findings",
-                                   tool="crypto_chain")
-            except Exception as e:
-                logger.warning(f"[P1-CryptoChain] failed (non-fatal): {e}")
-
-            # ── P2: Chatbot/LLM Exploitation ──
-            try:
-                from core.exploitation.chatbot_exploit import run_chatbot_exploit
-                p2_findings = await run_chatbot_exploit(self.ctx)
-                for f in p2_findings:
-                    self.ctx.add_vulnerability(f)
-                if p2_findings:
-                    logger.info(f"[P2-ChatbotExploit] {len(p2_findings)} chatbot findings")
-                self._log_activity("chatbot_exploit", f"P2: {len(p2_findings)} chatbot findings",
-                                   tool="chatbot_exploit")
-            except Exception as e:
-                logger.warning(f"[P2-ChatbotExploit] failed (non-fatal): {e}")
-
-            # ── P3: LLM-Driven Browser Agent ──
-            try:
-                from core.actuation.browser_agent import run_browser_agent
-                p3_findings = await run_browser_agent(self.ctx)
-                for f in p3_findings:
-                    self.ctx.add_vulnerability(f)
-                if p3_findings:
-                    logger.info(f"[P3-BrowserAgent] {len(p3_findings)} client-side findings")
-                self._log_activity("browser_agent", f"P3: {len(p3_findings)} client-side findings",
-                                   tool="browser_agent")
-            except Exception as e:
-                logger.warning(f"[P3-BrowserAgent] failed (non-fatal): {e}")
-
-            # ── P4: Identity Intelligence ──
-            try:
-                from core.intelligence.identity_intel import run_identity_intel
-                p4_findings = await run_identity_intel(self.ctx)
-                for f in p4_findings:
-                    self.ctx.add_vulnerability(f)
-                if p4_findings:
-                    logger.info(f"[P4-IdentityIntel] {len(p4_findings)} identity findings")
-                self._log_activity("identity_intel", f"P4: {len(p4_findings)} identity findings",
-                                   tool="identity_intel")
-            except Exception as e:
-                logger.warning(f"[P4-IdentityIntel] failed (non-fatal): {e}")
-
-            # ── P5: Web3/Smart Contract Probe ──
-            try:
-                from core.exploitation.web3_probe import run_web3_probe
-                p5_findings = await run_web3_probe(self.ctx)
-                for f in p5_findings:
-                    self.ctx.add_vulnerability(f)
-                if p5_findings:
-                    logger.info(f"[P5-Web3Probe] {len(p5_findings)} web3 findings")
-                self._log_activity("web3_probe", f"P5: {len(p5_findings)} web3 findings",
-                                   tool="web3_probe")
-            except Exception as e:
-                logger.warning(f"[P5-Web3Probe] failed (non-fatal): {e}")
-
-            # ── Second-Order Injection Probe ──
-            try:
-                from core.exploitation.second_order import run_second_order_probe
-                so_findings = await run_second_order_probe(self.ctx)
-                for f in so_findings:
-                    self.ctx.add_vulnerability(f)
-                if so_findings:
-                    logger.info(f"[SecondOrder] {len(so_findings)} second-order findings")
-                self._log_activity("second_order", f"SecondOrder: {len(so_findings)} findings",
-                                   tool="second_order_probe")
-            except Exception as e:
-                logger.warning(f"[SecondOrder] failed (non-fatal): {e}")
-
-            # ── Session Management Probe ──
-            try:
-                from core.exploitation.session_probe import run_session_probe
-                sess_findings = await run_session_probe(self.ctx)
-                for f in sess_findings:
-                    self.ctx.add_vulnerability(f)
-                if sess_findings:
-                    logger.info(f"[SessionProbe] {len(sess_findings)} session findings")
-                self._log_activity("session_probe", f"Session: {len(sess_findings)} findings",
-                                   tool="session_probe")
-            except Exception as e:
-                logger.warning(f"[SessionProbe] failed (non-fatal): {e}")
-
-            # ── CORS Misconfiguration Probe ──
-            try:
-                from core.exploitation.cors_probe import run_cors_probe
-                cors_findings = await run_cors_probe(self.ctx)
-                for f in cors_findings:
-                    self.ctx.add_vulnerability(f)
-                if cors_findings:
-                    logger.info(f"[CORSProbe] {len(cors_findings)} CORS misconfiguration findings")
-                self._log_activity("cors_probe", f"CORS: {len(cors_findings)} findings",
-                                   tool="cors_probe")
-            except Exception as e:
-                logger.warning(f"[CORSProbe] failed (non-fatal): {e}")
-
-            # ── HTTP Request Smuggling Probe ──
-            try:
-                from core.exploitation.smuggling_probe import run_smuggling_probe
-                smuggle_findings = await run_smuggling_probe(self.ctx)
-                for f in smuggle_findings:
-                    self.ctx.add_vulnerability(f)
-                if smuggle_findings:
-                    logger.info(f"[SmugglingProbe] {len(smuggle_findings)} request smuggling findings")
-                self._log_activity("smuggling_probe", f"Smuggling: {len(smuggle_findings)} findings",
-                                   tool="smuggling_probe")
-            except Exception as e:
-                logger.warning(f"[SmugglingProbe] failed (non-fatal): {e}")
-
-            # ── Host Header Injection Probe ──
-            try:
-                from core.exploitation.host_header_probe import run_host_header_probe
-                hhi_findings = await run_host_header_probe(self.ctx)
-                for f in hhi_findings:
-                    self.ctx.add_vulnerability(f)
-                if hhi_findings:
-                    logger.info(f"[HostHeaderProbe] {len(hhi_findings)} host header injection findings")
-                self._log_activity("host_header_probe", f"HostHeader: {len(hhi_findings)} findings",
-                                   tool="host_header_probe")
-            except Exception as e:
-                logger.warning(f"[HostHeaderProbe] failed (non-fatal): {e}")
-
-            # ── Open Redirect Probe ──
-            try:
-                from core.exploitation.open_redirect_probe import run_open_redirect_probe
-                redir_findings = await run_open_redirect_probe(self.ctx)
-                for f in redir_findings:
-                    self.ctx.add_vulnerability(f)
-                if redir_findings:
-                    logger.info(f"[OpenRedirectProbe] {len(redir_findings)} open redirect findings")
-                self._log_activity("open_redirect_probe", f"OpenRedirect: {len(redir_findings)} findings",
-                                   tool="open_redirect_probe")
-            except Exception as e:
-                logger.warning(f"[OpenRedirectProbe] failed (non-fatal): {e}")
-
-            # ── Clickjacking Probe ──
-            try:
-                from core.exploitation.clickjack_probe import run_clickjack_probe
-                click_findings = await run_clickjack_probe(self.ctx)
-                for f in click_findings:
-                    self.ctx.add_vulnerability(f)
-                if click_findings:
-                    logger.info(f"[ClickjackProbe] {len(click_findings)} clickjacking findings")
-                self._log_activity("clickjack_probe", f"Clickjacking: {len(click_findings)} findings",
-                                   tool="clickjack_probe")
-            except Exception as e:
-                logger.warning(f"[ClickjackProbe] failed (non-fatal): {e}")
-
-            # ── File Upload Vulnerability Probe ──
-            try:
-                from core.exploitation.file_upload_probe import run_file_upload_probe
-                upload_findings = await run_file_upload_probe(self.ctx)
-                for f in upload_findings:
-                    self.ctx.add_vulnerability(f)
-                if upload_findings:
-                    logger.info(f"[FileUploadProbe] {len(upload_findings)} file upload findings")
-                self._log_activity("file_upload_probe", f"FileUpload: {len(upload_findings)} findings",
-                                   tool="file_upload_probe")
-            except Exception as e:
-                logger.warning(f"[FileUploadProbe] failed (non-fatal): {e}")
-
-            # ── Cache Poisoning / Web Cache Deception Probe ──
-            try:
-                from core.exploitation.cache_poison_probe import run_cache_poison_probe
-                cache_findings = await run_cache_poison_probe(self.ctx)
-                for f in cache_findings:
-                    self.ctx.add_vulnerability(f)
-                if cache_findings:
-                    logger.info(f"[CachePoisonProbe] {len(cache_findings)} cache poisoning findings")
-                self._log_activity("cache_poison_probe", f"CachePoison: {len(cache_findings)} findings",
-                                   tool="cache_poison_probe")
-            except Exception as e:
-                logger.warning(f"[CachePoisonProbe] failed (non-fatal): {e}")
-
-            # ── SSTI (Server-Side Template Injection) Probe ──
-            try:
-                from core.exploitation.ssti_probe import run_ssti_probe
-                ssti_findings = await run_ssti_probe(self.ctx)
-                for f in ssti_findings:
-                    self.ctx.add_vulnerability(f)
-                if ssti_findings:
-                    logger.info(f"[SSTIProbe] {len(ssti_findings)} SSTI findings")
-                self._log_activity("ssti_probe", f"SSTI: {len(ssti_findings)} findings",
-                                   tool="ssti_probe")
-            except Exception as e:
-                logger.warning(f"[SSTIProbe] failed (non-fatal): {e}")
-
-            # ── XXE (XML External Entity) Probe ──
-            try:
-                from core.exploitation.xxe_probe import run_xxe_probe
-                xxe_findings = await run_xxe_probe(self.ctx)
-                for f in xxe_findings:
-                    self.ctx.add_vulnerability(f)
-                if xxe_findings:
-                    logger.info(f"[XXEProbe] {len(xxe_findings)} XXE findings")
-                self._log_activity("xxe_probe", f"XXE: {len(xxe_findings)} findings",
-                                   tool="xxe_probe")
-            except Exception as e:
-                logger.warning(f"[XXEProbe] failed (non-fatal): {e}")
-
-            # ── Mass Assignment Probe ──
-            try:
-                from core.exploitation.mass_assign_probe import run_mass_assign_probe
-                mass_findings = await run_mass_assign_probe(self.ctx)
-                for f in mass_findings:
-                    self.ctx.add_vulnerability(f)
-                if mass_findings:
-                    logger.info(f"[MassAssignProbe] {len(mass_findings)} mass assignment findings")
-                self._log_activity("mass_assign_probe", f"MassAssign: {len(mass_findings)} findings",
-                                   tool="mass_assign_probe")
-            except Exception as e:
-                logger.warning(f"[MassAssignProbe] failed (non-fatal): {e}")
-
-            # ── API Rate Limiting Probe ──
-            try:
-                from core.exploitation.rate_limit_probe import run_rate_limit_probe
-                rate_findings = await run_rate_limit_probe(self.ctx)
-                for f in rate_findings:
-                    self.ctx.add_vulnerability(f)
-                if rate_findings:
-                    logger.info(f"[RateLimitProbe] {len(rate_findings)} missing rate limit findings")
-                self._log_activity("rate_limit_probe", f"RateLimit: {len(rate_findings)} findings",
-                                   tool="rate_limit_probe")
-            except Exception as e:
-                logger.warning(f"[RateLimitProbe] failed (non-fatal): {e}")
-
-            # ── HTTP Parameter Pollution Probe ──
-            try:
-                from core.exploitation.hpp_probe import run_hpp_probe
-                hpp_findings = await run_hpp_probe(self.ctx)
-                for f in hpp_findings:
-                    self.ctx.add_vulnerability(f)
-                if hpp_findings:
-                    logger.info(f"[HPPProbe] {len(hpp_findings)} HPP findings")
-                self._log_activity("hpp_probe", f"HPP: {len(hpp_findings)} findings",
-                                   tool="hpp_probe")
-            except Exception as e:
-                logger.warning(f"[HPPProbe] failed (non-fatal): {e}")
-
-            # ── WebSocket Security Probe ──
-            try:
-                from core.exploitation.websocket_probe import run_websocket_probe
-                ws_findings = await run_websocket_probe(self.ctx)
-                for f in ws_findings:
-                    self.ctx.add_vulnerability(f)
-                if ws_findings:
-                    logger.info(f"[WebSocketProbe] {len(ws_findings)} WebSocket findings")
-                self._log_activity("websocket_probe", f"WebSocket: {len(ws_findings)} findings",
-                                   tool="websocket_probe")
-            except Exception as e:
-                logger.warning(f"[WebSocketProbe] failed (non-fatal): {e}")
-
-            # ── Email Header Injection Probe ──
-            try:
-                from core.exploitation.email_inject_probe import run_email_inject_probe
-                email_findings = await run_email_inject_probe(self.ctx)
-                for f in email_findings:
-                    self.ctx.add_vulnerability(f)
-                if email_findings:
-                    logger.info(f"[EmailInjectProbe] {len(email_findings)} email injection findings")
-                self._log_activity("email_inject_probe", f"EmailInject: {len(email_findings)} findings",
-                                   tool="email_inject_probe")
-            except Exception as e:
-                logger.warning(f"[EmailInjectProbe] failed (non-fatal): {e}")
-
-            # ── Cookie Security Probe ──
-            try:
-                from core.exploitation.cookie_probe import run_cookie_probe
-                cookie_findings = await run_cookie_probe(self.ctx)
-                for f in cookie_findings:
-                    self.ctx.add_vulnerability(f)
-                if cookie_findings:
-                    logger.info(f"[CookieProbe] {len(cookie_findings)} cookie security findings")
-                self._log_activity("cookie_probe", f"Cookie: {len(cookie_findings)} findings",
-                                   tool="cookie_probe")
-            except Exception as e:
-                logger.warning(f"[CookieProbe] failed (non-fatal): {e}")
-
-            # ── GraphQL Query Depth/Complexity DoS Probe ──
-            try:
-                from core.exploitation.graphql_dos_probe import run_graphql_dos_probe
-                gql_dos_findings = await run_graphql_dos_probe(self.ctx)
-                for f in gql_dos_findings:
-                    self.ctx.add_vulnerability(f)
-                if gql_dos_findings:
-                    logger.info(f"[GraphQLDoSProbe] {len(gql_dos_findings)} GraphQL DoS findings")
-                self._log_activity("graphql_dos_probe", f"GraphQLDoS: {len(gql_dos_findings)} findings",
-                                   tool="graphql_dos_probe")
-            except Exception as e:
-                logger.warning(f"[GraphQLDoSProbe] failed (non-fatal): {e}")
-
-            # ── Insecure Deserialization Probe ──
-            try:
-                from core.exploitation.deserial_probe import run_deserial_probe
-                deserial_findings = await run_deserial_probe(self.ctx)
-                for f in deserial_findings:
-                    self.ctx.add_vulnerability(f)
-                if deserial_findings:
-                    logger.info(f"[DeserialProbe] {len(deserial_findings)} deserialization findings")
-                self._log_activity("deserial_probe", f"Deserialization: {len(deserial_findings)} findings",
-                                   tool="deserial_probe")
-            except Exception as e:
-                logger.warning(f"[DeserialProbe] failed (non-fatal): {e}")
-
-            # ── DNS Rebinding Probe ──
-            try:
-                from core.exploitation.dns_rebind_probe import run_dns_rebind_probe
-                dns_findings = await run_dns_rebind_probe(self.ctx)
-                for f in dns_findings:
-                    self.ctx.add_vulnerability(f)
-                if dns_findings:
-                    logger.info(f"[DNSRebindProbe] {len(dns_findings)} DNS rebinding findings")
-                self._log_activity("dns_rebind_probe", f"DNSRebind: {len(dns_findings)} findings",
-                                   tool="dns_rebind_probe")
-            except Exception as e:
-                logger.warning(f"[DNSRebindProbe] failed (non-fatal): {e}")
-
-            # ── Server-Side Prototype Pollution Probe ──
-            try:
-                from core.exploitation.prototype_pollution_probe import run_prototype_pollution_probe
-                pp_findings = await run_prototype_pollution_probe(self.ctx)
-                for f in pp_findings:
-                    self.ctx.add_vulnerability(f)
-                if pp_findings:
-                    logger.info(f"[PrototypePollutionProbe] {len(pp_findings)} prototype pollution findings")
-                self._log_activity("prototype_pollution_probe", f"ProtoPollution: {len(pp_findings)} findings",
-                                   tool="prototype_pollution_probe")
-            except Exception as e:
-                logger.warning(f"[PrototypePollutionProbe] failed (non-fatal): {e}")
-
-            # ── Logging/Monitoring Failure Detection Probe ──
-            try:
-                from core.exploitation.logging_detect_probe import run_logging_detect_probe
-                log_findings = await run_logging_detect_probe(self.ctx)
-                for f in log_findings:
-                    self.ctx.add_vulnerability(f)
-                if log_findings:
-                    logger.info(f"[LoggingDetectProbe] {len(log_findings)} logging/monitoring findings")
-                self._log_activity("logging_detect_probe", f"LoggingDetect: {len(log_findings)} findings",
-                                   tool="logging_detect_probe")
-            except Exception as e:
-                logger.warning(f"[LoggingDetectProbe] failed (non-fatal): {e}")
+                logger.warning(f"[AuthedBattery] failed (non-fatal): {e}")
 
             # ── Semantic fuzzer + coverage-guided loop (Phase 1.4 + 4.1) ──
             try:
@@ -3590,8 +3820,11 @@ class CentralBrain(
                         base_url = f"https://{base_url}"
 
                     ep_list = []
-                    for raw_ep in (getattr(self.ctx, "endpoints", []) or [])[:50]:
-                        ep = raw_ep if isinstance(raw_ep, str) else raw_ep.get("url", raw_ep.get("path", ""))
+                    _raw_eps = getattr(self.ctx, "endpoints", []) or []
+                    if isinstance(_raw_eps, dict):
+                        _raw_eps = list(_raw_eps.keys())
+                    for raw_ep in list(_raw_eps)[:50]:
+                        ep = raw_ep if isinstance(raw_ep, str) else (raw_ep.get("url", raw_ep.get("path", "")) if isinstance(raw_ep, dict) else str(raw_ep))
                         if ep:
                             ep_list.append(ep)
 
@@ -3679,9 +3912,11 @@ class CentralBrain(
             # Existing expert-mode probes: JWT kid, prototype pollution, HTTP
             # smuggling sweep, SSRF metadata, timing user-enum, captcha bypass.
             try:
-                from core.exploitation.expert_probes import run_all_expert_probes
-                exp_findings = await run_all_expert_probes(self.ctx)
-                logger.info(f"[ExpertProbes] Ran full expert sweep: {len(exp_findings)} finding(s)")
+                if "exploitation:expert_probes" not in self._coverage_ran:
+                    from core.exploitation.expert_probes import run_all_expert_probes
+                    exp_findings = await run_all_expert_probes(self.ctx)
+                    logger.info(f"[ExpertProbes] Ran full expert sweep: {len(exp_findings)} finding(s)")
+                    self._coverage_ran.add("exploitation:expert_probes")
             except Exception as _e:
                 logger.warning(f"[ExpertProbes] sweep failed (non-fatal): {_e}")
 
@@ -3852,6 +4087,20 @@ class CentralBrain(
                 await self._run_dynamic_hypothesis_cycle("second_order")
             except Exception as _pa_err:
                 logger.warning(f"[Pα] Second-order cycle failed (non-fatal): {_pa_err}")
+
+            # Coverage-gate: verify the expert exploit sweep ran before EXPLOITATION closes.
+            try:
+                await self._assert_phase_coverage("exploitation")
+            except Exception as e:
+                logger.debug(f"[CoverageGate] exploitation skipped: {e}")
+
+            # Attack-graph chaining: combine confirmed primitives into scored,
+            # narrated end-to-end chains (graph detector + LLM-proposed), rescore
+            # findings by chain membership, persist. Non-fatal.
+            try:
+                await self._run_attack_chaining()
+            except Exception as e:
+                logger.warning(f"[Chaining] failed (non-fatal): {e}")
 
         elif phase == ExecutionPhase.REPORTING.value:
             # Convergence validation before reporting
@@ -4181,6 +4430,13 @@ class CentralBrain(
                 except Exception as e:
                     logger.warning(f"[Screenshots] Capture failed (non-fatal): {e}")
 
+                # Normalize a report-grade PoC bundle per finding from the evidence
+                # already gathered (proof, response snapshot, screenshot, oracle).
+                try:
+                    self._build_poc_bundles()
+                except Exception as e:
+                    logger.debug(f"[PoC] bundle build skipped: {e}")
+
             # Custom Nuclei Template Generation — create templates from discovered patterns
             if self.ctx.vulnerabilities:
                 try:
@@ -4487,22 +4743,43 @@ class CentralBrain(
 
 
     async def _run_phase(self, phase: str):
+        # Native agentic loop only works on models with native tool-calling
+        # (Bedrock + Claude). Everything else — claude_cli, Bedrock + DeepSeek/
+        # Gemini/Llama — drives the phase through the JSON-planner path, which
+        # works for any model that emits JSON. The capability is decided by the
+        # active provider+model, so this stays correct when the model changes.
         try:
-            await self._run_phase_agentic(phase)
-        except Exception as e:
-            logger.warning(f"Agentic executor failed: {e}, falling back to Approach A")
-            if self.execution_config.should_use_mode_a_primary():
-                try:
-                    await self._run_phase_approach_a(phase)
-                except Exception as e2:
-                    logger.exception(f"Approach A failed: {e2}")
-                    if self.execution_config.can_fallback_to_b():
-                        logger.info("Falling back to Approach B...")
-                        await self._run_phase_approach_b(phase)
-            elif self.execution_config.should_use_mode_b_primary():
-                await self._run_phase_approach_b(phase)
-            else:
-                await self._run_phase_legacy(phase)
+            _native_tools = bool(getattr(self, "llm", None)
+                                 and self.llm.supports_native_tools())
+        except Exception:
+            _native_tools = False
+
+        # Only attempt the native agentic loop when the model actually supports
+        # tool-calling. For claude_cli / Bedrock DeepSeek·Gemini·Llama it always
+        # returns 0 steps and wastes two LLM calls, so go straight to the
+        # JSON-planner path.
+        if _native_tools:
+            try:
+                await self._run_phase_agentic(phase)
+                return
+            except Exception as e:
+                logger.warning(f"Agentic executor failed: {e}, falling back to Approach A")
+        else:
+            logger.info(f"[{phase}] model has no native tool-calling — using "
+                        f"JSON-planner path directly")
+
+        if self.execution_config.should_use_mode_a_primary():
+            try:
+                await self._run_phase_approach_a(phase)
+            except Exception as e2:
+                logger.exception(f"Approach A failed: {e2}")
+                if self.execution_config.can_fallback_to_b():
+                    logger.info("Falling back to Approach B...")
+                    await self._run_phase_approach_b(phase)
+        elif self.execution_config.should_use_mode_b_primary():
+            await self._run_phase_approach_b(phase)
+        else:
+            await self._run_phase_legacy(phase)
 
     async def _run_phase_agentic(self, phase: str):
         logger.info(f"\n>>> AGENTIC EXECUTION: phase={phase}")
@@ -4756,11 +5033,23 @@ class CentralBrain(
         # concluded there was nothing exploitable in this phase.
         no_llm_calls = getattr(result, "llm_calls", 0) == 0
         had_llm_errors = bool(getattr(result, "llm_errors", 0))
-        if result.steps_taken == 0 and len(result.findings) == 0 and (no_llm_calls or had_llm_errors):
+        # Models without native tool-calling (Claude CLI, Bedrock DeepSeek/Gemini/
+        # Llama) can't drive the agentic tool loop — it returns 0 steps — so route
+        # those to the JSON-planner path instead of silently doing nothing. The
+        # capability is decided by the active provider+model.
+        try:
+            native_tools = bool(getattr(self, "llm", None)
+                                and self.llm.supports_native_tools())
+        except Exception:
+            native_tools = False
+        if (result.steps_taken == 0 and len(result.findings) == 0
+                and (no_llm_calls or had_llm_errors or not native_tools)):
+            reason = ("no native tool-calling for this model" if not native_tools
+                      else "LLM unreachable")
             raise RuntimeError(
                 f"Agentic executor produced no results for {phase} "
-                f"(llm_calls={getattr(result, 'llm_calls', '?')}, "
-                f"llm_errors={getattr(result, 'llm_errors', '?')}) — falling back")
+                f"(llm_calls={getattr(result, 'llm_calls', 0)}, "
+                f"llm_errors={getattr(result, 'llm_errors', 0)}, {reason}) — falling back")
 
     def _deterministic_fallback(self, phase: str, executed_caps: set = None):
         from core.common.schemas import BrainDecision, BrainDecisionAction, TaskSpec, CapabilityType
@@ -4860,6 +5149,84 @@ class CentralBrain(
             reason="planner_fallback",
             tasks=tasks,
         )
+
+    async def _safe_specialist_sweep(self, reason: str):
+        """Run the systematic specialist sweep, swallowing errors so it is safe
+        to launch as a background task. Idempotent via _families_spawned."""
+        try:
+            from core.orchestration.family_scheduler import run_specialist_probes
+            await run_specialist_probes(self)
+        except Exception as e:
+            logger.warning(f"[FamilyScheduler] {reason} sweep failed (non-fatal): {e}")
+
+    async def _run_network_verification(self):
+        """Dispatch allow-listed Metasploit auxiliary scanners against open
+        network services found during recon. Read-only (Level-A). Opt-in via
+        NEO_ENABLE_MSF; each run is scope-validated and module-allow-listed in
+        the adapter. Idempotent per scan."""
+        from core.utils.scan_flags import enable_metasploit
+        if not enable_metasploit():
+            return
+        if getattr(self, "_netverify_ran", False):
+            return
+        self._netverify_ran = True
+
+        from core.tools.adapters.metasploit import _PORT_DEFAULT, _host
+        ports = dict(getattr(self.ctx, "ports", {}) or {})
+        host = _host(self.target or "")
+        # Prefer a resolved IP when we have one (msf RHOSTS likes IPs).
+        ips = list(getattr(self.ctx, "ips", []) or [])
+        rhost = ips[0] if ips else host
+        if not rhost:
+            return
+
+        jobs = []
+        for p_str, _svc in ports.items():
+            try:
+                p = int(str(p_str).split("/")[0])
+            except (TypeError, ValueError):
+                continue
+            mod = _PORT_DEFAULT.get(p)
+            if mod:
+                jobs.append((p, mod))
+        if not jobs:
+            logger.info("[MSF] no open services matched an aux-scanner module")
+            return
+
+        from core.security.authorization import AuthContext
+        allowed_tools = list(self.tools.tools.keys()) if hasattr(self, "tools") and hasattr(self.tools, "tools") else []
+        auth_context = AuthContext(allowed_tools=allowed_tools, has_elevated_privilege=True,
+                                   target_profile=getattr(self, "target_profile", None))
+        session_id = "session_netverify"
+
+        logger.info(f"[MSF] network verification: {len(jobs)} module(s) on {rhost}")
+        import re as _re
+        for p, mod in jobs:
+            try:
+                params = {"target": rhost, "module": mod, "rport": p}
+                result = await self.tool_invocation_engine.invoke_from_capability(
+                    "network_vuln_verification", rhost, params, session_id, auth_context)
+                out = str(getattr(result, "stdout", "") or "")
+                # Aux scanners print a clear vulnerable signal; capture only that.
+                if _re.search(r"\bVULNERABLE\b|appears? (?:to be )?vulnerable|is likely VULNERABLE", out, _re.I):
+                    self.ctx.add_vulnerability({
+                        "title": f"Metasploit {mod.split('/')[-1]} reports target VULNERABLE",
+                        "type": "NETWORK_SERVICE",
+                        "severity": "HIGH",
+                        "location": f"{rhost}:{p}",
+                        "target": rhost,
+                        "details": f"msf module {mod} flagged {rhost}:{p} as vulnerable.",
+                        "proof": out[-1500:],
+                        "tool": "msf_scanner",
+                    })
+                    logger.info(f"[MSF] VULNERABLE: {mod} on {rhost}:{p}")
+            except Exception as e:
+                logger.debug(f"[MSF] {mod} on {rhost}:{p} failed: {e}")
+
+        try:
+            await self._flush_partial("msf_network_verification")
+        except Exception:
+            pass
 
     async def _run_phase_approach_a(self, phase: str):
         logger.debug(f"phase={phase} approach=A")
@@ -4965,7 +5332,11 @@ class CentralBrain(
                 f"CRITICAL: Do NOT repeat any capability or task that is listed in Already Executed Tasks."
             )
             
-            response = await self.llm.generate_response(prompt, system=BRAIN_SYSTEM, response_format="json")
+            # Strategic planner: the highest-leverage reasoning call in the system —
+            # its output drives every downstream task. Runs on LARGE (was silently
+            # defaulting to SMALL). Budget governor still auto-downgrades near cap.
+            response = await self.llm.generate_response(
+                prompt, system=BRAIN_SYSTEM, response_format="json", tier=TaskTier.LARGE)
 
             from core.common.normalizer import PlannerResponseNormalizer
             decision = None
@@ -4976,7 +5347,8 @@ class CentralBrain(
                 except Exception as e:
                     if _attempt == 0:
                         logger.warning(f"Planner parse failed (attempt 1), retrying: {e}")
-                        response = await self.llm.generate_response(prompt, system=BRAIN_SYSTEM, response_format="json")
+                        response = await self.llm.generate_response(
+                            prompt, system=BRAIN_SYSTEM, response_format="json", tier=TaskTier.LARGE)
                     else:
                         logger.error(f"Planner parse failed after retry: {e}")
 
@@ -4987,9 +5359,25 @@ class CentralBrain(
                     break
                 
             if decision.action in (BrainDecisionAction.COMPLETE, BrainDecisionAction.PHASE_COMPLETE):
-                logger.info(f"Phase {phase} complete.")
-                break
-                
+                # Guard: TargetMemory pre-primes context with endpoints from prior
+                # scans, which makes the planner declare a phase "complete" before
+                # running a single task. Never accept completion on iteration 0 with
+                # nothing executed — force the deterministic baseline so every phase
+                # does real work.
+                if agents_this_phase == 0 and not task_history:
+                    logger.warning(
+                        f"[{phase}] planner returned '{decision.action.value}' on first "
+                        f"iteration with 0 tasks — forcing deterministic baseline")
+                    decision = self._deterministic_fallback(phase, set())
+                    if decision is None or decision.action in (
+                            BrainDecisionAction.COMPLETE, BrainDecisionAction.PHASE_COMPLETE):
+                        logger.info(f"Phase {phase} complete.")
+                        break
+                    # fall through to execute the deterministic tasks
+                else:
+                    logger.info(f"Phase {phase} complete.")
+                    break
+
             tasks = decision.tasks
             if not tasks:
                 logger.info("No tasks returned. Exiting phase.")
@@ -6810,8 +7198,12 @@ class CentralBrain(
                 elif v:
                     fps.append(str(v))
         # Response-header fingerprints (x-powered-by etc.) recorded on ctx.
-        for h in list(getattr(self.ctx, "server_headers", {}) or {}).items():
-            fps.append(f"{h[0]}: {h[1]}")
+        # NOTE: call .items() on the dict, not on list(dict) (which is a list of
+        # keys and has no .items()).
+        _hdrs = getattr(self.ctx, "server_headers", {}) or {}
+        if isinstance(_hdrs, dict):
+            for _hk, _hv in _hdrs.items():
+                fps.append(f"{_hk}: {_hv}")
         quirks = lookup_all(fps)
         if quirks:
             self.ctx.framework_quirks = quirks
@@ -7273,10 +7665,94 @@ class CentralBrain(
         if findings:
             logger.info(f"[ModernAPI] added {len(findings)} GraphQL/gRPC/WebSocket findings")
 
+    async def _bootstrap_self_registration(self) -> None:
+        """Opt-in (AUTH_SELF_REGISTER=true): create a throwaway account on an
+        open-registration target and seed ctx.auth_credentials so the login
+        machinery authenticates. Default OFF — registering an account is an
+        outward action the operator opts into. Best-effort and non-fatal."""
+        from core.common.config import get_config
+        cfg = get_config()
+        if not cfg.get_bool("AUTH_SELF_REGISTER", False):
+            return
+        import secrets
+        from urllib.parse import urljoin
+        from core.security.scoped_http import get_scoped_client
+
+        base = self.ctx.target
+        if not base.startswith(("http://", "https://")):
+            base = "https://" + base
+        base = base.split("#")[0].rstrip("/") + "/"
+
+        candidates = []
+        if cfg.get("AUTH_REGISTER_URL", ""):
+            candidates.append(cfg.get("AUTH_REGISTER_URL", ""))
+        for p in ("api/Users", "api/auth/register", "api/register",
+                  "api/v1/auth/register", "register", "users"):
+            candidates.append(urljoin(base, p))
+        login_url = cfg.get("AUTH_LOGIN_URL", "") or urljoin(base, "rest/user/login")
+        uname_field = cfg.get("AUTH_USERNAME_FIELD", "email") or "email"
+        pw_field = cfg.get("AUTH_PASSWORD_FIELD", "password") or "password"
+        tok_path = cfg.get("AUTH_TOKEN_JSON_PATH", "authentication.token") or "authentication.token"
+
+        async def _register_one(client, role: str):
+            email = f"scan_{secrets.token_hex(5)}@example.com"
+            pw = "Sc@n_" + secrets.token_hex(6)
+            payloads = [
+                {"email": email, "password": pw, "passwordRepeat": pw,
+                 "securityQuestion": {"id": 1}, "securityAnswer": "test"},  # juice-shop
+                {"email": email, "password": pw},
+                {"username": email, "password": pw},
+            ]
+            for url in candidates:
+                for body in payloads:
+                    try:
+                        r = await client.post(url, json=body)
+                    except Exception:
+                        continue
+                    if r.status_code in (200, 201):
+                        logger.info(f"[Auth] self-registered throwaway account "
+                                    f"'{role}' at {url} ({r.status_code})")
+                        return {
+                            "role": role, "auth_type": "json", "login_url": login_url,
+                            "username": email, "password": pw,
+                            "username_field": uname_field, "password_field": pw_field,
+                            "token_json_path": tok_path,
+                        }
+            return None
+
+        # Two distinct identities so cross-role replay / AuthzMatrix can test
+        # HORIZONTAL access control (identity A reaching identity B's objects =
+        # IDOR/BOLA), not just vertical (unauth vs user). Falls back to one if the
+        # target only accepts a single signup.
+        creds = []
+        async with get_scoped_client(timeout=20, follow_redirects=True) as client:
+            for role in ("user_a", "user_b"):
+                c = await _register_one(client, role)
+                if c:
+                    creds.append(c)
+        if not creds:
+            logger.info("[Auth] self-registration: no registration endpoint accepted a signup")
+            return
+        lst = list(getattr(self.ctx, "auth_credentials", None) or [])
+        lst.extend(creds)
+        self.ctx.auth_credentials = lst
+        logger.info(f"[Auth] self-registration seeded {len(creds)} identity(ies) "
+                    f"for horizontal access-control testing: {[c['role'] for c in creds]}")
+
     async def _setup_auth_session(self) -> None:
         self.auth_session = None
         self.multi_auth = None
         try:
+            # 0. Zero-config auth: when no creds are supplied and self-registration
+            # is enabled, create a throwaway account so the authenticated surface
+            # (IDOR/JWT/business-logic) is reachable. Best-effort; seeds
+            # ctx.auth_credentials which the login machinery below consumes.
+            try:
+                if not (getattr(self.ctx, "auth_credentials", None)):
+                    await self._bootstrap_self_registration()
+            except Exception as _e:
+                logger.warning(f"[Auth] self-registration bootstrap failed (non-fatal): {_e}")
+
             # 1. Multi-role credentials supplied by the UI / CLI.
             creds = getattr(self.ctx, "auth_credentials", None) \
                 or [c for c in getattr(self.ctx, "harvested_creds", []) if isinstance(c, dict) and c.get("username")]
@@ -7951,7 +8427,7 @@ CRITICAL RULES:
             "harvested_creds_count": len(self.ctx.harvested_creds or []),
         }
         # 3. SMALL tier — this is summarisation, not reasoning
-        exec_summary = await self.llm.generate(
+        exec_summary = await self.llm.generate_response(
             "Write a 3-paragraph professional executive summary for this pentest. "
             "Cover: overall risk posture, key finding categories, recommendations. "
             "Use the scan-time analyst notes as your primary source; the fact "
@@ -8065,6 +8541,30 @@ CRITICAL RULES:
                 logger.info(f"POC reproduction scripts generated: {poc_files}")
         except Exception as pe:
             logger.warning(f"POC generation failed (non-fatal): {pe}")
+
+        # Coverage ledger into the persisted report so finished scans keep the
+        # "what was tested vs UNKNOWN" picture (§23/§24) for the UI.
+        try:
+            _oos = []
+            try:
+                from core.security.authorization import TargetScopeValidator
+                _oos = TargetScopeValidator.get().discovered_out_of_scope()
+            except Exception:
+                pass
+            report["coverage"] = {
+                "ledger": getattr(self.ctx, "coverage_ledger", {}) or {},
+                "surface": getattr(self.ctx, "surface_coverage", {}) or {},
+                "discovered_out_of_scope": _oos,
+                "dom_sinks": getattr(self.ctx, "dom_sinks", {}) or {},
+                # Coverage-vs-plan: what the Test Plan scoped in and what it skipped
+                # (skipped ≠ tested-clean — UNKNOWN≠CLEAN).
+                "engagement_plan": getattr(self.ctx, "engagement_plan", {}) or {},
+                "plan_skipped_families": getattr(self.ctx, "plan_skipped_families", []) or [],
+            }
+            # Threat model = Phase 1 deliverable.
+            report["threat_model"] = getattr(self.ctx, "threat_model", {}) or {}
+        except Exception:
+            pass
 
         # Save  (ts computed above, shared with the validation/dedup scan_id)
         report_path = self.report_dir / f"pentest_{ts}.json"
@@ -8484,11 +8984,14 @@ CRITICAL RULES:
             self.ctx.update('osint_failed', True)
 
     def _extract_company_name(self, domain: str) -> str:
-        # Remove TLD
-        parts = domain.split('.')
-        if len(parts) > 1:
-            return parts[0]
-        return domain
+        # Strip env/subdomain prefixes + public suffix → registrable org label
+        # (preview.owasp-juice.shop -> 'owasp-juice', not 'preview').
+        try:
+            from core.intelligence.osint_engine import derive_company_name
+            return derive_company_name(domain)
+        except Exception:
+            parts = domain.split('.')
+            return parts[0] if len(parts) > 1 else domain
     
     async def _run_phase_deep_reconnaissance(self):
         emp_count = len(getattr(self.ctx, "discovered_employees", []) or self.ctx.get("discovered_employees", []) or [])

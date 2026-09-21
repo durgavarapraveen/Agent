@@ -32,6 +32,12 @@ def _always_true(_ctx) -> bool:
 
 def default_dag() -> Dict[str, PhaseNode]:
     return {
+        "BUSINESS_UNDERSTANDING": PhaseNode(
+            name="BUSINESS_UNDERSTANDING",
+            depends_on=set(),
+            prereq_predicate=_always_true,
+            completion_predicate=_always_true,
+        ),
         "RECON": PhaseNode(
             name="RECON",
             depends_on=set(),

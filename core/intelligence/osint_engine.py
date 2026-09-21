@@ -12,6 +12,44 @@ import hashlib
 
 logger = logging.getLogger(__name__)
 
+# Subdomain/env labels that are NOT the company name — strip these before
+# picking the registrable label. Prevents GitHub/OSINT from querying org
+# "preview" for preview.owasp-juice.shop (→ 0 repos).
+_ENV_PREFIXES = {
+    "www", "preview", "staging", "stage", "app", "apps", "api", "dev",
+    "test", "testing", "demo", "uat", "qa", "beta", "m", "mobile", "portal",
+    "dashboard", "admin", "web", "prod", "production", "sandbox", "edge",
+}
+# Second-level public suffixes where the org is one label further left.
+_MULTI_TLD = {"co", "com", "org", "net", "gov", "ac", "edu"}
+# PaaS hosts whose app label (one further left) IS the org.
+_PAAS_HOSTS = {
+    "herokuapp", "vercel", "netlify", "github", "gitlab", "firebaseapp",
+    "onrender", "fly", "pythonanywhere", "azurewebsites", "appspot",
+    "pages", "surge", "glitch", "repl",
+}
+
+
+def derive_company_name(domain: str) -> str:
+    """Best-effort company/org label from a hostname. Strips scheme, port,
+    env/subdomain prefixes, and the public suffix, returning the registrable
+    label (e.g. preview.owasp-juice.shop -> 'owasp-juice', api.example.co.uk
+    -> 'example')."""
+    d = (domain or "").strip().lower()
+    d = d.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+    parts = [p for p in d.split(".") if p]
+    if len(parts) <= 1:
+        return d
+    # Drop leading env/service labels.
+    while len(parts) > 2 and parts[0] in _ENV_PREFIXES:
+        parts = parts[1:]
+    # Registrable label is the one before the public suffix; step one more left
+    # for two-part suffixes like co.uk / com.au or PaaS hosts like herokuapp.com.
+    idx = len(parts) - 2
+    if idx > 0 and (parts[idx] in _MULTI_TLD or parts[idx] in _PAAS_HOSTS):
+        idx -= 1
+    return parts[idx] if 0 <= idx < len(parts) else parts[0]
+
 
 @dataclass
 class Employee:

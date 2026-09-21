@@ -16,6 +16,45 @@ export default function Settings() {
   const [revealKey, setRevealKey] = useState(false);
   const [keySavedMsg, setKeySavedMsg] = useState("");
 
+  // LLM provider (Claude CLI / Amazon Bedrock / DeepSeek).
+  const [provider, setProvider] = useState("claude_cli");
+  const [providerMsg, setProviderMsg] = useState("");
+  // DeepSeek API key (only relevant when provider = deepseek).
+  const [dsKeyDraft, setDsKeyDraft] = useState("");
+  const [dsConfigured, setDsConfigured] = useState(false);
+  const [dsReveal, setDsReveal] = useState(false);
+  const [dsMsg, setDsMsg] = useState("");
+  // Metasploit auxiliary scanners (read-only network verification).
+  const [msfEnabled, setMsfEnabled] = useState(false);
+  const [msfMsg, setMsfMsg] = useState("");
+  useEffect(() => {
+    api.getLlmProvider().then(r => setProvider(r.provider || "claude_cli")).catch(() => {});
+    api.getDeepseekKey().then(r => setDsConfigured(!!r.configured)).catch(() => {});
+    api.getMetasploit().then(r => setMsfEnabled(!!r.enabled)).catch(() => {});
+  }, []);
+  const saveProvider = (p) => {
+    setProvider(p);
+    setProviderMsg("Saving…");
+    api.setLlmProvider(p)
+      .then(r => setProviderMsg(`Saved. ${r.note || "Applies to the next scan."}`))
+      .catch(() => setProviderMsg("Failed to save."));
+  };
+  const saveDsKey = () => {
+    setDsMsg("Saving…");
+    api.setDeepseekKey(dsKeyDraft.trim())
+      .then(r => { setDsConfigured(!!r.configured); setDsKeyDraft("");
+                   setDsMsg(r.configured ? "Saved. Applies to the next scan." : "Cleared."); })
+      .catch(() => setDsMsg("Failed to save."));
+  };
+  const toggleMsf = () => {
+    const next = !msfEnabled;
+    setMsfEnabled(next);
+    setMsfMsg("Saving…");
+    api.setMetasploit(next)
+      .then(r => { setMsfEnabled(!!r.enabled); setMsfMsg(r.note || "Saved."); })
+      .catch(() => { setMsfEnabled(!next); setMsfMsg("Failed to save."); });
+  };
+
   const update = (key, val) => {
     setDefaults(prev => {
       const next = { ...prev, [key]: val };
@@ -68,6 +107,92 @@ export default function Settings() {
           <button className="btn btn-primary" onClick={save}>
             {saved ? "Saved" : "Save Defaults"}
           </button>
+        </div>
+      </div>
+
+      <div className="card">
+        <h3>LLM Provider</h3>
+        <p style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 12 }}>
+          Which backend powers reasoning &amp; payload generation. Applies to the next scan you start.
+        </p>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <select value={provider} onChange={(e) => saveProvider(e.target.value)}
+            style={{ padding: "9px 14px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)", background: "var(--bg)", color: "var(--text-h)", fontSize: 13, width: 240 }}>
+            <option value="claude_cli">Claude CLI (Max/Pro subscription)</option>
+            <option value="bedrock">Amazon Bedrock</option>
+            <option value="deepseek">DeepSeek (API key)</option>
+          </select>
+          <span style={{
+            fontSize: 11, fontFamily: "var(--mono)", padding: "3px 9px", borderRadius: 6,
+            border: "1px solid var(--border)", color: "var(--text-h)",
+            background: "var(--accent-dim, rgba(0,113,227,0.10))",
+          }}>active: {provider}</span>
+        </div>
+        {providerMsg && (
+          <div style={{ marginTop: 10, fontSize: 12, color: "var(--text-dim)" }}>{providerMsg}</div>
+        )}
+        {provider === "bedrock" && (
+          <div style={{ marginTop: 8, fontSize: 12, color: "var(--orange)" }}>
+            Ensure your Bedrock model access is activated, or scans will produce no findings.
+          </div>
+        )}
+        {provider === "deepseek" && (
+          <div style={{ marginTop: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ color: "var(--text-dim)", fontWeight: 600, minWidth: 100, fontSize: 13 }}>DeepSeek API Key</span>
+              <input
+                type={dsReveal ? "text" : "password"}
+                value={dsKeyDraft}
+                onChange={(e) => { setDsKeyDraft(e.target.value); setDsMsg(""); }}
+                placeholder={dsConfigured ? "•••••••• (a key is saved — paste to replace)" : "sk-… paste your DeepSeek API key"}
+                style={{
+                  fontFamily: "var(--mono)", fontSize: 12, padding: "6px 10px",
+                  borderRadius: "var(--radius-sm)", border: "1px solid var(--border)",
+                  background: "var(--bg)", color: "var(--text-h)", minWidth: 320, flex: 1,
+                }}
+              />
+              <button className="btn" onClick={() => setDsReveal(v => !v)} style={{ fontSize: 12 }}>
+                {dsReveal ? "Hide" : "Show"}
+              </button>
+              <button className="btn btn-primary" disabled={!dsKeyDraft.trim()} onClick={saveDsKey} style={{ fontSize: 12 }}>
+                Save Key
+              </button>
+              {dsConfigured && (
+                <button className="btn" onClick={() => { setDsKeyDraft(""); api.setDeepseekKey("").then(() => { setDsConfigured(false); setDsMsg("Cleared."); }); }} style={{ fontSize: 12 }}>
+                  Clear
+                </button>
+              )}
+            </div>
+            <div style={{ marginTop: 6, fontSize: 12, color: dsConfigured ? "var(--green)" : "var(--orange)" }}>
+              {dsMsg || (dsConfigured ? "✓ A DeepSeek key is saved." : "No DeepSeek key set — scans will fail until you add one.")}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <h3>Metasploit (network verification)</h3>
+        <p style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 12 }}>
+          Runs <strong>read-only</strong> Metasploit <code>auxiliary/scanner</code> modules against open
+          network services (SMB, RDP, SSH, FTP, SMTP, HTTP) found during recon. No exploit or payload
+          modules run. Authorized targets only. Applies to the next scan you start.
+        </p>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <button className={msfEnabled ? "btn btn-primary" : "btn"} onClick={toggleMsf} style={{ fontSize: 13 }}>
+            {msfEnabled ? "Enabled — click to disable" : "Disabled — click to enable"}
+          </button>
+          <span style={{
+            fontSize: 11, fontFamily: "var(--mono)", padding: "3px 9px", borderRadius: 6,
+            border: "1px solid var(--border)", color: "var(--text-h)",
+            background: msfEnabled ? "rgba(48,209,88,0.12)" : "var(--accent-dim, rgba(0,113,227,0.10))",
+          }}>NEO_ENABLE_MSF: {msfEnabled ? "1" : "0"}</span>
+        </div>
+        {msfMsg && (
+          <div style={{ marginTop: 10, fontSize: 12, color: "var(--text-dim)" }}>{msfMsg}</div>
+        )}
+        <div style={{ marginTop: 8, fontSize: 12, color: "var(--orange)" }}>
+          Requires the msfconsole binary in the Kali container. Results appear as agent cards in Parallel
+          Agents, raw output in Tool Outputs, and any VULNERABLE hit as a finding.
         </div>
       </div>
 
@@ -187,7 +312,7 @@ export default function Settings() {
       <div className="card">
         <h3>About</h3>
         <div style={{ fontSize: 13, color: "var(--text-dim)", lineHeight: 1.8 }}>
-          <div><span style={{ color: "var(--text)", fontWeight: 600 }}>AntiGravity</span> v2.0 Autonomous Security Testing Engine</div>
+          <div><span style={{ color: "var(--text)", fontWeight: 600 }}>Neo</span> v2.0 Autonomous Security Testing Engine</div>
           <div>Coverage Matrix: 43 test types across 858+ cells</div>
           <div>Powered by multi-LLM reasoning with DeepSeek + Claude</div>
         </div>

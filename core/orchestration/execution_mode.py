@@ -34,7 +34,8 @@ class ExecutionConfig:
         callers must treat the LLM layer as unavailable and stay deterministic
         rather than silently substituting heuristic output for real LLM output."""
         has_creds = bool(
-            os.getenv("AWS_ACCESS_KEY_ID")
+            os.getenv("AWS_BEARER_TOKEN_BEDROCK")  # OpenAI-compatible gateway (Bearer)
+            or os.getenv("AWS_ACCESS_KEY_ID")
             or os.getenv("AWS_ROLE_ARN")
             or os.getenv("AWS_PROFILE")
             or os.getenv("AWS_WEB_IDENTITY_TOKEN_FILE")
@@ -52,8 +53,10 @@ class ExecutionConfig:
         return bool(getattr(self, "bedrock_available", False))
 
     def _log_config(self):
-        logger.info("Execution Config: Mode=%s, Provider=bedrock, bedrock_available=%s",
-                    self.mode.name, self.bedrock_available)
+        import os as _os
+        provider = (_os.getenv("LLM_PROVIDER") or "claude_cli").lower()
+        logger.info("Execution Config: Mode=%s, Provider=%s, bedrock_available=%s",
+                    self.mode.name, provider, self.bedrock_available)
 
     def is_mode_a_enabled(self) -> bool:
         return True

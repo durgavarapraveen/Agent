@@ -143,9 +143,15 @@ class BrowserAgent:
             )
             goals.append(goal)
 
-        # Add goals for specific discovered forms/pages
-        for ep in (getattr(self.ctx, "endpoints", []) or [])[:20]:
-            url = ep if isinstance(ep, str) else (ep.get("url", "") if isinstance(ep, dict) else "")
+        # Add goals for specific discovered forms/pages. ctx.endpoints may be a
+        # dict ({url: meta}) — slicing a dict raises TypeError(slice(None,20,None)),
+        # so normalize to a list first.
+        _eps = getattr(self.ctx, "endpoints", []) or []
+        if isinstance(_eps, dict):
+            _eps = list(_eps.keys())
+        for ep in list(_eps)[:20]:
+            url = ep if isinstance(ep, str) else (
+                ep.get("url", "") if isinstance(ep, dict) else getattr(ep, "url", "") or "")
             if not url:
                 continue
             path_lower = url.lower()
@@ -180,7 +186,10 @@ class BrowserAgent:
 
         try:
             from core.actuation.browser_actuator import BrowserActuator
-            actuator = BrowserActuator()
+            # Drive the SPA AUTHENTICATED — inject the logged-in session (JWT in
+            # localStorage + Authorization header + cookies) so DOM XSS / business
+            # logic behind login are reachable.
+            actuator = BrowserActuator(auth=BrowserActuator.auth_from_ctx(self.ctx))
         except Exception as e:
             result.error = f"Browser unavailable: {e}"
             return result
@@ -242,9 +251,9 @@ class BrowserAgent:
             )
 
             try:
-                from core.llm.task_tier import TaskTier
-                resp = await llm.generate(
-                    messages=[{"role": "user", "content": prompt}],
+                from core.common.schemas import TaskTier
+                resp = await llm.generate_response(
+                    prompt,
                     tier=TaskTier.SMALL,
                     temperature=0.2,
                 )
@@ -324,21 +333,21 @@ class BrowserAgent:
         """LLM evaluates if goal was achieved from step history."""
         try:
             llm = await self._get_llm()
-            from core.llm.task_tier import TaskTier
+            from core.common.schemas import TaskTier
 
             steps_summary = "\n".join(
                 f"Step {i+1}: {s.action} on '{s.selector}' → {s.result[:150]}"
                 for i, s in enumerate(result.steps)
             )
 
-            resp = await llm.generate(
-                messages=[{"role": "user", "content": (
+            resp = await llm.generate_response(
+                (
                     f"Goal: {goal.goal}\n"
                     f"Success criteria: {goal.success_criteria}\n"
                     f"Steps taken:\n{steps_summary}\n\n"
                     f"Was the goal achieved? Respond with JSON: "
                     f'{{"achieved": true/false, "evidence": "what proves it"}}'
-                )}],
+                ),
                 tier=TaskTier.SMALL,
                 temperature=0.1,
             )

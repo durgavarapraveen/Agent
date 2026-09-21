@@ -148,6 +148,16 @@ class ToolInstaller:
             logger.debug(f"Tool '{tool_lower}' already installed")
             return True
 
+        # §10: no autonomous runtime package installation by default. Runtime
+        # apt/pip/go/github installs are a supply-chain + persistence path; tools
+        # must be baked into the signed image. Opt in only for controlled setup.
+        import os as _os
+        if _os.getenv("ALLOW_RUNTIME_INSTALL", "false").lower() not in ("true", "1", "yes", "on"):
+            self.failed[tool_lower] = "runtime install disabled (ALLOW_RUNTIME_INSTALL off; bake tools into image)"
+            logger.warning("[ToolInstaller] REFUSED runtime install of '%s' — %s",
+                           tool_lower, self.failed[tool_lower])
+            return False
+
         # Already failed?
         if tool_lower in self.failed:
             logger.debug(f"Tool '{tool_lower}' previously failed: {self.failed[tool_lower]}")

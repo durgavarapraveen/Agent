@@ -1,0 +1,46 @@
+name: recall
+
+# Measures detection recall against a live Juice Shop lab. Runs on a schedule
+# and on demand; the miss-list (recall_report.json) is the prioritized backlog.
+on:
+  workflow_dispatch:
+    inputs:
+      recall_min:
+        description: "Fail if recall below this (0-1)"
+        default: "0"
+  schedule:
+    - cron: "23 4 * * 1"   # weekly, Mon 04:23 UTC (off the top-of-hour)
+
+jobs:
+  recall:
+    runs-on: ubuntu-latest
+    services:
+      juiceshop:
+        image: bkimminich/juice-shop:latest
+        ports:
+          - 3000:3000
+    env:
+      RECALL_TARGET: http://localhost:3000
+      CORPUS: juice_shop
+      ALLOW_PRIVATE_TARGETS: "true"
+      SCOPE_ALLOWED_HOSTS: "localhost,127.0.0.1"
+      RECALL_MIN: ${{ github.event.inputs.recall_min || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements.txt || pip install httpx psycopg2-binary
+      - name: Wait for Juice Shop
+        run: |
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:3000/rest/admin/application-version && break || sleep 3
+          done
+      - name: Run recall harness
+        run: python scripts/run_recall.py
+      - name: Upload recall report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recall-report
+          path: recall_report.json

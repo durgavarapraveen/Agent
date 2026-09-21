@@ -32,11 +32,12 @@ from agents.universal_llm_harness import (
 
 logger = logging.getLogger(__name__)
 
-# Approx Bedrock Claude pricing (USD per 1M tokens) for cost estimation.
+# Approx Bedrock pricing (USD per 1M tokens) for cost estimation.
 _PRICING = {
     "haiku": (0.80, 4.0),
     "sonnet": (3.0, 15.0),
     "opus": (15.0, 75.0),
+    "deepseek": (0.28, 0.42),
 }
 
 
@@ -54,12 +55,53 @@ class BedrockProvider(LLMProvider):
                  region: str = "", budget: Optional[TokenBudget] = None,
                  client: Any = None):
         super().__init__(ProviderType.BEDROCK, budget or TokenBudget())
-        self.small_model = small_model or os.getenv("AWS_BEDROCK_SMALL_MODEL",
-                                                    "us.anthropic.claude-haiku-4-5-20251001-v1:0")
-        self.large_model = large_model or os.getenv("AWS_BEDROCK_LARGE_MODEL",
-                                                    "us.anthropic.claude-sonnet-4-20250514-v1:0")
-        self.region = region or os.getenv("AWS_REGION", "us-west-2")
+        # single source of truth (identical LLM dev & prod)
+        from core.llm.bedrock_config import (
+            small_model as _sm, large_model as _lm, bedrock_region as _rg,
+            bedrock_base_url as _url, bedrock_api_token as _tok,
+        )
+        self.small_model = small_model or _sm()
+        self.large_model = large_model or _lm()
+        self.region = region or _rg()
+        # OpenAI-compatible gateway (Bearer auth). When base_url is set, the HTTP
+        # path is used instead of boto3 invoke_model. Auth prefers a freshly minted
+        # short-term token (aws_bedrock_token_generator, from the AWS credential
+        # chain) so it never expires mid-run; a static AWS_BEARER_TOKEN_BEDROCK is
+        # the fallback.
+        self.base_url = _url()
+        self.api_token = _tok()
         self._client = client  # injectable; lazily created from boto3 otherwise
+
+    def _sdk_base_url(self) -> str:
+        """OpenAI SDK base_url: the '/v1' root (SDK appends '/chat/completions')."""
+        u = self.base_url.rstrip("/")
+        if u.endswith("/chat/completions"):
+            u = u[: -len("/chat/completions")]
+        return u
+
+    def _mint_token(self) -> str:
+        """Fresh short-term gateway token from the AWS credential chain; falls
+        back to the static AWS_BEARER_TOKEN_BEDROCK when generation is unavailable."""
+        try:
+            from aws_bedrock_token_generator import provide_token
+            return provide_token(region=self.region)
+        except Exception as e:
+            if self.api_token:
+                return self.api_token
+            raise RuntimeError(f"no Bedrock gateway token: {e}")
+
+    def _can_auth(self) -> bool:
+        if self.api_token:
+            return True
+        try:
+            import aws_bedrock_token_generator  # noqa: F401
+            import boto3
+            return boto3.Session().get_credentials() is not None
+        except Exception:
+            return False
+
+    def _use_gateway(self) -> bool:
+        return bool(self.base_url and self._can_auth())
 
     def _get_client(self):
         if self._client is None:
@@ -68,6 +110,8 @@ class BedrockProvider(LLMProvider):
         return self._client
 
     async def is_available(self) -> bool:
+        if self._use_gateway():
+            return True
         try:
             self._get_client()
             return True
@@ -80,6 +124,14 @@ class BedrockProvider(LLMProvider):
 
     def get_large_model(self) -> str:
         return self.large_model
+
+    def supports_native_tools(self) -> bool:
+        # generate_with_tools speaks the Anthropic Messages tool schema
+        # (anthropic_version + input_schema), which only Claude models on Bedrock
+        # accept. Non-Claude Bedrock models (DeepSeek, Gemini, Llama, …) must use
+        # the JSON-planner path, so gate on the selected model id.
+        m = (self.get_large_model() or "").lower()
+        return "anthropic" in m or "claude" in m
 
     def count_tokens(self, text: str) -> int:
         try:
@@ -99,6 +151,9 @@ class BedrockProvider(LLMProvider):
         tier: TaskTier = TaskTier.SMALL,
     ) -> LLMResponse:
         model = self.get_model_for_tier(tier)
+        if self._use_gateway():
+            return await self._gateway_chat(prompt, system, max_tokens, temperature,
+                                            response_format, model)
         body = {
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": max_tokens,
@@ -136,6 +191,83 @@ class BedrockProvider(LLMProvider):
             usage={"input_tokens": in_tok, "output_tokens": out_tok,
                    "total_tokens": in_tok + out_tok},
             cost_usd=round(cost, 6), latency_ms=(time.monotonic() - start) * 1000)
+
+    async def _gateway_chat(
+        self,
+        prompt: str,
+        system: Optional[str],
+        max_tokens: int,
+        temperature: float,
+        response_format: Optional[str],
+        model: str,
+    ) -> LLMResponse:
+        """OpenAI-compatible chat call to the Bedrock (Mantle) gateway.
+
+        Follows the console 'Getting started' pattern: the OpenAI SDK pointed at
+        the gateway base_url, authenticated with a freshly minted short-term token
+        (provide_token). Token accounting: the gateway returns usage.{prompt_tokens,
+        completion_tokens, total_tokens}; these map to the harness's input/output/
+        total counters so every call is metered.
+        """
+        sys_prompt = system or ""
+        if response_format == "json":
+            sys_prompt = (sys_prompt + "\n\nRespond with a single valid JSON object "
+                          "only. No prose, no markdown fences.").strip()
+
+        messages = []
+        if sys_prompt:
+            messages.append({"role": "system", "content": sys_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        start = time.monotonic()
+        client = None
+        try:
+            from openai import AsyncOpenAI
+            # Hard per-attempt timeout + bounded retries so a slow/hanging gateway
+            # cannot block the main scan loop for minutes (default is 600s/attempt,
+            # which stalled the planner and starved the phase no-progress guard).
+            client = AsyncOpenAI(base_url=self._sdk_base_url(),
+                                 api_key=self._mint_token(),
+                                 timeout=90.0, max_retries=2)
+            resp = await client.chat.completions.create(
+                model=model, messages=messages,
+                max_tokens=max_tokens, temperature=temperature)
+        except Exception as e:
+            logger.warning("Bedrock gateway request failed: %s", e)
+            return LLMResponse(content="", provider="bedrock", model=model, error=str(e),
+                               latency_ms=(time.monotonic() - start) * 1000)
+        finally:
+            if client is not None:
+                try:
+                    await client.close()
+                except Exception:
+                    pass
+
+        latency = (time.monotonic() - start) * 1000
+        content = ""
+        finish_reason = None
+        if resp.choices:
+            content = resp.choices[0].message.content or ""
+            finish_reason = resp.choices[0].finish_reason
+
+        usage = resp.usage
+        in_tok = int(getattr(usage, "prompt_tokens", 0) or 0)
+        out_tok = int(getattr(usage, "completion_tokens", 0) or 0)
+        total = int(getattr(usage, "total_tokens", in_tok + out_tok) or (in_tok + out_tok))
+        pin, pout = _price_for(model)
+        cost = (in_tok * pin + out_tok * pout) / 1_000_000
+
+        logger.info("[Bedrock/gateway] %s tokens in=%d out=%d total=%d cost=$%.6f",
+                    model, in_tok, out_tok, total, cost)
+
+        structured = self._try_json(content) if response_format == "json" else None
+
+        return LLMResponse(
+            content=content, structured_output=structured,
+            finish_reason=finish_reason, provider="bedrock", model=model,
+            usage={"input_tokens": in_tok, "output_tokens": out_tok,
+                   "total_tokens": total},
+            cost_usd=round(cost, 6), latency_ms=latency)
 
     async def generate_with_tools(
         self,

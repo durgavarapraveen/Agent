@@ -29,6 +29,13 @@ class Payload:
     times_confirmed: int = 0
     last_updated: str = ""
     payload_id: str = ""
+    # ── §11 provenance (payload = auto-synced DATA, treated as hostile input) ──
+    source_ref: str = ""             # commit hash / template id the payload came from
+    source_url: str = ""             # upstream location for audit
+    risk: str = "poc"                # observe | poc | elevated | destructive
+    requires_oob: bool = False       # needs an out-of-band callback to confirm
+    requires_write: bool = False     # state-changing (gated by impact ceiling)
+    stage: str = "production"        # staging | canary | production
 
     def __post_init__(self):
         if not self.payload_id:

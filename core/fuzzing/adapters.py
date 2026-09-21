@@ -1,6 +1,7 @@
 import subprocess
 import shutil
 import json
+import re
 import uuid
 import logging
 from typing import Dict, Any, List
@@ -10,11 +11,65 @@ from core.domain.endpoint import Endpoint
 from core.domain.finding import SecurityFinding, FindingState
 from core.fuzzing.models import ToolResult, ToolStatus
 
+# Endpoints reach probes in many shapes; a tool binary needs a clean absolute URL.
+# Strip a "METHOD:" prefix and "get://"-style artifacts, drop the SPA fragment,
+# and reject un-rendered JS template literals (e.g. "https://${this.hostServer}/…"
+# extracted from a bundle). Returns "" when the input isn't a usable http(s) URL.
+_METHOD_PREFIX = re.compile(r'^\s*(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s*:(?!//)', re.I)
+_METHOD_SCHEME = re.compile(r'^(?:get|post|put|patch|delete|head|options)://', re.I)
+
+
+def _clean_target_url(raw: str) -> str:
+    if not raw:
+        return ""
+    u = raw.strip().split("#", 1)[0].strip()
+    prev = None
+    while prev != u:
+        prev = u
+        u = _METHOD_PREFIX.sub("", u).strip()
+        u = _METHOD_SCHEME.sub("", u).strip()
+    if "${" in u or "{{" in u or "`" in u:   # un-rendered JS template — not a real URL
+        return ""
+    return u if u.startswith(("http://", "https://")) else ""
+
 logger = logging.getLogger(__name__)
 
 
+def _kali_available() -> bool:
+    """True if the Kali tool container is up (binaries live there, not on the
+    host PATH — critical on Windows where nuclei/sqlmap/dalfox aren't local)."""
+    try:
+        from agents.kali_executor import KaliDockerExecutor
+        return bool(KaliDockerExecutor.get_container(auto_create=False))
+    except Exception:
+        return False
+
+
 def _tool_available(binary: str) -> bool:
-    return shutil.which(binary) is not None
+    return shutil.which(binary) is not None or _kali_available()
+
+
+class _Completed:
+    """subprocess.CompletedProcess-shaped result for the Kali-docker path."""
+    def __init__(self, returncode: int, stdout: str, stderr: str = ""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _run_cmd(cmd: List[str], timeout: float):
+    """Run a tool command locally if the binary (cmd[0]) is on PATH, otherwise
+    via the Kali docker container (which also applies target-scope validation)."""
+    binary = cmd[0] if cmd else ""
+    if shutil.which(binary):
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    import shlex
+    from agents.kali_executor import KaliDockerExecutor
+    cmd_str = " ".join(shlex.quote(c) for c in cmd)
+    r = KaliDockerExecutor.run(cmd_str, timeout=int(timeout), auto_install=True)
+    rc = r.get("returncode")
+    return _Completed(rc if rc is not None else 1,
+                      r.get("stdout", "") or "", r.get("stderr", "") or "")
 
 
 def _missing_binary_result(tool: str, binary: str, start: float) -> ToolResult:
@@ -48,12 +103,55 @@ class SQLMapAdapter(BaseAdapter):
         if not _tool_available("sqlmap"):
             return _missing_binary_result(self.tool_name, "sqlmap", start)
 
-        cmd = [
-            "sqlmap",
-            "-u", self.endpoint.url,
-            "--batch",
-            "--dbs"
-        ]
+        from core.domain.parameter import ParameterType
+
+        # Clean the target: drop the SPA fragment (everything after '#' is client-
+        # side → no server param to test, root cause of prior no_result), plus any
+        # METHOD:/get:// prefix and un-rendered ${...} template URLs.
+        url = _clean_target_url(self.endpoint.url)
+        if not url:
+            return ToolResult(tool_name=self.tool_name, status=ToolStatus.ERROR,
+                              evidence="skipped: invalid/template URL",
+                              execution_time_ms=(time.time() - start) * 1000)
+        # An Angular/SPA catch-all route returns index.html for any path — sqlmap
+        # against it only wastes the budget. Skip it explicitly.
+        if getattr(self.endpoint, "is_spa_catch_all", False):
+            return ToolResult(tool_name=self.tool_name, status=ToolStatus.ERROR,
+                              evidence="skipped: SPA catch-all route (no server-side params)",
+                              execution_time_ms=(time.time() - start) * 1000)
+
+        plist = getattr(self.endpoint, "parameters", []) or []
+        methods = [m.upper() for m in (getattr(self.endpoint, "method_set", ["GET"]) or ["GET"])]
+        query_params = [p.name for p in plist
+                        if getattr(p, "name", None) and getattr(p, "parameter_type", None)
+                        in (ParameterType.QUERY, ParameterType.PATH,
+                            ParameterType.INFERRED, ParameterType.UNKNOWN)]
+        body_params = [p.name for p in plist
+                       if getattr(p, "name", None) and getattr(p, "parameter_type", None)
+                       in (ParameterType.BODY, ParameterType.JSON, ParameterType.FORM)]
+
+        # Point sqlmap at an actually-injectable surface instead of a bare URL.
+        data_arg = None
+        if "?" in url:
+            target_url = url                                   # already parameterized
+        elif query_params:
+            target_url = url + "?" + "&".join(f"{n}=1" for n in query_params[:6])
+        elif body_params and ({"POST", "PUT", "PATCH"} & set(methods)):
+            target_url = url
+            ct = (getattr(self.endpoint, "content_type", "") or "").lower()
+            if "json" in ct:
+                data_arg = "{" + ",".join(f'"{n}":"1"' for n in body_params[:6]) + "}"
+            else:
+                data_arg = "&".join(f"{n}=1" for n in body_params[:6])
+        else:
+            target_url = url                                   # no known params → crawl/forms below
+
+        cmd = ["sqlmap", "-u", target_url, "--batch",
+               "--level=2", "--risk=2", "--random-agent"]
+        if data_arg:
+            cmd += ["--data", data_arg]
+        elif "?" not in target_url:
+            cmd += ["--forms", "--crawl=2"]
 
         # Additional params from config
         if params.get("tamper"):
@@ -61,13 +159,17 @@ class SQLMapAdapter(BaseAdapter):
         if params.get("threads"):
             cmd.extend(["--threads", str(params["threads"])])
 
+        # sqlmap with --level/--risk (+ --forms/--crawl for param-less URLs) needs
+        # minutes to confirm boolean/time-based blind injection. A 30s cap killed it
+        # before confirmation → reason=no_result. Give it a real budget.
+        _SQLMAP_TIMEOUT = 900.0
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30.0)
+            result = _run_cmd(cmd, _SQLMAP_TIMEOUT)
             duration = (time.time() - start) * 1000
-            
+
             status = ToolStatus.SUCCESS if result.returncode == 0 else ToolStatus.ERROR
             findings = self._parse_output(result.stdout)
-            
+
             return ToolResult(
                 tool_name=self.tool_name,
                 status=status,
@@ -75,14 +177,14 @@ class SQLMapAdapter(BaseAdapter):
                 evidence=result.stdout,
                 execution_time_ms=duration
             )
-            
+
         except subprocess.TimeoutExpired as e:
             logger.warning(f"SQLMap timed out on {self.endpoint.url}")
             return ToolResult(
                 tool_name=self.tool_name,
                 status=ToolStatus.TIMEOUT,
                 evidence=e.stdout.decode() if e.stdout else "",
-                execution_time_ms=30000.0
+                execution_time_ms=_SQLMAP_TIMEOUT * 1000
             )
         except Exception as e:
             return ToolResult(
@@ -161,7 +263,7 @@ class NucleiAdapter(BaseAdapter):
             cmd.extend(["-rl", str(params["rate_limit"])])
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30.0)
+            result = _run_cmd(cmd, 30.0)
             duration = (time.time() - start) * 1000
             
             status = ToolStatus.SUCCESS if result.returncode == 0 else ToolStatus.ERROR
@@ -219,15 +321,24 @@ class DalfoxAdapter(BaseAdapter):
         if not _tool_available("dalfox"):
             return _missing_binary_result(self.tool_name, "dalfox", start)
 
-        cmd = [
-            "dalfox", "url", self.endpoint.url
-        ]
+        # dalfox 3.x requires the URL as a flag: `dalfox url --url <URL>` (the bare
+        # positional `dalfox url <URL>` errors "required arguments were not
+        # provided: --url"). Also sanitize the target (drop METHOD:/get:// prefixes,
+        # the SPA #fragment, and un-rendered ${...} template URLs from JS bundles).
+        url = _clean_target_url(self.endpoint.url)
+        if not url:
+            return ToolResult(tool_name=self.tool_name, status=ToolStatus.ERROR,
+                              evidence="skipped: invalid/template URL",
+                              execution_time_ms=(time.time() - start) * 1000)
+        if getattr(self.endpoint, "is_spa_catch_all", False):
+            return ToolResult(tool_name=self.tool_name, status=ToolStatus.ERROR,
+                              evidence="skipped: SPA catch-all route",
+                              execution_time_ms=(time.time() - start) * 1000)
 
-        if params.get("concurrency"):
-            cmd.extend(["-w", str(params["concurrency"])])
+        cmd = ["dalfox", "url", "--url", url]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30.0)
+            result = _run_cmd(cmd, 120.0)
             duration = (time.time() - start) * 1000
             
             status = ToolStatus.SUCCESS if result.returncode == 0 else ToolStatus.ERROR
@@ -245,7 +356,7 @@ class DalfoxAdapter(BaseAdapter):
                 tool_name=self.tool_name,
                 status=ToolStatus.TIMEOUT,
                 evidence=e.stdout.decode() if e.stdout else "",
-                execution_time_ms=30000.0
+                execution_time_ms=120000.0
             )
         except Exception as e:
             return ToolResult(

@@ -33,7 +33,8 @@ class ReportingEngine:
         vulnerabilities: List[Dict[str, Any]],
         scan_id: Optional[str] = None,
         industry: Optional[str] = None,
-        mask_sensitive: bool = True
+        mask_sensitive: bool = True,
+        coverage: Optional[Dict[str, Any]] = None
     ) -> Dict[str, str]:
         if not scan_id:
             scan_id = datetime.now().strftime("scan_%Y%m%d_%H%M%S")
@@ -101,7 +102,8 @@ class ReportingEngine:
             scan_id=scan_id,
             target=target,
             vulnerabilities=prioritized_vulns,
-            mask_sensitive=mask_sensitive
+            mask_sensitive=mask_sensitive,
+            coverage=coverage or {}
         )
         json_path = target_dir / "report.json"
         json_path.write_text(json_content, encoding="utf-8")

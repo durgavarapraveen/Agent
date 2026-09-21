@@ -7,6 +7,7 @@ export default function Dashboard() {
   const [scans, setScans] = useState([]);
   const [active, setActive] = useState(null);
   const [review, setReview] = useState({ summary: {}, manual: [] });
+  const [combined, setCombined] = useState(null);
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
@@ -27,7 +28,12 @@ export default function Dashboard() {
       ([q, m]) => setReview({ summary: q.summary || {}, manual: m.items || [] }),
       8000,
     );
-    return () => { p1.stop(); p2.stop(); };
+    const p3 = createPoller(
+      () => api.getCombinedVulns(200),
+      (c) => setCombined(c),
+      12000,
+    );
+    return () => { p1.stop(); p2.stop(); p3.stop(); };
   }, []);
 
   if (loading) return <div className="loading">Initializing</div>;
@@ -80,6 +86,8 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {combined && <CombinedVulns data={combined} navigate={navigate} />}
+
       <ReviewWidget review={review} navigate={navigate} />
 
       <div className="card" style={{ marginTop: 8 }}>
@@ -113,6 +121,77 @@ export default function Dashboard() {
                     <td>{s.severity_counts?.CRITICAL > 0 ? <span className="badge critical">{s.severity_counts.CRITICAL}</span> : <span style={{ color: "var(--text-dim)" }}>0</span>}</td>
                     <td>{s.severity_counts?.HIGH > 0 ? <span className="badge high">{s.severity_counts.HIGH}</span> : <span style={{ color: "var(--text-dim)" }}>0</span>}</td>
                     <td>{s.status_counts?.CONFIRMED > 0 ? <span className="badge confirmed">{s.status_counts.CONFIRMED} confirmed</span> : <span style={{ color: "var(--text-dim)" }}>-</span>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CombinedVulns({ data, navigate }) {
+  const types = data.top_types || [];
+  const targets = data.top_targets || [];
+  const vulns = data.vulnerabilities || [];
+  const status = data.by_status || {};
+  const maxType = Math.max(1, ...types.map(([, n]) => n));
+  const maxTarget = Math.max(1, ...targets.map(([, n]) => n));
+  const sevClass = (s) => ({ CRITICAL: "critical", HIGH: "high", MEDIUM: "medium", LOW: "low", INFO: "info" }[s] || "info");
+
+  const Bar = ({ label, n, max, onClick }) => (
+    <div className="click-row" onClick={onClick} style={{ cursor: onClick ? "pointer" : "default", marginBottom: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 3 }}>
+        <span style={{ color: "var(--text-h)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 220 }}>{label}</span>
+        <span style={{ fontFamily: "var(--mono)", color: "var(--text-dim)" }}>{n}</span>
+      </div>
+      <div style={{ height: 6, borderRadius: 3, background: "var(--bg-alt)", overflow: "hidden" }}>
+        <div style={{ width: `${(n / max) * 100}%`, height: "100%", background: "var(--accent)" }} />
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div className="two-col">
+        <div className="card">
+          <h3>Most Common Vulnerability Types</h3>
+          {types.length === 0 ? <div className="empty">No data</div> :
+            types.map(([t, n]) => <Bar key={t} label={t} n={n} max={maxType} />)}
+        </div>
+        <div className="card">
+          <h3>Most Affected Targets</h3>
+          {targets.length === 0 ? <div className="empty">No data</div> :
+            targets.map(([t, n]) => <Bar key={t} label={t} n={n} max={maxTarget} />)}
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 8 }}>
+        <div className="flex-between" style={{ alignItems: "baseline", marginBottom: 8 }}>
+          <h3 style={{ margin: 0 }}>All Vulnerabilities (combined)</h3>
+          <span style={{ fontSize: 12, color: "var(--text-dim)" }}>
+            {data.total} total · {status.CONFIRMED || 0} confirmed · showing top {vulns.length}
+          </span>
+        </div>
+        {vulns.length === 0 ? (
+          <div className="empty">No vulnerabilities recorded yet.</div>
+        ) : (
+          <div className="table-wrap" style={{ border: "none", boxShadow: "none" }}>
+            <table>
+              <thead><tr><th>Severity</th><th>Type</th><th>Title</th><th>Target</th><th>Status</th></tr></thead>
+              <tbody>
+                {vulns.map((v, i) => (
+                  <tr key={v.id || i} className={v.scan_id ? "click-row" : ""}
+                      onClick={() => v.scan_id && navigate(`/scans/${v.scan_id}`)}>
+                    <td><span className={`badge ${sevClass(v.severity)}`}>{v.severity}</span></td>
+                    <td style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{v.type}</td>
+                    <td style={{ color: "var(--text-h)", maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v.title}</td>
+                    <td style={{ fontSize: 12, color: "var(--text-dim)", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v.target}</td>
+                    <td>{v.status === "CONFIRMED"
+                      ? <span className="badge confirmed">confirmed</span>
+                      : <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{(v.status || "").toLowerCase() || "-"}</span>}</td>
                   </tr>
                 ))}
               </tbody>
@@ -205,8 +284,12 @@ function ActiveScanCard({ scan }) {
 
   if (!scan || !scan.scan_id) return null;
 
-  const phases = ["RECON", "OSINT", "SCAN", "EXPLOIT", "POST"];
-  const currentPhase = (scan.phase || "RECON").toUpperCase();
+  const phases = ["BIZ", "RECON", "OSINT", "SCAN", "EXPLOIT", "POST"];
+  const _rawPhase = (scan.phase || "BUSINESS_UNDERSTANDING").toUpperCase();
+  const currentPhase = _rawPhase.startsWith("BUSINESS") ? "BIZ"
+    : _rawPhase.startsWith("ACTIVE_SCAN") || _rawPhase === "SCANNING" ? "SCAN"
+    : _rawPhase.startsWith("EXPLOIT") ? "EXPLOIT"
+    : _rawPhase.startsWith("POST") ? "POST" : _rawPhase;
 
   return (
     <div className="card active-scan" style={{ marginBottom: 20, position: "relative" }}>

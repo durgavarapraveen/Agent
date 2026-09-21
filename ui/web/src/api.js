@@ -245,6 +245,7 @@ export const api = {
   getActiveScan: () => request("/api/scans/active").then(list => (Array.isArray(list) ? list[0] : list) || null).catch(() => null),
   getScanJob: (id) => request(`/api/scans/job/${id}`),
   getScanLogs: (id, tail = 200) => request(`/api/scans/job/${id}/logs?tail=${tail}`),
+  getScanLogsSince: (id, offset = 0) => request(`/api/scans/job/${id}/logs?offset=${offset}`),
   getScanLogsFull: (id) => request(`/api/scans/job/${id}/logs-full`),
   // Download URLs must carry the API key too — the browser cannot set headers
   // on a top-level navigation. `?api_key` is accepted by the backend
@@ -278,6 +279,13 @@ export const api = {
   })),
   getToolOutputs: (id) => request(`/api/scans/${id}/tool-outputs`),
   getActivity: (id) => request(`/api/scans/${id}/activity`),
+  getUnderstanding: (id) => request(`/api/scans/${id}/understanding`).catch(() => ({})),
+  getLlmProvider: () => request(`/api/settings/llm-provider`).catch(() => ({ provider: "claude_cli", options: ["claude_cli", "bedrock", "deepseek"] })),
+  setLlmProvider: (provider) => post(`/api/settings/llm-provider`, { provider }),
+  getDeepseekKey: () => request(`/api/settings/deepseek-key`).catch(() => ({ configured: false })),
+  setDeepseekKey: (api_key) => post(`/api/settings/deepseek-key`, { api_key }),
+  getMetasploit: () => request(`/api/settings/metasploit`).catch(() => ({ enabled: false })),
+  setMetasploit: (enabled) => post(`/api/settings/metasploit`, { enabled }),
 
   // ── Scan artifacts (PoC, screenshots, SARIF, nuclei templates, canonical) ──
   listScanArtifacts: (scanId, kind = "") =>
@@ -357,9 +365,50 @@ export const api = {
     request(`/api/scans/${scanId}/sast-correlation`)
       .catch(() => ({ scan_id: scanId, available: false, counts: { confirmed: 0, sast_only: 0, dast_only: 0 }, confirmed: [], sast_only: [], dast_only: [] })),
 
+  // Combined vulnerabilities across ALL scans (dashboard cross-scan view)
+  getCombinedVulns: (limit = 200) =>
+    request(`/api/vulnerabilities/combined?limit=${limit}`)
+      .catch(() => ({ total: 0, by_severity: {}, by_status: {}, top_types: [], top_targets: [], vulnerabilities: [] })),
+
+  // Coverage ledger (what was tested vs UNKNOWN) + surface coverage + out-of-scope
+  getCoverage: (scanId) =>
+    request(`/api/scans/${scanId}/coverage`)
+      .catch(() => ({ ledger: {}, surface: {}, discovered_out_of_scope: [], dom_sinks: {} })),
+
+  // Watchdog / budget governor (live, global) + external kill switch
+  getWatchdog: () => request("/control/watchdog").catch(() => null),
+  killScan: (reason = "manual via UI") =>
+    post(`/control/kill?reason=${encodeURIComponent(reason)}`, {}),
+
   // Standalone (individual) analysis — no scan/target.
+  listAnalyses: (limit = 100) => request(`/api/analyses?limit=${limit}`).catch(() => ({ analyses: [] })),
+  getAnalysis: (id) => request(`/api/analyses/${id}`),
   analyzeMobile: (path) => post("/api/analyze/mobile", { path }),
   analyzeSource: (source_repo, source_path) => post("/api/analyze/source", { source_repo, source_path }),
+  analyzeSourceZip: async (file) => {
+    const form = new FormData();
+    form.append("file", file);
+    const res = await fetch(`${BASE}/api/analyze/source-zip`, {
+      method: "POST",
+      headers: _authHeaders(),   // don't set Content-Type; browser sets multipart boundary
+      body: form,
+    });
+    await _checkResponse(res, "/api/analyze/source-zip");
+    return res.json();
+  },
+  // Grey-box = SAST + build/run DAST + correlation. These return { job_id };
+  // poll getGreyboxProgress(job_id) for live steps + the final result.
+  analyzeGreybox: (source_repo, source_path) => post("/api/analyze/greybox", { source_repo, source_path }),
+  analyzeGreyboxZip: async (file) => {
+    const form = new FormData();
+    form.append("file", file);
+    const res = await fetch(`${BASE}/api/analyze/greybox-zip`, {
+      method: "POST", headers: _authHeaders(), body: form,
+    });
+    await _checkResponse(res, "/api/analyze/greybox-zip");
+    return res.json();
+  },
+  getGreyboxProgress: (jobId) => request(`/api/analyze/greybox/progress/${jobId}`),
 
   // Upload an APK/IPA for mobile backend analysis; returns { path, kind, filename }.
   uploadScanInput: async (file) => {

@@ -46,7 +46,7 @@ export default function FixSuggestionsPanel({ scanId }) {
               </span>
             </div>
             <pre style={{
-              background: "#0d1117", color: "#c9d1d9", padding: 12, borderRadius: 6,
+              background: "var(--bg-alt)", color: "var(--text)", border: "1px solid var(--border)", padding: 12, borderRadius: 6,
               fontSize: 12, fontFamily: "var(--mono)", lineHeight: 1.5, overflow: "auto",
               whiteSpace: "pre", margin: 0, maxHeight: 320,
             }}>{f.fix_code}</pre>

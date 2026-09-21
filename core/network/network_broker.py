@@ -280,6 +280,27 @@ class NetworkBroker:
         self._budget = budget or RequestBudget()
         self._max_redirects = max_redirects
         self._timeout = timeout
+        # Negative cache for repeatedly-failing STATIC assets (.js/.css/.map/…).
+        # A dead-LLM planner loop re-queued the same JS fetch 854× (all 503),
+        # hammering the target. Once a static GET returns 4xx/5xx, short-circuit
+        # identical GETs for a TTL instead of re-fetching. key -> (status, expiry).
+        self._neg_cache: dict = {}
+        try:
+            self._neg_ttl = float(os.getenv("STATIC_NEG_CACHE_TTL", "600"))
+        except (TypeError, ValueError):
+            self._neg_ttl = 600.0
+
+    _STATIC_EXT = (".js", ".css", ".map", ".png", ".jpg", ".jpeg", ".gif",
+                   ".svg", ".ico", ".woff", ".woff2", ".ttf", ".eot", ".webp")
+
+    def _static_neg_key(self, method: str, url: str):
+        """Return a cache key for a cacheable static GET, else None."""
+        if (method or "").upper() != "GET":
+            return None
+        path = url.split("?", 1)[0].split("#", 1)[0].lower()
+        if path.endswith(self._STATIC_EXT):
+            return url.split("#", 1)[0]
+        return None
 
     @property
     def resolver(self) -> DNSResolver:
@@ -518,14 +539,50 @@ class NetworkBroker:
             **kwargs,
         )
 
+    async def send_request(self, method: str, url: str, **kwargs) -> Any:
+        """Back-compat alias: several probes call ``broker.send_request(...)``."""
+        return await self.request(method, url, **kwargs)
+
     async def request(self, method: str, url: str,
                       follow_redirects: bool = True,
                       **kwargs) -> Any:
+
+        # `verify` is a client-construction arg, not a per-request one — httpx's
+        # AsyncClient.request() rejects it with TypeError. The scoped client below
+        # already sets verify=False, so silently drop any caller-supplied verify
+        # (probes commonly pass verify=False) instead of failing the request.
+        kwargs.pop("verify", None)
+
+        # §26/§39: external watchdog — fail-closed on budget breach / kill switch,
+        # independent of the agent/LLM. Metered after the response returns.
+        try:
+            from core.security.watchdog import get_watchdog
+            _wd = get_watchdog()
+            _wd.check()
+        except Exception as _e:
+            if _e.__class__.__name__ == "WatchdogTripped":
+                raise
+            _wd = None
 
         decision = self.check_url(url)
         if not decision.allowed:
             from core.security.egress_firewall import EgressBlocked
             raise EgressBlocked(f"NetworkBroker: {decision.reason}")
+
+        # Negative-cache short-circuit: an identical static-asset GET that already
+        # failed (4xx/5xx) this scan returns the cached failure without re-hitting
+        # the target (caps runaway re-fetch loops like the 854× rolldown-runtime.js).
+        _nk = self._static_neg_key(method, url)
+        if _nk is not None:
+            _hit = self._neg_cache.get(_nk)
+            if _hit is not None:
+                _status, _exp = _hit
+                if time.monotonic() < _exp:
+                    import httpx as _httpx
+                    logger.debug("[NegCache] short-circuit %s (cached status %s)", _nk, _status)
+                    return _httpx.Response(status_code=_status,
+                                           request=_httpx.Request(method, url))
+                self._neg_cache.pop(_nk, None)
 
         redirect_chain: List[str] = []
         
@@ -538,6 +595,12 @@ class NetworkBroker:
                     resp = await client.request(method, current_url, **kwargs)
                 finally:
                     await client.aclose()
+
+                if _wd is not None:
+                    try:
+                        _wd.record_request(len(getattr(resp, "content", b"") or b""))
+                    except Exception:
+                        pass
 
                 if follow_redirects and resp.is_redirect and resp.has_redirect_location:
                     next_url = str(resp.next_request.url)
@@ -558,6 +621,11 @@ class NetworkBroker:
                         method = "GET"
                     continue
 
+                # Record a failing static-asset fetch so identical retries this
+                # scan are short-circuited instead of re-hammering the target.
+                if _nk is not None and resp.status_code in (404, 500, 502, 503, 504):
+                    self._neg_cache[_nk] = (resp.status_code,
+                                            time.monotonic() + self._neg_ttl)
                 return resp
 
             from core.security.egress_firewall import EgressBlocked

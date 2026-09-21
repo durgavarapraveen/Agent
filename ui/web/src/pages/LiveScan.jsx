@@ -8,10 +8,10 @@ import AccessGainedPanel from "../components/AccessGainedPanel";
 import LiveAgentsPanel from "../components/LiveAgentsPanel";
 import ScanChatPanel from "../components/ScanChatPanel";
 import ArtifactsPanel from "../components/ArtifactsPanel";
-import { methodColor, fmtDate } from "../components/utils";
+import { methodColor, fmtDate, parseTs, asText } from "../components/utils";
 
-const PHASES = ["RECON", "ACTIVE_SCANNING", "EXPLOITATION", "REPORTING"];
-const PHASE_LABELS = { RECON: "Recon", ACTIVE_SCANNING: "Vulnerability Assessment", EXPLOITATION: "Exploitation", REPORTING: "Reporting" };
+const PHASES = ["BUSINESS_UNDERSTANDING", "RECON", "ACTIVE_SCANNING", "EXPLOITATION", "REPORTING"];
+const PHASE_LABELS = { BUSINESS_UNDERSTANDING: "Business Understanding", RECON: "Recon", ACTIVE_SCANNING: "Vulnerability Assessment", EXPLOITATION: "Exploitation", REPORTING: "Reporting" };
 
 export default function LiveScan() {
   const [jobs, setJobs] = useState([]);
@@ -116,7 +116,7 @@ export default function LiveScan() {
             </div>
           )}
 
-          {selected && <LiveScanDetail jobId={selected} />}
+          {selected && <LiveScanDetail key={selected} jobId={selected} />}
         </>
       )}
     </div>
@@ -129,6 +129,7 @@ function LiveScanDetail({ jobId }) {
   const [progress, setProgress] = useState({});
   const [results, setResults] = useState(null);
   const [logs, setLogs] = useState({ lines: [], total: 0 });
+  const [understanding, setUnderstanding] = useState(null);
   const [tab, setTab] = useState("overview");
   const logRef = useRef(null);
 
@@ -167,12 +168,14 @@ function LiveScanDetail({ jobId }) {
         api.getLiveProgress(jobId).catch(() => ({})),
         api.getLiveResults(jobId).catch(() => null),
         api.getScanLogs(jobId, 300).catch(() => ({ lines: [], total: 0 })),
+        api.getUnderstanding(jobId).catch(() => null),
       ]),
-      ([j, p, r, l]) => {
+      ([j, p, r, l, u]) => {
         if (j) setJob(j);
         if (p && Object.keys(p).length) setProgress(p);
         if (r) setResults(r);
         if (l) setLogs(l);
+        if (u && Object.keys(u).length) setUnderstanding(u);
       },
       10000,
     );
@@ -200,7 +203,7 @@ function LiveScanDetail({ jobId }) {
   const isRunning = job.status === "running" || job.status === "starting";
   const isStopping = job.status === "stopping";
   const isStopped = job.status === "stopped";
-  const currentPhase = progress?.phase || "RECON";
+  const currentPhase = progress?.phase || "BUSINESS_UNDERSTANDING";
 
   const stopScan = () => api.stopScan(jobId).catch(() => {});
   const resumeScan = () => api.resumeScan({ target: job.target, tier: job.tier || "POC" }).catch(() => {});
@@ -218,6 +221,7 @@ function LiveScanDetail({ jobId }) {
   const tabs = [
     { id: "chat", label: "Ask (LLM)" },
     { id: "overview", label: "Overview" },
+    { id: "understanding", label: "Understanding" },
     { id: "recon", label: `Recon (${recon.subdomains.length + recon.endpoints.length})` },
     { id: "osint", label: `OSINT (${recon.osint?.summary?.employees || 0}+${recon.osint?.summary?.leaked_credentials || 0})` },
     { id: "vulns", label: `Vulnerabilities (${vulns.length})` },
@@ -231,14 +235,15 @@ function LiveScanDetail({ jobId }) {
   ];
 
   return (
-    <div className="card" style={{ marginTop: 16, position: "relative", border: isRunning ? "1px solid rgba(175,80,255,0.2)" : undefined }}>
+    <div className={`card ${isRunning ? "scan-running" : ""}`} style={{ marginTop: 16, position: "relative" }}>
       <div className="flex-between" style={{ marginBottom: 12 }}>
         <div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
             <span className={`badge ${isRunning ? "running" : isStopping ? "medium" : job.status === "completed" ? "confirmed" : isStopped ? "medium" : "critical"}`}>
-              {job.status?.toUpperCase()}
+              {isRunning && <span className="live-dot" />}{job.status?.toUpperCase()}
             </span>
             <span style={{ fontSize: 16, fontWeight: 700, color: "var(--text-h)" }}>{job.target}</span>
+            {isRunning && <LiveElapsed startedAt={job.started_at} />}
           </div>
           <span style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--text-dim)" }}>
             Job: {jobId} | Started: {fmtDate(job.started_at)} {job.finished_at ? `| Finished: ${fmtDate(job.finished_at)}` : ""}
@@ -286,6 +291,7 @@ function LiveScanDetail({ jobId }) {
 
       {tab === "chat" && <ScanChatPanel scanId={jobId} />}
       {tab === "overview" && <OverviewSection recon={recon} vulns={vulns} exploits={exploits} progress={progress} />}
+      {tab === "understanding" && <UnderstandingSection data={understanding} />}
       {tab === "recon" && <ReconPanel context={recon} scanId={jobId} />}
       {tab === "osint" && <OsintSection osint={recon.osint || {}} />}
       {tab === "vulns" && <VulnsSection vulns={vulns} />}
@@ -295,7 +301,7 @@ function LiveScanDetail({ jobId }) {
       {tab === "agents" && <LiveAgentsPanel scanId={jobId} poll />}
       {tab === "artifacts" && <ArtifactsPanel scanId={jobId} poll />}
       {tab === "requests" && <RequestsSection requests={requests} />}
-      {tab === "logs" && <LogsSection logs={logs} logRef={logRef} jobId={jobId} />}
+      {tab === "logs" && <LogsSection logRef={logRef} jobId={jobId} />}
     </div>
   );
 }
@@ -328,10 +334,21 @@ function PhaseProgress({ currentPhase, status, isRunning, phases }) {
 
 
 function MiniStat({ label, value, color }) {
+  const prev = useRef(value);
+  const [flash, setFlash] = useState(false);
+  useEffect(() => {
+    if (prev.current !== value) {
+      prev.current = value;
+      setFlash(true);
+      const t = setTimeout(() => setFlash(false), 700);
+      return () => clearTimeout(t);
+    }
+  }, [value]);
   return (
-    <div style={{
+    <div className={flash ? "stat-flash" : ""} style={{
       padding: "8px 14px", background: "var(--bg-surface)", border: "1px solid var(--border)",
       borderRadius: "var(--radius-sm)", display: "flex", alignItems: "center", gap: 8, fontSize: 12,
+      transition: "background 0.3s ease",
     }}>
       <span style={{ color: "var(--text-dim)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px", fontSize: 10 }}>{label}</span>
       <span style={{ fontFamily: "var(--mono)", fontWeight: 700, color, fontSize: 14 }}>{value}</span>
@@ -339,6 +356,113 @@ function MiniStat({ label, value, color }) {
   );
 }
 
+
+// Live-ticking elapsed clock for a running scan.
+function LiveElapsed({ startedAt }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const start = startedAt ? parseTs(startedAt) : now;
+  const secs = Number.isFinite(start) ? Math.max(0, Math.floor((now - start) / 1000)) : 0;
+  const hh = String(Math.floor(secs / 3600)).padStart(2, "0");
+  const mm = String(Math.floor((secs % 3600) / 60)).padStart(2, "0");
+  const ss = String(secs % 60).padStart(2, "0");
+  return <span style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 600, color: "var(--accent)" }}>{hh}:{mm}:{ss}</span>;
+}
+
+
+// Always-visible streaming activity feed while the scan runs — the biggest
+// "this is alive" signal. Shows the tail of the log stream, auto-scrolling.
+function UChip({ children }) {
+  return <span style={{ display: "inline-block", padding: "3px 9px", borderRadius: 6, fontSize: 12,
+    fontFamily: "var(--mono)", background: "var(--accent-dim, rgba(0,113,227,0.10))",
+    color: "var(--text-h)", border: "1px solid var(--border)" }}>{children}</span>;
+}
+
+function UnderstandingSection({ data }) {
+  if (!data || !data.domain) {
+    return <div style={{ color: "var(--text-dim)", fontSize: 13, padding: 12 }}>
+      Business Understanding runs as the first phase — the report appears here once it completes.
+    </div>;
+  }
+  const req = data.required_testing || [];
+  const sens = data.data_sensitivity || {};
+  const rules = data.business_rules || [];
+  const inv = data.security_invariants || [];
+  const skipped = data.skipped_families || [];
+  const conf = Math.round((data.domain_confidence || 0) * 100);
+  const invText = (x) => typeof x === "string" ? x : (x.rule || x.description || x.invariant || JSON.stringify(x));
+  return (
+    <div>
+      <div className="card" style={{ margin: "0 0 16px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <h3 style={{ margin: 0 }}>What the model understood</h3>
+          <UChip>domain: {data.domain}</UChip>
+          <UChip>confidence: {conf}%</UChip>
+          <UChip>source: {data.source || "n/a"}</UChip>
+        </div>
+      </div>
+
+      <div className="two-col" style={{ marginBottom: 16 }}>
+        <div className="card" style={{ margin: 0 }}>
+          <h3>Sensitive Assets</h3>
+          {Object.keys(sens).length === 0
+            ? <div style={{ color: "var(--text-dim)", fontSize: 13 }}>None inferred</div>
+            : <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                {Object.entries(sens).map(([f, c]) => <UChip key={f}>{f} → {c}</UChip>)}
+              </div>}
+        </div>
+        <div className="card" style={{ margin: 0 }}>
+          <h3>Security Invariants (must hold)</h3>
+          {inv.length === 0
+            ? <div style={{ color: "var(--text-dim)", fontSize: 13 }}>None inferred</div>
+            : <ul style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 13, color: "var(--text-h)" }}>
+                {inv.slice(0, 12).map((x, i) => <li key={i}>{invText(x)}</li>)}
+              </ul>}
+        </div>
+      </div>
+
+      {rules.length > 0 && (
+        <div className="card" style={{ margin: "0 0 16px" }}>
+          <h3>Business Rules</h3>
+          <ul style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 13, color: "var(--text-h)" }}>
+            {rules.slice(0, 15).map((r, i) => <li key={i}>{r}</li>)}
+          </ul>
+        </div>
+      )}
+
+      <div className="card" style={{ margin: "0 0 16px" }}>
+        <h3>What is required — prioritized test plan</h3>
+        {req.length === 0
+          ? <div style={{ color: "var(--text-dim)", fontSize: 13 }}>No plan produced</div>
+          : <table style={{ width: "100%", fontSize: 13, marginTop: 8, borderCollapse: "collapse" }}>
+              <thead><tr style={{ textAlign: "left", color: "var(--text-dim)" }}>
+                <th style={{ padding: "4px 8px" }}>Test Family</th>
+                <th style={{ padding: "4px 8px" }}>Priority</th>
+                <th style={{ padding: "4px 8px" }}>Why</th>
+              </tr></thead>
+              <tbody>
+                {req.map((it, i) => (
+                  <tr key={i} style={{ borderTop: "1px solid var(--border)" }}>
+                    <td style={{ padding: "5px 8px", fontFamily: "var(--mono)", color: "var(--text-h)" }}>{it.family}</td>
+                    <td style={{ padding: "5px 8px", fontFamily: "var(--mono)" }}>{it.priority}</td>
+                    <td style={{ padding: "5px 8px", color: "var(--text-dim)" }}>{it.why}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>}
+        {skipped.length > 0 && (
+          <div style={{ marginTop: 12, fontSize: 12, color: "var(--text-dim)", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            <span>Skipped (out of scope for this app):</span>
+            {skipped.map(s => <UChip key={s}>{s}</UChip>)}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function OverviewSection({ recon, vulns, exploits, progress }) {
   const criticals = vulns.filter(v => (v.severity || "").toUpperCase() === "CRITICAL");
@@ -502,12 +626,12 @@ function VulnsSection({ vulns }) {
                   <tr><td colSpan={6} style={{ padding: 0 }}>
                     <div style={{ padding: "14px 20px", background: "var(--bg)", borderTop: "1px solid var(--border)" }}>
                       <div className="vuln-detail-grid">
-                        <span className="lbl">Details</span><span>{v.details || v.description || "-"}</span>
-                        <span className="lbl">Proof</span><span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{v.proof || v.evidence || "-"}</span>
-                        <span className="lbl">Tool</span><span>{v.tool || v.source || "-"}</span>
-                        <span className="lbl">Remediation</span><span>{v.remediation || "-"}</span>
-                        {v.cve_id && <><span className="lbl">CVE</span><span>{v.cve_id}</span></>}
-                        {v.cwe_id && <><span className="lbl">CWE</span><span>{v.cwe_id}</span></>}
+                        {asText(v.details || v.description) && <><span className="lbl">Details</span><span>{asText(v.details || v.description)}</span></>}
+                        {asText(v.proof || v.evidence) && <><span className="lbl">Proof</span><span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{asText(v.proof || v.evidence)}</span></>}
+                        {asText(v.tool || v.source) && <><span className="lbl">Tool</span><span>{asText(v.tool || v.source)}</span></>}
+                        {asText(v.remediation) && <><span className="lbl">Remediation</span><span>{asText(v.remediation)}</span></>}
+                        {v.cve_id && <><span className="lbl">CVE</span><span>{asText(v.cve_id)}</span></>}
+                        {v.cwe_id && <><span className="lbl">CWE</span><span>{asText(v.cwe_id)}</span></>}
                       </div>
                     </div>
                   </td></tr>
@@ -647,14 +771,52 @@ function RequestsSection({ requests }) {
 
 
 
-function LogsSection({ logs, logRef, jobId }) {
-  const [showFull, setShowFull] = useState(false);
-  const [fullLogs, setFullLogs] = useState(null);
-  const [pinBottom, setPinBottom] = useState(true);
+// Vercel-style log stream: loads the whole log, then appends only NEW lines each
+// poll (offset-based) — no "last 300" cap. Freezes on scroll-up so the view
+// doesn't jump; auto-tails when pinned to the bottom.
+const LOG_MAX_RENDER = 10000; // keep the DOM bounded; full file via Download
 
-  const loadFull = () => {
-    api.getScanLogsFull(jobId).then(l => { setFullLogs(l); setShowFull(true); }).catch(() => {});
-  };
+function LogsSection({ logRef, jobId }) {
+  const [all, setAll] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [pinBottom, setPinBottom] = useState(true);
+  const [frozen, setFrozen] = useState(null); // { lines, total } snapshot while paused
+  const offsetRef = useRef(0);
+
+  // Initial full load + incremental streaming of only-new lines.
+  useEffect(() => {
+    let alive = true;
+    offsetRef.current = 0;
+    setAll([]); setTotal(0); setFrozen(null); setPinBottom(true);
+    api.getScanLogsSince(jobId, 0).then(r => {
+      if (!alive) return;
+      const lines = r.lines || [];
+      setAll(lines.slice(-LOG_MAX_RENDER));
+      const t = typeof r.total === "number" ? r.total : lines.length;
+      setTotal(t); offsetRef.current = t;
+    }).catch(() => {});
+    const iv = setInterval(() => {
+      api.getScanLogsSince(jobId, offsetRef.current).then(r => {
+        if (!alive) return;
+        const nu = r.lines || [];
+        if (nu.length) {
+          setAll(prev => {
+            const merged = prev.concat(nu);
+            return merged.length > LOG_MAX_RENDER ? merged.slice(-LOG_MAX_RENDER) : merged;
+          });
+        }
+        if (typeof r.total === "number") { setTotal(r.total); offsetRef.current = r.total; }
+      }).catch(() => {});
+    }, 2500);
+    return () => { alive = false; clearInterval(iv); };
+  }, [jobId]);
+
+  // Auto-tail when the user is pinned to the bottom.
+  useEffect(() => {
+    if (pinBottom && !frozen && logRef.current) {
+      logRef.current.scrollTop = logRef.current.scrollHeight;
+    }
+  }, [all, pinBottom, frozen]);
 
   const downloadLogs = async () => {
     try {
@@ -664,47 +826,61 @@ function LogsSection({ logs, logRef, jobId }) {
       const blob = await res.blob();
       const blobUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `scan_${jobId}_logs.txt`;
-      a.click();
+      a.href = blobUrl; a.download = `scan_${jobId}_logs.txt`; a.click();
       URL.revokeObjectURL(blobUrl);
     } catch {}
   };
 
   const handleScroll = () => {
-    if (!logRef.current) return;
-    const el = logRef.current;
+    const el = logRef.current; if (!el) return;
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
     setPinBottom(atBottom);
+    if (atBottom) setFrozen(null);                       // resumed
+    else if (frozen === null) setFrozen({ lines: all, total }); // snapshot on pause
   };
 
-  const lines = showFull && fullLogs ? fullLogs.lines : (logs.lines || []);
+  const resume = () => {
+    setPinBottom(true); setFrozen(null);
+    requestAnimationFrame(() => {
+      if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+    });
+  };
+
+  const lines = frozen ? frozen.lines : all;            // freeze view while paused
+  const newCount = frozen ? Math.max(0, total - (frozen.total || 0)) : 0;
+  const truncated = total > all.length;                 // older lines beyond the render cap
 
   return (
     <div>
       <div className="flex-between" style={{ marginBottom: 8 }}>
         <span style={{ fontSize: 12, color: "var(--text-dim)" }}>
-          {showFull ? `${lines.length} total lines` : `Last ${lines.length} of ${logs.total} lines`}
-          {!pinBottom && <span style={{ marginLeft: 8, color: "var(--orange)", fontWeight: 600 }}>&#x25B2; Scroll paused</span>}
+          {truncated ? `Showing last ${all.length} of ${total} lines · streaming`
+                     : `${total} lines · streaming`}
+          {!pinBottom && (
+            <span style={{ marginLeft: 8, color: "var(--orange)", fontWeight: 600 }}>
+              &#x25B2; Scroll paused{newCount > 0 ? ` · ${newCount} new below` : ""}
+            </span>
+          )}
         </span>
         <div style={{ display: "flex", gap: 6 }}>
           {!pinBottom && (
-            <button className="btn btn-sm" onClick={() => { setPinBottom(true); if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }}>
-              &#x25BC; Resume scroll
+            <button className="btn btn-sm" onClick={resume}>
+              &#x25BC; Resume{newCount > 0 ? ` (${newCount} new)` : " scroll"}
             </button>
           )}
-          {!showFull && logs.total > lines.length && (
-            <button className="btn btn-sm" onClick={loadFull}>Load Full Log</button>
-          )}
-          <button className="btn btn-sm" onClick={downloadLogs} title="Download logs">
+          <button className="btn btn-sm" onClick={downloadLogs} title="Download full log">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Download
           </button>
         </div>
       </div>
-      {/* P3-2: overflowAnchor:none disables the browser's scroll-anchoring,
-          which was nudging the view up a few px whenever a new line appended. */}
+      {/* overflowAnchor:none disables the browser's scroll-anchoring. */}
       <div className="log-terminal" ref={logRef} style={{ maxHeight: 600, overflowAnchor: "none" }} onScroll={handleScroll}>
+        {truncated && (
+          <div style={{ color: "var(--text-dim)", fontSize: 11, fontStyle: "italic", padding: "2px 0" }}>
+            … {total - all.length} earlier lines — use Download for the complete log …
+          </div>
+        )}
         {lines.map((l, i) => {
           const raw = typeof l === "string" ? l.replace(/\x1b\[[0-9;]*m|\[0m/g, "").trimEnd() : String(l);
           return (

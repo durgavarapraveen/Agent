@@ -45,14 +45,6 @@ class UserProfile:
     security_questions: List[str] = field(default_factory=list)
 
 
-@dataclass
-class IdentityClue:
-    category: str  # "location", "pet", "family", "school", "workplace"
-    value: str
-    confidence: float = 0.5
-    source: str = ""
-
-
 class IdentityIntelligence:
     def __init__(self, ctx=None, llm_client=None):
         self.ctx = ctx
@@ -198,9 +190,9 @@ class IdentityIntelligence:
             )
 
             try:
-                from core.llm.task_tier import TaskTier
-                resp = await llm.generate(
-                    messages=[{"role": "user", "content": prompt}],
+                from core.common.schemas import TaskTier
+                resp = await llm.generate_response(
+                    prompt,
                     tier=TaskTier.SMALL,
                     temperature=0.3,
                 )
@@ -383,7 +375,8 @@ class IdentityIntelligence:
                 domain = urlparse(target).hostname or ""
                 if domain:
                     osint = OSINTEngine()
-                    osint_results = await osint.run_full_osint(domain, domain.split(".")[0])
+                    from core.intelligence.osint_engine import derive_company_name
+                    osint_results = await osint.run_full_osint(domain, derive_company_name(domain))
                     leaked = osint_results.get("leaked_credentials", [])
                     if leaked:
                         self._findings.append({

@@ -163,12 +163,18 @@ RUN set -eux; \
     rm -f /tmp/waybackurls.tgz /tmp/gau.tgz /tmp/LICENSE* /tmp/README*
 
 # ------------------------------------------------------------
-# OPTIONAL heavy tools — NOT installed by default (each is 0.5–2 GB and only
-# referenced in a handful of files; the agent has its own exploitation paths and
-# falls back when a tool is absent). Uncomment if you specifically need them:
+# Metasploit Framework — used ONLY for read-only auxiliary/scanner modules via
+# the allow-listed msf_scanner tool (core/tools/adapters/metasploit.py). No
+# exploit/post/payload path. Gated at runtime by NEO_ENABLE_MSF. ~1.5 GB.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        metasploit-framework \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+# Fail the build if msfconsole is not runnable.
+RUN msfconsole -v
 #
+# OTHER optional heavy tools (still not installed by default). Uncomment if
+# needed:
 #   RUN apt-get update && apt-get install -y --no-install-recommends \
-#       metasploit-framework \
 #       zaproxy \
 #       && apt-get clean && rm -rf /var/lib/apt/lists/*
 # ------------------------------------------------------------

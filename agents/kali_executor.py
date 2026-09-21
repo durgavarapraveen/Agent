@@ -240,6 +240,10 @@ class KaliDockerExecutor:
     @classmethod
     def _effective_timeout(cls, command: str, requested: int) -> int:
         cmd = (command or "").lower()
+        # DNS recon (fierce/dnsenum/dnsrecon) is lightweight; never let a default
+        # subdomain brute-force stall the phase for the 900s floor. Cap it tight.
+        if any(t in cmd for t in ("fierce", "dnsenum", "dnsrecon")):
+            return min(requested, 150) if requested else 150
         if "nuclei" in cmd:
             return max(requested, 900)
         if any(t in cmd for t in ("theharvester", "harvester", "nmap", "amass",
@@ -257,6 +261,27 @@ class KaliDockerExecutor:
             parts = command.split()
         except Exception:
             return command
+
+        # Strip the SPA fragment ("…/#/…") from any http(s) URL token — it is
+        # client-side only, so dir-brute/crawl/scan tools (dirsearch, gobuster,
+        # ffuf, feroxbuster, katana, nikto, whatweb, httpx…) get nothing useful
+        # from a "…/#/" target and waste the run. Keep the origin+path.
+        if "#" in command:
+            new_parts = []
+            for p in parts:
+                low = p.lower()
+                if (low.startswith(("http://", "https://")) or
+                        low.startswith(("'http", '"http'))) and "#" in p:
+                    q = p[:1] if p[:1] in "'\"" else ""
+                    core = p[len(q):]
+                    core = core.split("#", 1)[0]
+                    p = f"{q}{core}{q}"
+                new_parts.append(p)
+            if new_parts != parts:
+                command = " ".join(new_parts)
+                parts = new_parts
+                logger.info(f"[Kali] stripped SPA fragment -> {command}")
+
         if parts and parts[0] == "amass" and "enum" not in parts:
             domain = ""
             for p in parts[1:]:
@@ -267,6 +292,12 @@ class KaliDockerExecutor:
                 fixed = f"amass enum -passive -d {domain} -silent"
                 logger.info(f"[Kali] normalized amass command -> {fixed}")
                 return fixed
+
+        # fierce: the default run brute-forces a ~2000-name subdomain wordlist and,
+        # against a host with no zone, grinds for minutes. This fierce build has NO
+        # --connection-timeout flag (appending it → rc=2 "usage:"), so we bound the
+        # whole run via _effective_timeout's 150s cap instead of a per-query flag.
+        # (Left intentionally unmodified here.)
 
         # nuclei: a bare `nuclei -u <url>` runs ALL ~9000 templates and, behind a WAF,
         # can run for tens of minutes. Scope it and bound concurrency/rate/timeout so

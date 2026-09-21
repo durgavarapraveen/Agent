@@ -133,7 +133,7 @@ function ScanModal({ target, onClose, onStarted }) {
   const [uploading, setUploading] = useState(false);
   const [sourceRepo, setSourceRepo] = useState("");
   const [sourcePath, setSourcePath] = useState("");
-  const [selectedPhases, setSelectedPhases] = useState(["RECON", "ACTIVE_SCANNING", "EXPLOITATION", "REPORTING"]);
+  const [selectedPhases, setSelectedPhases] = useState(["BUSINESS_UNDERSTANDING", "RECON", "ACTIVE_SCANNING", "EXPLOITATION", "REPORTING"]);
   const [showCreds, setShowCreds] = useState(false);
   const [credList, setCredList] = useState([{ role: "admin", username: "", password: "", login_url: "" }]);
   const [state, setState] = useState("config"); // config | launching | running | stopped | completed | failed
@@ -149,6 +149,7 @@ function ScanModal({ target, onClose, onStarted }) {
   ];
 
   const phaseOptions = [
+    { id: "BUSINESS_UNDERSTANDING", name: "Business Understanding", desc: "LLM learns the app + plans the engagement" },
     { id: "RECON", name: "Recon", desc: "Subdomain enum, port scan, tech fingerprint" },
     { id: "ACTIVE_SCANNING", name: "Vuln Assessment", desc: "Nuclei scans, injection testing" },
     { id: "EXPLOITATION", name: "Exploitation", desc: "Exploit execution, post-exploit" },
@@ -162,10 +163,10 @@ function ScanModal({ target, onClose, onStarted }) {
   };
 
   const applyPreset = (preset) => {
-    if (preset === "recon") setSelectedPhases(["RECON"]);
-    else if (preset === "recon+scan") setSelectedPhases(["RECON", "ACTIVE_SCANNING"]);
-    else if (preset === "no-exploit") setSelectedPhases(["RECON", "ACTIVE_SCANNING", "REPORTING"]);
-    else setSelectedPhases(["RECON", "ACTIVE_SCANNING", "EXPLOITATION", "REPORTING"]);
+    if (preset === "recon") setSelectedPhases(["BUSINESS_UNDERSTANDING", "RECON"]);
+    else if (preset === "recon+scan") setSelectedPhases(["BUSINESS_UNDERSTANDING", "RECON", "ACTIVE_SCANNING"]);
+    else if (preset === "no-exploit") setSelectedPhases(["BUSINESS_UNDERSTANDING", "RECON", "ACTIVE_SCANNING", "REPORTING"]);
+    else setSelectedPhases(["BUSINESS_UNDERSTANDING", "RECON", "ACTIVE_SCANNING", "EXPLOITATION", "REPORTING"]);
   };
 
   const handleMobileUpload = async (e) => {

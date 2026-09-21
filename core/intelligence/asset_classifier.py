@@ -103,7 +103,3 @@ def classify(profile: AssetProfile) -> AssetClass:
             return AssetClass.LIVE_APP
 
     return AssetClass.UNKNOWN
-
-
-def workflow_for(cls: AssetClass) -> List[str]:
-    return WORKFLOW_BY_CLASS.get(cls, WORKFLOW_BY_CLASS[AssetClass.UNKNOWN])

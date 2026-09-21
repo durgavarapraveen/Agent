@@ -467,6 +467,17 @@ class ToolRegistry:
         for name, desc in kali_tools:
             self.register(KaliTool(name, desc, "recon"))
 
+        # Metasploit auxiliary scanners (Level-A, read-only verification).
+        # Opt-in via NEO_ENABLE_MSF; allow-listed modules only. See adapter.
+        try:
+            from core.tools.adapters.metasploit import MetasploitAuxTool
+            self.register(MetasploitAuxTool(
+                "msf_scanner",
+                "Metasploit auxiliary scanners (read-only network vuln verification)",
+                "vuln"))
+        except Exception as _e:
+            logger.debug(f"[Metasploit] registration skipped: {_e}")
+
         # P2-8: structured HTTP operations as first-class tools so the
         # LLM can call `http_fetch` / `extract_api_routes` / `parse_html`
         # / `compare_responses` etc. without asking for a shell pipeline.

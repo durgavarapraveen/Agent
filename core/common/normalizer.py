@@ -111,6 +111,18 @@ class PlannerResponseNormalizer:
             action_map = {
                 "spawn_tasks": BrainDecisionAction.SPAWN_AGENTS,
                 "spawn_agents": BrainDecisionAction.SPAWN_AGENTS,
+                "execute_tools": BrainDecisionAction.SPAWN_AGENTS,
+                "execute": BrainDecisionAction.SPAWN_AGENTS,
+                "run_tools": BrainDecisionAction.SPAWN_AGENTS,
+                # Single tool-call shapes some models emit (e.g. DeepSeek):
+                # {"action":"execute_capability","tool":...,"parameters":...}
+                "execute_capability": BrainDecisionAction.SPAWN_AGENTS,
+                "execute_tool": BrainDecisionAction.SPAWN_AGENTS,
+                "run_capability": BrainDecisionAction.SPAWN_AGENTS,
+                "run_tool": BrainDecisionAction.SPAWN_AGENTS,
+                "tool_call": BrainDecisionAction.SPAWN_AGENTS,
+                "call_tool": BrainDecisionAction.SPAWN_AGENTS,
+                "use_tool": BrainDecisionAction.SPAWN_AGENTS,
                 "run_task": BrainDecisionAction.RUN_TASK,
                 "wait": BrainDecisionAction.WAIT,
                 "replan": BrainDecisionAction.REPLAN,
@@ -126,7 +138,24 @@ class PlannerResponseNormalizer:
 
             # 2. Extract and normalize tasks list (handling agent_spec singular vs agents plural)
             singular_spec = raw.get("agent_spec") or raw.get("task_spec") or raw.get("task") or raw.get("agent")
-            plural_specs = raw.get("tasks") or raw.get("agent_specs") or raw.get("agents")
+            # Accept common LLM variants for the task list, incl. `queue`/`tools`
+            # (some models emit action='execute_tools' with a `queue` array).
+            plural_specs = (raw.get("tasks") or raw.get("agent_specs") or raw.get("agents")
+                            or raw.get("queue") or raw.get("tools") or raw.get("tool_calls"))
+
+            # Single tool-call shape: {"action":"execute_capability","tool":"nmap",
+            # "parameters":{...}} — no agent_spec/tasks. Synthesize one task from the
+            # top-level tool + parameters so it isn't dropped as "empty".
+            if not singular_spec and not plural_specs and (raw.get("tool") or raw.get("capability")):
+                singular_spec = {
+                    "tool": raw.get("tool"),
+                    "capability": raw.get("capability"),
+                    "parameters": raw.get("parameters") or raw.get("params") or raw.get("inputs"),
+                    "objective": raw.get("objective") or raw.get("reason") or raw.get("goal"),
+                    "target": raw.get("target"),
+                }
+                logger.info("[PlannerNormalizer] FORMAT_CONVERSION: single tool-call "
+                            "(tool=%s) → task", raw.get("tool") or raw.get("capability"))
 
             if singular_spec and not plural_specs:
                 logger.warning(
@@ -193,7 +222,8 @@ class PlannerResponseNormalizer:
 
     @classmethod
     def _normalize_task_spec(cls, data: Dict[str, Any]) -> TaskSpec:
-        objective = data.get("objective") or data.get("goal") or data.get("description") or "Unspecified task"
+        objective = (data.get("objective") or data.get("goal") or data.get("description")
+                     or data.get("reason") or "Unspecified task")
         
         # Determine capability: prioritize objective text keyword inference first
         capability = cls._infer_capability(objective, data)
@@ -214,13 +244,15 @@ class PlannerResponseNormalizer:
         # ToolRouter still picks the actual tool). Keeping it: (a) lets the router prefer
         # the requested tool, and (b) makes distinct tools (subfinder vs amass) produce
         # distinct task signatures so they aren't wrongly deduplicated into one run.
-        inputs = data.get("inputs") or {}
-        if not inputs and "target" in data:
+        inputs = dict(data.get("inputs") or {})
+        if data.get("target") and "target" not in inputs:
             inputs["target"] = data["target"]
-        if "params" in data and isinstance(data["params"], dict):
-            inputs.update(data["params"])
-        # Also capture a top-level 'tools' hint from the task spec, not just inputs.
-        _raw_tools = inputs.pop("tools", None) or data.get("tools")
+        # Accept both `params` and `parameters` (the single tool-call shape uses the latter).
+        for _k in ("params", "parameters"):
+            if isinstance(data.get(_k), dict):
+                inputs.update(data[_k])
+        # Also capture a top-level tool hint (`tools` list OR singular `tool`).
+        _raw_tools = inputs.pop("tools", None) or data.get("tools") or data.get("tool")
         if _raw_tools:
             inputs["tools_hint"] = _raw_tools if isinstance(_raw_tools, list) else [_raw_tools]
         else:
@@ -281,8 +313,15 @@ class PlannerResponseNormalizer:
             except ValueError:
                 pass
 
-        # Check tool hints in data if provided
-        tools_hint = [str(t).lower() for t in (data.get("tools") or [])]
+        # Check tool hints in data if provided. Accept the plural `tools` list, an
+        # already-built `tools_hint`, AND the singular `tool` (the single tool-call
+        # shape). Without this a `{tool:"nmap"}` task with no objective wrongly
+        # defaulted to technology_fingerprinting, so every tool-call collapsed to the
+        # same capability and the planner looped on it.
+        _th = data.get("tools") or data.get("tools_hint") or data.get("tool") or []
+        if isinstance(_th, str):
+            _th = [_th]
+        tools_hint = [str(t).lower() for t in _th]
         if any(t in ("nmap", "masscan", "port_check") for t in tools_hint):
             logger.info(f"CAPABILITY_CLASSIFICATION: objective='{objective}' matched_capability={CapabilityType.PORT_SCANNING.value} via tools_hint")
             return CapabilityType.PORT_SCANNING

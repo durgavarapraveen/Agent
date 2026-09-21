@@ -306,6 +306,24 @@ class PersistenceMixin:
         if added:
             logger.info(f"[ProbeSweep] LLM triage recovered {added} missed finding(s) from {len(pending)} probes")
 
+    async def _flush_partial(self, reason: str = ""):
+        """Incrementally persist the current findings mid-scan so a stop/kill/crash
+        never loses what was already discovered. Idempotent (upsert) and fully
+        guarded — must never break the scan loop. Writes straight to the
+        `vulnerabilities` table under this run's id."""
+        try:
+            vulns = list(getattr(self.ctx, "vulnerabilities", []) or [])
+            if not vulns:
+                return
+            from core.database.pg_store import VulnRepo
+            run_id = getattr(self, "_scan_id", "") or getattr(self.ctx, "scan_id", "") or ""
+            if not run_id:
+                return
+            VulnRepo.bulk_insert(run_id, vulns)
+            logger.info("[flush] persisted %d finding(s) mid-scan (%s)", len(vulns), reason or "checkpoint")
+        except Exception as e:
+            logger.warning("[flush] partial persist failed (non-fatal): %s", e)
+
     async def _persist_vulnerabilities(self):
         try:
             # LLM safety-net over unclassified probes before we persist.

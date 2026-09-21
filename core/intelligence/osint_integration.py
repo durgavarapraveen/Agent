@@ -214,16 +214,34 @@ class OSINTOrchestrator:
             from core.orchestration.parallel_agents import AgentTracker
             scan_id = getattr(self.ctx, "scan_id", None) or getattr(self.ctx, "_scan_id", "")
 
+            try:
+                from core.orchestration.family_scheduler import _reason
+            except Exception:
+                _reason = None
+
             async def _tracked(name: str, coro):
-                t = AgentTracker(scan_id, agent_id=f"osint:{name}",
+                aid = f"osint:{name}"
+                t = AgentTracker(scan_id, agent_id=aid,
                                   label=f"OSINT: {name}", phase="osint", target=domain)
                 t.start(current_step=name)
+                if _reason:
+                    await _reason(scan_id, aid, 1,
+                                  f"Gathering OSINT: {name.replace('_', ' ')} for {domain}.",
+                                  tool=name)
                 try:
                     r = await coro
                     t.finish(status="completed")
+                    if _reason:
+                        n = len(r) if isinstance(r, (list, dict)) else 0
+                        await _reason(scan_id, aid, 2,
+                                      f"→ {name}: completed ({n} item(s)).",
+                                      tool=name, status=1 if n else 0)
                     return r
                 except Exception as e:
                     t.finish(status="failed", error=str(e))
+                    if _reason:
+                        await _reason(scan_id, aid, 2, f"{name} failed: {e}",
+                                      tool=name, status=-1)
                     raise
 
             logger.info("[OSINTOrchestrator] Wave 1: employee_enum, github_scan, dns_intel, subdomain_enum (parallel)")
@@ -289,78 +307,6 @@ class OSINTOrchestrator:
         return counts
 
 
-class OSINTCapabilityResolver:
-
-    OSINT_CAPABILITIES = {
-        'employee_enumeration': {
-            'description': 'Discover employee email addresses and roles',
-            'tools': ['theharvester', 'browser', 'http_request', 'dns_lookup'],
-            'max_steps': 10
-        },
-        'github_scanning': {
-            'description': 'Scan public GitHub repositories for secrets',
-            'tools': ['http_request'],
-            'max_steps': 15
-        },
-        'dns_intelligence': {
-            'description': 'Analyze DNS and mail infrastructure',
-            'tools': ['dig', 'dns_lookup', 'ssl_inspect', 'whois'],
-            'max_steps': 8
-        },
-        'subdomain_enumeration': {
-            'description': 'Discover all subdomains and virtual hosts',
-            'tools': ['subfinder', 'amass', 'httpx', 'chaos', 'http_request', 'dns_lookup', 'ssl_inspect'],
-            'max_steps': 20
-        },
-        'threat_intelligence': {
-            'description': 'Correlate assets with threat intelligence feeds',
-            'tools': ['http_request'],
-            'max_steps': 12
-        },
-        'web_reconnaissance': {
-            'description': 'Deep web asset and technology reconnaissance',
-            'tools': ['httpx', 'whatweb', 'wafw00f', 'katana', 'gau', 'waybackurls', 'gobuster'],
-            'max_steps': 15
-        },
-        'parameter_discovery': {
-            'description': 'Discover hidden URL parameters and endpoints',
-            'tools': ['arjun', 'paramspider', 'katana', 'gau', 'waybackurls'],
-            'max_steps': 12
-        }
-    }
-
-    @classmethod
-    def resolve_osint_objective(cls, objective: str) -> Optional[Dict]:
-        obj_lower = objective.lower()
-        best_cap = None
-        best_score = 0
-
-        # Exact match check first
-        for cap_name, cap_spec in cls.OSINT_CAPABILITIES.items():
-            if cap_name in obj_lower:
-                return {
-                    'capability': cap_name,
-                    'description': cap_spec['description'],
-                    'tools': cap_spec['tools'],
-                    'max_steps': cap_spec['max_steps']
-                }
-
-        for cap_name, cap_spec in cls.OSINT_CAPABILITIES.items():
-            keywords = cap_name.split('_')
-            score = sum(1 for kw in keywords if kw in obj_lower and len(kw) > 3)
-            if score > best_score:
-                best_score = score
-                best_cap = (cap_name, cap_spec)
-
-        if best_cap:
-            cap_name, cap_spec = best_cap
-            return {
-                'capability': cap_name,
-                'description': cap_spec['description'],
-                'tools': cap_spec['tools'],
-                'max_steps': cap_spec['max_steps']
-            }
-        return None
 
 
 # Example usage in central_brain:

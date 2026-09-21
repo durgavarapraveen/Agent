@@ -16,10 +16,36 @@ from playwright.async_api import async_playwright
 
 async def main():
     actions = json.loads(base64.b64decode(sys.argv[1]))
+    # Optional auth blob (argv[2]): {headers:{}, cookies:[{name,value,url}], local_storage:{k:v}}
+    auth = {}
+    if len(sys.argv) > 2 and sys.argv[2]:
+        try:
+            auth = json.loads(base64.b64decode(sys.argv[2]))
+        except Exception:
+            auth = {}
     logs, results = [], []
     async with async_playwright() as p:
         browser = await p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
-        page = await browser.new_page()
+        ctx_kwargs = {}
+        if auth.get("headers"):
+            ctx_kwargs["extra_http_headers"] = auth["headers"]
+        context = await browser.new_context(**ctx_kwargs)
+        if auth.get("cookies"):
+            try:
+                await context.add_cookies(auth["cookies"])
+            except Exception as e:
+                logs.append(f"cookie-inject-err: {e}")
+        ls = auth.get("local_storage") or {}
+        if ls:
+            # Seed localStorage BEFORE any page script runs, so SPAs (e.g. token-in-
+            # localStorage auth) boot authenticated on the first navigation.
+            js = ";".join("localStorage.setItem(%s,%s)" % (json.dumps(k), json.dumps(v))
+                          for k, v in ls.items())
+            try:
+                await context.add_init_script(js)
+            except Exception as e:
+                logs.append(f"ls-inject-err: {e}")
+        page = await context.new_page()
         page.on("console", lambda m: logs.append(f"{m.type}: {m.text}"))
         page.on("pageerror", lambda e: logs.append(f"pageerror: {e}"))
         for a in actions:
@@ -55,8 +81,13 @@ asyncio.run(main())
 
 class BrowserActuator:
     def __init__(self, timeout: int = 120, host_override: Optional[str] = None,
-                 scope_validator: Optional[Any] = None):
+                 scope_validator: Optional[Any] = None,
+                 auth: Optional[Dict[str, Any]] = None):
         self.timeout = timeout
+        # Optional auth injected into the browser context so SPAs are driven
+        # AUTHENTICATED (headers + cookies + localStorage token). Build with
+        # BrowserActuator.auth_from_ctx(ctx).
+        self.auth = auth or {}
         self._driver_b64 = base64.b64encode(_DRIVER.encode()).decode()
         if host_override is None:
             try:
@@ -74,6 +105,47 @@ class BrowserActuator:
                 logger.debug("TargetScopeValidator import failed: %s", e)
                 scope_validator = None
         self.scope_validator = scope_validator
+
+    @classmethod
+    def auth_from_ctx(cls, ctx) -> Dict[str, Any]:
+        """Build the browser auth blob from a scan context: Authorization/cookie
+        headers, cookies, and a localStorage token (SPAs that store the JWT in
+        localStorage, e.g. OWASP Juice Shop's `token`). Empty when unauthenticated."""
+        if not ctx:
+            return {}
+        headers = dict(getattr(ctx, "auth_headers", {}) or {})
+        cookies_map = dict(getattr(ctx, "auth_cookies", {}) or {})
+        target = getattr(ctx, "target", "") or ""
+        if target and not target.startswith(("http://", "https://")):
+            target = "https://" + target
+        origin = ""
+        try:
+            pu = urlparse(target.split("#")[0])
+            if pu.scheme and pu.netloc:
+                origin = f"{pu.scheme}://{pu.netloc}"
+        except Exception:
+            pass
+        local_storage = {}
+        authz = headers.get("Authorization", "")
+        if authz.startswith("Bearer "):
+            jwt = authz[len("Bearer "):]
+            for k in ("token", "access_token", "authToken", "jwt"):
+                local_storage[k] = jwt
+        cookies = []
+        for name, val in cookies_map.items():
+            c = {"name": str(name), "value": str(val)}
+            if origin:
+                c["url"] = origin
+            cookies.append(c)
+        ctx_headers = {k: v for k, v in headers.items() if k.lower() != "cookie"}
+        blob: Dict[str, Any] = {}
+        if ctx_headers:
+            blob["headers"] = ctx_headers
+        if cookies:
+            blob["cookies"] = cookies
+        if local_storage:
+            blob["local_storage"] = local_storage
+        return blob
 
     def _in_scope(self, url: str) -> bool:
         if not self.scope_validator:
@@ -103,6 +175,12 @@ class BrowserActuator:
         return out
 
     async def run_actions(self, actions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        # Drop no-op navigations with a blank URL: an empty target is not a scope
+        # violation — validating '' would log a spurious AUTHORIZATION_DENIED and
+        # abort the whole batch. Keep every other action.
+        actions = [a for a in actions
+                   if not (a.get("action") == "navigate"
+                           and not str(a.get("url") or "").strip())]
         for a in actions:
             if a.get("action") == "navigate" and not self._in_scope(a.get("url", "")):
                 return {"error": "navigation target out of authorized scope", "blocked": True}
@@ -112,9 +190,10 @@ class BrowserActuator:
             return {"error": f"Kali executor unavailable: {e}"}
 
         actions_b64 = base64.b64encode(json.dumps(self._rewrite(actions)).encode()).decode()
+        auth_b64 = base64.b64encode(json.dumps(self.auth or {}).encode()).decode()
         cmd = (
             f"echo {self._driver_b64} | base64 -d > /tmp/bdriver.py && "
-            f"python3 /tmp/bdriver.py {actions_b64}"
+            f"python3 /tmp/bdriver.py {actions_b64} {auth_b64}"
         )
         try:
             res = await asyncio.to_thread(KaliDockerExecutor.run, cmd, self.timeout)

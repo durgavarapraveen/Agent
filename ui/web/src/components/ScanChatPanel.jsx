@@ -17,12 +17,28 @@ const SUGGESTED = [
   "Show all OSINT-discovered employees",
 ];
 
+const chatKey = (scanId) => `ag_scanchat_${scanId}`;
+const loadChat = (scanId) => {
+  try { return JSON.parse(localStorage.getItem(chatKey(scanId)) || "[]") || []; }
+  catch { return []; }
+};
+
 export default function ScanChatPanel({ scanId }) {
-  const [msgs, setMsgs] = useState([]);
+  const [msgs, setMsgs] = useState(() => loadChat(scanId));
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [stats, setStats] = useState(null);
   const bottomRef = useRef(null);
+
+  // Restore this scan's conversation on mount / when the scan changes, so
+  // switching tabs (or reloading) never loses the chat history.
+  useEffect(() => { setMsgs(loadChat(scanId)); setStats(null); }, [scanId]);
+
+  // Persist per-scan on every change (per-viewer convenience; storage may be
+  // unavailable in private windows, so guard it).
+  useEffect(() => {
+    try { localStorage.setItem(chatKey(scanId), JSON.stringify(msgs)); } catch { /* ignore */ }
+  }, [msgs, scanId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -59,9 +75,18 @@ export default function ScanChatPanel({ scanId }) {
           ASK ABOUT THIS SCAN
         </span>
         {stats && (
-          <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--mono)" }}>
+          <span style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--mono)" }}>
             reusing {stats.phase_summaries || 0} scan-time summaries · {stats.vulns} vulns · {stats.access} access
           </span>
+        )}
+        {msgs.length > 0 && (
+          <button onClick={() => { setMsgs([]); setStats(null); }}
+            title="Clear this scan's conversation"
+            style={{ marginLeft: "auto", fontSize: 11, padding: "3px 10px", borderRadius: 6,
+                     border: "1px solid var(--border)", background: "var(--bg-card, #fff)",
+                     color: "var(--text-dim)", cursor: "pointer" }}>
+            Clear
+          </button>
         )}
       </div>
 
@@ -116,8 +141,8 @@ export default function ScanChatPanel({ scanId }) {
         />
         <button type="submit" disabled={busy || !input.trim()} className="btn"
           style={{
-            background: busy ? "var(--text-dim)" : "var(--accent, #00ff9a)",
-            color: "#000", fontWeight: 700, padding: "0 16px",
+            background: busy ? "var(--text-dim)" : "var(--accent)",
+            color: "var(--accent-on, #fff)", fontWeight: 700, padding: "0 16px",
             border: 0, borderRadius: 6, cursor: busy ? "wait" : "pointer",
           }}>
           {busy ? "…" : "Send"}
@@ -136,23 +161,80 @@ function ChatBubble({ role, content }) {
     }}>
       <div style={{
         maxWidth: "82%",
-        background: isUser ? "var(--bg-elev)" : "rgba(0,255,154,0.06)",
-        border: `1px solid ${isUser ? "var(--border)" : "var(--accent, #00ff9a)"}`,
+        background: isUser ? "var(--bg-elev)" : "var(--accent-dim, #eef4ff)",
+        border: `1px solid ${isUser ? "var(--border)" : "var(--accent)"}`,
         borderRadius: 8, padding: "10px 12px",
       }}>
         <div style={{
           fontSize: 10, letterSpacing: 1, fontWeight: 700,
-          color: isUser ? "var(--text-dim)" : "var(--accent, #00ff9a)",
+          color: isUser ? "var(--text-dim)" : "var(--accent)",
           marginBottom: 4, textTransform: "uppercase",
         }}>
           {isUser ? "You" : "Analyst"}
         </div>
-        <pre style={{
-          margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word",
-          fontFamily: isUser ? "var(--mono)" : "inherit", fontSize: 13,
-          color: "var(--text-h)", lineHeight: 1.5,
-        }}>{content}</pre>
+        {isUser ? (
+          <pre style={{
+            margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word",
+            fontFamily: "var(--mono)", fontSize: 13, color: "var(--text-h)", lineHeight: 1.5,
+          }}>{content}</pre>
+        ) : (
+          <Markdown text={content} />
+        )}
       </div>
+    </div>
+  );
+}
+
+/* Tiny dependency-free markdown: **bold**, `code`, and -/1. lists. */
+function renderInline(text) {
+  const out = [];
+  const re = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+  let last = 0, m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    const tok = m[0];
+    if (tok.startsWith("**")) out.push(<strong key={out.length}>{tok.slice(2, -2)}</strong>);
+    else out.push(
+      <code key={out.length} style={{
+        fontFamily: "var(--mono)", fontSize: 12, padding: "1px 5px", borderRadius: 4,
+        background: "var(--bg-surface, #f5f5f7)", border: "1px solid var(--border)",
+      }}>{tok.slice(1, -1)}</code>);
+    last = m.index + tok.length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+function Markdown({ text }) {
+  const lines = String(text || "").split("\n");
+  const blocks = [];
+  let list = null;
+  const flush = () => { if (list) { blocks.push(list); list = null; } };
+  lines.forEach((ln) => {
+    const bullet = ln.match(/^\s*[-*]\s+(.*)/);
+    const num = ln.match(/^\s*\d+\.\s+(.*)/);
+    if (bullet || num) {
+      const ordered = !!num;
+      if (!list || list.ordered !== ordered) { flush(); list = { ordered, items: [] }; }
+      list.items.push((bullet || num)[1]);
+    } else {
+      flush();
+      blocks.push({ text: ln });
+    }
+  });
+  flush();
+  return (
+    <div style={{ fontSize: 13, lineHeight: 1.6, color: "var(--text)" }}>
+      {blocks.map((b, i) => {
+        if (b.items) {
+          const Tag = b.ordered ? "ol" : "ul";
+          return <Tag key={i} style={{ margin: "6px 0", paddingLeft: 20 }}>
+            {b.items.map((it, j) => <li key={j} style={{ marginBottom: 3 }}>{renderInline(it)}</li>)}
+          </Tag>;
+        }
+        if (!b.text.trim()) return <div key={i} style={{ height: 6 }} />;
+        return <div key={i} style={{ marginBottom: 4 }}>{renderInline(b.text)}</div>;
+      })}
     </div>
   );
 }

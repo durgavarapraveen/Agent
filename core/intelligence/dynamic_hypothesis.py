@@ -230,9 +230,14 @@ class DynamicHypothesisEngine:
         if not signal_text.strip():
             return []
 
+        # ctx.technologies is usually a dict ({name: info}); slicing a dict raises
+        # TypeError(slice(None,20,None)), so normalize to a list first.
+        _techs = getattr(self.ctx, "technologies", []) or []
+        if isinstance(_techs, dict):
+            _techs = list(_techs.keys())
         techs = ", ".join(
-            t if isinstance(t, str) else t.get("name", str(t))
-            for t in (getattr(self.ctx, "technologies", []) or [])[:20]
+            t if isinstance(t, str) else (t.get("name", str(t)) if isinstance(t, dict) else str(t))
+            for t in list(_techs)[:20]
         ) or "unknown"
 
         ep_count = len(getattr(self.ctx, "endpoints", []) or [])
@@ -245,17 +250,57 @@ class DynamicHypothesisEngine:
             endpoints_summary=endpoints_summary,
         )
 
+        # Universal patterns (Tester.txt §4) + researched known issues (Phase 1)
+        # ground the LLM in systematic, tech-specific context. Scoped to the plan.
+        families = self._relevant_families()
         try:
-            from core.llm.task_tier import TaskTier
-            resp = await llm.generate(
-                messages=[{"role": "user", "content": prompt}],
+            from core.hypothesis.universal_patterns import checklist_text
+            prompt += "\n\n" + checklist_text(families)
+        except Exception as e:
+            logger.debug(f"[Pα] pattern checklist skipped: {e}")
+        try:
+            from core.intelligence.tech_research import known_issues_text
+            ki = known_issues_text(getattr(self.ctx, "technologies", []) or [])
+            if ki:
+                prompt += "\n\n" + ki
+        except Exception as e:
+            logger.debug(f"[Pα] tech research skipped: {e}")
+
+        try:
+            from core.common.schemas import TaskTier
+            resp = await llm.generate_response(
+                prompt,
                 tier=TaskTier.MEDIUM,
                 temperature=0.3,
             )
-            return self._parse_hypotheses(resp.content)
+            hyps = self._parse_hypotheses(resp.content)
         except Exception as e:
             logger.error(f"[Pα] Hypothesis generation failed: {e}")
-            return []
+            hyps = []
+
+        # Deterministic, no-LLM pattern probes (info-disclosure / storage) so the
+        # cycle always covers cheap high-signal checks even if the LLM is down.
+        try:
+            from core.hypothesis.universal_patterns import deterministic_hypotheses
+            base = getattr(self.ctx, "target", "") or ""
+            existing = {h.vulnerability_class + h.attack_surface for h in hyps}
+            for dh in deterministic_hypotheses(base, families):
+                if dh.vulnerability_class + dh.attack_surface not in existing:
+                    hyps.append(dh)
+        except Exception as e:
+            logger.debug(f"[Pα] deterministic patterns skipped: {e}")
+        return hyps
+
+    def _relevant_families(self):
+        """TestFamily list from ctx.engagement_plan (None → all patterns)."""
+        raw = getattr(self.ctx, "engagement_plan", None)
+        if not isinstance(raw, dict) or not raw.get("items"):
+            return None
+        try:
+            from core.orchestration.test_plan import EngagementPlan
+            return EngagementPlan.from_dict(raw).relevant_families()
+        except Exception:
+            return None
 
     def _parse_hypotheses(self, raw: str) -> List[DynamicHypothesis]:
         hypotheses = []
@@ -389,9 +434,9 @@ class DynamicHypothesisEngine:
         )
 
         try:
-            from core.llm.task_tier import TaskTier
-            resp = await llm.generate(
-                messages=[{"role": "user", "content": prompt}],
+            from core.common.schemas import TaskTier
+            resp = await llm.generate_response(
+                prompt,
                 tier=TaskTier.SMALL,
                 temperature=0.1,
             )

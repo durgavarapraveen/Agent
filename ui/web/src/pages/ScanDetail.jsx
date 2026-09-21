@@ -16,8 +16,10 @@ import FixSuggestionsPanel from "../components/FixSuggestionsPanel";
 import AttackRecordingsPanel from "../components/AttackRecordingsPanel";
 import SurfaceDiffPanel from "../components/SurfaceDiffPanel";
 import SastPanel from "../components/SastPanel";
+import CoveragePanel from "../components/CoveragePanel";
+import WatchdogPanel from "../components/WatchdogPanel";
 import { OsintSection } from "../components/ReconPanel";
-import { methodColor } from "../components/utils";
+import { methodColor, asText } from "../components/utils";
 
 export default function ScanDetail() {
   const { scanId } = useParams();
@@ -46,6 +48,8 @@ export default function ScanDetail() {
     { id: "access", label: "Access Gained" },
     { id: "agents", label: "Parallel Agents" },
     { id: "exploits", label: `Exploits (${exploits.length})` },
+    { id: "coverage", label: "Coverage" },
+    { id: "watchdog", label: "Watchdog" },
     { id: "recordings", label: "Recordings" },
     { id: "recon", label: "Recon Data" },
     { id: "tool-outputs", label: "Tool Outputs" },
@@ -90,6 +94,8 @@ export default function ScanDetail() {
       {tab === "access" && <AccessGainedPanel scanId={scanId} />}
       {tab === "agents" && <LiveAgentsPanel scanId={scanId} poll={false} />}
       {tab === "exploits" && <ExploitsTab exploits={exploits} scanId={scanId} />}
+      {tab === "coverage" && <CoveragePanel scanId={scanId} />}
+      {tab === "watchdog" && <WatchdogPanel />}
       {tab === "artifacts" && <ArtifactsPanel scanId={scanId} />}
       {tab === "chains" && <AttackChainsPanel scanId={scanId} />}
       {tab === "chain-analysis" && <ChainAnalysisPanel scanId={scanId} />}
@@ -300,7 +306,7 @@ function VulnsTab({ vulns, expanded, setExpanded }) {
              (v.type || "").toLowerCase().includes(q) ||
              (v.tool || "").toLowerCase().includes(q) ||
              (v.location || "").toLowerCase().includes(q) ||
-             (v.details || "").toLowerCase().includes(q);
+             asText(v.details).toLowerCase().includes(q);
     }
     return true;
   });
@@ -434,41 +440,41 @@ function VulnDetail({ v }) {
       <div style={{ marginBottom: 16, padding: 12, background: "var(--surface-1, #1a1a2e)", borderRadius: 8, borderLeft: "3px solid var(--accent)" }}>
         <div style={{ fontSize: 12, fontWeight: 600, color: "var(--accent)", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>How to Reproduce</div>
         <div style={{ fontSize: 13, lineHeight: 1.6, color: "var(--text)" }}>
-          {v.details || "No reproduction steps available."}
+          {asText(v.details) || "No reproduction steps available."}
         </div>
         {v.evidence && (
           <div style={{ marginTop: 8 }}>
             <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-dim)", marginBottom: 4 }}>Evidence</div>
-            <pre style={{ fontSize: 12, fontFamily: "var(--mono)", background: "var(--surface-2, #0e0e12)", padding: 8, borderRadius: 4, whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 200, overflow: "auto" }}>{v.evidence}</pre>
+            <pre style={{ fontSize: 12, fontFamily: "var(--mono)", background: "var(--surface-2, #0e0e12)", padding: 8, borderRadius: 4, whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 200, overflow: "auto" }}>{asText(v.evidence)}</pre>
           </div>
         )}
         {v.curl_command && (
           <div style={{ marginTop: 8 }}>
             <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-dim)", marginBottom: 4 }}>cURL Command</div>
-            <pre style={{ fontSize: 11, fontFamily: "var(--mono)", background: "#0d1117", color: "#22c55e", padding: 8, borderRadius: 4, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{v.curl_command}</pre>
+            <pre style={{ fontSize: 11, fontFamily: "var(--mono)", background: "var(--bg-alt)", color: "var(--text)", border: "1px solid var(--border)", padding: 8, borderRadius: 4, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{asText(v.curl_command)}</pre>
           </div>
         )}
       </div>
 
       <div className="vuln-detail-grid">
-        <span className="lbl">Location</span><span>{v.location || v.target || "-"}</span>
-        <span className="lbl">Target</span><span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{v.target || "-"}</span>
-        <span className="lbl">Source</span><span>{v.source || v.tool || "-"}</span>
-        {v.cve_id && <><span className="lbl">CVE</span><span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--red)" }}>{v.cve_id}</span></>}
-        {v.cwe_id && <><span className="lbl">CWE</span><span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{v.cwe_id}</span></>}
-        <span className="lbl">Proof</span><span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{v.proof || "-"}</span>
-        <span className="lbl">Reproducible</span>
-        <span>
-          {v.reproducibility_status === "REPRODUCIBLE"
-            ? <span style={{ color: "var(--green)" }}>REPRODUCIBLE</span>
-            : v.reproducibility_status || "-"}
-        </span>
-        <span className="lbl">Retest</span>
-        <span>
-          {v.retest_attempts
-            ? <span>{v.retest_successes}/{v.retest_attempts} passed {v.retest_successes === v.retest_attempts ? <span style={{ color: "var(--green)" }}>(all pass)</span> : ""}</span>
-            : "-"}
-        </span>
+        {(v.location || v.target) && <><span className="lbl">Location</span><span>{v.location || v.target}</span></>}
+        {v.target && <><span className="lbl">Target</span><span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{v.target}</span></>}
+        {(v.source || v.tool) && <><span className="lbl">Source</span><span>{v.source || v.tool}</span></>}
+        {v.cve_id && <><span className="lbl">CVE</span><span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--red)" }}>{asText(v.cve_id)}</span></>}
+        {v.cwe_id && <><span className="lbl">CWE</span><span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{asText(v.cwe_id)}</span></>}
+        {asText(v.proof) && <><span className="lbl">Proof</span><span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{asText(v.proof)}</span></>}
+        {v.reproducibility_status && <>
+          <span className="lbl">Reproducible</span>
+          <span>
+            {v.reproducibility_status === "REPRODUCIBLE"
+              ? <span style={{ color: "var(--green)" }}>REPRODUCIBLE</span>
+              : v.reproducibility_status}
+          </span>
+        </>}
+        {v.retest_attempts ? <>
+          <span className="lbl">Retest</span>
+          <span>{v.retest_successes}/{v.retest_attempts} passed {v.retest_successes === v.retest_attempts ? <span style={{ color: "var(--green)" }}>(all pass)</span> : ""}</span>
+        </> : null}
         {v.original_severity && v.original_severity !== (v.severity || "").toLowerCase() && <>
           <span className="lbl">Original Severity</span>
           <span className={`badge ${v.original_severity}`}>{v.original_severity.toUpperCase()}</span>
@@ -585,7 +591,7 @@ function VulnDetail({ v }) {
       {v.remediation && (
         <div style={{ marginTop: 12, padding: 12, background: "var(--surface-1, #1a1a2e)", borderRadius: 8, borderLeft: "3px solid var(--green)" }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: "var(--green)", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>Remediation</div>
-          <div style={{ fontSize: 13, lineHeight: 1.6, color: "var(--text)", whiteSpace: "pre-wrap" }}>{v.remediation}</div>
+          <div style={{ fontSize: 13, lineHeight: 1.6, color: "var(--text)", whiteSpace: "pre-wrap" }}>{asText(v.remediation)}</div>
         </div>
       )}
     </div>
@@ -641,20 +647,30 @@ function ExploitsTab({ exploits, scanId }) {
             </div>
 
             {/* Human-readable reproduction guide */}
-            <div style={{ marginBottom: 12, padding: 12, background: "var(--surface-1, #1a1a2e)", borderRadius: 8, borderLeft: "3px solid var(--accent)" }}>
+            <div style={{ marginBottom: 12, padding: 12, background: "var(--accent-dim, #eef4ff)", borderRadius: 8, borderLeft: "3px solid var(--accent)" }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: "var(--accent)", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>How a Pentester Can Reproduce This</div>
               <ol style={{ paddingLeft: 20, margin: 0, fontSize: 13, lineHeight: 1.8, color: "var(--text)" }}>
                 {howTo.map((s, j) => <li key={j}>{s}</li>)}
               </ol>
             </div>
 
+            {(ex.description || ex.detail) && (
+              <div style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.6, marginBottom: 12 }}>
+                {ex.description || ex.detail}
+              </div>
+            )}
+
             <div className="vuln-detail-grid">
               <span className="lbl">Target</span>
               <span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{target}</span>
-              <span className="lbl">Method</span>
-              <span>{method}</span>
-              <span className="lbl">Tool / Agent</span>
-              <span>{tool}</span>
+              {method && method !== "-" && <>
+                <span className="lbl">Method</span>
+                <span>{method}</span>
+              </>}
+              {tool && tool !== "-" && <>
+                <span className="lbl">Tool / Agent</span>
+                <span>{tool}</span>
+              </>}
               {ex.chain_id && <>
                 <span className="lbl">Chain</span>
                 <span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{ex.chain_id}</span>
@@ -674,6 +690,10 @@ function ExploitsTab({ exploits, scanId }) {
               {error && <>
                 <span className="lbl">Error</span>
                 <span style={{ color: "var(--red)", fontSize: 12 }}>{error}</span>
+              </>}
+              {ex.remediation && <>
+                <span className="lbl">Remediation</span>
+                <span style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.6 }}>{ex.remediation}</span>
               </>}
               {details.length > 0 && <>
                 <span className="lbl">Findings ({details.length})</span>
@@ -770,12 +790,50 @@ function ExploitsTab({ exploits, scanId }) {
 }
 
 function _buildHowToReproduce(ex) {
+  // Prefer real reproduction data the probe captured over any template.
+  const explicit = ex.reproduction || ex.how_to || ex.repro_steps || ex.steps
+    || (ex.poc && ex.poc.steps);
+  if (Array.isArray(explicit) && explicit.length) return explicit.map(String);
+
   const steps = [];
-  const type = (ex.type || ex.method || "").toLowerCase();
+  const add = (...s) => s.forEach((x) => x && steps.push(x));
+  // Match keywords across type AND title/name — the classifying signal is often
+  // only in the human title (e.g. "SPA JS bundle disclosed …", "Exposed Source Map").
+  const type = [ex.sub_type, ex.type, ex.vuln_type, ex.method,
+                ex.title, ex.name, ex.vulnerability]
+    .filter(Boolean).join(" ").toLowerCase();
   const target = ex.target || ex.url || ex.location || "the target";
   const chain = ex.chain_id || "";
+  const proof = typeof ex.proof === "string" ? ex.proof : "";
 
-  if (type.includes("csp") || type.includes("missing_csp")) {
+  if ((type.includes("source") && type.includes("map")) || type.includes("sourcemap")) {
+    add(`Fetch the source map directly: curl -s ${target}`,
+        'Confirm it returns JSON with "sources" / "sourcesContent" arrays',
+        "Reconstruct original source (e.g. sourcemapper / unwebpack-sourcemap)",
+        "Review recovered code for secrets, internal endpoints, and business logic");
+  } else if (type.includes("bundle") || type.includes("route") || type.includes("endpoint") || type.includes("js_")) {
+    add(`Download the JS bundle(s) referenced by ${target}`,
+        `Extract path strings: curl -s <bundle.js> | grep -oE '"/[a-zA-Z0-9_/-]+"'`,
+        "Enumerate the disclosed routes — especially admin/API paths not linked in the UI",
+        "Request each disclosed route and test for missing authorization");
+  } else if (type.includes("secret") || type.includes("credential") || type.includes("key") || type.includes("token")) {
+    add(`Retrieve the resource: curl -s ${target}`,
+        "Locate the exposed secret/credential in the response body or headers",
+        "Validate it against its service (non-destructively), then report and rotate");
+  } else if (type.includes("idor") || type.includes("authz") || type.includes("access")) {
+    add(`Authenticate as a low-privilege user and capture a request to ${target}`,
+        "Change the object identifier (id/uuid) to another user's value and replay",
+        "If you receive the other user's data, IDOR is confirmed",
+        "Repeat across create/read/update/delete to gauge impact");
+  } else if (type.includes("xss")) {
+    add(`Locate the reflected/stored input on ${target}`,
+        "Inject: <script>alert(document.domain)</script> and confirm it executes",
+        "Escalate to cookie/session theft to demonstrate real impact");
+  } else if (type.includes("ssrf")) {
+    add(`Find a parameter on ${target} that fetches a URL`,
+        "Point it at an OOB host you control and watch for the callback",
+        "Try cloud metadata (http://169.254.169.254/) to show impact");
+  } else if (type.includes("csp") || type.includes("missing_csp")) {
     steps.push(`Open a browser and navigate to ${target}`);
     steps.push("Open Developer Tools (F12) and go to the Network tab");
     steps.push("Reload the page and click on the main document request");
@@ -798,14 +856,16 @@ function _buildHowToReproduce(ex) {
     steps.push("Try boolean-based detection: parameter=value' AND 1=1-- vs parameter=value' AND 1=2--");
     steps.push("Use sqlmap for automated exploitation: sqlmap -u \"URL\" --dbs");
   } else {
-    steps.push(`Navigate to ${target} and identify the vulnerability type: ${type || "unknown"}`);
-    steps.push("Inspect HTTP response headers using curl -v or browser Developer Tools");
-    if (ex.error) steps.push(`Note: Previous attempt failed with: ${ex.error}`);
-    steps.push("Document findings with screenshots and response headers as evidence");
+    add(`Request the resource: curl -s -D - ${target}`,
+        proof ? `Confirm the observed evidence: ${proof.slice(0, 180)}`
+              : "Inspect the full HTTP response (headers + body) in curl -v or DevTools",
+        ex.description ? `Impact: ${String(ex.description).slice(0, 220)}` : null,
+        ex.error ? `Note: a prior automated attempt failed with: ${ex.error}` : null,
+        "Capture the request/response and a screenshot as evidence");
   }
 
   if (chain) {
-    steps.push(`This is part of attack chain ${chain} — check related exploits in this chain for the full attack path`);
+    add(`Part of attack chain ${chain} — chain with related findings for the full attack path`);
   }
 
   return steps;
@@ -839,12 +899,12 @@ function ToolOutputsTab({ scanId }) {
     <div>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
         <button onClick={() => setFilter("ALL")}
-          style={{ ...pillBtn, background: filter === "ALL" ? "var(--accent, #6366f1)" : "var(--surface-2, #1e1e2e)", color: filter === "ALL" ? "#fff" : "var(--text-dim)" }}>
+          style={{ ...pillBtn, background: filter === "ALL" ? "var(--accent)" : "var(--bg-card, #fff)", color: filter === "ALL" ? "var(--accent-on, #fff)" : "var(--text-dim)", borderColor: filter === "ALL" ? "var(--accent)" : "var(--border)" }}>
           All ({outputs.length})
         </button>
         {tools.map(t => (
           <button key={t} onClick={() => setFilter(t)}
-            style={{ ...pillBtn, background: filter === t ? "var(--accent, #6366f1)" : "var(--surface-2, #1e1e2e)", color: filter === t ? "#fff" : "var(--text-dim)" }}>
+            style={{ ...pillBtn, background: filter === t ? "var(--accent)" : "var(--bg-card, #fff)", color: filter === t ? "var(--accent-on, #fff)" : "var(--text-dim)", borderColor: filter === t ? "var(--accent)" : "var(--border)" }}>
             {t} ({outputs.filter(o => o.tool_name === t).length})
           </button>
         ))}
@@ -853,7 +913,7 @@ function ToolOutputsTab({ scanId }) {
         {filtered.map((o, i) => {
           const isOpen = expanded === i;
           return (
-            <div key={o.id || i} style={{ background: "var(--surface-1, #18181b)", borderRadius: 8, border: "1px solid var(--border, #2e2e3e)" }}>
+            <div key={o.id || i} style={{ background: "var(--bg-card, #fff)", borderRadius: 10, border: "1px solid var(--border)" }}>
               <div onClick={() => setExpanded(isOpen ? null : i)}
                 style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", cursor: "pointer" }}>
                 <span style={{ fontWeight: 600, color: "var(--text)", minWidth: 90 }}>{o.tool_name}</span>
@@ -893,8 +953,8 @@ function ToolOutputsTab({ scanId }) {
   );
 }
 
-const pillBtn = { border: "none", borderRadius: 16, padding: "4px 12px", fontSize: 12, cursor: "pointer" };
-const preBoxSD = { background: "var(--surface-2, #0e0e12)", padding: 10, borderRadius: 6, fontSize: 11, maxHeight: 220, overflow: "auto" };
+const pillBtn = { border: "1px solid var(--border)", borderRadius: 16, padding: "4px 12px", fontSize: 12, cursor: "pointer" };
+const preBoxSD = { background: "var(--bg-surface, #f5f5f7)", color: "var(--text)", border: "1px solid var(--border)", padding: 10, borderRadius: 8, fontSize: 12, lineHeight: 1.5, maxHeight: 220, overflow: "auto" };
 
 /* ── Requests ────────────────────────────────────────────────────────────── */
 function RequestsTab({ capturedData }) {
@@ -1008,7 +1068,7 @@ function LogsTab({ scanId }) {
         </a>
       </div>
       <pre style={{
-        background: "#0d1117", color: "#c9d1d9", padding: 16, borderRadius: "var(--radius-sm)",
+        background: "var(--bg-alt)", color: "var(--text)", border: "1px solid var(--border)", padding: 16, borderRadius: "var(--radius-sm)",
         fontSize: 12, fontFamily: "var(--mono)", lineHeight: 1.6, maxHeight: 600,
         overflowY: "auto", overflowX: "auto", whiteSpace: "pre", margin: 0,
       }}>
@@ -1060,6 +1120,19 @@ function CoverageTab() {
           <span className="value" style={{ color: "var(--orange)" }}>{outcomes.NEEDS_FOLLOW_UP || 0}</span>
         </div>
       </div>
+
+      {total === 0 && confidence && confidence.total_findings > 0 && (
+        <div style={{ marginTop: 16, padding: "12px 14px", borderRadius: 8,
+                      background: "var(--accent-dim, #eef4ff)", borderLeft: "3px solid var(--accent)",
+                      fontSize: 13, color: "var(--text)", lineHeight: 1.6 }}>
+          <b>No tests were logged because this scan ended before the testing phase</b> (it
+          stopped during recon). The confidence gate still evaluated{" "}
+          <b>{confidence.total_findings}</b> candidate signal(s) from recon — most were
+          rejected as low-confidence, which is why <i>Total Tests</i> is 0 while{" "}
+          <i>Rejected</i> is high. Run a full scan through <b>ACTIVE_SCANNING</b> to
+          populate real coverage.
+        </div>
+      )}
 
       {confidence && confidence.total_findings > 0 && (
         <div className="two-col" style={{ marginTop: 16 }}>
@@ -1269,7 +1342,7 @@ function AttackChainsTab({ scanId }) {
                 const loc = typeof s === "object" ? (s.location || "") : "";
                 return (
                   <React.Fragment key={si}>
-                    <div style={{ padding: "6px 12px", background: "var(--surface-1, #1e3a5f)", borderRadius: 6, fontSize: 12, color: "#fff" }}>
+                    <div style={{ padding: "6px 12px", background: "var(--accent-dim)", border: "1px solid var(--border)", borderRadius: 6, fontSize: 12, color: "var(--text-h)" }}>
                       <div style={{ fontWeight: 600 }}>{label}</div>
                       {loc && <div style={{ fontSize: 10, opacity: 0.7 }}>{loc}</div>}
                     </div>

@@ -1,5 +1,7 @@
 
+import os
 import re
+import time
 import logging
 from typing import List, Optional
 from urllib.parse import urlparse
@@ -40,16 +42,55 @@ class TargetScopeValidator:
         with cls._lock:
             cls._instance = validator
 
-    def __init__(self, authorized_targets: List[str]):
+    def __init__(self, authorized_targets: List[str], *, allow_wildcard: Optional[bool] = None,
+                 max_impact: str = None, expires_at: float = None):
         self.authorized_scope = [
             self._normalize_target(t) for t in authorized_targets if t
         ]
+        # ── IMMUTABLE AUTHORIZATION CONTRACT (§3/§5) ──────────────────────
+        # The ORIGINAL authorized targets, frozen at construction. Discovery may
+        # add working-set entries via add_target(), but ONLY hosts that still
+        # satisfy this baseline — discovery can never grant authority the
+        # original contract did not. This is the security boundary; the mutable
+        # authorized_scope is only a convenience cache.
+        self._baseline_scope: frozenset = frozenset(self.authorized_scope)
+        # Wildcard "*" is a LAB-only convenience. In production it must DENY (§4).
+        if allow_wildcard is None:
+            allow_wildcard = os.getenv("AUTHZ_ALLOW_WILDCARD", "false").lower() in ("true", "1", "yes", "on")
+        self._allow_wildcard = bool(allow_wildcard)
+        # Contract metadata (impact ceiling + expiry) — enforced by the broker/watchdog.
+        self._max_impact = (max_impact or os.getenv("AUTHZ_MAX_IMPACT", "POC")).upper()
+        self._expires_at = expires_at  # epoch seconds; None = no expiry
+        if not self._allow_wildcard and "*" in self._baseline_scope:
+            logger.warning("[TargetScopeValidator] Wildcard '*' in scope but AUTHZ_ALLOW_WILDCARD "
+                           "is off — wildcard will DENY (production-safe).")
         # IPs that in-scope hosts (authorized domains and their subdomains) resolve
         # to. Populated automatically as ANY in-scope host is validated, so scanning
         # those IPs later is authorized — globally, without per-call-site wiring.
-        self._authorized_ips: set = set()
-        self._resolved_hosts: set = set()   # hosts we've already resolved (cache)
+        # IP → expiry timestamp (TTL). A resolved IP is trusted only for a bounded
+        # window, then re-validated — a permanent set let a stale/shared/cloud IP
+        # stay authorized after DNS repointed (cross-tenant SSRF risk).
+        self._authorized_ips: dict = {}
+        self._resolved_hosts: dict = {}      # host → last-resolved timestamp (TTL)
+        try:
+            self._ip_ttl = float(os.getenv("AUTHZ_IP_TTL_SECONDS", "3600"))
+        except (TypeError, ValueError):
+            self._ip_ttl = 3600.0
         logger.info(f"[TargetScopeValidator] Initialized with scope: {self.authorized_scope}")
+
+    def _add_ip(self, ip: str) -> None:
+        import time
+        self._authorized_ips[ip] = time.time() + self._ip_ttl
+
+    def _ip_valid(self, ip: str) -> bool:
+        import time
+        exp = self._authorized_ips.get(ip)
+        if exp is None:
+            return False
+        if time.time() >= exp:
+            self._authorized_ips.pop(ip, None)   # expired → force re-validation
+            return False
+        return True
 
     def note_resolution(self, host: str, ip: str = None) -> None:
         try:
@@ -60,26 +101,32 @@ class TargetScopeValidator:
             if ip and re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip.strip()):
                 ips = [ip.strip()]
             else:
-                if host_norm in self._resolved_hosts:
-                    return  # already resolved this host — cheap cache guard
-                self._resolved_hosts.add(host_norm)
+                last = self._resolved_hosts.get(host_norm)
+                if last is not None and (time.time() - last) < self._ip_ttl:
+                    return  # resolved recently — within TTL, skip re-resolve
+                self._resolved_hosts[host_norm] = time.time()
                 import socket
                 try:
                     ips = list({ai[4][0] for ai in socket.getaddrinfo(host_norm, None)})
                 except Exception:
                     ips = []
             for got in ips:
-                if got not in self._authorized_ips:
-                    self._authorized_ips.add(got)
-                    logger.info(f"[TargetScopeValidator] Authorized IP {got} (resolved from in-scope host {host_norm})")
+                if not self._ip_valid(got):
+                    logger.info(f"[TargetScopeValidator] Authorized IP {got} (resolved from in-scope host {host_norm}, ttl={self._ip_ttl:.0f}s)")
+                self._add_ip(got)
         except Exception as e:
             raise SystemError(f"Policy enforcement failed: {e}") from e
 
-    def _host_in_scope(self, norm: str) -> bool:
+    def _host_in_scopes(self, norm: str, scopes) -> bool:
         norm_bare = norm[4:] if norm.startswith("www.") else norm
-        for allowed in self.authorized_scope:
+        for allowed in scopes:
             allowed_norm = self._normalize_target(allowed)
-            if allowed == "*" or norm == allowed_norm or norm_bare == allowed_norm:
+            if allowed == "*":
+                # wildcard honored only in explicit lab mode (§4)
+                if self._allow_wildcard:
+                    return True
+                continue
+            if norm == allowed_norm or norm_bare == allowed_norm:
                 return True
             if allowed_norm.startswith("*."):
                 allowed_norm = allowed_norm[2:]
@@ -87,6 +134,14 @@ class TargetScopeValidator:
             if norm_bare == allowed_bare or norm_bare.endswith("." + allowed_bare):
                 return True
         return False
+
+    def _host_in_scope(self, norm: str) -> bool:
+        return self._host_in_scopes(norm, self.authorized_scope)
+
+    def _matches_baseline(self, norm: str) -> bool:
+        """Does this host satisfy the IMMUTABLE contract (§5)? Discovery is
+        checked against this, never against the mutable working set."""
+        return self._host_in_scopes(norm, self._baseline_scope)
 
     def _normalize_target(self, target: str) -> str:
         if not target:
@@ -107,11 +162,38 @@ class TargetScopeValidator:
         # Normalize FQDN trailing dot so "example.com." == "example.com"
         return target.rstrip(".").lower()
 
-    def add_target(self, target: str) -> None:
+    def add_target(self, target: str) -> bool:
+        """Add a DISCOVERED host to the working set — ONLY if it independently
+        satisfies the immutable contract (§3/§5). Discovery can never expand
+        authority beyond the original contract. Returns True if added.
+
+        A discovered host that does NOT match the baseline is rejected and
+        recorded as an out-of-scope DiscoveredAsset (visible, not authorized)."""
         norm = self._normalize_target(target)
-        if norm and norm not in self.authorized_scope:
+        if not norm:
+            return False
+        if not self._matches_baseline(norm):
+            self._note_discovered_out_of_scope(norm)
+            logger.warning("[TargetScopeValidator] REFUSED to authorize discovered host "
+                           "'%s' — outside immutable contract %s", norm, sorted(self._baseline_scope))
+            return False
+        if norm not in self.authorized_scope:
             self.authorized_scope.append(norm)
-            logger.info(f"[TargetScopeValidator] Dynamically added to scope: {norm}")
+            logger.info("[TargetScopeValidator] Discovered host '%s' matches contract → in working set", norm)
+        return True
+
+    def _note_discovered_out_of_scope(self, norm: str) -> None:
+        try:
+            store = getattr(self, "_discovered_out_of_scope", None)
+            if store is None:
+                store = set()
+                self._discovered_out_of_scope = store
+            store.add(norm)
+        except Exception:
+            pass
+
+    def discovered_out_of_scope(self) -> list:
+        return sorted(getattr(self, "_discovered_out_of_scope", set()))
 
     def is_authorized(self, target: str) -> bool:
         if not target:
@@ -119,10 +201,17 @@ class TargetScopeValidator:
         norm = self._normalize_target(target)
         if norm in PASSIVE_OSINT_DOMAINS:
             return True
-        if any(self._normalize_target(a) == "*" or a == "*" for a in self.authorized_scope):
+        # Wildcard authorizes everything ONLY in explicit lab mode (§4).
+        if self._allow_wildcard and any(a == "*" for a in self.authorized_scope):
             return True
 
         is_ip = bool(re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', norm))
+
+        # A bare IP that is LITERALLY in the contract (e.g. scope=['172.17.0.2'])
+        # is authorized directly — otherwise an IP target authorized itself to
+        # nothing and every request to it was silently filtered.
+        if is_ip and (norm in self._baseline_scope or norm in self.authorized_scope):
+            return True
 
         # Hostname: if it's an authorized domain or any subdomain thereof, authorize
         # it AND opportunistically cache the IPs it resolves to. Because every tool
@@ -138,8 +227,8 @@ class TargetScopeValidator:
 
         # Check if target is an IP address belonging to an in-scope domain.
         if True:
-            # 1. Already recorded as an in-scope host's resolved IP.
-            if norm in self._authorized_ips:
+            # 1. Already recorded as an in-scope host's resolved IP (within TTL).
+            if self._ip_valid(norm):
                 return True
             # 2. Resolve every authorized domain (ALL A-records, not just the first)
             #    and authorize the IP if it belongs to one. Cache the result.
@@ -156,7 +245,7 @@ class TargetScopeValidator:
                         except Exception:
                             resolved = set()
                         if norm in resolved:
-                            self._authorized_ips.add(norm)
+                            self._add_ip(norm)
                             logger.info(f"[TargetScopeValidator] Authorized resolved IP {norm} for in-scope domain {domain}")
                             return True
         return False

@@ -131,12 +131,27 @@ class ReconContextMixin:
             recon_ctx["ips"] = _serialize(ips) if ips else recon_ctx.get("ips", [])
             if techs and isinstance(techs, dict):
                 recon_ctx["technologies"] = techs
+            # Coverage ledger + surface coverage + discovered-out-of-scope so the
+            # UI can show "what was tested" (UNKNOWN ≠ CLEAN) and containment state.
+            discovered_oos = []
+            try:
+                from core.security.authorization import TargetScopeValidator
+                discovered_oos = TargetScopeValidator.get().discovered_out_of_scope()
+            except Exception:
+                pass
+            coverage = {
+                "ledger": getattr(self.ctx, "coverage_ledger", {}) or {},
+                "surface": getattr(self.ctx, "surface_coverage", {}) or {},
+                "discovered_out_of_scope": discovered_oos,
+                "dom_sinks": getattr(self.ctx, "dom_sinks", {}) or {},
+            }
             results = {
                 "recon": recon_ctx,
                 "vulnerabilities": _serialize(vulns),
                 "exploits": _serialize(exploits),
                 "captured_requests": _serialize(captured[:100]),
                 "attack_chains": attack_chains,
+                "coverage": coverage,
             }
             try:
                 from core.database.pg_store import (LiveDataRepo, ReconRepo, VulnRepo,

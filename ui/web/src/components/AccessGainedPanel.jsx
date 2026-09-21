@@ -60,7 +60,7 @@ const TECH_META = {
   sqli_bypass:       { label: "SQL Injection Bypass",   color: "#ff3355" },
   mass_assign_admin: { label: "Mass Assignment (admin)", color: "#ff8800" },
   self_register:     { label: "Self-Registration",       color: "#ffaa00" },
-  credential_replay: { label: "Credential Replay",       color: "#00ff9a" },
+  credential_replay: { label: "Credential Replay",       color: "#1a9e4b" },
   default_creds:     { label: "Default Credentials",     color: "#ff3355" },
   sqlmap_dump:       { label: "sqlmap DB Dump",          color: "#ff3355" },
   hash_crack:        { label: "Cracked Password Hash",   color: "#ff8800" },

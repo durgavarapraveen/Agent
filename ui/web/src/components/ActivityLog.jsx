@@ -13,8 +13,8 @@ const ACTION_ICONS = {
   error: "✗", decision: "⊙",
 };
 
-const pillStyle = { border: "none", borderRadius: 16, padding: "4px 12px", fontSize: 12, cursor: "pointer" };
-const preBox = { background: "var(--surface-2, #0e0e12)", padding: 10, borderRadius: 6, fontSize: 11, maxHeight: 220, overflow: "auto" };
+const pillStyle = { border: "1px solid var(--border)", borderRadius: 16, padding: "4px 12px", fontSize: 12, cursor: "pointer" };
+const preBox = { background: "var(--bg-surface, #f5f5f7)", color: "var(--text)", border: "1px solid var(--border)", padding: 10, borderRadius: 8, fontSize: 12, lineHeight: 1.5, maxHeight: 220, overflow: "auto" };
 
 function fmtTs(ts) {
   if (!ts) return "";
@@ -54,12 +54,12 @@ export default function ActivityLog({ scanId, poll = false }) {
     <div>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
         <button onClick={() => setFilter("ALL")}
-          style={{ ...pillStyle, background: filter === "ALL" ? "var(--accent, #6366f1)" : "var(--surface-2, #1e1e2e)", color: filter === "ALL" ? "#fff" : "var(--text-dim)" }}>
+          style={{ ...pillStyle, background: filter === "ALL" ? "var(--accent)" : "var(--bg-card, #fff)", color: filter === "ALL" ? "var(--accent-on, #fff)" : "var(--text-dim)", borderColor: filter === "ALL" ? "var(--accent)" : "var(--border)" }}>
           All ({items.length})
         </button>
         {actions.map(a => (
           <button key={a} onClick={() => setFilter(a)}
-            style={{ ...pillStyle, background: filter === a ? (ACTION_COLORS[a] || "#888") : "var(--surface-2, #1e1e2e)", color: filter === a ? "#fff" : "var(--text-dim)" }}>
+            style={{ ...pillStyle, background: filter === a ? (ACTION_COLORS[a] || "var(--accent)") : "var(--bg-card, #fff)", color: filter === a ? "#fff" : "var(--text-dim)", borderColor: filter === a ? (ACTION_COLORS[a] || "var(--accent)") : "var(--border)" }}>
             {ACTION_ICONS[a] || "●"} {a.replace("_", " ")} ({items.filter(x => x.action === a).length})
           </button>
         ))}
@@ -70,7 +70,7 @@ export default function ActivityLog({ scanId, poll = false }) {
           const color = ACTION_COLORS[a.action] || "#888";
           const icon = ACTION_ICONS[a.action] || "●";
           return (
-            <div key={a.id || i} style={{ background: "var(--surface-1, #18181b)", borderRadius: 8, border: "1px solid var(--border, #2e2e3e)" }}>
+            <div key={a.id || i} style={{ background: "var(--bg-card, #fff)", borderRadius: 10, border: "1px solid var(--border)" }}>
               <div onClick={() => setExpanded(isOpen ? null : i)}
                 style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", cursor: "pointer" }}>
                 <span style={{ color, fontSize: 14, minWidth: 18, textAlign: "center" }}>{icon}</span>

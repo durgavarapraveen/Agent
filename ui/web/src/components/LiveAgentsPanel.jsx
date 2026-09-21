@@ -97,17 +97,34 @@ function StatusBar({ counts, total }) {
 }
 
 const STATUS_META = {
-  running:   { color: "var(--accent, #00ff9a)", label: "RUN"  },
-  queued:    { color: "var(--text-dim)",         label: "WAIT" },
-  completed: { color: "var(--text-h)",           label: "DONE" },
-  failed:    { color: "var(--red, #ff3355)",     label: "FAIL" },
+  running:   { color: "var(--accent, #0071e3)", label: "RUN"  },
+  queued:    { color: "var(--text-dim)",        label: "WAIT" },
+  completed: { color: "#16a34a",                label: "DONE" },
+  failed:    { color: "var(--red, #ef4444)",    label: "FAIL" },
 };
+
+function parseMeta(m) {
+  if (!m) return {};
+  if (typeof m === "object") return m;
+  try { return JSON.parse(m); } catch { return {}; }
+}
 
 function AgentCard({ agent }) {
   const s = STATUS_META[agent.status] || STATUS_META.queued;
   const running = agent.status === "running";
+  const meta = parseMeta(agent.metadata);
+  const skills = meta.skills || "";
+  // Tick every second while running so the elapsed clock advances smoothly
+  // instead of jumping on each poll. Frozen once the agent finishes.
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!running) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [running]);
+  const endMs = agent.finished_at ? new Date(agent.finished_at).getTime() : now;
   const elapsed = agent.started_at
-    ? Math.max(0, Math.floor((new Date(agent.finished_at || Date.now()) - new Date(agent.started_at)) / 1000))
+    ? Math.max(0, Math.floor((endMs - new Date(agent.started_at).getTime()) / 1000))
     : 0;
   const [showThoughts, setShowThoughts] = useState(false);
   const [thoughts, setThoughts] = useState([]);
@@ -134,13 +151,19 @@ function AgentCard({ agent }) {
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
         <span style={{
-          padding: "2px 7px", borderRadius: 3, fontSize: 10, fontWeight: 700, letterSpacing: 1,
-          background: s.color, color: "#000",
+          padding: "2px 8px", borderRadius: 999, fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
+          background: s.color, color: "#fff",
         }}>{s.label}</span>
         <span style={{ fontWeight: 700, color: "var(--text-h)", fontSize: 13, wordBreak: "break-all" }}>
           {agent.label || agent.agent_id}
         </span>
       </div>
+      {skills && (
+        <div style={{ color: "var(--accent, #0071e3)", fontSize: 11, marginBottom: 6,
+                      wordBreak: "break-word" }}>
+          <span style={{ color: "var(--text-dim)" }}>specialty: </span>{skills}
+        </div>
+      )}
       {agent.target && (
         <div style={{ color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--mono)",
                       marginBottom: 6, wordBreak: "break-all" }}>

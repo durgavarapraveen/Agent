@@ -79,7 +79,7 @@ class LLMFindingValidator:
 
             try:
                 from agents.llm_client import TaskTier
-                response = await llm.generate(prompt, tier=TaskTier.SMALL)
+                response = await llm.generate_response(prompt, tier=TaskTier.SMALL)
 
                 if not response:
                     return finding
@@ -204,7 +204,7 @@ class LLMFindingValidator:
             )
             try:
                 from agents.llm_client import TaskTier
-                resp = await llm.generate(prompt, tier=TaskTier.SMALL)
+                resp = await llm.generate_response(prompt, tier=TaskTier.SMALL)
                 text = resp if isinstance(resp, str) else str(resp)
                 import re, json as _json
                 m = re.search(r"\[[\s\S]*\]", text)

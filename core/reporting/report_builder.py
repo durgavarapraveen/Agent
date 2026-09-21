@@ -94,7 +94,8 @@ class CustomReportBuilder:
 
         return mapping_result
 
-    def export_json(self, scan_id: str, target: str, vulnerabilities: List[Dict[str, Any]], mask_sensitive: bool = True) -> str:
+    def export_json(self, scan_id: str, target: str, vulnerabilities: List[Dict[str, Any]],
+                    mask_sensitive: bool = True, coverage: Dict[str, Any] = None) -> str:
         masked_target = mask_sensitive_data(target, mask_sensitive)
         masked_findings = []
 
@@ -114,7 +115,13 @@ class CustomReportBuilder:
             "scan_date": datetime.now().isoformat(),
             "mandatory_disclaimer": MANDATORY_DISCLAIMER,
             "total_findings": len(masked_findings),
-            "findings": masked_findings
+            "findings": masked_findings,
+            # §23: UNKNOWN != CLEAN. Absence of a finding is not proof of safety;
+            # the coverage ledger states exactly what was tested vs skipped/errored.
+            "coverage": coverage or {},
+            "coverage_note": ("Findings list what was CONFIRMED. 'coverage' reports what was "
+                              "actually TESTED. Cells that are BLOCKED/ERRORED/SKIPPED/UNKNOWN are "
+                              "NOT clean — they were not verified."),
         }
 
         return json.dumps(data, indent=2)

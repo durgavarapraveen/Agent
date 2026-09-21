@@ -71,12 +71,3 @@ def load_checkpoint(scan_id: str) -> Optional[Tuple[Dict[str, Any], int]]:
     except Exception as e:
         logger.warning("Scan checkpoint load failed for %s: %s", scan_id, e)
         return None
-
-
-def clear_checkpoint(scan_id: str) -> None:
-    p = _path_for(scan_id)
-    try:
-        if p.exists():
-            p.unlink()
-    except Exception:
-        pass

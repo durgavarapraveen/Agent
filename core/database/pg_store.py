@@ -913,6 +913,55 @@ def _init_schema():
                 conn.rollback()
 
     logger.info("[PGStore] Schema initialized")
+    _run_migrations()
+
+
+# ── Tracked schema migrations ────────────────────────────────────────────────
+# Ordered, idempotent, run-once steps applied AFTER the base _init_schema().
+# Each entry is (unique_id, sql). New schema changes go here instead of being
+# scattered as ad-hoc `ALTER ... IF NOT EXISTS` — the id is recorded in
+# schema_migrations so it runs exactly once, in order, and is auditable.
+_MIGRATIONS: List[tuple] = [
+    ("0001_agent_reasoning_cols",
+     "ALTER TABLE agent_reasoning ADD COLUMN IF NOT EXISTS tool_args JSONB DEFAULT '{}'::jsonb;"
+     "ALTER TABLE agent_reasoning ADD COLUMN IF NOT EXISTS tool_result_preview TEXT DEFAULT '';"
+     "ALTER TABLE agent_reasoning ADD COLUMN IF NOT EXISTS tool_status INT DEFAULT NULL;"
+     "ALTER TABLE agent_reasoning ADD COLUMN IF NOT EXISTS duration_ms INT DEFAULT NULL;"),
+    ("0002_analysis_jobs",
+     "CREATE TABLE IF NOT EXISTS analysis_jobs ("
+     "job_id TEXT PRIMARY KEY, status TEXT, label TEXT, "
+     "steps JSONB DEFAULT '[]'::jsonb, result JSONB, error TEXT, "
+     "created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());"),
+]
+
+
+def _run_migrations() -> None:
+    """Apply any un-applied entries from _MIGRATIONS, tracked in schema_migrations.
+    Best-effort and idempotent — a failing migration is logged and skipped so it
+    never blocks startup, and is retried next boot."""
+    try:
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("CREATE TABLE IF NOT EXISTS schema_migrations ("
+                            "id TEXT PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT NOW())")
+                conn.commit()
+                cur.execute("SELECT id FROM schema_migrations")
+                applied = {r[0] for r in cur.fetchall()}
+        for mid, sql in _MIGRATIONS:
+            if mid in applied:
+                continue
+            try:
+                with DatabaseManager.get_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(sql)
+                        cur.execute("INSERT INTO schema_migrations(id) VALUES(%s) "
+                                    "ON CONFLICT (id) DO NOTHING", (mid,))
+                    conn.commit()
+                logger.info("[PGStore] migration applied: %s", mid)
+            except Exception as e:
+                logger.warning("[PGStore] migration %s failed (will retry next boot): %s", mid, e)
+    except Exception as e:
+        logger.warning("[PGStore] migration runner skipped: %s", e)
 
 
 class TargetRepo:
@@ -1161,7 +1210,13 @@ class VulnRepo:
         # `execute_values`. Later rows for the same fid win because "later"
         # usually means more evidence.
         def _strip_nul(s):
-            return s.replace("\x00", "") if isinstance(s, str) else s
+            # Coerce non-str values so a probe/LLM finding whose text field is a
+            # dict/list can't abort the batch with "can't adapt type 'dict'".
+            if isinstance(s, (dict, list)):
+                s = _dumps(s, default=str)
+            elif not isinstance(s, str):
+                return s
+            return s.replace("\x00", "")
 
         by_fid: Dict[str, tuple] = {}
         for v in vulns:
@@ -1175,7 +1230,7 @@ class VulnRepo:
                 _strip_nul(v.get("target", "")), _strip_nul(v.get("location", "")),
                 _strip_nul(v.get("details", "")), _strip_nul(str(v.get("proof", ""))),
                 _strip_nul(v.get("remediation", "")), _strip_nul(v.get("tool", "")),
-                v.get("cwe_id", ""), v.get("cve_id", ""),
+                _strip_nul(v.get("cwe_id", "")), _strip_nul(v.get("cve_id", "")),
                 v.get("confidence_score", 0.5),
                 _strip_nul(_dumps({k: v.get(k) for k in v
                             if k not in ("title", "type", "severity", "status",
@@ -2415,3 +2470,115 @@ class LLMMemoryRepo:
                     return [dict(r) for r in cur.fetchall()]
         except Exception:
             return []
+
+
+class AnalysisRepo:
+    """Persists standalone code analyses (SAST / grey-box / mobile) so results
+    are kept and viewable in the UI, not just returned inline."""
+
+    _ready = False
+
+    @classmethod
+    def _ensure(cls):
+        if cls._ready:
+            return
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as c:
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS standalone_analyses ("
+                    "id TEXT PRIMARY KEY, kind TEXT, source TEXT, "
+                    "created_at TIMESTAMPTZ DEFAULT NOW(), "
+                    "summary JSONB DEFAULT '{}'::jsonb, result JSONB DEFAULT '{}'::jsonb)")
+                conn.commit()
+        cls._ready = True
+
+    @classmethod
+    def save(cls, kind: str, source: str, summary: Dict, result: Dict) -> str:
+        cls._ensure()
+        aid = f"an_{uuid.uuid4().hex[:12]}"
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as c:
+                c.execute(
+                    "INSERT INTO standalone_analyses(id, kind, source, summary, result) "
+                    "VALUES(%s,%s,%s,%s,%s)",
+                    (aid, kind, (source or "")[:500], _dumps(summary, default=str),
+                     _dumps(result, default=str)))
+            conn.commit()
+        return aid
+
+    @classmethod
+    def list_all(cls, limit: int = 100) -> List[Dict]:
+        cls._ensure()
+        limit = max(1, min(int(limit or 100), 500))
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
+                c.execute("SELECT id, kind, source, created_at, summary FROM standalone_analyses "
+                          "ORDER BY created_at DESC LIMIT %s", (limit,))
+                return [dict(r) for r in c.fetchall()]
+
+    @classmethod
+    def get(cls, analysis_id: str) -> Optional[Dict]:
+        cls._ensure()
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
+                c.execute("SELECT * FROM standalone_analyses WHERE id = %s", (analysis_id,))
+                row = c.fetchone()
+                return dict(row) if row else None
+
+
+class AnalysisJobRepo:
+    """Write-through store for in-progress analysis (grey-box) jobs so their live
+    step-progress survives an API restart — the in-memory job table alone loses
+    everything on restart (stale-404 on the progress poll). Best-effort: the API
+    still works from memory if the DB is down."""
+
+    _ready = False
+
+    @classmethod
+    def _ensure(cls):
+        if cls._ready:
+            return
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as c:
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS analysis_jobs ("
+                    "job_id TEXT PRIMARY KEY, status TEXT, label TEXT, "
+                    "steps JSONB DEFAULT '[]'::jsonb, result JSONB, error TEXT, "
+                    "created_at TIMESTAMPTZ DEFAULT NOW(), "
+                    "updated_at TIMESTAMPTZ DEFAULT NOW())")
+                conn.commit()
+        cls._ready = True
+
+    @classmethod
+    def upsert(cls, job_id: str, status: str, steps: list, label: str = "",
+               result: Optional[Dict] = None, error: Optional[str] = None):
+        try:
+            cls._ensure()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as c:
+                    c.execute(
+                        "INSERT INTO analysis_jobs(job_id,status,label,steps,result,error,updated_at) "
+                        "VALUES(%s,%s,%s,%s,%s,%s,NOW()) "
+                        "ON CONFLICT (job_id) DO UPDATE SET status=EXCLUDED.status, "
+                        "steps=EXCLUDED.steps, result=EXCLUDED.result, error=EXCLUDED.error, "
+                        "updated_at=NOW()",
+                        (job_id, status, (label or "")[:500],
+                         _dumps(steps or [], default=str),
+                         _dumps(result, default=str) if result is not None else None,
+                         (error or "")[:2000] or None))
+                conn.commit()
+        except Exception as e:
+            logger.debug("AnalysisJobRepo.upsert skipped: %s", e)
+
+    @classmethod
+    def get(cls, job_id: str) -> Optional[Dict]:
+        try:
+            cls._ensure()
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
+                    c.execute("SELECT * FROM analysis_jobs WHERE job_id=%s", (job_id,))
+                    row = c.fetchone()
+                    return dict(row) if row else None
+        except Exception as e:
+            logger.debug("AnalysisJobRepo.get skipped: %s", e)
+            return None

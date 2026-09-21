@@ -158,7 +158,7 @@ class FindingFactory:
         """Call LLM to classify a single finding."""
         try:
             llm = await self._get_llm()
-            from core.llm.task_tier import TaskTier
+            from core.common.schemas import TaskTier
             prompt = ENRICHMENT_PROMPT.format(
                 attack_type=finding.get("attack_type", finding.get("type", "")),
                 description=finding.get("description", ""),
@@ -166,8 +166,8 @@ class FindingFactory:
                 target=finding.get("target", ""),
                 location=finding.get("location", ""),
             )
-            resp = await llm.generate(
-                messages=[{"role": "user", "content": prompt}],
+            resp = await llm.generate_response(
+                prompt,
                 tier=TaskTier.SMALL,
                 temperature=0.1,
             )
@@ -181,7 +181,7 @@ class FindingFactory:
         results: List[Optional[Dict[str, Any]]] = [None] * len(batch)
         try:
             llm = await self._get_llm()
-            from core.llm.task_tier import TaskTier
+            from core.common.schemas import TaskTier
 
             findings_text = ""
             for i, f in enumerate(batch):
@@ -197,8 +197,8 @@ class FindingFactory:
             prompt = BATCH_ENRICHMENT_PROMPT.format(
                 count=len(batch), findings_text=findings_text,
             )
-            resp = await llm.generate(
-                messages=[{"role": "user", "content": prompt}],
+            resp = await llm.generate_response(
+                prompt,
                 tier=TaskTier.MEDIUM,
                 temperature=0.1,
             )

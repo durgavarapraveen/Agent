@@ -6,10 +6,6 @@ import logging
 import sys, os
 from pathlib import Path
 
-# ── Observability bootstrap ─────────────────────────────────────────────
-# Configure structured JSON logging + PII redaction BEFORE any other logger
-# instantiates. Inherit trace context from the parent API process via the
-# `TRACEPARENT` env var so scan spans link back to the launching HTTP request.
 try:
     from core.observability import logging as _ag_logging
     _ag_logging.configure_root(level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -24,7 +20,6 @@ except Exception as _obs_err:
     logging.getLogger(__name__).warning("Observability bootstrap skipped: %s", _obs_err)
 
 
-# Force UTF-8 encoding for standard streams on Windows to prevent UnicodeEncodeErrors
 if sys.platform.startswith("win"):
     try:
         sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
@@ -32,8 +27,6 @@ if sys.platform.startswith("win"):
     except Exception:
         pass
 
-# Ensure standard storage directories exist. reports/ is opt-in via
-# REPORTS_ENABLED — see core/common/reports_config.py.
 _standard_dirs = ["data/db", "loot", ".audit_logs"]
 if os.getenv("REPORTS_ENABLED", "0").lower() in ("1", "true", "yes", "on"):
     _standard_dirs.append(os.getenv("REPORTS_DIR", "reports"))
@@ -306,6 +299,17 @@ def main():
     except Exception as _e:
         # Missing httpx / etc. — soft-warn, do NOT silently proceed.
         print(f"[AnonGate] skipped (import error): {_e}")
+
+    # Eagerly bring up the OOB collaborator so its local listener binds for the
+    # WHOLE scan (blind XXE/SSRF/deserial can fire in any phase) and so the
+    # cloudflared tunnel has a live origin — instead of binding lazily mid-scan.
+    try:
+        from core.oob import get_collaborator
+        _c = get_collaborator()
+        if _c.is_active():
+            print(f"[OOB] collaborator active for this scan ({type(_c).__name__})")
+    except Exception as _e:
+        print(f"[OOB] init skipped: {_e}")
 
     parser = argparse.ArgumentParser(
         description="Autonomous Pentesting Agent",

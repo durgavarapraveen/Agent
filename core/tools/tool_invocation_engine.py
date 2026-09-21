@@ -1,11 +1,24 @@
 import asyncio
 import logging
+import os
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 from enum import Enum
 from core.common.schemas import ToolInvocation, ToolResult
 
 logger = logging.getLogger(__name__)
+
+# Active vulnerability scanners get their own live-agent card in the UI's
+# Parallel Agents tab (phase VULNERABILITY_SCANNING) so a scanner run is visible
+# as an agent, not only in Tool Outputs.
+_SCANNER_TOOLS = {"nuclei", "nikto", "wpscan", "sqlmap", "zap", "dalfox",
+                  "arachni", "wapiti", "msf_scanner"}
+_SCANNER_LABEL = {
+    "nuclei": "Nuclei Scanner", "sqlmap": "SQLMap", "nikto": "Nikto",
+    "wpscan": "WPScan", "zap": "OWASP ZAP", "dalfox": "Dalfox XSS",
+    "arachni": "Arachni", "wapiti": "Wapiti",
+    "msf_scanner": "Metasploit Aux Scanner",
+}
 
 class InvocationSource(Enum):
     TASK_MANAGER = "TASK_MANAGER"
@@ -33,6 +46,7 @@ class ToolInvocationEngine:
         "wafw00f": "waf_detection",
         "nuclei": "vulnerability_scanning", "nikto": "vulnerability_scanning",
         "sqlmap": "sql_injection", "wpscan": "vulnerability_scanning",
+        "msf_scanner": "network_vuln_verification",
         "ffuf": "endpoint_discovery", "gobuster": "endpoint_discovery",
         "feroxbuster": "endpoint_discovery", "dirb": "endpoint_discovery",
         "dirsearch": "endpoint_discovery", "katana": "web_crawling",
@@ -76,6 +90,22 @@ class ToolInvocationEngine:
             audit_context=context.audit_context
         )
 
+        # Scanner tools get a live-agent card (phase VULNERABILITY_SCANNING).
+        _tracker = None
+        _tl = (resolved_tool_id or "").lower()
+        if _tl in _SCANNER_TOOLS:
+            try:
+                from core.orchestration.parallel_agents import AgentTracker
+                _sid = os.environ.get("ANTIGRAVITY_SCAN_ID", "") or ""
+                if _sid:
+                    _tracker = AgentTracker(
+                        _sid, agent_id=f"scan:{_tl}",
+                        label=_SCANNER_LABEL.get(_tl, _tl.upper()),
+                        phase="VULNERABILITY_SCANNING", target=context.target or "")
+                    _tracker.start(current_step=(resolved_operation or _tl))
+            except Exception:
+                _tracker = None
+
         try:
             # Expert mode: escalate timeout, then walk the portfolio fallback
             # chain before declaring failure.
@@ -84,7 +114,15 @@ class ToolInvocationEngine:
                 self.gateway, invocation, context.auth_context,
                 base_timeout=getattr(invocation, "timeout_seconds", None) or 60,
             )
-            
+
+            if _tracker is not None:
+                try:
+                    _fc = len(getattr(result, "findings", None) or []) if hasattr(result, "findings") else 0
+                    _tracker.finish(status="completed" if result.success else "failed",
+                                    findings=([None] * _fc) if _fc else None)
+                except Exception:
+                    pass
+
             if not result.success:
                 self._handle_tool_failure(invocation, result)
             else:
@@ -105,6 +143,11 @@ class ToolInvocationEngine:
                 
             return result
         except Exception as e:
+            if _tracker is not None:
+                try:
+                    _tracker.finish(status="failed", error=str(e)[:120])
+                except Exception:
+                    pass
             logger.error(f"Critical engine failure executing {invocation.tool_id}: {e}", exc_info=True)
             from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus, ErrorInfo, ErrorType
             result = SchemaToolResult(

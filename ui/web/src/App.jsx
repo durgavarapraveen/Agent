@@ -122,9 +122,9 @@ export default function App() {
         <AuthBanner />
         <nav className="sidebar">
           <div className="logo">
-            <div className="logo-icon">AG</div>
+            <div className="logo-icon">N</div>
             <div className="logo-text">
-              <span className="logo-name">AntiGravity</span>
+              <span className="logo-name">Neo</span>
               <span className="logo-version">v2.0 Autonomous</span>
             </div>
           </div>

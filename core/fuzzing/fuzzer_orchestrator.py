@@ -57,8 +57,12 @@ class FuzzerOrchestrator:
                 
             result = self.execute_tool(tool_name, endpoint, params)
             
-            if result.status == ToolStatus.SUCCESS:
-                # Primary tool succeeded
+            # Accept on SUCCESS, or whenever the tool produced confirmed findings
+            # even with a non-zero exit: sqlmap/dalfox/nuclei often exit rc!=0
+            # (warnings, session resume, partial run) while having CONFIRMED an
+            # injection. Gating on SUCCESS alone discarded those findings and
+            # logged reason=no_result — a silent breadth suppressor for sqli/xss.
+            if result.status == ToolStatus.SUCCESS or result.findings:
                 return result
             else:
                 logger.warning(f"Tool {tool_name} failed with status {result.status}. Attempting fallback...")

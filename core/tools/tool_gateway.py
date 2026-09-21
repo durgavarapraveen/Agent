@@ -295,7 +295,35 @@ class ToolGateway:
         
         # STEP 7: Audit
         self.audit.log_tool_execution(invocation, result, auth_context)
-        
+
+        # STEP 8: Persist raw tool output for the UI. This is the single choke
+        # point every tool passes through, so recon tools (nmap/httpx/…) that
+        # bypass the worker-level writers are captured here too. Best-effort;
+        # deduped by ToolOutputRepo.save's ON CONFLICT.
+        try:
+            from core.observability.scan_context import get_scan_id
+            _sid = get_scan_id()
+            if _sid:
+                from core.database.pg_store import ToolOutputRepo
+                _ec = getattr(result, "exit_code", None)
+                if _ec is None:
+                    _ec = 0 if getattr(result, "success", False) else -1
+                _cmd = getattr(result, "command", "") or \
+                    f"{invocation.tool_id} {invocation.target or ''}".strip()
+                ToolOutputRepo.save(
+                    scan_id=_sid,
+                    tool_name=getattr(result, "tool", None) or invocation.tool_id or "",
+                    operation=invocation.operation or "",
+                    target=invocation.target or "",
+                    command=str(_cmd),
+                    stdout=str(getattr(result, "stdout", "") or ""),
+                    stderr=str(getattr(result, "stderr", "") or ""),
+                    exit_code=_ec,
+                    duration_s=float(getattr(result, "duration_seconds", 0.0) or 0.0),
+                )
+        except Exception:
+            pass
+
         return result
     
     async def _authorize(self, invocation: ToolInvocation, 

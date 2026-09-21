@@ -267,20 +267,39 @@ class ExecutionController:
                   "javascript": "node"}[language.value]
         image = cfg.node_image if language == ExecutionLanguage.JAVASCRIPT else cfg.docker_image
 
+        import os as _os
+        # §9 hardening: non-root UID/GID, no swap, tight ulimits, default seccomp
+        # (or an explicit profile), no host namespaces. Fail-closed defaults.
+        run_as = _os.getenv("SANDBOX_RUN_AS", "65534:65534")   # nobody:nogroup
         cmd = [
             "docker", "run", "--rm",
             f"--memory={cfg.memory_mb}m",
+            f"--memory-swap={cfg.memory_mb}m",   # == memory → no swap
             f"--cpus={cfg.cpu_count}",
             f"--pids-limit={cfg.pid_limit}",
             "--cap-drop=ALL",
             "--security-opt=no-new-privileges",
+            f"--user={run_as}",
+            "--ulimit", "nofile=256:256",
+            "--ulimit", "nproc=128:128",
+            "--ipc=private",
             "--no-healthcheck",
         ]
+        # seccomp: use an explicit profile if provided, else Docker's default
+        # (do NOT pass 'unconfined' — that would disable it).
+        seccomp = _os.getenv("SANDBOX_SECCOMP_PROFILE", "").strip()
+        if seccomp and _os.path.exists(seccomp):
+            cmd.append(f"--security-opt=seccomp={seccomp}")
+        apparmor = _os.getenv("SANDBOX_APPARMOR_PROFILE", "").strip()
+        if apparmor:
+            cmd.append(f"--security-opt=apparmor={apparmor}")
 
         if cfg.read_only_root:
             cmd.append("--read-only")
             cmd.extend(["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"])
 
+        # Network: default to isolated unless a scan explicitly needs egress AND
+        # the sandbox egress guard is in force. --network=none is the safe default.
         if not cfg.network_enabled:
             cmd.append("--network=none")
 

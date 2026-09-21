@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
+import { parseTs } from "../components/utils";
 
 export default function Scans() {
   const [scans, setScans] = useState([]);
@@ -20,14 +21,14 @@ export default function Scans() {
     <div>
       <h1>Scan History</h1>
       {scans.length === 0 ? (
-        <div className="empty">No scans found. Run AntiGravity to generate results.</div>
+        <div className="empty">No scans found. Run Neo to generate results.</div>
       ) : (
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Scan ID</th>
                 <th>Target</th>
+                <th>Domain</th>
                 <th>Date</th>
                 <th>Duration</th>
                 <th>Agents</th>
@@ -41,9 +42,22 @@ export default function Scans() {
             <tbody>
               {scans.map((s) => (
                 <tr key={s.scan_id} className="click-row" onClick={() => navigate(`/scans/${s.scan_id}`)}>
-                  <td style={{ fontFamily: "var(--mono)", fontSize: "11px", color: "var(--accent)" }}>{s.scan_id}</td>
-                  <td style={{ color: "var(--text-h)", fontWeight: 500 }}>{s.target}</td>
-                  <td style={{ whiteSpace: "nowrap" }}>{fmtDate(s.timestamp)}</td>
+                  <td style={{ color: "var(--text-h)", fontWeight: 500, whiteSpace: "nowrap", maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis" }} title={s.target}>{s.target}</td>
+                  <td>
+                    {s.domain ? (
+                      <span title={s.domain} style={{
+                        display: "inline-block", maxWidth: 150, whiteSpace: "nowrap",
+                        overflow: "hidden", textOverflow: "ellipsis", verticalAlign: "middle",
+                        padding: "2px 9px", borderRadius: 999, fontSize: 12, fontWeight: 500,
+                        background: "rgba(99,102,241,0.12)", color: "var(--accent)",
+                        textTransform: "capitalize",
+                      }}>{shortDomain(s.domain)}</span>
+                    ) : <span style={{ color: "var(--text-dim)" }}>-</span>}
+                  </td>
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    <div style={{ fontWeight: 600, color: "var(--text-h)" }}>{fmtTime(s.timestamp)}</div>
+                    <div style={{ fontSize: 12, color: "var(--text-dim)" }}>{fmtDay(s.timestamp)}</div>
+                  </td>
                   <td>{fmtDur(s.duration_seconds)}</td>
                   <td>{s.agents_used}</td>
                   <td style={{ fontFamily: "var(--mono)", fontWeight: 600 }}>{s.total_vulns}</td>
@@ -61,17 +75,38 @@ export default function Scans() {
   );
 }
 
-function fmtDate(ts) {
+function shortDomain(d) {
+  if (!d) return "-";
+  // Verbose LLM label ("E-Commerce (Online Juice Shop …)") → keep the part before
+  // the parenthesis; canonical keys ("ecommerce") pass through. Cap the length.
+  let label = String(d).split("(")[0].replace(/_/g, " ").trim();
+  if (label.length > 20) label = label.slice(0, 20).trim() + "…";
+  return label;
+}
+
+function fmtTime(ts) {
   if (!ts) return "-";
-  try {
-    const d = new Date(ts);
-    return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  } catch { return ts; }
+  try { return new Date(parseTs(ts)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+  catch { return ts; }
+}
+
+function fmtDay(ts) {
+  if (!ts) return "";
+  try { return new Date(parseTs(ts)).toLocaleDateString(); }
+  catch { return ""; }
 }
 
 function fmtDur(s) {
   if (!s) return "-";
-  const m = Math.floor(s / 60);
-  const sec = Math.round(s % 60);
-  return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
+  s = Math.round(s);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const parts = [];
+  if (d) parts.push(`${d}d`);
+  if (h) parts.push(`${h}h`);
+  if (m) parts.push(`${m}m`);
+  if (sec || parts.length === 0) parts.push(`${sec}s`);
+  return parts.join(" ");
 }

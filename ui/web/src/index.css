@@ -2,62 +2,69 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 :root {
-  /* Surfaces — pure Tesla black with hair-thin neutral borders */
-  --bg:          #000000;
-  --bg-alt:      #0a0a0a;
-  --bg-card:     #131313;
-  --bg-card-hover: #1a1a1a;
-  --bg-sidebar:  #000000;
-  --bg-surface:  #171717;
-  --bg-elev:     #1f1f1f;
-  --border:      rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.14);
-  --border-glow: rgba(255, 255, 255, 0.28);
+  /* ── Apple.com light palette ──────────────────────────────────────────── */
+  /* Surfaces — Apple white + signature #f5f5f7 grey, hairline #d2d2d7 borders */
+  --bg:          #ffffff;
+  --bg-alt:      #f5f5f7;
+  --bg-card:     #ffffff;
+  --bg-card-hover: #f5f5f7;
+  --bg-sidebar:  #f5f5f7;
+  --bg-surface:  #f5f5f7;
+  --bg-elev:     #fbfbfd;
+  /* Aliases used by scan-detail tab components (cards / inset panels). Mapped to
+     the semantic bg tokens so they follow the theme instead of hardcoded dark
+     fallbacks (which rendered dark-on-light and were unreadable). */
+  --surface-1:   var(--bg-card);
+  --surface-2:   var(--bg-surface);
+  --border:      #d2d2d7;
+  --border-strong: #c7c7cc;
+  --border-glow: #86868b;
 
-  /* Text — Tesla white/greys */
-  --text:        #c9ced1;
-  --text-dim:    #7c8286;
-  --text-h:      #ffffff;
-  --text-mute:   #5a6064;
+  /* Text — Apple near-black + greys */
+  --text:        #1d1d1f;
+  --text-dim:    #6e6e73;
+  --text-h:      #1d1d1f;
+  --text-mute:   #86868b;
 
-  /* Primary — Tesla signature blue (used sparingly for CTAs/active) */
-  --accent:      #3E6AE1;
-  --accent-dim:  rgba(62, 106, 225, 0.10);
-  --accent-mid:  rgba(62, 106, 225, 0.22);
-  --accent-solid: #3E6AE1;
-  --accent-hot:  #5b82ea;
+  /* Primary — Apple blue (#0071e3 / hover #0077ed) */
+  --accent:      #0071e3;
+  --accent-dim:  rgba(0, 113, 227, 0.10);
+  --accent-mid:  rgba(0, 113, 227, 0.18);
+  --accent-solid: #0071e3;
+  --accent-hot:  #0077ed;
   --accent-on:   #ffffff;
 
   /* Alias tokens kept so existing components keep working */
   --accent-purple: var(--accent);
-  --purple:      #3E6AE1;
-  --purple-dim:  rgba(62, 106, 225, 0.10);
-  --cyan:        #6aa9ff;
-  --cyan-dim:    rgba(106, 169, 255, 0.10);
+  --purple:      #0071e3;
+  --purple-dim:  rgba(0, 113, 227, 0.10);
+  --cyan:        #0091ff;
+  --cyan-dim:    rgba(0, 145, 255, 0.10);
 
-  /* Severity — restrained, Tesla-flat */
-  --green:       #2fbf71;
-  --green-dim:   rgba(47, 191, 113, 0.12);
-  --red:         #e82127;         /* Tesla red */
-  --red-dim:     rgba(232, 33, 39, 0.12);
-  --orange:      #ff9a3c;
-  --orange-dim:  rgba(255, 154, 60, 0.10);
-  --yellow:      #ffcb3a;
-  --yellow-dim:  rgba(255, 203, 58, 0.10);
-  --blue:        #3E6AE1;
-  --blue-dim:    rgba(62, 106, 225, 0.12);
+  /* Severity — Apple-flat, tuned for a LIGHT background (readable) */
+  --green:       #1a9e4b;
+  --green-dim:   rgba(26, 158, 75, 0.12);
+  --red:         #d70015;         /* Apple system red */
+  --red-dim:     rgba(215, 0, 21, 0.10);
+  --orange:      #c93400;
+  --orange-dim:  rgba(201, 52, 0, 0.10);
+  --yellow:      #a15c00;
+  --yellow-dim:  rgba(161, 92, 0, 0.10);
+  --blue:        #0071e3;
+  --blue-dim:    rgba(0, 113, 227, 0.12);
 
-  /* Type — Inter primary, JetBrains for mono/technical data */
-  --mono:        "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --sans:        "Inter", -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  /* Type — SF Pro (via -apple-system) primary, JetBrains for mono/technical */
+  --mono:        "SF Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans:        -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", "Inter", "Segoe UI", Roboto, Arial, sans-serif;
 
-  /* Radius — Tesla uses pill buttons + tight card rounds */
-  --radius:      8px;
-  --radius-sm:   4px;
-  --radius-lg:   12px;
-  --radius-nested: 4px;
+  /* Radius — Apple pill buttons + soft card rounds */
+  --radius:      12px;
+  --radius-sm:   8px;
+  --radius-lg:   18px;
+  --radius-nested: 8px;
+  --radius-pill: 980px;
 
-  /* Effects — flat, no glows, no drop-shadows */
+  /* Effects — flat, no shine: hairline borders do the work, not shadows/glows */
   --shadow:      none;
   --shadow-lg:   none;
   --glow-accent: none;
@@ -66,9 +73,9 @@
   --scanline:    transparent;
 }
 
-* { box-sizing: border-box; margin: 0; padding: 0; }
+html { color-scheme: light; }
 
-html { color-scheme: dark; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
   font-family: var(--sans);
@@ -108,19 +115,18 @@ body::before, body::after { content: none; }
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--border-glow);
-  box-shadow: 0 0 4px var(--accent);
 }
 
-/* Neon focus ring — accessible, keyboard-only */
+/* Clean focus ring — accessible, keyboard-only (no glow) */
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-  box-shadow: 0 0 0 4px var(--accent-dim);
+  box-shadow: none;
   border-radius: var(--radius-sm);
 }
 button:focus-visible, a:focus-visible {
-  outline-color: var(--accent-hot);
-  box-shadow: 0 0 0 3px var(--accent-mid), 0 0 12px var(--accent-dim);
+  outline-color: var(--accent);
+  box-shadow: none;
 }
 
 /* Monospace treatment for scan IDs, hashes, targets, code */
@@ -254,19 +260,19 @@ code, kbd, samp, pre, .mono, [data-mono] {
 
 .sidebar a:hover {
   color: var(--text-h);
-  background: rgba(247, 249, 250, 0.04);
+  background: rgba(0, 0, 0, 0.04);
 }
 
-.sidebar a:hover svg { opacity: 0.6; }
+.sidebar a:hover svg { opacity: 0.7; }
 
 .sidebar a.active {
-  color: var(--text-h);
-  background: rgba(255, 255, 255, 0.06);
-  font-weight: 500;
-  border: none;
+  color: var(--accent);
+  background: #ffffff;
+  font-weight: 600;
+  border: 1px solid var(--border);
 }
 
-.sidebar a.active svg { opacity: 1; color: var(--text-h); }
+.sidebar a.active svg { opacity: 1; color: var(--accent); }
 
 .sidebar-footer {
   margin-top: auto;
@@ -335,6 +341,26 @@ code, kbd, samp, pre, .mono, [data-mono] {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
 }
+
+/* Skeleton loading placeholders */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--bg-surface);
+  border-radius: 6px;
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg,
+    transparent,
+    color-mix(in srgb, var(--text) 8%, transparent),
+    transparent);
+  animation: shimmer 1.3s ease-in-out infinite;
+}
+@keyframes shimmer { 100% { transform: translateX(100%); } }
 
 .content {
   flex: 1;
@@ -505,7 +531,9 @@ h3 {
 .table-wrap {
   overflow-x: auto;
   overflow-y: auto;
-  max-height: 70vh;
+  /* Fill the page height instead of a fixed 70vh box that leaves the lower
+     page empty. Header/title occupy ~150px above the table. */
+  max-height: calc(100vh - 150px);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: none;
@@ -551,15 +579,15 @@ tbody tr:hover { background: rgba(247, 249, 250, 0.03); }
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 0 22px;
+  padding: 0 20px;
   height: 38px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.20);
-  background: rgba(0, 0, 0, 0.30);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: #f5f5f7;
   color: var(--text-h);
   font-size: 13px;
   font-weight: 500;
-  letter-spacing: 0.02em;
+  letter-spacing: -0.01em;
   cursor: pointer;
   transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
   font-family: var(--sans);
@@ -567,8 +595,8 @@ tbody tr:hover { background: rgba(247, 249, 250, 0.03); }
 }
 
 .btn:hover {
-  background: rgba(255, 255, 255, 0.10);
-  border-color: rgba(255, 255, 255, 0.35);
+  background: #e8e8ed;
+  border-color: var(--border-strong);
   color: var(--text-h);
 }
 .btn:active { transform: none; }
@@ -600,8 +628,8 @@ tbody tr:hover { background: rgba(247, 249, 250, 0.03); }
 }
 
 .btn-sm { padding: 0 14px; height: 30px; font-size: 12px; font-family: var(--sans); letter-spacing: 0.02em; }
-.btn-ghost { border-color: transparent; background: transparent; }
-.btn-ghost:hover { background: rgba(255, 255, 255, 0.06); color: var(--text-h); }
+.btn-ghost { border-color: transparent; background: transparent; color: var(--accent); }
+.btn-ghost:hover { background: var(--accent-dim); color: var(--accent-hot); }
 
 /* ── Forms ────────────────────────────────────────────────────────────────── */
 .form-row {
@@ -682,16 +710,14 @@ tbody tr:hover { background: rgba(247, 249, 250, 0.03); }
 
 .tab:hover { color: var(--text-h); }
 .tab.active {
-  color: var(--text-h);
-  border-bottom-color: var(--text-h);
+  color: var(--accent);
+  border-bottom-color: var(--accent);
   text-shadow: none;
 }
 
 /* ── Code block — terminal window aesthetic ─────────────────────────────── */
 .code-block {
-  background:
-    linear-gradient(180deg, rgba(0, 255, 154, 0.02), transparent 70%),
-    var(--bg-alt);
+  background: var(--bg-alt);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-nested);
   padding: 16px;
@@ -725,17 +751,7 @@ tbody tr:hover { background: rgba(247, 249, 250, 0.03); }
   box-sizing: border-box;
 }
 
-.log-terminal::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 40px;
-  background: linear-gradient(to bottom, #090909, transparent);
-  pointer-events: none;
-  z-index: 1;
-}
+.log-terminal::before { content: none; }
 
 .log-line { padding: 2px 0; white-space: pre-wrap; word-break: break-all; }
 .log-line .timestamp { color: var(--text-dim); margin-right: 8px; }
@@ -889,16 +905,16 @@ tbody tr:hover { background: rgba(247, 249, 250, 0.03); }
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: rgba(0, 0, 0, 0.4);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 100;
-  backdrop-filter: blur(8px);
+  backdrop-filter: blur(4px);
 }
 
 .modal {
-  background: #111111;
+  background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 28px;
@@ -906,7 +922,8 @@ tbody tr:hover { background: rgba(247, 249, 250, 0.03); }
   max-width: 92vw;
   max-height: 85vh;
   overflow-y: auto;
-  box-shadow: none;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+  color: var(--text);
 }
 
 .modal h2 {
@@ -1014,6 +1031,78 @@ tbody tr:hover { background: rgba(247, 249, 250, 0.03); }
 
 .phase-step.completed .phase-dot {
   background: var(--green);
+}
+
+/* completed connector turns green; active phase pulses + shows a scan shimmer */
+.phase-step.completed::after { background: var(--green); }
+.phase-step.active .phase-dot {
+  box-shadow: 0 0 0 0 var(--accent-mid);
+  animation: phase-pulse 1.4s ease-out infinite;
+}
+@keyframes phase-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(0,113,227,0.45); }
+  70%  { box-shadow: 0 0 0 8px rgba(0,113,227,0); }
+  100% { box-shadow: 0 0 0 0 rgba(0,113,227,0); }
+}
+.phase-step.active {
+  background: linear-gradient(90deg, var(--accent-dim), transparent);
+  border-radius: var(--radius-sm);
+}
+
+/* ── Live scan: activity ticker (terminal-style streaming feed) ──────────── */
+.live-ticker {
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.7;
+  max-height: 150px;
+  overflow-y: auto;
+  margin: 12px 0 4px;
+}
+.live-ticker-line {
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  animation: ticker-in 0.35s ease;
+}
+.live-ticker-line:last-child { color: var(--text-h); }
+@keyframes ticker-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* live status dot + elapsed */
+.live-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--green); margin-right: 6px; vertical-align: middle;
+  animation: live-blink 1.2s ease-in-out infinite;
+}
+@keyframes live-blink { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+/* counter flash when a live stat increments */
+@keyframes stat-flash {
+  0%   { background: var(--accent-mid); }
+  100% { background: var(--bg-surface); }
+}
+.stat-flash { animation: stat-flash 0.7s ease; }
+
+/* subtle animated top-border on the running scan card */
+.scan-running {
+  border: 1px solid var(--accent) !important;
+}
+.scan-running::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background-size: 200% 100%;
+  animation: scan-sweep 1.8s linear infinite;
+}
+@keyframes scan-sweep {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
 }
 
 /* ── Scan Config Options ─────────────────────────────────────────────────── */
@@ -1135,7 +1224,7 @@ tbody tr:hover { background: rgba(247, 249, 250, 0.03); }
 
 /* ── Skeleton loader ─────────────────────────────────────────────────────── */
 .skeleton {
-  background: linear-gradient(90deg, rgba(247,249,250,0.05) 25%, rgba(247,249,250,0.1) 50%, rgba(247,249,250,0.05) 75%);
+  background: linear-gradient(90deg, #f0f0f2 25%, #e6e6ea 50%, #f0f0f2 75%);
   background-size: 200% 100%;
   animation: shimmer 1.5s infinite;
   border-radius: 6px;

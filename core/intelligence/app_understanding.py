@@ -62,6 +62,10 @@ _DOMAIN_KEYWORDS: Dict[str, tuple] = {
                   "dispatch", "warehouse", "customs", "manifest", "delivery"),
 }
 
+# Canonical domain taxonomy the LLM must classify into (matches test_plan's
+# _DOMAIN_BOOST keys). Emitting the key directly avoids fragile free-text mapping.
+_CANONICAL_DOMAINS: tuple = tuple(_DOMAIN_KEYWORDS.keys()) + ("generic",)
+
 _SENSITIVE_FIELD_HINTS: Dict[str, tuple] = {
     "pii": ("email", "phone", "ssn", "dob", "birth", "address", "firstname",
             "lastname", "passport", "national_id", "driver_license", "tax_id"),
@@ -178,6 +182,7 @@ class AppUnderstanding:
     business_rules: List[str]
     hypotheses: List[TestHypothesis]
     source: str  # "llm" | "heuristic"
+    domain_key: str = ""  # canonical taxonomy bucket chosen by the model (or heuristic)
     entities: List[Dict[str, Any]] = field(default_factory=list)
     roles: List[Dict[str, Any]] = field(default_factory=list)
     ownership: List[Dict[str, Any]] = field(default_factory=list)
@@ -192,6 +197,7 @@ class AppUnderstanding:
                 "business_rules": self.business_rules,
                 "hypotheses": [h.to_dict() for h in self.hypotheses],
                 "source": self.source,
+                "domain_key": self.domain_key,
                 "entities": self.entities,
                 "roles": self.roles,
                 "ownership": self.ownership,
@@ -238,6 +244,12 @@ class AppUnderstandingEngine:
 
     def __init__(self, llm: Any = None):
         self._llm = llm  # object with async generate_json(...); None → lazy harness
+        # Per-target LLM-understanding cache, keyed by a content fingerprint of the
+        # signals. Cuts redundant LLM calls across phase re-entries (same signals →
+        # cache hit); a genuinely richer post-recon corpus changes the key and
+        # re-analyzes, so quality is unaffected. Only successful LLM results are
+        # cached — heuristic/429 fallbacks are not, so a later call still retries.
+        self._understanding_cache: Dict[str, "AppUnderstanding"] = {}
 
     # ── Deterministic heuristic (fallback, always available) ─────────────────
     def _detect_domain(self, corpus: str) -> tuple:
@@ -269,47 +281,62 @@ class AppUnderstandingEngine:
         hyps = [TestHypothesis(title=rule, rationale=f"{domain} domain rule", capability=cap)
                 for rule, cap in rules_caps]
         rules = [r for r, _ in rules_caps]
-        return AppUnderstanding(domain, conf, sensitivity, rules, hyps, source="heuristic")
+        return AppUnderstanding(domain, conf, sensitivity, rules, hyps,
+                                source="heuristic", domain_key=domain)
 
     # ── LLM path ─────────────────────────────────────────────────────────────
     def build_prompt(self, signals: AppSignals) -> str:
+        # Focused schema: a large 11-key nested schema makes the model punt with `{}`
+        # (verified: a lean, targeted prompt returns rich JSON; the bloated one does
+        # not). Keep only the high-value fields that feed AppModel + the test plan.
         return (
             "You are a senior penetration tester analyzing a web application to plan "
-            "security testing. From the observed signals, perform domain-independent "
-            "security analysis:\n\n"
+            "security testing. From the observed signals:\n"
             "1. Classify the business domain.\n"
-            "2. Identify domain ENTITIES (e.g. User, Order, Patient, Account) from "
-            "   API field names, endpoints, and UI text.\n"
-            "3. Infer ROLES (e.g. admin, customer, provider) and their privilege levels.\n"
-            "4. Map OWNERSHIP relationships (which role owns which entity).\n"
-            "5. Identify STATE TRANSITIONS (e.g. order: pending→paid→shipped).\n"
-            "6. Identify TRUST BOUNDARIES (e.g. public→authenticated, user→admin).\n"
-            "7. Generate SECURITY INVARIANTS that MUST hold (e.g. 'User A cannot "
-            "   access User B orders').\n"
-            "8. Propose concrete test HYPOTHESES mapped to a capability.\n\n"
-            f"UI text: {signals.ui_text[:2000]}\n"
-            f"Form labels: {', '.join(signals.form_labels[:60])}\n"
-            f"API fields: {', '.join(signals.api_fields[:60])}\n"
-            f"Error messages: {', '.join(signals.error_messages[:30])}\n"
-            f"Endpoints: {', '.join(signals.endpoints[:60])}\n\n"
-            "Return JSON:\n"
+            "2. Identify domain ENTITIES (e.g. User, Order, Account) and their sensitive fields.\n"
+            "3. Infer ROLES (e.g. admin, customer) and privilege levels.\n"
+            "4. State SECURITY INVARIANTS that must hold (e.g. 'User A cannot access User B orders').\n"
+            "5. Propose concrete test HYPOTHESES, each mapped to a capability.\n\n"
+            f"UI text: {signals.ui_text[:1500]}\n"
+            f"Form labels: {', '.join(signals.form_labels[:40])}\n"
+            f"API fields: {', '.join(signals.api_fields[:40])}\n"
+            f"Endpoints: {', '.join(signals.endpoints[:40])}\n\n"
+            "Return ONLY a single JSON object with exactly these keys:\n"
             "{\n"
-            '  "business_domain": str,\n'
+            '  "business_domain": str,   // free-text label\n'
+            '  "domain_key": str,        // MUST be exactly one of: '
+            + ", ".join(_CANONICAL_DOMAINS) + "\n"
             '  "domain_confidence": float (0-1),\n'
             '  "entities": [{name, type, owner_role, sensitive_fields: [str]}],\n'
             '  "roles": [{name, privilege_level: int, description}],\n'
-            '  "ownership": [{entity, owner_role, access_rules: str}],\n'
-            '  "state_transitions": [{entity, from_state, to_state, trigger, requires_role}],\n'
-            '  "trust_boundaries": [{name, from_zone, to_zone, controls: [str]}],\n'
-            '  "data_sensitivity": {field: class},\n'
             '  "security_invariants": [{description, invariant_type, entities: [str]}],\n'
-            '  "business_rules": [str],\n'
+            '  "state_transitions": [{name, from_state, to_state, actor_role, '
+            'guard}],  // key workflow steps (e.g. cart->checkout->paid)\n'
+            '  "trust_boundaries": [{name, from_zone, to_zone, crossing}],  '
+            '// where privilege/data crosses (e.g. customer->admin, client->server)\n'
             '  "hypotheses": [{title, rationale, capability, target_hint}]\n'
             "}\n"
+            "state_transitions: enumerate the main multi-step workflows and who may "
+            "trigger each step. trust_boundaries: enumerate privilege/zone crossings. "
+            "Pick the single closest domain_key even if the app spans several. "
             "capability must be one of: business_logic, ecommerce, role_escalation, authorization."
         )
 
+    @staticmethod
+    def _cache_key(signals: AppSignals) -> str:
+        import hashlib
+        return hashlib.sha1(signals.corpus().encode("utf-8", "replace")).hexdigest()
+
     async def analyze(self, signals: AppSignals) -> AppUnderstanding:
+        # Per-target cache: identical signals (e.g. same phase re-entered) reuse the
+        # prior LLM result instead of re-calling the model. Only LLM results are
+        # cached, so heuristic/429 fallbacks always retry.
+        key = self._cache_key(signals)
+        cached = self._understanding_cache.get(key)
+        if cached is not None:
+            logger.info("[AppUnderstanding] cache hit (key=%s) -> reuse LLM understanding", key[:12])
+            return cached
+
         llm = self._llm
         if llm is None:
             try:
@@ -320,22 +347,39 @@ class AppUnderstandingEngine:
                 return self.heuristic(signals)
 
         try:
+            from core.common.schemas import TaskTier as _TaskTier
+            _prompt = self.build_prompt(signals)
+            logger.debug("[AppUnderstanding] prompt_len=%d ui_text=%d endpoints=%d",
+                         len(_prompt), len(signals.ui_text), len(signals.endpoints))
             data = await llm.generate_json(
-                self.build_prompt(signals),
+                _prompt,
                 system="You classify web-app business logic for security testing.",
                 mandatory_fields=["business_domain", "hypotheses"],
+                # Deep reasoning over the whole app (entities/roles/invariants/
+                # hypotheses) — SMALL/Haiku punts with `{}`. Run on LARGE; the result
+                # is cached per target so this is one call/scan.
+                tier=_TaskTier.LARGE,
+                max_tokens=4096,
             )
         except Exception as e:
             logger.warning("app_understanding: LLM call failed (%s); heuristic", e)
             return self.heuristic(signals)
 
+        logger.info("[AppUnderstanding] LLM dict keys=%s domain=%r hyps=%d",
+                    list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+                    (data or {}).get("business_domain") if isinstance(data, dict) else None,
+                    len((data or {}).get("hypotheses") or []) if isinstance(data, dict) else 0)
         parsed = self._parse_llm(data)
         if parsed is None:
+            logger.warning("[AppUnderstanding] LLM parse rejected -> heuristic")
             return self.heuristic(signals)
+        self._understanding_cache[key] = parsed  # cache only successful LLM understanding
         return parsed
 
     def _parse_llm(self, data: Dict[str, Any]) -> Optional[AppUnderstanding]:
         if not isinstance(data, dict) or not data.get("business_domain"):
+            logger.info("[AppUnderstanding] reject: missing business_domain (got %s)",
+                        list(data.keys()) if isinstance(data, dict) else type(data).__name__)
             return None
         raw_hyps = data.get("hypotheses") or []
         hyps: List[TestHypothesis] = []
@@ -348,6 +392,8 @@ class AppUnderstandingEngine:
                     title=h["title"], rationale=h.get("rationale", ""),
                     capability=cap, target_hint=h.get("target_hint", "")))
         if not hyps:
+            logger.info("[AppUnderstanding] reject: 0 usable hypotheses from %d raw",
+                        len(raw_hyps))
             return None
 
         def _list_of_dicts(key: str) -> List[Dict[str, Any]]:
@@ -373,12 +419,15 @@ class AppUnderstandingEngine:
                     title=desc, rationale=f"Inferred security invariant ({inv_type})",
                     capability=cap))
 
+        dk = str(data.get("domain_key", "") or "").strip().lower().replace("-", "_")
+        domain_key = dk if dk in _CANONICAL_DOMAINS else ""
+
         return AppUnderstanding(
             business_domain=str(data["business_domain"]),
             domain_confidence=float(data.get("domain_confidence", 0.5) or 0.5),
             data_sensitivity={str(k): str(v) for k, v in (data.get("data_sensitivity") or {}).items()},
             business_rules=[str(r) for r in (data.get("business_rules") or [])],
-            hypotheses=hyps, source="llm",
+            hypotheses=hyps, source="llm", domain_key=domain_key,
             entities=entities, roles=roles, ownership=ownership,
             state_transitions=transitions, trust_boundaries=boundaries,
             security_invariants=invariants)

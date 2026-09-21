@@ -83,6 +83,11 @@ class Dispatcher:
         max_surfaces = self._int_env("DISPATCH_MAX_SURFACES", 40)
         max_points = self._int_env("DISPATCH_MAX_POINTS", 30)
 
+        # Coverage ledger — records every (surface, point, class) outcome so a
+        # skip/error is never silent (gaps: "never skip silently").
+        from core.coverage.coverage_ledger import CoverageLedger
+        ledger = CoverageLedger()
+
         surfaces = self.classifier.classify(ctx)
         findings: List[Dict[str, Any]] = []
         delegated_seen: Dict[str, int] = {}
@@ -95,17 +100,20 @@ class Dispatcher:
                     delegated_seen[c] = delegated_seen.get(c, 0) + 1
                     if c == "FILE_UPLOAD":
                         upload_needed = True
+                    ledger.skipped(s.url, "surface", c, f"delegated to {DELEGATED[c]}")
             # point × class injection battery
             for pt in s.injection_points[:max_points]:
                 # skip classes that only make sense for a different point kind
                 for c in engine_classes:
                     if not self._point_supports(pt, c):
+                        ledger.skipped(s.url, pt.key(), c, "point kind not applicable")
                         continue
                     try:
-                        fs = await self.engine.probe_point(s, pt, c, ctx, budget=budget)
+                        fs = await self.engine.probe_point(s, pt, c, ctx, budget=budget, ledger=ledger)
                         findings.extend(fs)
                     except Exception as e:
-                        logger.debug("probe_point %s @ %s failed: %s", c, pt.key(), e)
+                        logger.warning("probe_point %s @ %s failed: %s", c, pt.key(), e)
+                        ledger.errored(s.url, pt.key(), c, f"{type(e).__name__}: {e}")
 
         # delegate upload once (real field detection + execution verify lives there)
         if upload_needed:
@@ -116,8 +124,13 @@ class Dispatcher:
             except Exception as e:
                 logger.debug("file_upload delegation failed: %s", e)
 
-        logger.info("Dispatcher: %d surfaces → %d engine findings; delegated=%s",
-                    len(surfaces), len(findings), delegated_seen)
+        rep = ledger.report()
+        logger.info("Dispatcher: %d surfaces → %d findings; coverage %.0f%% (%s); delegated=%s",
+                    len(surfaces), len(findings), rep["completeness"] * 100, rep["counts"], delegated_seen)
+        try:
+            setattr(ctx, "coverage_ledger", rep)
+        except Exception:
+            pass
         try:
             self._record_coverage(ctx, surfaces, delegated_seen)
         except Exception:
