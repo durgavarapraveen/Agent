@@ -235,6 +235,10 @@ export const api = {
   getScans: () => request("/api/scans"),
   getScan: (id) => request(`/api/scans/${id}`),
   getVulnerabilities: (id) => request(`/api/scans/${id}/vulnerabilities`),
+  getHumanRequests: (id, status = "") => request(`/api/scans/${id}/human-requests${status ? `?status=${status}` : ""}`),
+  answerHumanRequest: (id, rid, data) => post(`/api/scans/${id}/human-requests/${rid}/answer`, data),
+  getBenchmark: (id, suite = "") => request(`/api/scans/${id}/benchmark${suite ? `?suite=${suite}` : ""}`),
+  getCoverage: (id) => request(`/api/scans/${id}/coverage`),
   getAuditTrail: () => request("/api/audit-trail"),
   getExecutionLog: () => request("/api/execution-log"),
   getPoc: () => request("/api/poc"),
@@ -272,10 +276,23 @@ export const api = {
   getCampaigns: () => request("/api/campaigns"),
   runCampaign: (data) => post("/api/campaigns/run", data),
   getCampaignProgress: () => request("/api/campaigns/progress"),
+  getCampaign: (id) => request(`/api/campaigns/${encodeURIComponent(id)}`),
+  resumeCampaign: (id) => post(`/api/campaigns/${encodeURIComponent(id)}/resume`, {}),
   getLiveProgress: (scanId) => request(`/api/scans/live-progress${scanId ? `?scan_id=${encodeURIComponent(scanId)}` : ""}`).catch(() => ({})),
   getLiveResults: (scanId) => request(`/api/scans/live-results${scanId ? `?scan_id=${encodeURIComponent(scanId)}` : ""}`).catch(() => ({
     recon: { subdomains: [], endpoints: [], technologies: {}, ports: [], ips: [] },
     vulnerabilities: [], exploits: [], captured_requests: [],
+  })),
+  getBlackboard: (id, since = 0, limit = 300) =>
+    request(`/api/scans/${id}/blackboard?since=${since}&limit=${limit}`).catch(() => ({
+      scan_id: id, summary: {}, count: 0, since, entries: [],
+    })),
+  getLlmCalls: (id, since = 0, limit = 200) =>
+    request(`/api/scans/${id}/llm-calls?since=${since}&limit=${limit}`).catch(() => ({
+      scan_id: id, summary: {}, count: 0, since, entries: [],
+    })),
+  getAttackGraph: (id) => request(`/api/scans/${id}/attack-graph`).catch(() => ({
+    scan_id: id, nodes: [], edges: [], node_count: 0, edge_count: 0, exploited_count: 0,
   })),
   getToolOutputs: (id) => request(`/api/scans/${id}/tool-outputs`),
   getActivity: (id) => request(`/api/scans/${id}/activity`),

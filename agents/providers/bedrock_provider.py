@@ -127,11 +127,17 @@ class BedrockProvider(LLMProvider):
 
     def supports_native_tools(self) -> bool:
         # generate_with_tools speaks the Anthropic Messages tool schema
-        # (anthropic_version + input_schema), which only Claude models on Bedrock
-        # accept. Non-Claude Bedrock models (DeepSeek, Gemini, Llama, …) must use
-        # the JSON-planner path, so gate on the selected model id.
+        # (anthropic_version + input_schema) for Claude on Bedrock, AND — via the
+        # OpenAI-compatible gateway — OpenAI function-calling, which every gateway
+        # model (deepseek/qwen/gpt-oss/glm/…) supports. Enabling this unlocks the
+        # native agentic loop for non-Claude models; the JSON-planner fallback used
+        # to bypass OSINT/specialist agents. Opt out with BEDROCK_GATEWAY_TOOLS=0.
         m = (self.get_large_model() or "").lower()
-        return "anthropic" in m or "claude" in m
+        if "anthropic" in m or "claude" in m:
+            return True
+        if self._use_gateway() and os.getenv("BEDROCK_GATEWAY_TOOLS", "1") != "0":
+            return True
+        return False
 
     def count_tokens(self, text: str) -> int:
         try:
@@ -278,6 +284,11 @@ class BedrockProvider(LLMProvider):
         tool_executor=None,
         max_rounds: int = 10,
     ) -> LLMResponse:
+        # Gateway models (deepseek/qwen/gpt-oss/…) speak OpenAI function-calling,
+        # not the Anthropic tool schema — run the OpenAI tool loop over the gateway.
+        if self._use_gateway():
+            return await self._gateway_tools(
+                messages, tools, max_tokens, tier, tool_executor, max_rounds)
         model = self.get_model_for_tier(tier)
         bedrock_tools = []
         for t in tools:
@@ -366,6 +377,84 @@ class BedrockProvider(LLMProvider):
             cost_usd=round(total_cost, 6), latency_ms=latency,
             usage={"input_tokens": total_in, "output_tokens": total_out,
                    "total_tokens": total_in + total_out})
+
+    async def _gateway_tools(self, messages, tools, max_tokens, tier,
+                             tool_executor, max_rounds) -> LLMResponse:
+        """OpenAI function-calling tool loop over the gateway. Mirrors the
+        Anthropic path's contract: runs up to max_rounds, calls
+        tool_executor(name, args_dict) (sync or async) for each tool_call, feeds
+        the result back as a role=tool message, and returns the final assistant
+        text as an LLMResponse. Any gateway model (deepseek/qwen/gpt-oss/…) works."""
+        import asyncio as _aio
+        model = self.get_model_for_tier(tier)
+        # PENTESTING_TOOLS are already OpenAI-shaped; normalize any bare fn dicts.
+        oai_tools = [t if t.get("type") == "function"
+                     else {"type": "function", "function": t} for t in (tools or [])]
+        conv = list(messages)
+        total_in = total_out = 0
+        start = time.monotonic()
+        last_text = ""
+        client = None
+        try:
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI(base_url=self._sdk_base_url(),
+                                 api_key=self._mint_token(),
+                                 timeout=90.0, max_retries=2)
+            for _round in range(max(1, max_rounds)):
+                resp = await client.chat.completions.create(
+                    model=model, messages=conv, tools=oai_tools,
+                    tool_choice="auto", max_tokens=max_tokens)
+                u = getattr(resp, "usage", None)
+                if u:
+                    total_in += int(getattr(u, "prompt_tokens", 0) or 0)
+                    total_out += int(getattr(u, "completion_tokens", 0) or 0)
+                msg = resp.choices[0].message
+                tool_calls = list(getattr(msg, "tool_calls", None) or [])
+                if msg.content:
+                    last_text = msg.content
+                if not tool_calls or not tool_executor:
+                    break
+                # Echo the assistant turn (with tool_calls) then each tool result.
+                conv.append({
+                    "role": "assistant",
+                    "content": msg.content or "",
+                    "tool_calls": [{
+                        "id": tc.id, "type": "function",
+                        "function": {"name": tc.function.name,
+                                     "arguments": tc.function.arguments},
+                    } for tc in tool_calls],
+                })
+                for tc in tool_calls:
+                    try:
+                        args = json.loads(tc.function.arguments or "{}")
+                    except Exception:
+                        args = {}
+                    try:
+                        result = tool_executor(tc.function.name, args)
+                        if _aio.iscoroutine(result):
+                            result = await result
+                        result = result if isinstance(result, str) else str(result)
+                    except Exception as e:
+                        result = f"Error: {e}"
+                    conv.append({"role": "tool", "tool_call_id": tc.id,
+                                 "content": result[:20000]})
+            pin, pout = _price_for(model)
+            cost = (total_in * pin + total_out * pout) / 1_000_000
+            return LLMResponse(
+                content=last_text, provider="bedrock", model=model,
+                cost_usd=round(cost, 6), latency_ms=(time.monotonic() - start) * 1000,
+                usage={"input_tokens": total_in, "output_tokens": total_out,
+                       "total_tokens": total_in + total_out})
+        except Exception as e:
+            logger.warning("[Bedrock/gateway-tools] failed: %s", e)
+            return LLMResponse(content=last_text, provider="bedrock", model=model,
+                               error=str(e), latency_ms=(time.monotonic() - start) * 1000)
+        finally:
+            if client is not None:
+                try:
+                    await client.close()
+                except Exception:
+                    pass
 
     @staticmethod
     def _extract_text(data: dict) -> str:

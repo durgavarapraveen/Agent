@@ -86,7 +86,16 @@ class OSINTOrchestrator:
         
         # Save to shared context
         self.ctx.update('leaked_credentials', all_creds)
-        
+        # Surface the discovered repos in the OSINT view — previously the repo
+        # list was fetched then dropped, so the OSINT tab never showed GitHub data.
+        try:
+            self.ctx.update('github_repos', [
+                {'name': r, 'org': company_name,
+                 'url': f'https://github.com/{company_name}/{r}'}
+                for r in (repos or []) if r])
+        except Exception:
+            pass
+
         return {
             'spec': spec.to_dict(),
             'results': {

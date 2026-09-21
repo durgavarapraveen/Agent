@@ -120,6 +120,24 @@ class VulnGraph:
 
         logger.info(f"[VulnGraph] Built graph: {len(self.nodes)} nodes, {len(self.edges)} edges")
 
+    def serialize(self) -> Dict:
+        """Flatten to plain JSON for persistence / the live UI graph (B1)."""
+        return {
+            "nodes": [
+                {"id": n.id, "type": n.vuln_type, "location": n.location,
+                 "severity": n.severity, "confirmed": bool(n.confirmed),
+                 "exploited": bool(n.exploited), "impact": n.impact_score,
+                 "title": (n.details or {}).get("title", "")}
+                for n in self.nodes.values()
+            ],
+            "edges": [
+                {"source": e.source, "target": e.target,
+                 "relationship": e.relationship, "success_rate": e.success_rate,
+                 "description": e.description}
+                for e in self.edges
+            ],
+        }
+
     def find_all_paths(self, max_depth: int = 6) -> List[AttackPath]:
         all_paths: List[AttackPath] = []
 

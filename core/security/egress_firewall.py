@@ -166,7 +166,10 @@ def assert_egress_allowed(url_or_host: str, purpose: str = "http") -> None:
     except Exception as e:
         logger.error(f"[EgressFirewall] scope check failed: {e} — DENYING {host}")
         raise EgressBlocked(f"egress denied ({purpose}): scope check failed for {host}")
-    logger.error(f"[EgressFirewall] BLOCKED egress to {host} (purpose={purpose})")
+    # Blocking an out-of-scope egress is the firewall working as intended (not a
+    # fault) — log at WARNING so routine scope enforcement doesn't inflate the
+    # ERROR count operators watch. A genuine internal-target block stays ERROR.
+    logger.warning(f"[EgressFirewall] BLOCKED egress to {host} (purpose={purpose})")
     raise EgressBlocked(f"egress denied ({purpose}): {host} not in authorised scope")
 
 

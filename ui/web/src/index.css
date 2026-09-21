@@ -16,6 +16,12 @@
      fallbacks (which rendered dark-on-light and were unreadable). */
   --surface-1:   var(--bg-card);
   --surface-2:   var(--bg-surface);
+  /* --bg-1/--bg-2 are used by newer live-scan panels (LLM I/O, Blackboard,
+     Human Assist, Attack Graph, Campaigns). They were undefined, so those
+     components fell back to dark hex → dark-on-light unreadable boxes. Map them
+     to the light surface tokens so every panel follows the theme. */
+  --bg-1:        var(--bg-elev);
+  --bg-2:        var(--bg-surface);
   --border:      #d2d2d7;
   --border-strong: #c7c7cc;
   --border-glow: #86868b;

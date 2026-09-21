@@ -4,6 +4,7 @@ import Dashboard from "./pages/Dashboard";
 import Targets from "./pages/Targets";
 import LiveScan from "./pages/LiveScan";
 import Scans from "./pages/Scans";
+import Campaigns from "./pages/Campaigns";
 import ScanDetail from "./pages/ScanDetail";
 import AuditTrail from "./pages/AuditTrail";
 import ReviewQueue from "./pages/ReviewQueue";
@@ -135,6 +136,7 @@ export default function App() {
             <NavLink to="/targets"><TargetIcon /> Targets</NavLink>
             <NavLink to="/live"><LiveIcon /> Live Scans</NavLink>
             <NavLink to="/scans"><ScanIcon /> Scan History</NavLink>
+            <NavLink to="/campaigns"><ScanIcon /> Campaigns</NavLink>
             <NavLink to="/analyze"><ScanIcon /> Analyze (APK / Source)</NavLink>
           </div>
 
@@ -171,6 +173,7 @@ export default function App() {
             <Route path="/targets" element={<Targets />} />
             <Route path="/live" element={<LiveScan />} />
             <Route path="/scans" element={<Scans />} />
+            <Route path="/campaigns" element={<Campaigns />} />
             <Route path="/scans/:scanId" element={<ScanDetail />} />
             <Route path="/review" element={<ReviewQueue />} />
             <Route path="/compare" element={<Compare />} />

@@ -340,7 +340,7 @@ def _read_scan_log(job_id: str) -> bytes:
 sys.path.insert(0, str(BASE))
 from core.database.pg_store import (
     _init_schema, TargetRepo, ScanRepo, VulnRepo, LiveDataRepo,
-    FindingV2Repo, DedupRepo, AuditRepo, ScheduleRepo, CampaignRepo,
+    FindingV2Repo, DedupRepo, AuditRepo, ScheduleRepo, CampaignRepo, CampaignTargetRepo,
     ExploitResultRepo, ScanArtifactRepo, AuthBypassRepo, LiveAgentRepo, make_run_id,
     _vuln_category, _normalize_location, _host_only,
     _PER_ENDPOINT_CATEGORIES, _HOST_LEVEL_CATEGORIES,
@@ -427,6 +427,14 @@ class ScanRequest(BaseModel):
     # captured JWT cannot silently authenticate later anonymous/authz tests.
     allow_ambient_auth: bool = False
     phases: List[str] = Field(default_factory=list, max_length=16)
+    # Test thoroughness (probe_engine early-stop/budget) + family selectivity.
+    # mode: fast | coverage (default) | benchmark; profile: standard (default) | lab.
+    mode: str = Field(default="", max_length=16)
+    profile: str = Field(default="", max_length=16)
+    # Opt-in benchmark scoring at REPORTING (generic corpus + per-challenge score).
+    benchmark: bool = False
+    benchmark_suite: str = Field(default="", max_length=64)
+    human_assist: bool = False
     credentials: List[dict] = Field(default_factory=list, max_length=32)
     # Grey-box / mobile inputs (Phases 4.4 / 4.5). Paths are server-side (from the
     # /api/uploads/scan-input endpoint); source_repo is a git URL. Passed to
@@ -746,9 +754,22 @@ def _run_scan_process(job_id: str, target: str, tier: str,
                       credentials: dict = None, allow_shell_operators: bool = False,
                       allow_ambient_auth: bool = False,
                       mobile_app: str = "", ipa_app: str = "",
-                      source_repo: str = "", source_path: str = ""):
+                      source_repo: str = "", source_path: str = "",
+                      mode: str = "", profile: str = "",
+                      benchmark: bool = False, benchmark_suite: str = "",
+                      human_assist: bool = False):
     log_file = _scan_log_path(job_id)
     cmd = [sys.executable, str(BASE / "main.py"), "--target", target, "--tier", tier]
+    if mode:
+        cmd.extend(["--mode", mode])
+    if profile:
+        cmd.extend(["--profile", profile])
+    if benchmark:
+        cmd.append("--benchmark")
+        if benchmark_suite:
+            cmd.extend(["--benchmark-suite", benchmark_suite])
+    if human_assist:
+        cmd.append("--human-assist")
     if auto_approve:
         cmd.append("--auto-approve")
     if skip_osint:
@@ -1040,7 +1061,12 @@ def _dedup_vulns(vulns: list) -> list:
         if cat:
             return f"{cat}|{_normalize_location(loc)}|{norm_title}"
         vtype = (v.get("type") or v.get("vuln_type") or "").upper().strip()
-        return f"{vtype}|{norm_title}|{_host_only(loc)}"
+        # Uncategorized findings default to PER-ENDPOINT keying: an access-control
+        # / business-logic flaw on /api/Users is a distinct exposure from the same
+        # flaw on /rest/memories. Key by (type + full endpoint) — NOT host (which
+        # hid per-endpoint instances) and NOT title (whose LLM wording variants
+        # would otherwise double-count the same issue at the same endpoint).
+        return f"{vtype}|{_normalize_location(loc)}"
 
     def _evidence_score(v: dict) -> int:
         score = 0
@@ -1504,6 +1530,121 @@ def list_agent_reasoning(scan_id: str, agent_id: str = "", limit: int = 100):
         return {"scan_id": scan_id, "count": len(rows), "reasoning": rows}
     except Exception as e:
         raise HTTPException(500, f"reasoning unavailable: {e}")
+
+
+# ── LLM I/O LOG — every request→response, in order, per scan ──────────────
+@app.get("/api/scans/{scan_id}/llm-calls")
+def get_llm_calls(scan_id: str, since: int = 0, limit: int = 200):
+    try:
+        from core.economics import llm_log as _llm
+        entries = _llm.recent(scan_id, since_id=since, limit=limit)
+        return {
+            "scan_id": scan_id,
+            "summary": _llm.summary(scan_id),
+            "count": len(entries),
+            "since": since,
+            "entries": entries,
+        }
+    except Exception as e:
+        raise HTTPException(500, f"llm-calls unavailable: {e}")
+
+
+# ── SHARED BLACKBOARD — live cross-agent bus (creds/findings/tools/pivots) ──
+@app.get("/api/scans/{scan_id}/blackboard")
+def get_blackboard(scan_id: str, since: int = 0, limit: int = 300):
+    try:
+        from core.orchestration import blackboard as _bb
+        entries = _bb.recent(scan_id, since_id=since, limit=limit)
+        return {
+            "scan_id": scan_id,
+            "summary": _bb.summary(scan_id),
+            "count": len(entries),
+            "since": since,
+            "entries": entries,
+        }
+    except Exception as e:
+        raise HTTPException(500, f"blackboard unavailable: {e}")
+
+
+# ── COVERAGE LEDGER + BENCHMARK — persisted, benchmark-agnostic (spec §16-20) ──
+@app.get("/api/scans/{scan_id}/coverage")
+def get_coverage(scan_id: str, limit: int = 5000):
+    try:
+        from core.database.pg_store import CoverageRepo
+        return {"scan_id": scan_id, "summary": CoverageRepo.summary(scan_id),
+                "records": CoverageRepo.list_by_scan(scan_id, limit=limit)}
+    except Exception as e:
+        raise HTTPException(500, f"coverage unavailable: {e}")
+
+
+@app.get("/api/scans/{scan_id}/benchmark")
+def get_benchmark(scan_id: str, suite: str = ""):
+    try:
+        from core.database.pg_store import BenchmarkResultRepo
+        rows = BenchmarkResultRepo.list_by_scan(scan_id, suite=suite)
+        by_status: dict = {}
+        for r in rows:
+            by_status[r.get("status", "?")] = by_status.get(r.get("status", "?"), 0) + 1
+        confirmed = by_status.get("confirmed", 0)
+        applicable = len(rows) - by_status.get("not_applicable", 0)
+        return {"scan_id": scan_id, "suite": suite, "total": len(rows),
+                "by_status": by_status, "confirmed": confirmed, "applicable": applicable,
+                "coverage_pct": round(100.0 * confirmed / applicable, 1) if applicable else 0.0,
+                "results": rows}
+    except Exception as e:
+        raise HTTPException(500, f"benchmark unavailable: {e}")
+
+
+# ── HUMAN-IN-THE-LOOP assist — tasks offloaded to a person + their answers ──
+@app.get("/api/scans/{scan_id}/human-requests")
+def get_human_requests(scan_id: str, status: str = ""):
+    try:
+        from core.database.pg_store import HumanRequestRepo
+        rows = HumanRequestRepo.list_by_scan(scan_id, status=status)
+        pend = sum(1 for r in rows if r.get("status") == "pending")
+        return {"scan_id": scan_id, "pending": pend, "count": len(rows), "requests": rows}
+    except Exception as e:
+        raise HTTPException(500, f"human-requests unavailable: {e}")
+
+
+class HumanAnswer(BaseModel):
+    answer: str = Field(default="", max_length=4000)
+    solved: bool = False
+
+
+@app.post("/api/scans/{scan_id}/human-requests/{request_id}/answer")
+def answer_human_request(scan_id: str, request_id: str, body: HumanAnswer):
+    try:
+        from core.orchestration import human_assist
+        ok = human_assist.answer(scan_id, request_id, body.answer, solved=body.solved)
+        if not ok:
+            raise HTTPException(404, "request not found")
+        return {"ok": True, "request_id": request_id, "solved": body.solved}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"answer failed: {e}")
+
+
+# ── ATTACK GRAPH — persisted node/edge graph (B1) ─────────────────────────
+@app.get("/api/scans/{scan_id}/attack-graph")
+def get_attack_graph(scan_id: str):
+    try:
+        from core.database.pg_store import AttackGraphRepo
+        g = AttackGraphRepo.get(scan_id)
+        nodes = g.get("nodes", []) or []
+        edges = g.get("edges", []) or []
+        return {
+            "scan_id": scan_id,
+            "updated_at": g.get("updated_at"),
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "exploited_count": sum(1 for n in nodes if n.get("exploited")),
+            "nodes": nodes,
+            "edges": edges,
+        }
+    except Exception as e:
+        raise HTTPException(500, f"attack graph unavailable: {e}")
 
 
 # ── ATTACK CHAINS — LLM-synthesised exploitation paths ────────────────────
@@ -2443,7 +2584,10 @@ def run_scan(body: ScanRequest):
                 "allow_shell_operators": body.allow_shell_operators,
                 "allow_ambient_auth": body.allow_ambient_auth,
                 "mobile_app": body.mobile_app, "ipa_app": body.ipa_app,
-                "source_repo": body.source_repo, "source_path": body.source_path},
+                "source_repo": body.source_repo, "source_path": body.source_path,
+                "mode": body.mode, "profile": body.profile,
+                "benchmark": body.benchmark, "benchmark_suite": body.benchmark_suite,
+                "human_assist": body.human_assist},
         daemon=True,
     )
     t.start()
@@ -2749,12 +2893,23 @@ async def _ws_push_loop(job_id: str):
                 except Exception:
                     pass
 
+            # Shared blackboard: latest cross-agent posts for the live feed.
+            blackboard = {}
+            try:
+                from core.orchestration import blackboard as _bb
+                _sid = job.get("scan_id") or progress.get("scan_id") or job_id
+                blackboard = {"summary": _bb.summary(_sid),
+                              "entries": _bb.recent(_sid, since_id=0, limit=40)}
+            except Exception:
+                pass
+
             payload = {
                 "type": "live_update",
                 "job_id": job_id,
                 "status": job.get("status", "unknown"),
                 "progress": progress,
                 "results": results,
+                "blackboard": blackboard,
                 # Scrub bearer tokens, API keys, passwords, and long hex/base64
                 # secrets before they hit the wire. Log lines commonly contain
                 # captured Authorization headers from target responses.
@@ -3049,7 +3204,12 @@ async def run_campaign(req: CampaignRequest):
 @app.get("/api/campaigns/progress")
 def campaign_progress():
     try:
-        return CampaignRepo.get_progress()
+        row = CampaignRepo.get_progress() or {}
+        cid = row.get("campaign_id")
+        if cid:
+            row["target_progress"] = CampaignTargetRepo.progress(cid)
+            row["targets"] = CampaignTargetRepo.list_by_campaign(cid)
+        return row
     except Exception:
         return {}
 
@@ -3060,6 +3220,40 @@ def list_campaigns():
         return CampaignRepo.list_all()
     except Exception:
         return []
+
+
+@app.get("/api/campaigns/{campaign_id}")
+def get_campaign(campaign_id: str):
+    try:
+        row = CampaignRepo.get(campaign_id)
+        if not row:
+            raise HTTPException(404, "campaign not found")
+        row["target_progress"] = CampaignTargetRepo.progress(campaign_id)
+        row["targets"] = CampaignTargetRepo.list_by_campaign(campaign_id)
+        return row
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"campaign unavailable: {e}")
+
+
+@app.post("/api/campaigns/{campaign_id}/resume")
+async def resume_campaign(campaign_id: str):
+    """Resume a campaign after a crash/restart — skips completed targets."""
+    row = CampaignRepo.get(campaign_id)
+    if not row:
+        raise HTTPException(404, "campaign not found")
+    remaining = CampaignTargetRepo.unfinished_targets(campaign_id)
+    if not remaining:
+        return {"status": "nothing_to_resume", "campaign_id": campaign_id}
+    from core.orchestration.campaign import CampaignManager
+    all_targets = [t["target"] for t in CampaignTargetRepo.list_by_campaign(campaign_id)]
+    campaign = CampaignManager(all_targets, tier=row.get("tier", "POC"),
+                               campaign_id=campaign_id, resume=True)
+    import asyncio
+    asyncio.create_task(campaign.run())
+    return {"status": "resumed", "campaign_id": campaign_id,
+            "remaining": len(remaining)}
 
 
 # ── Decision Log ───────────────────────────────────────────────────────────

@@ -51,16 +51,12 @@ _ROLE_KEYWORDS: Dict[str, List[str]] = {
 
 
 def _base_or_scheme(ctx, path: str) -> str:
-    if path.startswith(("http://", "https://")):
-        return path
-    t = getattr(ctx, "target", "") or ""
-    if not t:
-        return path
-    if not t.startswith(("http://", "https://")):
-        t = f"https://{t}"
-    if not path.startswith("/"):
-        path = "/" + path
-    return t.rstrip("/") + path
+    # Canonicalise via the shared hygiene helper: un-stacks METHOD:/scheme://
+    # endpoint-id artifacts, recovers a real URL from an SPA "/#/" fragment, and
+    # rejects JS-template/glob garbage (returns "" → callers filter it out). This
+    # is the single fix for the "get:get://https://…" corruption at its source.
+    from core.common.url_hygiene import canonical_http_url
+    return canonical_http_url(path, getattr(ctx, "target", "") or "")
 
 
 def _lower_paths_from_ctx(ctx) -> Set[str]:
@@ -75,8 +71,10 @@ def _lower_paths_from_ctx(ctx) -> Set[str]:
                 u = getattr(r, "url", None)
             elif isinstance(r, str):
                 u = r
-            if u and u.startswith(("http://", "https://")):
-                out.add(u.split("?")[0].lower())
+            if u:
+                cu = _base_or_scheme(ctx, u)
+                if cu.startswith(("http://", "https://")):
+                    out.add(cu.split("?")[0].lower())
     # 2. Endpoints written by the LLM extractor / tool result parsers
     for e in (getattr(ctx, "endpoints", None) or []):
         u = e if isinstance(e, str) else (e.get("url") if isinstance(e, dict) else None)

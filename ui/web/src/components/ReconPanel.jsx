@@ -317,6 +317,8 @@ export function OsintSection({ osint }) {
     { key: "findings", label: "Findings", count: count(osint.findings) },
     { key: "dns", label: "DNS/Mail Intel", count: count(osint.domain_intelligence) },
   ];
+  if (osint.github_repos?.length) tabs.push({ key: "repos", label: "GitHub Repos", count: osint.github_repos.length });
+  if (osint.subdomains?.length) tabs.push({ key: "subdomains", label: "Subdomains", count: osint.subdomains.length });
   if (osint.other?.github_profiles?.length) tabs.push({ key: "github", label: "GitHub", count: osint.other.github_profiles.length });
   if (osint.cloud_buckets?.length) tabs.push({ key: "buckets", label: "Cloud Buckets", count: osint.cloud_buckets.length });
   if (osint.other?.interesting_urls?.length) tabs.push({ key: "urls", label: "Interesting URLs", count: osint.other.interesting_urls.length });
@@ -330,6 +332,8 @@ export function OsintSection({ osint }) {
         <StatBox label="Leaked Creds" value={s.leaked_credentials || 0} accent="red" />
         <StatBox label="Cloud Buckets" value={s.cloud_buckets || 0} accent="cyan" />
         <StatBox label="Threat Hits" value={s.threat_correlations || 0} accent="orange" />
+        <StatBox label="GitHub Repos" value={s.github_repos || 0} accent="purple" />
+        <StatBox label="Subdomains" value={s.subdomains || 0} accent="green" />
       </div>
 
       <div className="tabs" style={{ marginBottom: 16 }}>
@@ -409,6 +413,27 @@ export function OsintSection({ osint }) {
           ]}
           rows={osint.other.github_profiles}
         />
+      )}
+
+      {osintTab === "repos" && osint.github_repos?.length > 0 && (
+        <DataTable
+          columns={[
+            { key: "name", label: "Repository", tdStyle: { fontFamily: "var(--mono)", fontWeight: 600, color: "var(--text-h)" }, render: (r) => typeof r === "string" ? r : (r.name || JSON.stringify(r)) },
+            { key: "url", label: "URL", tdStyle: { fontSize: 12 }, render: (r) => (typeof r === "object" && r.url) ? <a href={r.url} target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>{r.url}</a> : "-" },
+          ]}
+          rows={osint.github_repos}
+        />
+      )}
+
+      {osintTab === "subdomains" && osint.subdomains?.length > 0 && (
+        <div style={{ maxHeight: 500, overflowY: "auto" }}>
+          {osint.subdomains.map((sd, i) => {
+            const name = typeof sd === "string" ? sd : (sd.name || sd.subdomain || JSON.stringify(sd));
+            return (
+              <div key={i} style={{ padding: "8px 12px", fontSize: 12, fontFamily: "var(--mono)", borderBottom: "1px solid var(--border)", wordBreak: "break-all", color: "var(--text)" }}>{name}</div>
+            );
+          })}
+        </div>
       )}
 
       {osintTab === "buckets" && osint.cloud_buckets?.length > 0 && (

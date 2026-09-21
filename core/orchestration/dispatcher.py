@@ -86,13 +86,19 @@ class Dispatcher:
         # Coverage ledger — records every (surface, point, class) outcome so a
         # skip/error is never silent (gaps: "never skip silently").
         from core.coverage.coverage_ledger import CoverageLedger
-        ledger = CoverageLedger()
+        _sid = (getattr(ctx, "scan_id", "") or getattr(ctx, "_scan_id", "")
+                or __import__("os").getenv("ANTIGRAVITY_SCAN_ID", ""))
+        ledger = CoverageLedger(scan_id=_sid, target=getattr(ctx, "target", ""))
 
         surfaces = self.classifier.classify(ctx)
         findings: List[Dict[str, Any]] = []
         delegated_seen: Dict[str, int] = {}
         upload_needed = False
 
+        # Build the full (surface, point, class) job list first — each unit is
+        # independent (its own request + its own finding/catalog writes, both
+        # lock-guarded), so they fan out safely instead of running one-by-one.
+        jobs = []
         for s in surfaces[:max_surfaces]:
             engine_classes = [c for c in s.applicable_classes if c in ENGINE_CLASSES]
             for c in s.applicable_classes:
@@ -101,19 +107,31 @@ class Dispatcher:
                     if c == "FILE_UPLOAD":
                         upload_needed = True
                     ledger.skipped(s.url, "surface", c, f"delegated to {DELEGATED[c]}")
-            # point × class injection battery
             for pt in s.injection_points[:max_points]:
-                # skip classes that only make sense for a different point kind
                 for c in engine_classes:
                     if not self._point_supports(pt, c):
                         ledger.skipped(s.url, pt.key(), c, "point kind not applicable")
                         continue
-                    try:
-                        fs = await self.engine.probe_point(s, pt, c, ctx, budget=budget, ledger=ledger)
-                        findings.extend(fs)
-                    except Exception as e:
-                        logger.warning("probe_point %s @ %s failed: %s", c, pt.key(), e)
-                        ledger.errored(s.url, pt.key(), c, f"{type(e).__name__}: {e}")
+                    jobs.append((s, pt, c))
+
+        async def _probe_job(job):
+            s, pt, c = job
+            try:
+                return await self.engine.probe_point(s, pt, c, ctx, budget=budget, ledger=ledger)
+            except Exception as e:
+                logger.warning("probe_point %s @ %s failed: %s", c, pt.key(), e)
+                ledger.errored(s.url, pt.key(), c, f"{type(e).__name__}: {e}")
+                return None
+
+        from core.orchestration.parallel_agents import run_parallel_agents
+        from core.orchestration.concurrency import probe_concurrency
+        results = await run_parallel_agents(
+            jobs, _probe_job,
+            concurrency=probe_concurrency(getattr(ctx, "target_health", None)),
+            label="probe_dispatch")
+        for fs in results:
+            if fs:
+                findings.extend(fs)
 
         # delegate upload once (real field detection + execution verify lives there)
         if upload_needed:

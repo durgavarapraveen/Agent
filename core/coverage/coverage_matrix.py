@@ -19,13 +19,26 @@ class CoverageState(Enum):
 
 class CoverageMatrix:
 
-    def __init__(self, endpoints: List[str], tests: List[str]) -> None:
+    def __init__(self, endpoints: List[str], tests: List[str],
+                 applicable: Optional[set] = None) -> None:
+        # `applicable`: set of (endpoint_id, test_id) pairs that actually apply to
+        # each endpoint (from the applicability engine). When given, every OTHER
+        # cell starts NOT_APPLICABLE instead of NOT_TESTED — otherwise the full
+        # endpoints×tests cross-product counts as applicable and the coverage
+        # denominator explodes (e.g. 278×200≈55k), pinning coverage near 0% and
+        # starving convergence → runtime watchdog. When None, legacy behaviour
+        # (all cells NOT_TESTED) is preserved.
         self._matrix: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        _app = set(applicable) if applicable is not None else None
         for ep in endpoints:
             self._matrix[ep] = {}
             for t in tests:
+                if _app is not None and (ep, t) not in _app:
+                    st = CoverageState.NOT_APPLICABLE
+                else:
+                    st = CoverageState.NOT_TESTED
                 self._matrix[ep][t] = {
-                    "state": CoverageState.NOT_TESTED,
+                    "state": st,
                     "evidence_id": None,
                     "timestamp": time.time(),
                 }

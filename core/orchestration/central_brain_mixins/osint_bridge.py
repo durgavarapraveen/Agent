@@ -139,6 +139,16 @@ class OsintBridgeMixin:
                 "username": user, "password": pw,
                 "login_url": login_url,   # may be "" -> auth layer will try form detection
             })
+            # Shared blackboard: broadcast the leaked identity (password masked)
+            # so auth/IDOR agents and the live UI see it as it lands.
+            try:
+                from core.orchestration import blackboard as _bb
+                _bb.post(getattr(self, "_scan_id", "") or getattr(self.ctx, "scan_id", ""),
+                         "osint", "cred", f"leaked identity: {user}",
+                         {"username": user, "password": pw, "login_url": login_url},
+                         ref=f"cred:{user}")
+            except Exception:
+                pass
         self.ctx.auth_credentials = new_creds
         try:
             # Re-establish sessions (multi-role) — registers these leaked identities
@@ -171,12 +181,18 @@ class OsintBridgeMixin:
             "domain_intelligence": g("domain_intelligence", {}) or {},
             "threat_correlations": g("threat_correlations", []) or [],
             "findings": g("osint_findings", []) or [],
+            # Route the rest of the OSINT engine's output to the OSINT tab too:
+            # GitHub repos + discovered subdomains were being dropped from this view.
+            "github_repos": g("github_repos", []) or [],
+            "subdomains": g("discovered_subdomains", []) or [],
         }
         osint["summary"] = {
             "employees": len(osint["employees"]),
             "leaked_credentials": len(masked_creds),
             "cloud_buckets": len(osint["cloud_buckets"]),
             "threat_correlations": len(osint["threat_correlations"]),
+            "github_repos": len(osint["github_repos"]),
+            "subdomains": len(osint["subdomains"]),
         }
         # Include any other dynamically-collected intelligence not covered above.
         try:

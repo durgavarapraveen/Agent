@@ -462,6 +462,8 @@ class UniversalLLMHarness:
             except Exception:
                 _cache = None
 
+        import time as _time
+        _t0 = _time.time()
         resp = await self.active_provider.generate_response(
             prompt, system, max_tokens, temperature, response_format, tier
         )
@@ -472,6 +474,7 @@ class UniversalLLMHarness:
                 resp = await self.active_provider.generate_response(
                     prompt, system, max_tokens, temperature, response_format, tier
                 )
+        _dur_ms = int((_time.time() - _t0) * 1000)
 
         try:
             sid = os.getenv("ANTIGRAVITY_SCAN_ID", "")
@@ -483,6 +486,26 @@ class UniversalLLMHarness:
                     input_tokens=int(_u.get("input_tokens", 0) or 0),
                     output_tokens=int(_u.get("output_tokens", 0) or 0),
                     cost_usd=float(resp.cost_usd or 0.0))
+        except Exception:
+            pass
+
+        # LLM I/O log: record every request→response in order for the UI tab.
+        try:
+            from core.economics import llm_log as _llm_log
+            _u = (resp.usage or {}) if resp is not None else {}
+            _llm_log.log(
+                os.getenv("ANTIGRAVITY_SCAN_ID", ""),
+                provider=getattr(resp, "provider", "") or "",
+                model=getattr(resp, "model", "") or _model_hint,
+                tier=getattr(tier, "value", str(tier)),
+                kind=("json" if response_format == "json" else "text"),
+                system=system or "", prompt=prompt or "",
+                response=(getattr(resp, "content", "") or ""),
+                tokens_in=int(_u.get("input_tokens", 0) or 0),
+                tokens_out=int(_u.get("output_tokens", 0) or 0),
+                cost_usd=float(getattr(resp, "cost_usd", 0.0) or 0.0),
+                duration_ms=_dur_ms,
+                error=(getattr(resp, "error", "") or ""))
         except Exception:
             pass
 
@@ -599,6 +622,8 @@ class UniversalLLMHarness:
         except Exception:
             pass
         if hasattr(self.active_provider, 'generate_with_tools'):
+            import time as _time
+            _t0 = _time.time()
             resp = await self.active_provider.generate_with_tools(
                 messages, tools, max_tokens=max_tokens, tier=tier,
                 tool_executor=tool_executor, max_rounds=max_rounds,
@@ -606,10 +631,32 @@ class UniversalLLMHarness:
             if resp.error and self._is_fatal_provider_error(resp.error):
                 if await self._try_fallback_provider(resp.error):
                     if hasattr(self.active_provider, 'generate_with_tools'):
-                        return await self.active_provider.generate_with_tools(
+                        resp = await self.active_provider.generate_with_tools(
                             messages, tools, max_tokens=max_tokens, tier=tier,
                             tool_executor=tool_executor, max_rounds=max_rounds,
                         )
+            # LLM I/O log: one entry for the agentic (tool-calling) turn.
+            try:
+                from core.economics import llm_log as _llm_log
+                _sys = " ".join(str(m.get("content", "")) for m in (messages or [])
+                                if isinstance(m, dict) and m.get("role") == "system")
+                _usr = " ".join(str(m.get("content", "")) for m in (messages or [])
+                                if isinstance(m, dict) and m.get("role") != "system")
+                _u = (resp.usage or {}) if resp is not None else {}
+                _llm_log.log(
+                    os.getenv("ANTIGRAVITY_SCAN_ID", ""),
+                    provider=getattr(resp, "provider", "") or "",
+                    model=getattr(resp, "model", "") or "",
+                    tier=getattr(tier, "value", str(tier)), kind="tools",
+                    system=_sys, prompt=_usr,
+                    response=(getattr(resp, "content", "") or ""),
+                    tokens_in=int(_u.get("input_tokens", 0) or 0),
+                    tokens_out=int(_u.get("output_tokens", 0) or 0),
+                    cost_usd=float(getattr(resp, "cost_usd", 0.0) or 0.0),
+                    duration_ms=int((_time.time() - _t0) * 1000),
+                    error=(getattr(resp, "error", "") or ""))
+            except Exception:
+                pass
             return resp
         return LLMResponse(content="", error="Tool calling not supported on this provider")
 

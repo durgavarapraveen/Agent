@@ -6,6 +6,10 @@ import ReconPanel from "../components/ReconPanel";
 import { OsintSection } from "../components/ReconPanel";
 import AccessGainedPanel from "../components/AccessGainedPanel";
 import LiveAgentsPanel from "../components/LiveAgentsPanel";
+import BlackboardPanel from "../components/BlackboardPanel";
+import AttackGraphPanel from "../components/AttackGraphPanel";
+import LlmCallsPanel from "../components/LlmCallsPanel";
+import HumanAssistPanel from "../components/HumanAssistPanel";
 import ScanChatPanel from "../components/ScanChatPanel";
 import ArtifactsPanel from "../components/ArtifactsPanel";
 import { methodColor, fmtDate, parseTs, asText } from "../components/utils";
@@ -229,6 +233,10 @@ function LiveScanDetail({ jobId }) {
     { id: "exploits", label: `Exploits (${exploits.length})` },
     { id: "artifacts", label: "Artifacts / PoC" },
     { id: "agents", label: "Parallel Agents" },
+    { id: "blackboard", label: "Blackboard" },
+    { id: "attackgraph", label: "Attack Graph" },
+    { id: "llmio", label: "LLM I/O" },
+    { id: "human", label: "Human Assist" },
     { id: "activity", label: "Agent Activity" },
     { id: "requests", label: `Requests (${requests.length})` },
     { id: "logs", label: `Logs (${logs.total})` },
@@ -299,6 +307,10 @@ function LiveScanDetail({ jobId }) {
       {tab === "exploits" && <ExploitsSection exploits={exploits} />}
       {tab === "activity" && <ActivityLog scanId={jobId} poll />}
       {tab === "agents" && <LiveAgentsPanel scanId={jobId} poll />}
+      {tab === "blackboard" && <BlackboardPanel scanId={jobId} poll={isRunning} />}
+      {tab === "attackgraph" && <AttackGraphPanel scanId={jobId} poll={isRunning} />}
+      {tab === "llmio" && <LlmCallsPanel scanId={jobId} poll={isRunning} />}
+      {tab === "human" && <HumanAssistPanel scanId={jobId} poll={isRunning} />}
       {tab === "artifacts" && <ArtifactsPanel scanId={jobId} poll />}
       {tab === "requests" && <RequestsSection requests={requests} />}
       {tab === "logs" && <LogsSection logRef={logRef} jobId={jobId} />}

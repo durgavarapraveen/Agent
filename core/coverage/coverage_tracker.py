@@ -29,6 +29,16 @@ class FailureReason(str, Enum):
     TIMEOUT = "timeout"
     INVALID_INPUT = "invalid_input"
     TRANSIENT_ERROR = "transient_error"
+    # Coverage-gap reasons (spec §19): a challenge/class was NOT tested — distinct
+    # from "tested and not found" — so the planner can flag missing coverage
+    # instead of under-reporting it as a genuine miss.
+    REQUIRES_AUTH = "requires_auth"
+    REQUIRES_SECOND_IDENTITY = "requires_second_identity"
+    REQUIRES_ROLE = "requires_role"
+    REQUIRES_BROWSER = "requires_browser"
+    REQUIRES_STATE = "requires_state"
+    NOT_REACHABLE = "not_reachable"
+    BLOCKED = "blocked"
     UNKNOWN = "unknown"
     NONE = "none"
 

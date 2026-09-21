@@ -309,6 +309,17 @@ class CentralBrain(
         logger.info(f"BRAIN_PHASE_TRANSITION: old_phase='{old_phase}' -> new_phase='{new_phase}'")
 
     def _evaluate_phase_transition(self) -> Optional[ExecutionPhase]:
+        # Soft deadline: once the runtime budget is nearly spent, jump straight to
+        # REPORTING so the scan finalizes with the results it has instead of being
+        # hard-killed mid-phase by the watchdog. Single hop, not phase-by-phase.
+        try:
+            if getattr(self, "_soft_deadline_hit", False) and \
+                    self.current_phase != ExecutionPhase.REPORTING:
+                logger.warning("Soft deadline — routing directly to REPORTING.")
+                return ExecutionPhase.REPORTING
+        except Exception:
+            pass
+
         # Anti-loop: if the current phase gave up via the no-progress guard, force
         # advance along the canonical sequence instead of letting the planner
         # re-enter the same stalled phase (root cause of the ~2h EXPLOITATION loop).
@@ -398,7 +409,9 @@ class CentralBrain(
             endpoints = self.ctx.get_endpoints() if hasattr(self.ctx, "get_endpoints") else []
         except Exception:
             endpoints = []
-        all_findings = []
+        # Build the (url, param, class) job list, then fan out — each probe is
+        # independent (own request + lock-guarded finding/catalog writes).
+        jobs = []
         for e in endpoints[:max_endpoints]:
             url = e if isinstance(e, str) else (
                 e.get("url") if isinstance(e, dict) else getattr(e, "url", ""))
@@ -410,11 +423,26 @@ class CentralBrain(
                 param = (p0[0] if isinstance(p0, list) and p0 else
                          next(iter(p0), "q") if isinstance(p0, dict) else "q")
             for vc in classes:
-                try:
-                    all_findings.extend(await engine.probe(url, vc, self.ctx,
-                                                           parameter=param, budget=upe_budget))
-                except Exception as ex:
-                    logger.debug(f"UPE probe {vc} on {url} failed: {ex}")
+                jobs.append((url, param, vc))
+
+        async def _probe_job(job):
+            url, param, vc = job
+            try:
+                return await engine.probe(url, vc, self.ctx, parameter=param, budget=upe_budget)
+            except Exception as ex:
+                logger.debug(f"UPE probe {vc} on {url} failed: {ex}")
+                return None
+
+        from core.orchestration.parallel_agents import run_parallel_agents
+        from core.orchestration.concurrency import probe_concurrency
+        results = await run_parallel_agents(
+            jobs, _probe_job,
+            concurrency=probe_concurrency(getattr(self.ctx, "target_health", None)),
+            label="upe_probe")
+        all_findings = []
+        for fs in results:
+            if fs:
+                all_findings.extend(fs)
         return all_findings
         
     def _should_exit_phase(self) -> bool:
@@ -423,7 +451,34 @@ class CentralBrain(
             
         state = self.phase_state
         config = self.phase_config
-        
+
+        # SOFT DEADLINE: wind down to reporting cleanly BEFORE the hard runtime
+        # watchdog kills the scan mid-operation. The no-progress guard below only
+        # catches ZERO progress; a phase making slow-but-nonzero progress (e.g.
+        # 13 findings trickling in over 3h) evades it and grinds to the 2h kill.
+        # Once past the soft fraction, exit every remaining non-reporting phase
+        # immediately so the state machine cascades to finalize/report with the
+        # results it has, instead of a hard WATCHDOG STOP. Reporting/finalize
+        # phases are exempt so the report still runs.
+        _pn_up = (state.phase_name or "").upper()
+        _is_report = any(k in _pn_up for k in ("REPORT", "FINAL", "COMPLETE"))
+        if not _is_report:
+            if getattr(self, "_soft_deadline_hit", False):
+                return True
+            try:
+                from core.security.watchdog import get_watchdog
+                _frac = get_watchdog().elapsed_fraction()
+                _soft = float(os.getenv("BUDGET_SOFT_EXIT_FRAC", "0.85"))
+                if _frac >= _soft:
+                    self._soft_deadline_hit = True
+                    logger.warning(
+                        f"Soft deadline reached ({_frac:.0%} of runtime budget) — "
+                        f"winding down to reporting cleanly instead of a hard "
+                        f"watchdog halt. Exiting phase {state.phase_name}.")
+                    return True
+            except Exception:
+                pass
+
         if (datetime.now() - state.start_time).total_seconds() > (config.TIMEOUT_MINUTES * 60):
             logger.warning(f"Phase {state.phase_name} timed out.")
             return True
@@ -614,14 +669,22 @@ class CentralBrain(
                     self._reentry = PhaseReentryController()
                     self._phase_snapshot = {}
                 cur_snap = snapshot_ctx(self.ctx)
-                self._reentry.detect(self._phase_snapshot or cur_snap, cur_snap)
-                self._phase_snapshot = cur_snap
-                before = set(completed)
-                completed = self._reentry.consume_reentries(completed)
-                reopened = before - completed
-                if reopened:
-                    logger.info(f"PHASE_REENTRY: re-opening {sorted(reopened)} on "
-                                "dependency event(s)")
+                # Forward-only when the operator pinned an explicit --phases
+                # sequence: honor it literally. Otherwise the reentry controller
+                # re-opens RECON/ACTIVE on every new-endpoint event, which on an
+                # endpoint-rich target loops those phases to their entry cap and
+                # starves EXPLOITATION (root cause of the RECON/ACTIVE cycling).
+                if self._allowed_phases:
+                    self._phase_snapshot = cur_snap
+                else:
+                    self._reentry.detect(self._phase_snapshot or cur_snap, cur_snap)
+                    self._phase_snapshot = cur_snap
+                    before = set(completed)
+                    completed = self._reentry.consume_reentries(completed)
+                    reopened = before - completed
+                    if reopened:
+                        logger.info(f"PHASE_REENTRY: re-opening {sorted(reopened)} on "
+                                    "dependency event(s)")
                 # Anti-loop guard: never let re-entry re-open a phase that has
                 # already hit its entry cap (breaks the EXPLOITATION crawl loop
                 # where each pass mutates ctx and re-triggers re-entry forever).
@@ -1572,13 +1635,20 @@ class CentralBrain(
         nd_test_ids = {p[1] for p in not_discovered_pairs}
         all_ep_ids = list({p[0] for p in applicable_pairs} | {p[0] for p in not_discovered_pairs})
         all_test_ids = list({p[1] for p in applicable_pairs} | nd_test_ids)
-        self.coverage_matrix = CoverageMatrix(all_ep_ids, all_test_ids)
+        # Pass the REAL per-endpoint applicable pairs so non-applicable cells in
+        # the ep×test grid start NOT_APPLICABLE — prevents the coverage
+        # denominator from exploding to the full cross-product (~55k) and keeps
+        # convergence meaningful.
+        self.coverage_matrix = CoverageMatrix(
+            all_ep_ids, all_test_ids, applicable=set(applicable_pairs))
 
-        # Mark NOT_DISCOVERED cells
+        # Mark NOT_DISCOVERED cells (update_state is the real API; the old
+        # .update() name silently AttributeError'd and never marked them).
         from core.coverage.coverage_matrix import CoverageState
+        _app_set = set(applicable_pairs)
         for ep_id, test_id in not_discovered_pairs:
-            if (ep_id, test_id) not in {(a, b) for a, b in applicable_pairs}:
-                self.coverage_matrix.update(ep_id, test_id, CoverageState.NOT_DISCOVERED)
+            if (ep_id, test_id) not in _app_set:
+                self.coverage_matrix.update_state(ep_id, test_id, CoverageState.NOT_DISCOVERED)
 
         self.convergence_engine = ConvergenceEngineV2(self.coverage_matrix)
         self.pipeline_v2 = ExecutionPipelineV2(
@@ -3511,49 +3581,56 @@ class CentralBrain(
                         catch_all = bool(getattr(ep, "is_spa_catch_all", False))
                         return (0 if has_params else 1, 1 if catch_all else 0)
                     as_endpoints = sorted(as_endpoints, key=_inject_rank)
-                    fuzz_count = 0
+                    # Independent (endpoint, test_type) fuzz jobs run concurrently,
+                    # bounded by KALI_CONCURRENCY (the tools shell into ONE shared
+                    # Kali container, so this pool stays small). The fallback chain
+                    # inside run_fuzzing stays sequential; only the caller fans out.
+                    fuzz_jobs = []
                     for ep in as_endpoints[:10]:
                         for test_type in ["sqli", "xss"]:
-                            tools = self.fuzzer_orchestrator.get_applicable_tools(test_type)
-                            if tools:
-                                params = {
-                                    "endpoint_url": getattr(ep, 'url', ''),
-                                    "method": getattr(ep, 'method', 'GET'),
-                                }
-                                try:
-                                    result = await asyncio.to_thread(
-                                        self.fuzzer_orchestrator.run_fuzzing, test_type, ep, params)
-                                    # Ingest confirmed findings — previously the
-                                    # fuzzer's SecurityFindings (sqlmap/dalfox/nuclei
-                                    # confirmations) were computed then DISCARDED here
-                                    # (only success/failure was recorded), so sqli/xss
-                                    # never persisted. Stamp+persist each one.
-                                    _fnds = list(getattr(result, "findings", None) or []) if result else []
-                                    for sf in _fnds:
-                                        ev = getattr(sf, "evidence", None) or {}
-                                        proof = ""
-                                        if isinstance(ev, dict):
-                                            proof = (ev.get("output") or ev.get("payload") or "")
-                                        self._stamp_and_add_vuln({
-                                            "title": getattr(sf, "title", "") or f"{test_type} injection",
-                                            "type": test_type,
-                                            "severity": getattr(sf, "severity", "HIGH") or "HIGH",
-                                            "status": "CONFIRMED",
-                                            "proof": str(proof)[:2000],
-                                            "location": getattr(ep, "url", ""),
-                                            "evidence": ev,
-                                            "description": getattr(sf, "description", ""),
-                                            "tool": tools[0] if tools else "fuzzer",
-                                        }, source=(tools[0] if tools else "fuzzer"), parser="regex")
-                                    if result and (getattr(result, 'success', False) or _fnds):
-                                        fuzz_count += 1
-                                        self.experience_learner.record_success(
-                                            test_type, tools[0], {"endpoint": getattr(ep, 'url', '')})
-                                    else:
-                                        self.experience_learner.record_failure(
-                                            test_type, tools[0], getattr(result, 'error', 'no_result'))
-                                except Exception:
-                                    pass
+                            if self.fuzzer_orchestrator.get_applicable_tools(test_type):
+                                fuzz_jobs.append((ep, test_type))
+
+                    async def _fuzz_job(job):
+                        ep, test_type = job
+                        tools = self.fuzzer_orchestrator.get_applicable_tools(test_type)
+                        params = {"endpoint_url": getattr(ep, 'url', ''),
+                                  "method": getattr(ep, 'method', 'GET')}
+                        try:
+                            result = await asyncio.to_thread(
+                                self.fuzzer_orchestrator.run_fuzzing, test_type, ep, params)
+                            _fnds = list(getattr(result, "findings", None) or []) if result else []
+                            for sf in _fnds:
+                                ev = getattr(sf, "evidence", None) or {}
+                                proof = (ev.get("output") or ev.get("payload") or "") if isinstance(ev, dict) else ""
+                                self._stamp_and_add_vuln({
+                                    "title": getattr(sf, "title", "") or f"{test_type} injection",
+                                    "type": test_type,
+                                    "severity": getattr(sf, "severity", "HIGH") or "HIGH",
+                                    "status": "CONFIRMED",
+                                    "proof": str(proof)[:2000],
+                                    "location": getattr(ep, "url", ""),
+                                    "evidence": ev,
+                                    "description": getattr(sf, "description", ""),
+                                    "tool": tools[0] if tools else "fuzzer",
+                                }, source=(tools[0] if tools else "fuzzer"), parser="regex")
+                            if result and (getattr(result, 'success', False) or _fnds):
+                                self.experience_learner.record_success(
+                                    test_type, tools[0], {"endpoint": getattr(ep, 'url', '')})
+                                return 1
+                            self.experience_learner.record_failure(
+                                test_type, tools[0], getattr(result, 'error', 'no_result'))
+                            return 0
+                        except Exception:
+                            return 0
+
+                    from core.orchestration.parallel_agents import run_parallel_agents
+                    from core.orchestration.concurrency import kali_concurrency
+                    _fr = await run_parallel_agents(
+                        fuzz_jobs, _fuzz_job,
+                        concurrency=kali_concurrency(getattr(self.ctx, "target_health", None)),
+                        label="fuzz")
+                    fuzz_count = sum(x for x in _fr if x)
                     if fuzz_count:
                         logger.info(f"[FuzzerOrchestrator] {fuzz_count} successful fuzzing results")
             except Exception as e:
@@ -4670,6 +4747,52 @@ class CentralBrain(
         except Exception as e:      # noqa: BLE001
             logger.error(f"[capture] request interception failed: {e}")
 
+    def _build_postex_runner(self):
+        """B3: return a scope-gated command runner for post-exploitation, or
+        None (plan-only). Activating live post-ex execution requires ALL of:
+          1. operator opt-in via env NEO_ENABLE_POSTEX=1 (default off),
+          2. a real foothold command channel present on ctx.foothold_runner,
+          3. per-command scope validation + consent (never removed/weakened).
+        Against a web target with no OS foothold this correctly returns None."""
+        import os
+        if os.getenv("NEO_ENABLE_POSTEX", "0") != "1":
+            return None
+        channel = getattr(self.ctx, "foothold_runner", None)
+        if not callable(channel):
+            logger.info("[PostExploit] NEO_ENABLE_POSTEX set but no foothold channel — plan-only")
+            return None
+
+        target = getattr(self.ctx, "target", "")
+
+        async def _scoped_runner(cmd: str) -> str:
+            # Authorization checks are mandatory and must never be bypassed.
+            try:
+                from core.security.authorization import TargetScopeValidator
+                if not TargetScopeValidator.get().is_authorized(target):
+                    logger.warning(f"[PostExploit] DENY out-of-scope target: {target}")
+                    return "[denied: out-of-scope]"
+            except Exception as e:
+                logger.warning(f"[PostExploit] scope check failed, refusing: {e}")
+                return "[denied: scope-check-error]"
+            try:
+                from core.security.consent import get_consent
+                if not get_consent().allows("post_exploit_exec"):
+                    return "[denied: no-consent]"
+            except Exception:
+                pass  # consent module optional; scope check already enforced
+            out = await channel(cmd)
+            try:
+                from core.orchestration import blackboard as _bb
+                _bb.post(getattr(self, "_scan_id", ""), "postex", "pivot",
+                         f"post-ex cmd on {target}",
+                         {"cmd": str(cmd)[:200], "output_preview": str(out)[:300]})
+            except Exception:
+                pass
+            return out
+
+        logger.info("[PostExploit] Live runner ENABLED (scope+consent gated)")
+        return _scoped_runner
+
     async def _run_post_exploitation(self):
         logger.info("\n>>> PHASE 6: POST-EXPLOITATION (privesc / lateral / persistence)")
 
@@ -4691,8 +4814,9 @@ class CentralBrain(
             return
 
         # Runner stays None (plan-only) unless a confirmed foothold session is
-        # wired in. Persistence install additionally requires DEEP + authorize.
-        runner = None
+        # wired in AND the operator has explicitly enabled post-ex execution.
+        # Persistence install additionally requires DEEP + authorize.
+        runner = self._build_postex_runner()
         authorize_persistence = False  # never auto-install; operator opt-in only
 
         self.post_exploit = PostExploitManager(
@@ -4743,6 +4867,22 @@ class CentralBrain(
 
 
     async def _run_phase(self, phase: str):
+        # Special phases have dedicated DETERMINISTIC handlers (the real OSINT
+        # engine, deep-recon) that don't go through the LLM planner at all. These
+        # were only wired into approach_b's branch, so with approach_a primary
+        # (the DeepSeek/no-native-tools path) they fell through to the generic
+        # capability planner — which has no OSINT capability — and produced
+        # nothing ($0 cost, 0 findings). Route them to their real handler up front,
+        # regardless of approach/model, so OSINT/deep-recon actually run.
+        _SPECIAL_PHASE_HANDLERS = {
+            "OSINT_RECONNAISSANCE": self._run_phase_osint_reconnaissance,
+            "DEEP_RECONNAISSANCE": self._run_phase_deep_reconnaissance,
+        }
+        _special = _SPECIAL_PHASE_HANDLERS.get(phase)
+        if _special is not None:
+            await _special()
+            return
+
         # Native agentic loop only works on models with native tool-calling
         # (Bedrock + Claude). Everything else — claude_cli, Bedrock + DeepSeek/
         # Gemini/Llama — drives the phase through the JSON-planner path, which
@@ -4857,15 +4997,14 @@ class CentralBrain(
             logger.debug(f"objective_hint skipped: {_e}")
 
         context_hint = ""
-        if self.ctx.vulnerabilities:
-            vuln_summary = "\n".join(
-                f"  - [{v.get('severity', 'info')}] {v.get('title', v.get('type', 'unknown'))}"
-                for v in self.ctx.vulnerabilities[:15]
-            )
-            context_hint += f"Known vulnerabilities:\n{vuln_summary}\n\n"
+        # (Known vulnerabilities are already surfaced twice — the executor's
+        # "## Already Found Vulnerabilities (DO NOT re-test)" block and the
+        # [NORMALIZED STATE] "Known observations" list below. Don't add a third
+        # copy here; it just tripled the vuln list in every LLM request.)
 
-        if self.ctx.subdomains:
-            context_hint += f"Known subdomains: {', '.join(self.ctx.subdomains[:20])}\n\n"
+        # (Subdomains are already listed once in the [NORMALIZED STATE] Assets
+        # block below — don't repeat them here; the duplicate copy just inflated
+        # every LLM request.)
 
         # P1-6: hand the LLM a normalized state summary instead of relying
         # on raw history. Bounded to <60 lines so it stays cheap. P1-4:
@@ -8391,6 +8530,23 @@ CRITICAL RULES:
             await synthesize_chains(self._scan_id)
         except Exception as _e:
             logger.warning(f"[ChainIntel] synthesis failed (non-fatal): {_e}")
+
+        # Benchmark scoring (opt-in) — generic across benchmarks/targets: build a
+        # corpus (live challenge API → checklist over the attack surface → static)
+        # and score findings per-challenge into benchmark_results + the blackboard.
+        if os.getenv("NEO_BENCHMARK", "0").strip() == "1":
+            try:
+                from core.benchmark.runner import generate_corpus, score_corpus
+                _tgt = getattr(self.ctx, "target", "") or "target"
+                suite = os.getenv("NEO_BENCHMARK_SUITE", "") or (
+                    _tgt.split("://")[-1].split("/")[0].split(":")[0] or "target")
+                corpus = generate_corpus(getattr(self.ctx, "target", ""), suite,
+                                         scan_id=self._scan_id, ctx=self.ctx)
+                if corpus.challenges:
+                    score_corpus(self._scan_id, corpus,
+                                 list(self.ctx.vulnerabilities or []), ctx=self.ctx)
+            except Exception as _e:
+                logger.warning(f"[Benchmark] scoring failed (non-fatal): {_e}")
 
         """LLM generates final report.
 

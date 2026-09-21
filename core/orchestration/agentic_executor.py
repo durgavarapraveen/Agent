@@ -40,6 +40,20 @@ def _redact_args(args: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _cap_tool_result(s: Any, head: int = 6000, tail: int = 1500) -> Any:
+    """Cap an oversized tool result before it re-enters the LLM message history —
+    keeps the head (where tools put the summary/hits) AND the tail (final
+    status/errors), eliding only the bulk middle. Generous threshold so normal
+    outputs pass through untouched; only giant dumps (nmap/subfinder/ffuf) are
+    trimmed. Saves tokens per agentic turn without losing the actionable signal."""
+    if not isinstance(s, str) or len(s) <= head + tail + 400:
+        return s
+    elided = len(s) - head - tail
+    return (s[:head]
+            + f"\n\n... [{elided} chars elided to save tokens — head+tail kept] ...\n\n"
+            + s[-tail:])
+
+
 def _preview_result(result: Any, max_chars: int = 4000) -> str:
     try:
         if isinstance(result, (bytes, bytearray)):
@@ -105,6 +119,11 @@ from core.intel.tool_authoring import (
     AUTHOR_TOOL_SCHEMA as _AUTHOR_TOOL,
     RUN_AUTHORED_TOOL_SCHEMA as _RUN_AUTHORED_TOOL,
     run_authored_tool as _run_authored_tool,
+)
+# Memory-as-tool (opt-in via NEO_AGENT_MEMORY): agent recalls scan state on
+# demand instead of us re-pasting it every turn. See project_agent_memory_plan.
+from core.memory.memory_manager import (
+    AgentMemory, MEMORY_TOOL_SCHEMAS, memory_enabled,
 )
 
 PENTESTING_TOOLS = _CUSTOM_TOOLS + _SKILL_TOOLS + [_KB_TOOL, _AUTHOR_TOOL, _RUN_AUTHORED_TOOL] + [
@@ -311,6 +330,9 @@ class AgenticExecutor:
         # Live-agent tracker (nullable — set by execute() so parallel launcher
         # can pass an id in from outside).
         self._tracker = None
+        # Memory-as-tool state (built per execute() when NEO_AGENT_MEMORY is on).
+        self._memory = None
+        self._active_tools = PENTESTING_TOOLS
 
     async def execute(
         self,
@@ -369,41 +391,59 @@ class AgenticExecutor:
             "for one round: what related weakness would the same class of bug enable?\n\n"
         )
 
-        user_message = (
-            f"## Objective\n{objective}\n\n"
-            f"## Phase\n{phase}\n\n"
-            f"## Target\n{self.ctx.target}\n\n"
-            f"## Current Knowledge\n"
-            f"- Subdomains: {known_subdomains}\n"
-            f"- Endpoints: {known_endpoints}\n"
-            f"- Technologies: {known_techs}\n"
-            f"## Authentication State\n{auth_state}\n\n"
-            f"{prior_phases_ctx}"
-            f"{novel_attack_directive}"
-        )
-        if vuln_summary:
-            user_message += f"## Already Found Vulnerabilities (DO NOT re-test these)\n{vuln_summary}\n\n"
+        # Memory-as-tool: when enabled AND state is large enough, replace the
+        # full knowledge dump with a compact index + on-demand memory tools.
+        # Otherwise fall back to the exact prior full-dump build (zero change).
+        mem_on = memory_enabled()
+        self._memory = AgentMemory(self.scan_id, self.ctx) if mem_on else None
+        self._active_tools = (PENTESTING_TOOLS + MEMORY_TOOL_SCHEMAS) if mem_on else PENTESTING_TOOLS
+
+        if mem_on and self._memory.should_compact():
+            user_message = (
+                f"## Objective\n{objective}\n\n"
+                f"## Phase\n{phase}\n\n"
+                f"## Target\n{self.ctx.target}\n\n"
+                f"{self._memory.compact_index()}"
+                f"## Authentication State\n{auth_state}\n\n"
+                f"{prior_phases_ctx}"
+            )
+        else:
+            user_message = (
+                f"## Objective\n{objective}\n\n"
+                f"## Phase\n{phase}\n\n"
+                f"## Target\n{self.ctx.target}\n\n"
+                f"## Current Knowledge\n"
+                f"- Subdomains: {known_subdomains}\n"
+                f"- Endpoints: {known_endpoints}\n"
+                f"- Technologies: {known_techs}\n"
+                f"## Authentication State\n{auth_state}\n\n"
+                f"{prior_phases_ctx}"
+            )
+            if vuln_summary:
+                user_message += f"## Already Found Vulnerabilities (DO NOT re-test these)\n{vuln_summary}\n\n"
         if context_hint:
             user_message += f"## Additional Context\n{context_hint}\n\n"
 
-        # P1.8: inject the fixed sandbox/environment profile once so the LLM
-        # never spends tool calls discovering module availability / async / the
-        # RESULT contract during exploitation.
+        # Static per-scan context (novel-attack directive + fixed sandbox/env
+        # profile + available-tool list + working instructions) is CONSTANT across
+        # every turn — put it in the SYSTEM prompt instead of re-templating it into
+        # each user message. Same information reaches the model, but it's sent once
+        # per message array and the identical prefix is cache-eligible on the
+        # gateway → big token saving with zero change to what the agent knows.
         try:
             from core.execution.environment_profile import describe_for_llm as _env_desc
-            user_message += _env_desc()
+            _env_block = _env_desc()
         except Exception:
-            pass
-
-        user_message += (
+            _env_block = ""
+        static_ctx = (
+            "\n\n" + novel_attack_directive + _env_block +
             f"## Available Tools (in Docker)\n"
             f"These tools are confirmed available: {available_tools_str}\n"
             f"Do NOT call run_tool with any tool NOT in this list — it will fail. "
             f"Use http_request as fallback for anything not available.\n\n"
-            "Start by assessing what we know and what we need to find out. "
-            "Then use the available tools to achieve the objective. "
-            "Analyze every result and adapt your approach. "
-            "Record all findings with analyze_results."
+            "Work method: assess what's known and what's needed, then use the tools "
+            "to achieve the objective. Analyze every result and adapt. Record all "
+            "findings with analyze_results."
         )
 
         from urllib.parse import urlparse
@@ -412,7 +452,7 @@ class AgenticExecutor:
         system_prompt = AGENTIC_SYSTEM_PROMPT.format(
             authorized_target=self.ctx.target,
             authorized_domain=authorized_domain,
-        )
+        ) + static_ctx
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -437,7 +477,7 @@ class AgenticExecutor:
         try:
             response = await self.llm.generate_with_tools(
                 messages=messages,
-                tools=PENTESTING_TOOLS,
+                tools=self._active_tools,
                 tool_executor=self._execute_tool_call,
                 max_rounds=max_rounds,
                 max_tokens=4096,
@@ -480,7 +520,7 @@ class AgenticExecutor:
             })
             follow = await self.llm.generate_with_tools(
                 messages=reprompt_messages,
-                tools=PENTESTING_TOOLS,
+                tools=self._active_tools,
                 tool_executor=self._execute_tool_call,
                 max_rounds=max(6, max_rounds // 3),
                 max_tokens=4096,
@@ -539,7 +579,7 @@ class AgenticExecutor:
                 reflect_msgs.append({"role": "user", "content": reflect_prompt})
                 follow = await self.llm.generate_with_tools(
                     messages=reflect_msgs,
-                    tools=PENTESTING_TOOLS,
+                    tools=self._active_tools,
                     tool_executor=self._execute_tool_call,
                     max_rounds=6,
                     max_tokens=2048,
@@ -647,6 +687,19 @@ class AgenticExecutor:
             _result = self._record_finding(fn_args)
         elif fn_name == "filter_endpoints":
             _result = self._filter_endpoints(fn_args)
+        elif fn_name in ("memory_search", "memory_get", "memory_write", "state_view"):
+            mem = self._memory or AgentMemory(self.scan_id, self.ctx)
+            if fn_name == "memory_search":
+                _result = await mem.search(fn_args.get("query", ""), fn_args.get("k", 8))
+            elif fn_name == "memory_get":
+                _result = mem.get(fn_args.get("ids"))
+            elif fn_name == "memory_write":
+                _result = mem.write(fn_args.get("title", ""), fn_args.get("data"))
+            else:
+                _result = mem.state_view(
+                    fn_args.get("section", "all"),
+                    fn_args.get("filter", ""),
+                    fn_args.get("page", 0))
         else:
             _result = f"Unknown function: {fn_name}"
 
@@ -714,9 +767,23 @@ class AgenticExecutor:
                                     _tool_planned, _args_view, _preview,
                                     _status, _duration_ms)
                 )
+                # Shared blackboard: broadcast the tool result so other agents
+                # (and the live UI) see what this agent just ran.
+                try:
+                    from core.orchestration import blackboard as _bb
+                    _aio.get_event_loop().create_task(
+                        _aio.to_thread(
+                            _bb.post, self.scan_id, self._tracker.agent_id, "tool",
+                            str(_tool_planned)[:120],
+                            {"args": _args_view, "status": _status,
+                             "result_preview": str(_preview)[:400],
+                             "duration_ms": _duration_ms},
+                            f"tool:{self._tracker.agent_id}:{self.result.steps_taken}"))
+                except Exception:
+                    pass
         except Exception:
             pass
-        return _result
+        return _cap_tool_result(_result)
 
     TOOL_TO_OPERATION = {
         "nmap": "port_scanning", "masscan": "port_scanning",

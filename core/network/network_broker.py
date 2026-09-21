@@ -547,11 +547,39 @@ class NetworkBroker:
                       follow_redirects: bool = True,
                       **kwargs) -> Any:
 
+        # Defense-in-depth: canonicalise the target before scope check + send so a
+        # stacked-scheme artifact ("…/#/get:get://https://host/…", "get:https://…")
+        # from any probe is repaired here even if it slipped past discovery. Only
+        # replace when the cleaner yields a valid URL; otherwise keep the original
+        # and let the scope/egress layer reject it.
+        try:
+            from core.common.url_hygiene import canonical_http_url
+            _cu = canonical_http_url(url)
+            if _cu:
+                url = _cu
+        except Exception:
+            pass
+
         # `verify` is a client-construction arg, not a per-request one — httpx's
         # AsyncClient.request() rejects it with TypeError. The scoped client below
         # already sets verify=False, so silently drop any caller-supplied verify
         # (probes commonly pass verify=False) instead of failing the request.
         kwargs.pop("verify", None)
+
+        # Compat: many probes pass `body=` (requests-style). httpx's request()
+        # has no `body` kwarg and raises TypeError — which silently killed every
+        # POST-based probe (race/chatbot/state-changing). Translate it to the
+        # right httpx kwarg by shape: dict → json, str/bytes → content. If the
+        # caller already set json/content/data, the explicit one wins.
+        if "body" in kwargs:
+            _b = kwargs.pop("body")
+            if _b is not None and not any(k in kwargs for k in ("json", "content", "data")):
+                if isinstance(_b, (dict, list)):
+                    kwargs["json"] = _b
+                elif isinstance(_b, (bytes, bytearray, str)):
+                    kwargs["content"] = _b
+                else:
+                    kwargs["content"] = str(_b)
 
         # §26/§39: external watchdog — fail-closed on budget breach / kill switch,
         # independent of the agent/LLM. Metered after the response returns.

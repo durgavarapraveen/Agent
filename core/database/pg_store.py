@@ -378,6 +378,27 @@ def _init_schema():
                     finished_at TIMESTAMPTZ
                 );
 
+                -- Per-target campaign state (delta 5): persistent + resumable.
+                -- One row per (campaign, target); survives an API restart so a
+                -- crashed campaign can resume, skipping already-completed targets.
+                CREATE TABLE IF NOT EXISTS campaign_targets (
+                    campaign_id TEXT REFERENCES campaigns(campaign_id) ON DELETE CASCADE,
+                    target TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',  -- pending|running|completed|failed
+                    scan_id TEXT DEFAULT '',
+                    vuln_count INT DEFAULT 0,
+                    critical_count INT DEFAULT 0,
+                    high_count INT DEFAULT 0,
+                    exploit_count INT DEFAULT 0,
+                    duration_seconds NUMERIC DEFAULT 0,
+                    error TEXT DEFAULT '',
+                    started_at TIMESTAMPTZ,
+                    finished_at TIMESTAMPTZ,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (campaign_id, target)
+                );
+                CREATE INDEX IF NOT EXISTS idx_ctargets_campaign ON campaign_targets(campaign_id, status);
+
                 CREATE TABLE IF NOT EXISTS authorized_scopes (
                     scope_id TEXT PRIMARY KEY,
                     target_cidr TEXT DEFAULT '',
@@ -766,6 +787,120 @@ def _init_schema():
                     ADD COLUMN IF NOT EXISTS duration_ms INT DEFAULT NULL;
                 CREATE INDEX IF NOT EXISTS idx_reasoning_scan ON agent_reasoning(scan_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_reasoning_agent ON agent_reasoning(scan_id, agent_id, created_at DESC);
+
+                -- Shared agent blackboard: a live cross-agent bus. Every agent
+                -- posts creds / findings / tool-results / pivots here; other
+                -- agents (and the UI, in a separate process) read the same rows.
+                -- Postgres is the shared medium because a scan runs in its own
+                -- subprocess while the API server is a distinct process.
+                CREATE TABLE IF NOT EXISTS agent_blackboard (
+                    id SERIAL PRIMARY KEY,
+                    scan_id TEXT REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    agent_id TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL DEFAULT 'note',   -- finding|cred|tool|pivot|note
+                    title TEXT NOT NULL DEFAULT '',
+                    data JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    ref TEXT NOT NULL DEFAULT '',         -- dedup key within a scan
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_bb_scan ON agent_blackboard(scan_id, id DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_bb_dedup ON agent_blackboard(scan_id, kind, ref) WHERE ref <> '';
+
+                -- LLM I/O log: every request→response, in order, per scan, so
+                -- the operator can audit exactly what the model was asked and
+                -- what it returned (prompts/responses secret-scrubbed + capped).
+                CREATE TABLE IF NOT EXISTS llm_calls (
+                    id SERIAL PRIMARY KEY,
+                    scan_id TEXT REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    provider TEXT DEFAULT '',
+                    model TEXT DEFAULT '',
+                    tier TEXT DEFAULT '',
+                    kind TEXT DEFAULT 'text',        -- text|json|tools
+                    system_prompt TEXT DEFAULT '',
+                    prompt TEXT DEFAULT '',
+                    response TEXT DEFAULT '',
+                    tokens_in INT DEFAULT 0,
+                    tokens_out INT DEFAULT 0,
+                    cost_usd NUMERIC DEFAULT 0,
+                    duration_ms INT DEFAULT 0,
+                    error TEXT DEFAULT '',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_llm_calls_scan ON llm_calls(scan_id, id);
+
+                -- Persisted attack graph (B1): one row per scan holding the
+                -- node/edge graph so the UI can render it live. Upserted as the
+                -- graph is (re)built and as nodes get exploited during chaining.
+                CREATE TABLE IF NOT EXISTS attack_graph (
+                    scan_id TEXT PRIMARY KEY REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    nodes JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    edges JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+
+                -- Persistent coverage ledger (spec §6/§20): one row per tested
+                -- (endpoint, method, param, location, technique) so coverage is
+                -- durable/auditable across runs and drives resumable planning.
+                CREATE TABLE IF NOT EXISTS coverage_records (
+                    scan_id TEXT NOT NULL,
+                    target TEXT DEFAULT '',
+                    endpoint TEXT NOT NULL,
+                    method TEXT NOT NULL DEFAULT 'GET',
+                    param TEXT NOT NULL DEFAULT '',
+                    location TEXT NOT NULL DEFAULT '',   -- query|json|form|header|cookie|path|...
+                    auth_state TEXT DEFAULT 'unknown',   -- anonymous|authenticated|unknown
+                    technique TEXT NOT NULL DEFAULT '',  -- vuln_class / test technique
+                    status TEXT NOT NULL DEFAULT 'tested',  -- tested|skipped|blocked|errored
+                    reason TEXT DEFAULT '',
+                    confirmed BOOLEAN DEFAULT FALSE,
+                    confidence NUMERIC DEFAULT 0,
+                    evidence TEXT DEFAULT '',
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (scan_id, endpoint, method, param, location, technique)
+                );
+                CREATE INDEX IF NOT EXISTS idx_coverage_scan ON coverage_records(scan_id, status);
+
+                -- Generic benchmark results (spec §16-19) — benchmark-agnostic:
+                -- suite/version name any corpus (juice-shop, dvwa, a custom set).
+                CREATE TABLE IF NOT EXISTS benchmark_results (
+                    scan_id TEXT NOT NULL,
+                    suite TEXT NOT NULL DEFAULT '',      -- benchmark family (e.g. juice-shop)
+                    corpus_version TEXT DEFAULT '',
+                    challenge_id TEXT NOT NULL,
+                    name TEXT DEFAULT '',
+                    category TEXT DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'not_found',  -- confirmed|partial|not_found|not_applicable|blocked|error
+                    confidence NUMERIC DEFAULT 0,
+                    evidence JSONB DEFAULT '[]'::jsonb,
+                    requests JSONB DEFAULT '[]'::jsonb,
+                    prerequisites JSONB DEFAULT '[]'::jsonb,
+                    reason TEXT DEFAULT '',
+                    duration_ms INT DEFAULT 0,
+                    run_meta JSONB DEFAULT '{}'::jsonb,   -- scanner/target/payload commit/timestamp
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (scan_id, suite, challenge_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_benchmark_scan ON benchmark_results(scan_id, suite, status);
+
+                -- Human-in-the-loop assist queue: tasks the scanner cannot solve
+                -- autonomously (client-side puzzles, OSINT, business logic, CAPTCHA)
+                -- are posted here for a human, who answers via the UI/API. Generic.
+                CREATE TABLE IF NOT EXISTS human_requests (
+                    scan_id TEXT NOT NULL,
+                    request_id TEXT NOT NULL,
+                    ref TEXT DEFAULT '',          -- dedup key (e.g. bench|suite|challenge_id)
+                    kind TEXT NOT NULL DEFAULT 'assist',  -- assist|captcha|osint|decision|evidence
+                    prompt TEXT NOT NULL DEFAULT '',
+                    context JSONB DEFAULT '{}'::jsonb,
+                    status TEXT NOT NULL DEFAULT 'pending',  -- pending|answered|skipped
+                    answer TEXT DEFAULT '',
+                    solved BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    answered_at TIMESTAMPTZ,
+                    PRIMARY KEY (scan_id, request_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_human_scan ON human_requests(scan_id, status);
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_human_ref ON human_requests(scan_id, ref) WHERE ref <> '';
 
                 CREATE TABLE IF NOT EXISTS learned_skills (
                     id SERIAL PRIMARY KEY,
@@ -2044,6 +2179,318 @@ class CampaignRepo:
                 cur.execute("SELECT * FROM campaigns WHERE status = 'running' ORDER BY created_at DESC LIMIT 1")
                 row = cur.fetchone()
                 return dict(row) if row else {}
+
+
+class CampaignTargetRepo:
+    """Per-target campaign state (delta 5) — persistent + resumable."""
+
+    @staticmethod
+    def seed(campaign_id: str, targets: List[str]):
+        """Insert one pending row per target (idempotent — safe on resume)."""
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                for t in targets:
+                    cur.execute("""
+                        INSERT INTO campaign_targets (campaign_id, target, status)
+                        VALUES (%s, %s, 'pending')
+                        ON CONFLICT (campaign_id, target) DO NOTHING
+                    """, (campaign_id, t))
+                conn.commit()
+
+    @staticmethod
+    def upsert(campaign_id: str, target: str, **fields):
+        """Update a target's status/counts; sets timestamps by status."""
+        cols = {k: v for k, v in fields.items() if k in (
+            "status", "scan_id", "vuln_count", "critical_count", "high_count",
+            "exploit_count", "duration_seconds", "error")}
+        sets = ["updated_at = NOW()"]
+        vals = []
+        for k, v in cols.items():
+            sets.append(f"{k} = %s")
+            vals.append(v)
+        if cols.get("status") == "running":
+            sets.append("started_at = COALESCE(started_at, NOW())")
+        if cols.get("status") in ("completed", "failed"):
+            sets.append("finished_at = NOW()")
+        vals.extend([campaign_id, target])
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE campaign_targets SET {', '.join(sets)} "
+                    f"WHERE campaign_id = %s AND target = %s", vals)
+                conn.commit()
+
+    @staticmethod
+    def list_by_campaign(campaign_id: str) -> List[Dict]:
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT * FROM campaign_targets WHERE campaign_id = %s ORDER BY target",
+                    (campaign_id,))
+                rows = []
+                for r in cur.fetchall():
+                    r = dict(r)
+                    for k in ("started_at", "finished_at", "updated_at"):
+                        if r.get(k) and not isinstance(r[k], str):
+                            r[k] = r[k].isoformat()
+                    rows.append(r)
+                return rows
+
+    @staticmethod
+    def unfinished_targets(campaign_id: str) -> List[str]:
+        """Targets still pending/running (for resume — completed are skipped)."""
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT target FROM campaign_targets WHERE campaign_id = %s "
+                    "AND status IN ('pending', 'running') ORDER BY target", (campaign_id,))
+                return [r[0] for r in cur.fetchall()]
+
+    @staticmethod
+    def progress(campaign_id: str) -> Dict:
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, COUNT(*), COALESCE(SUM(vuln_count),0) "
+                    "FROM campaign_targets WHERE campaign_id = %s GROUP BY status",
+                    (campaign_id,))
+                out = {"pending": 0, "running": 0, "completed": 0, "failed": 0, "vulns": 0}
+                for status, n, vulns in cur.fetchall():
+                    out[status] = int(n)
+                    out["vulns"] += int(vulns or 0)
+                out["total"] = out["pending"] + out["running"] + out["completed"] + out["failed"]
+                return out
+
+
+class AttackGraphRepo:
+    """Persisted attack graph (B1) — node/edge graph per scan for the live UI."""
+
+    @staticmethod
+    def save(scan_id: str, graph: Dict):
+        if not scan_id or not isinstance(graph, dict):
+            return
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO attack_graph (scan_id, nodes, edges, updated_at)
+                        VALUES (%s, %s::jsonb, %s::jsonb, NOW())
+                        ON CONFLICT (scan_id) DO UPDATE
+                          SET nodes = EXCLUDED.nodes, edges = EXCLUDED.edges,
+                              updated_at = NOW()
+                    """, (scan_id, _dumps(graph.get("nodes", []), default=str),
+                          _dumps(graph.get("edges", []), default=str)))
+                    conn.commit()
+        except Exception as e:
+            logger.debug(f"[AttackGraphRepo] save skipped: {e}")
+
+    @staticmethod
+    def get(scan_id: str) -> Dict:
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("SELECT nodes, edges, updated_at FROM attack_graph WHERE scan_id=%s",
+                                (scan_id,))
+                    row = cur.fetchone()
+                    if not row:
+                        return {"nodes": [], "edges": []}
+                    r = dict(row)
+                    if r.get("updated_at") and not isinstance(r["updated_at"], str):
+                        r["updated_at"] = r["updated_at"].isoformat()
+                    return r
+        except Exception:
+            return {"nodes": [], "edges": []}
+
+
+class CoverageRepo:
+    """Persistent coverage ledger (spec §6/§20) — durable per-(point,technique)
+    test accounting so coverage survives restarts and drives resumable planning.
+    Benchmark-agnostic: works for any target, not a specific benchmark."""
+
+    @staticmethod
+    def upsert(scan_id: str, endpoint: str, technique: str, *,
+               method: str = "GET", param: str = "", location: str = "",
+               auth_state: str = "unknown", status: str = "tested",
+               reason: str = "", confirmed: bool = False,
+               confidence: float = 0.0, evidence: str = "", target: str = ""):
+        if not scan_id or not endpoint:
+            return
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO coverage_records
+                          (scan_id, target, endpoint, method, param, location,
+                           auth_state, technique, status, reason, confirmed,
+                           confidence, evidence, updated_at)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                        ON CONFLICT (scan_id, endpoint, method, param, location, technique)
+                        DO UPDATE SET status=EXCLUDED.status, reason=EXCLUDED.reason,
+                           confirmed=(coverage_records.confirmed OR EXCLUDED.confirmed),
+                           confidence=GREATEST(coverage_records.confidence, EXCLUDED.confidence),
+                           auth_state=EXCLUDED.auth_state,
+                           evidence=CASE WHEN EXCLUDED.evidence<>'' THEN EXCLUDED.evidence
+                                         ELSE coverage_records.evidence END,
+                           updated_at=NOW()
+                    """, (scan_id, target, endpoint[:2048], (method or "GET")[:12],
+                          (param or "")[:256], (location or "")[:32],
+                          (auth_state or "unknown")[:16], (technique or "")[:64],
+                          (status or "tested")[:16], (reason or "")[:512],
+                          bool(confirmed), float(confidence or 0),
+                          (evidence or "")[:2000]))
+                    conn.commit()
+        except Exception as e:
+            logger.debug(f"[CoverageRepo] upsert skipped: {e}")
+
+    @staticmethod
+    def list_by_scan(scan_id: str, limit: int = 5000) -> List[Dict]:
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("""SELECT * FROM coverage_records WHERE scan_id=%s
+                                   ORDER BY updated_at DESC LIMIT %s""", (scan_id, limit))
+                    return [dict(r) for r in (cur.fetchall() or [])]
+        except Exception:
+            return []
+
+    @staticmethod
+    def summary(scan_id: str) -> Dict[str, int]:
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""SELECT status, COUNT(*) FROM coverage_records
+                                   WHERE scan_id=%s GROUP BY status""", (scan_id,))
+                    out = {r[0]: int(r[1]) for r in (cur.fetchall() or [])}
+                    cur.execute("""SELECT COUNT(*) FROM coverage_records
+                                   WHERE scan_id=%s AND confirmed=TRUE""", (scan_id,))
+                    out["confirmed"] = int((cur.fetchone() or [0])[0])
+                    return out
+        except Exception:
+            return {}
+
+
+class BenchmarkResultRepo:
+    """Generic benchmark results (spec §16-19). suite/corpus_version name ANY
+    benchmark corpus (juice-shop, dvwa, a custom set) — not benchmark-specific."""
+
+    @staticmethod
+    def upsert(scan_id: str, suite: str, result: Dict):
+        if not scan_id or not suite or not isinstance(result, dict):
+            return
+        cid = str(result.get("challenge_id") or result.get("id") or "")
+        if not cid:
+            return
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO benchmark_results
+                          (scan_id, suite, corpus_version, challenge_id, name, category,
+                           status, confidence, evidence, requests, prerequisites, reason,
+                           duration_ms, run_meta, updated_at)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s,%s::jsonb,NOW())
+                        ON CONFLICT (scan_id, suite, challenge_id) DO UPDATE SET
+                           corpus_version=EXCLUDED.corpus_version, name=EXCLUDED.name,
+                           category=EXCLUDED.category, status=EXCLUDED.status,
+                           confidence=EXCLUDED.confidence, evidence=EXCLUDED.evidence,
+                           requests=EXCLUDED.requests, prerequisites=EXCLUDED.prerequisites,
+                           reason=EXCLUDED.reason, duration_ms=EXCLUDED.duration_ms,
+                           run_meta=EXCLUDED.run_meta, updated_at=NOW()
+                    """, (scan_id, suite, str(result.get("corpus_version", "")), cid,
+                          str(result.get("name", ""))[:512], str(result.get("category", ""))[:128],
+                          str(result.get("status", "not_found"))[:20],
+                          float(result.get("confidence", 0) or 0),
+                          _dumps(result.get("evidence", []), default=str),
+                          _dumps(result.get("requests", []), default=str),
+                          _dumps(result.get("prerequisites", []), default=str),
+                          str(result.get("reason", ""))[:512],
+                          int(result.get("duration_ms", 0) or 0),
+                          _dumps(result.get("run_meta", {}), default=str)))
+                    conn.commit()
+        except Exception as e:
+            logger.debug(f"[BenchmarkResultRepo] upsert skipped: {e}")
+
+    @staticmethod
+    def list_by_scan(scan_id: str, suite: str = "") -> List[Dict]:
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    if suite:
+                        cur.execute("""SELECT * FROM benchmark_results WHERE scan_id=%s AND suite=%s
+                                       ORDER BY category, challenge_id""", (scan_id, suite))
+                    else:
+                        cur.execute("""SELECT * FROM benchmark_results WHERE scan_id=%s
+                                       ORDER BY suite, category, challenge_id""", (scan_id,))
+                    return [dict(r) for r in (cur.fetchall() or [])]
+        except Exception:
+            return []
+
+
+class HumanRequestRepo:
+    """Human-in-the-loop assist queue (generic) — tasks the scanner offloads to a
+    person, and their answers. Not benchmark-specific."""
+
+    @staticmethod
+    def create(scan_id: str, request_id: str, prompt: str, *, kind: str = "assist",
+               ref: str = "", context: Optional[Dict] = None) -> None:
+        if not scan_id or not request_id:
+            return
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO human_requests
+                          (scan_id, request_id, ref, kind, prompt, context, status)
+                        VALUES (%s,%s,%s,%s,%s,%s::jsonb,'pending')
+                        ON CONFLICT (scan_id, ref) WHERE ref <> '' DO NOTHING
+                    """, (scan_id, request_id, ref or "", (kind or "assist")[:20],
+                          (prompt or "")[:2000], _dumps(context or {}, default=str)))
+                    conn.commit()
+        except Exception as e:
+            logger.debug(f"[HumanRequestRepo] create skipped: {e}")
+
+    @staticmethod
+    def answer(scan_id: str, request_id: str, answer: str, solved: bool = False) -> bool:
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE human_requests SET answer=%s, solved=%s, status='answered',
+                               answered_at=NOW()
+                        WHERE scan_id=%s AND request_id=%s
+                    """, ((answer or "")[:4000], bool(solved), scan_id, request_id))
+                    conn.commit()
+                    return cur.rowcount > 0
+        except Exception as e:
+            logger.debug(f"[HumanRequestRepo] answer skipped: {e}")
+            return False
+
+    @staticmethod
+    def list_by_scan(scan_id: str, status: str = "") -> List[Dict]:
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    if status:
+                        cur.execute("""SELECT * FROM human_requests WHERE scan_id=%s AND status=%s
+                                       ORDER BY created_at""", (scan_id, status))
+                    else:
+                        cur.execute("""SELECT * FROM human_requests WHERE scan_id=%s
+                                       ORDER BY created_at""", (scan_id,))
+                    return [dict(r) for r in (cur.fetchall() or [])]
+        except Exception:
+            return []
+
+    @staticmethod
+    def get(scan_id: str, request_id: str) -> Optional[Dict]:
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("SELECT * FROM human_requests WHERE scan_id=%s AND request_id=%s",
+                                (scan_id, request_id))
+                    r = cur.fetchone()
+                    return dict(r) if r else None
+        except Exception:
+            return None
 
 
 class AttackChainRepo:

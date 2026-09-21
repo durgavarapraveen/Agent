@@ -55,10 +55,23 @@ DEFAULT_CLASS: Dict[str, str] = {
     "endpoint_discovery": "standard",
     "directory_bruteforce": "standard",
     "vulnerability_scanning": "deep",
-    "sql_injection": "deep",
+    "sql_injection": "long",
     "xss_scanning": "standard",
     "tls_analysis": "quick",
     "http_analysis": "quick",
+}
+
+
+# Per-capability TOOL-scope ceiling override (seconds). A few tools legitimately
+# need longer than the generic 600s per-invocation cap — notably sqlmap's
+# boolean/time-based blind confirmation, which was being SIGKILLed at 600s with
+# zero results (600s wasted). Raise ONLY those capabilities; everything else
+# still clamps to the generic TOOL cap so runaway tools stay bounded.
+TOOL_CAP_OVERRIDES: Dict[str, int] = {
+    # sqlmap at level5/risk3/BEUSTQ was SIGKILLed at the 900s floor with zero
+    # results. Give it the "long" 1200s budget so blind confirmation actually
+    # finishes (with -o optimization it fits); other tools stay at the 600s cap.
+    "sql_injection": 1200,
 }
 
 
@@ -67,4 +80,7 @@ def default_class_for(capability: str) -> str:
 
 
 def default_seconds_for(capability: str) -> int:
-    return clamp(budget_for(default_class_for(capability)), TimeoutScope.TOOL)
+    c = (capability or "").lower()
+    secs = budget_for(default_class_for(c))
+    cap = TOOL_CAP_OVERRIDES.get(c, cap_for(TimeoutScope.TOOL))
+    return max(1, min(int(secs), cap))

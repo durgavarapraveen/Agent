@@ -332,6 +332,25 @@ Examples:
     parser.add_argument("--tier", default="POC",
                          choices=["POC", "SHALLOW", "DEEP"],
                          help="Max exploitation tier (default: POC)")
+    parser.add_argument("--mode", default=None,
+                         choices=["fast", "coverage", "benchmark"],
+                         help="Test thoroughness per injection point: fast (stop at "
+                              "first hit), coverage (bounded thorough — default), "
+                              "benchmark (exhaustive; authorized labs only)")
+    parser.add_argument("--profile", default=None,
+                         choices=["standard", "lab"],
+                         help="Family selectivity: standard (relevance-gated — default) "
+                              "or lab (full battery, every family; authorized labs)")
+    parser.add_argument("--benchmark", action="store_true",
+                         help="At REPORTING, build a challenge corpus (live API → "
+                              "checklist over the attack surface → static) and score "
+                              "findings per-challenge into benchmark_results + blackboard")
+    parser.add_argument("--benchmark-suite", default="",
+                         help="Benchmark suite name for the corpus (default: target host)")
+    parser.add_argument("--human-assist", action="store_true",
+                         help="Human-in-the-loop: offload challenges the scanner can't "
+                              "solve alone (client-side puzzles, OSINT, business logic, "
+                              "CAPTCHA) to a human via the UI Human Assist tab")
     parser.add_argument("--skip-osint", action="store_true",
                          help="Skip OSINT reconnaissance phase")
     parser.add_argument("--reset-dedup", action="store_true",
@@ -412,6 +431,22 @@ Examples:
     if args.skip_osint:
         os.environ["ENABLE_OSINT"] = "false"
         logger.info("OSINT disabled via --skip-osint flag.")
+
+    # Scan thoroughness (probe_engine early-stop/budget) + family selectivity.
+    if args.mode:
+        os.environ["NEO_SCAN_MODE"] = args.mode
+        logger.info("Scan mode: %s", args.mode)
+    if args.profile:
+        os.environ["NEO_SCAN_PROFILE"] = args.profile
+        logger.info("Scan profile: %s", args.profile)
+    if args.benchmark:
+        os.environ["NEO_BENCHMARK"] = "1"
+        if args.benchmark_suite:
+            os.environ["NEO_BENCHMARK_SUITE"] = args.benchmark_suite
+        logger.info("Benchmark scoring enabled (suite=%s)", args.benchmark_suite or "auto")
+    if args.human_assist:
+        os.environ["NEO_HUMAN_ASSIST"] = "1"
+        logger.info("Human-in-the-loop assist enabled")
 
     # Load .env config
     config = load_config()

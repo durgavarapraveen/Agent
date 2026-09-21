@@ -136,6 +136,18 @@ class Watchdog:
     def should_continue(self) -> bool:
         return self.breach_reason() is None
 
+    def elapsed_fraction(self) -> float:
+        """Fraction of the runtime budget consumed (0.0–…). Used for a SOFT
+        deadline so the orchestrator can wind down to reporting cleanly BEFORE
+        the hard max_runtime kill halts it mid-operation."""
+        try:
+            b = self.budget
+            if b.max_runtime_s <= 0:
+                return 0.0
+            return (time.time() - self._start) / b.max_runtime_s
+        except Exception:
+            return 0.0
+
     def check(self) -> None:
         """Fail-closed gate: raise WatchdogTripped on any breach. Call before
         every network request / loop iteration."""

@@ -23,6 +23,7 @@ class TargetResult:
     high_count: int = 0
     exploit_count: int = 0
     report_path: str = ""
+    scan_id: str = ""
     error: str = ""
 
 
@@ -31,7 +32,8 @@ class CampaignManager:
     def __init__(self, targets: List[str], tier: str = "POC",
                  max_parallel: int = 3, auth_file: str = None,
                  phases: list = None, credentials: dict = None,
-                 report_dir: str = None):
+                 report_dir: str = None, campaign_id: str = None,
+                 resume: bool = False):
         from core.common.reports_config import reports_enabled, reports_dir as _rd
         self._reports_enabled = reports_enabled()
         if report_dir is None:
@@ -46,16 +48,27 @@ class CampaignManager:
         self.report_dir.mkdir(parents=True, exist_ok=True)
         self.results: Dict[str, TargetResult] = {}
         self.start_time = 0.0
-        self.campaign_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Resume reuses the given campaign_id; a fresh run stamps a new one.
+        self.resume = resume
+        self.campaign_id = campaign_id or datetime.now().strftime("%Y%m%d_%H%M%S")
 
         for t in self.targets:
             self.results[t] = TargetResult(target=t)
+
+    def _db_upsert(self, target: str, **fields):
+        """Persist one target's state (delta 5). Never breaks a scan."""
+        try:
+            from core.database.pg_store import CampaignTargetRepo
+            CampaignTargetRepo.upsert(self.campaign_id, target, **fields)
+        except Exception as e:
+            logger.debug(f"[Campaign] target upsert skipped: {e}")
 
     async def _scan_target(self, target: str, semaphore: asyncio.Semaphore):
         async with semaphore:
             result = self.results[target]
             result.status = "running"
             result.start_time = time.time()
+            self._db_upsert(target, status="running")
             self._write_progress()
 
             logger.info(f"[Campaign] Starting scan: {target}")
@@ -79,6 +92,7 @@ class CampaignManager:
                 result.status = "completed"
                 result.vuln_count = len(brain.ctx.vulnerabilities)
                 result.exploit_count = len(brain.ctx.exploit_results)
+                result.scan_id = getattr(brain, "_scan_id", "") or ""
 
                 for v in brain.ctx.vulnerabilities:
                     sev = (v.get("severity") or "").upper()
@@ -105,24 +119,57 @@ class CampaignManager:
 
             result.end_time = time.time()
             result.duration_seconds = result.end_time - result.start_time
+            self._db_upsert(
+                target, status=result.status, scan_id=result.scan_id,
+                vuln_count=result.vuln_count, critical_count=result.critical_count,
+                high_count=result.high_count, exploit_count=result.exploit_count,
+                duration_seconds=round(result.duration_seconds, 1),
+                error=result.error)
             self._write_progress()
 
     async def run(self) -> Dict:
         self.start_time = time.time()
+
+        # Delta 5: persist campaign + per-target rows so the run is resumable
+        # and the UI can poll live per-target state. All DB calls are best-effort.
+        run_targets = list(self.targets)
+        try:
+            from core.database.pg_store import CampaignRepo, CampaignTargetRepo
+            if self.resume:
+                # Skip already-completed targets; re-run only pending/running.
+                unfinished = CampaignTargetRepo.unfinished_targets(self.campaign_id)
+                if unfinished:
+                    run_targets = [t for t in self.targets if t in unfinished] or unfinished
+                for t in (set(self.targets) - set(run_targets)):
+                    self.results[t].status = "completed"  # reflect prior completion
+                logger.info(f"[Campaign] RESUME {self.campaign_id}: "
+                            f"{len(run_targets)}/{len(self.targets)} targets remaining")
+            else:
+                CampaignRepo.create(self.campaign_id, self.tier, len(self.targets))
+                CampaignTargetRepo.seed(self.campaign_id, self.targets)
+        except Exception as e:
+            logger.warning(f"[Campaign] persistence init skipped (non-fatal): {e}")
+
         logger.info(f"\n{'='*60}")
-        logger.info(f"CAMPAIGN START: {len(self.targets)} targets, "
+        logger.info(f"CAMPAIGN {'RESUME' if self.resume else 'START'}: "
+                    f"{len(run_targets)} targets, "
                     f"max {self.max_parallel} parallel, tier={self.tier}")
         logger.info(f"{'='*60}\n")
 
         semaphore = asyncio.Semaphore(self.max_parallel)
 
-        tasks = [self._scan_target(t, semaphore) for t in self.targets]
+        tasks = [self._scan_target(t, semaphore) for t in run_targets]
         await asyncio.gather(*tasks, return_exceptions=True)
 
         total_time = time.time() - self.start_time
 
         report = self._generate_campaign_report(total_time)
         self._save_campaign_report(report)
+        try:
+            from core.database.pg_store import CampaignRepo
+            CampaignRepo.finish(self.campaign_id, report)
+        except Exception as e:
+            logger.debug(f"[Campaign] finish persist skipped: {e}")
 
         completed = len([r for r in self.results.values() if r.status == "completed"])
         failed = len([r for r in self.results.values() if r.status == "failed"])

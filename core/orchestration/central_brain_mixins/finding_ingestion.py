@@ -113,6 +113,8 @@ class FindingIngestionMixin:
                 get_metrics().inc("confirmed_findings")
         except Exception:
             pass
+        # (Blackboard finding-broadcast moved to the universal sink
+        # SharedContext.add_vulnerability so ALL ingestion paths are covered.)
 
     def _ingest_executor_findings(self, test_id: str, target: str, evidence: dict) -> None:
         SEVERITY_MAP = {

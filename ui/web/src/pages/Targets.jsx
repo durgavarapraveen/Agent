@@ -122,6 +122,10 @@ export default function Targets() {
 
 function ScanModal({ target, onClose, onStarted }) {
   const [tier, setTier] = useState("DEEP");
+  const [mode, setMode] = useState("coverage");   // fast | coverage | benchmark
+  const [profile, setProfile] = useState("standard"); // standard | lab
+  const [benchmark, setBenchmark] = useState(false);  // score findings vs a challenge corpus
+  const [humanAssist, setHumanAssist] = useState(false);  // offload non-DAST tasks to a human
   const [autoApprove, setAutoApprove] = useState(true);
   const [skipOsint, setSkipOsint] = useState(false);
   const [resetDedup, setResetDedup] = useState(false);
@@ -146,6 +150,17 @@ function ScanModal({ target, onClose, onStarted }) {
     { id: "POC", name: "POC", desc: "Quick recon only" },
     { id: "SHALLOW", name: "Shallow", desc: "Recon + basic scan" },
     { id: "DEEP", name: "Deep", desc: "Full autonomous pentest" },
+  ];
+
+  const modes = [
+    { id: "fast", name: "Fast", desc: "Stop at first hit — quick / gentle" },
+    { id: "coverage", name: "Coverage", desc: "Bounded thorough — real targets (default)" },
+    { id: "benchmark", name: "Benchmark", desc: "Exhaustive — authorized labs only" },
+  ];
+
+  const profiles = [
+    { id: "standard", name: "Standard", desc: "Relevance-gated families — real targets" },
+    { id: "lab", name: "Lab", desc: "Full battery, every family — labs" },
   ];
 
   const phaseOptions = [
@@ -198,6 +213,10 @@ function ScanModal({ target, onClose, onStarted }) {
         allow_shell_operators: allowShellOperators,
         allow_ambient_auth: allowAmbientAuth,
         phases: selectedPhases,
+        mode,
+        profile,
+        benchmark,
+        human_assist: humanAssist,
         credentials: validCreds,
         mobile_app: mobileUpload && mobileUpload.kind === "apk" ? mobileUpload.path : "",
         ipa_app: mobileUpload && mobileUpload.kind === "ipa" ? mobileUpload.path : "",
@@ -276,6 +295,26 @@ function ScanModal({ target, onClose, onStarted }) {
               ))}
             </div>
 
+            <h3 style={{ marginTop: 20 }}>Thoroughness (per injection point)</h3>
+            <div className="tier-selector">
+              {modes.map(m => (
+                <div key={m.id} className={`tier-card ${mode === m.id ? "selected" : ""}`} onClick={() => setMode(m.id)}>
+                  <div className="tier-name">{m.name}</div>
+                  <div className="tier-desc">{m.desc}</div>
+                </div>
+              ))}
+            </div>
+
+            <h3 style={{ marginTop: 20 }}>Technique Selectivity</h3>
+            <div className="tier-selector">
+              {profiles.map(p => (
+                <div key={p.id} className={`tier-card ${profile === p.id ? "selected" : ""}`} onClick={() => setProfile(p.id)}>
+                  <div className="tier-name">{p.name}</div>
+                  <div className="tier-desc">{p.desc}</div>
+                </div>
+              ))}
+            </div>
+
             <h3 style={{ marginTop: 20 }}>Execution Phases</h3>
             <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
               <button className="btn btn-sm" onClick={() => applyPreset("recon")} style={{ fontSize: 11 }}>Recon Only</button>
@@ -300,6 +339,14 @@ function ScanModal({ target, onClose, onStarted }) {
               <label className={`scan-option ${autoApprove ? "selected" : ""}`}>
                 <input type="checkbox" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} />
                 Auto-approve exploits
+              </label>
+              <label className={`scan-option ${benchmark ? "selected" : ""}`}>
+                <input type="checkbox" checked={benchmark} onChange={(e) => setBenchmark(e.target.checked)} />
+                Benchmark scoring (score findings vs challenge corpus)
+              </label>
+              <label className={`scan-option ${humanAssist ? "selected" : ""}`}>
+                <input type="checkbox" checked={humanAssist} onChange={(e) => setHumanAssist(e.target.checked)} />
+                Human-in-the-loop (offload non-DAST puzzles to a human)
               </label>
               <label className={`scan-option ${skipOsint ? "selected" : ""}`}>
                 <input type="checkbox" checked={skipOsint} onChange={(e) => setSkipOsint(e.target.checked)} />

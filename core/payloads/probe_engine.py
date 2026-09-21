@@ -38,6 +38,8 @@ class UniversalProbeEngine:
     async def probe(self, endpoint: str, vuln_class: str, ctx,
                     parameter: str = "q", budget: int = 15) -> List[Dict[str, Any]]:
         """Run one (endpoint, vuln_class) test plan; return finding dicts."""
+        from core.orchestration import scan_mode
+        budget = scan_mode.effective_budget(budget)
         waf = self._waf_mode(ctx)
         tech = self._tech_for(ctx, endpoint)
         inj = InjectionContext(endpoint=endpoint, parameter=parameter,
@@ -75,7 +77,9 @@ class UniversalProbeEngine:
             if result.is_vulnerable:
                 findings.append(self._build_finding(endpoint, parameter, p, vuln_class, result, status))
                 ctx.add_vulnerability(findings[-1])
-                break  # one confirmation per (endpoint, class) is enough
+                if scan_mode.stop_after_first():
+                    break  # FAST: one confirmation per (endpoint, class) is enough
+                # COVERAGE/BENCHMARK: keep testing to catch distinct bugs/challenges
         return findings
 
     # Classes whose confirmation needs an out-of-band callback (blind bugs).
@@ -138,6 +142,8 @@ class UniversalProbeEngine:
         ``surface`` / ``point`` come from SurfaceClassifier. Budget<=0 = send
         every catalog payload of the class (exhaustive; §7 "leave nothing
         untested"). Returns confirmed finding dicts (also added to ctx)."""
+        from core.orchestration import scan_mode
+        budget = scan_mode.effective_budget(budget)
         pkey = f"{point.location}:{point.name}"
         waf = self._waf_mode(ctx)
         tech = self._tech_for(ctx, surface.url)
@@ -214,7 +220,9 @@ class UniversalProbeEngine:
                             self.catalog.upsert([p])
                         except Exception:
                             pass
-                    break  # one confirmation per (point, class)
+                    if scan_mode.stop_after_first():
+                        break  # FAST: one confirmation per (point, class)
+                    # COVERAGE/BENCHMARK: keep going for distinct bugs/challenges
             # 3. boolean-blind SQLi (differential TRUE/FALSE pair) when error/
             #    time-based in-band probes found nothing.
             if not findings and vuln_class.upper() == "SQLI":

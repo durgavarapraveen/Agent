@@ -146,7 +146,11 @@ class SQLMapAdapter(BaseAdapter):
         else:
             target_url = url                                   # no known params → crawl/forms below
 
-        cmd = ["sqlmap", "-u", target_url, "--batch",
+        # -o turns on all safe optimization switches (keep-alive, null-connection,
+        # output prediction, threads) so blind-injection confirmation fits inside
+        # the per-tool timeout ceiling (600s) instead of being killed with no
+        # result. Optimization only — it does not drop techniques/level/risk.
+        cmd = ["sqlmap", "-u", target_url, "--batch", "-o",
                "--level=2", "--risk=2", "--random-agent"]
         if data_arg:
             cmd += ["--data", data_arg]
@@ -259,6 +263,16 @@ class NucleiAdapter(BaseAdapter):
 
         if params.get("template"):
             cmd.extend(["-t", params["template"]])
+        else:
+            # Fall back to the PATT-synced templates dir when present so nuclei
+            # never FTLs with "no templates provided for scan".
+            try:
+                from core.payloads.updater import nuclei_templates_dir
+                _tdir = nuclei_templates_dir()
+                if _tdir:
+                    cmd.extend(["-t", _tdir])
+            except Exception:
+                pass
         if params.get("rate_limit"):
             cmd.extend(["-rl", str(params["rate_limit"])])
 
@@ -335,7 +349,13 @@ class DalfoxAdapter(BaseAdapter):
                               evidence="skipped: SPA catch-all route",
                               execution_time_ms=(time.time() - start) * 1000)
 
-        cmd = ["dalfox", "url", "--url", url]
+        # Mine params/DOM sinks so param-less SPA URLs still get tested (bare
+        # `dalfox url` on a param-less URL exits non-zero with nothing = the
+        # "Tool dalfox failed" no_result we were seeing). Follow redirects and
+        # cap workers to stay WAF-polite.
+        cmd = ["dalfox", "url", "--url", url,
+               "--mining-dom", "--mining-dict", "--deep-domxss",
+               "--follow-redirects", "--worker", "10", "--delay", "50"]
 
         try:
             result = _run_cmd(cmd, 120.0)

@@ -46,9 +46,33 @@ class LedgerEntry:
 
 
 class CoverageLedger:
-    def __init__(self):
+    def __init__(self, scan_id: str = "", target: str = ""):
         self._entries: Dict[str, LedgerEntry] = {}
         self._lock = threading.RLock()
+        # When a scan_id is set, every terminal outcome is also written through
+        # to the coverage_records DB table so coverage is durable/auditable and
+        # can drive resumable planning across runs (spec §6/§20).
+        self._scan_id = scan_id or ""
+        self._target = target or ""
+
+    def set_scan(self, scan_id: str, target: str = "") -> None:
+        self._scan_id = scan_id or self._scan_id
+        if target:
+            self._target = target
+
+    def _persist(self, e: LedgerEntry) -> None:
+        if not self._scan_id:
+            return
+        loc, _, param = (e.point or "").partition(":")  # point == "location:name"
+        try:
+            from core.database.pg_store import CoverageRepo
+            CoverageRepo.upsert(
+                self._scan_id, e.surface or "", e.vuln_class or "",
+                param=param or (e.point or ""), location=loc or "",
+                status=(e.status or "").lower(), reason=e.reason,
+                confirmed=e.confirmed, target=self._target)
+        except Exception:
+            pass  # persistence is best-effort; never breaks a scan
 
     def record(self, surface: str, point: str, vuln_class: str, status: str,
                reason: str = "", confirmed: bool = False) -> None:
@@ -62,6 +86,7 @@ class CoverageLedger:
             if prev and prev.confirmed and not confirmed:
                 return
             self._entries[e.key()] = e
+        self._persist(e)
         if status in (ERRORED, BLOCKED):
             logger.info("COVERAGE_%s: %s @ %s [%s] %s", status, vuln_class, point, surface, reason)
 

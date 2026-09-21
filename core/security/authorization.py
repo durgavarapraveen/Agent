@@ -147,9 +147,23 @@ class TargetScopeValidator:
         if not target:
             return ""
         target = target.strip()
-        # Strip scheme if present
-        if "://" in target:
-            target = target.split("://", 1)[1]
+        # Strip ALL leading scheme/method artifacts, not just the first. The
+        # prompt/plan renderer can prepend a "METHOD:" prefix AND a "get://"
+        # pseudo-scheme on top of the real "https://", producing a triple like
+        # "GET:get://https://host/…". A single-pass "://" split would leave
+        # "https" as the host and wrongly DENY an in-scope endpoint. Loop until
+        # no leading scheme (word://) or HTTP-method (WORD:) prefix remains.
+        _prev = None
+        while target and target != _prev:
+            _prev = target
+            m = re.match(r'^[a-zA-Z][a-zA-Z0-9+.\-]*://', target)
+            if m:
+                target = target[m.end():]
+                continue
+            m = re.match(r'^(?:get|post|put|delete|patch|head|options|connect|trace):',
+                         target, re.IGNORECASE)
+            if m:
+                target = target[m.end():]
         # Strip path
         if "/" in target:
             target = target.split("/", 1)[0]

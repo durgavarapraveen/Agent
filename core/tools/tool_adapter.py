@@ -217,6 +217,17 @@ class NucleiAdapter:
     def scan(target: str, params: Dict[str, Any], profile=None) -> Dict[str, Any]:
         flags = [f"-u {target}"]
 
+        # Point -t at the PATT-synced templates dir when present so nuclei never
+        # FTLs with "no templates provided for scan" (empty default home in a
+        # fresh container). Omitted when absent → nuclei uses its own templates.
+        try:
+            from core.payloads.updater import nuclei_templates_dir
+            _tdir = nuclei_templates_dir()
+            if _tdir:
+                flags.append(f"-t {_tdir}")
+        except Exception:
+            pass
+
         # Expert mode: cover every severity (low+info flag chain-attacks and
         # information disclosure the LLM can pivot on) and every relevant tag
         # group so nothing is skipped for speed.
@@ -264,7 +275,10 @@ class SqlmapAdapter:
     @staticmethod
     def scan(target: str, params: Dict[str, Any], profile=None) -> Dict[str, Any]:
         from core.exploitation.waf_evasion import WAFEvasionManager
-        flags = [f"-u {target}", "--batch"]
+        # -o = all safe optimization switches (keep-alive, null-connection,
+        # output prediction, threads) so blind confirmation fits the per-tool
+        # timeout instead of being killed. Optimization only, no recall loss.
+        flags = [f"-u {target}", "--batch", "-o"]
 
         if profile:
             # DBMS detection from technology stack (HexStrike pattern)
@@ -333,7 +347,15 @@ class KatanaAdapter:
 class DalfoxAdapter:
     @staticmethod
     def scan(target: str, params: Dict[str, Any], profile=None) -> Dict[str, Any]:
-        flags = [f"url {target}"]
+        # dalfox 3.x requires the URL as a flag (`dalfox url --url <URL>`); the
+        # bare positional errors "required arguments were not provided: --url".
+        # Also strip the METHOD:/get:// artifact so the URL is valid.
+        try:
+            from core.fuzzing.adapters import _clean_target_url
+            target = _clean_target_url(target) or target
+        except Exception:
+            pass
+        flags = [f"url --url {target}"]
 
         if profile:
             # DOM mining for SPA targets

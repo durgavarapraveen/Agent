@@ -55,6 +55,9 @@ class InjectionPoint:
     name: str                     # param / field / header / path-index
     sample_value: str = ""
     signals: Set[str] = field(default_factory=set)   # url_valued / numeric / file / ...
+    # Reflection context observed for this point (html/attr/js/uri/json/none) —
+    # set by the reflection/oracle step so payload selection can be context-aware.
+    reflection_context: str = ""
 
     def key(self) -> str:
         return f"{self.location}:{self.name}"
@@ -70,6 +73,12 @@ class Surface:
     signals: Set[str] = field(default_factory=set)
     applicable_classes: List[str] = field(default_factory=list)   # OracleEngine keys
     raw: Dict[str, Any] = field(default_factory=dict)             # original captured request
+    # Identity/context the surface was observed under — drives per-identity retest
+    # and authz differential. Populated from the captured request when available.
+    auth_state: str = "unknown"   # anonymous | authenticated | unknown
+    role: str = ""                # identity/role the request was captured as
+    tech: str = ""                # detected framework/stack hint
+    baseline_digest: str = ""     # digest of the baseline response (diff oracles)
 
     def point_by_key(self, key: str) -> Optional[InjectionPoint]:
         for p in self.injection_points:
@@ -133,6 +142,13 @@ class SurfaceClassifier:
         body = req.get("body") if req.get("body") is not None else req.get("data")
 
         s = Surface(url=url, method=method, content_type=ctype, raw=req)
+        # Identity/context this request was captured under (drives per-identity
+        # retest + authz differential). Ambient credentials → authenticated.
+        if ("authorization" in headers) or headers.get("cookie"):
+            s.auth_state = "authenticated"
+            s.role = str(req.get("role") or req.get("identity") or "")
+        else:
+            s.auth_state = "anonymous"
         pts: List[InjectionPoint] = []
 
         # query params

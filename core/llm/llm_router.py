@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 from typing import Any, Dict, List
 
 from core.llm.schemas import LLMResponse
@@ -31,7 +32,12 @@ class LLMRouter:
                                    "justification": "Fallback"}]}
         return {}
 
-    def _run_async(self, coro, timeout: float = 180.0):
+    def _run_async(self, coro, timeout: float = None):
+        if timeout is None:
+            try:
+                timeout = float(os.getenv("LLM_ROUTER_TIMEOUT_S", "180"))
+            except Exception:
+                timeout = 180.0
         try:
             loop = asyncio.get_event_loop()
         except RuntimeError:
@@ -112,7 +118,14 @@ class LLMRouter:
                 raw_response=json.dumps(data),
             )
         except Exception as e:
-            logger.error(f"LLM routing failed for {task_type}: {e}")
+            # A timeout is a HANDLED degradation (heuristic fallback below), not a
+            # fault — log it at WARNING so it doesn't inflate the ERROR count that
+            # operators watch. Genuine failures stay ERROR.
+            if isinstance(e, TimeoutError):
+                logger.warning(f"LLM routing timed out for {task_type} ({e}) — "
+                               f"using heuristic fallback")
+            else:
+                logger.error(f"LLM routing failed for {task_type}: {e}")
             return self._fallback_response(task_type, candidates, reason=str(e))
 
     def _fallback_response(self, task_type: str, candidates: List[Any], reason: str) -> LLMResponse:

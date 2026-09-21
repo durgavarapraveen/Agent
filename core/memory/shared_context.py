@@ -204,6 +204,27 @@ class SharedContextV2:
             except Exception:
                 pass
 
+        # Shared blackboard (delta 1): broadcast EVERY newly-added finding here,
+        # at the universal sink, so findings reach the live board no matter which
+        # ingestion path produced them (dedup collapses re-posts by ref). Fired
+        # outside the state lock; dedup returns above never reach this point.
+        try:
+            from core.orchestration import blackboard as _bb
+            _sid = getattr(self, "scan_id", "") or ""
+            if _sid:
+                _ref = str(vuln.get("finding_id") or vuln.get("id")
+                           or f"{vuln.get('type','')}|{vuln.get('location') or vuln.get('target','')}")
+                _bb.post(_sid, vuln.get("tool") or "agent", "finding",
+                         vuln.get("title") or vuln.get("type") or "Finding",
+                         {"type": vuln.get("type", ""), "severity": vuln.get("severity", ""),
+                          "status": vuln.get("status", ""),
+                          "location": vuln.get("location") or vuln.get("target") or "",
+                          "confidence": vuln.get("confidence_score") or vuln.get("confidence"),
+                          "tool": vuln.get("tool", "")},
+                         ref=_ref[:200])
+        except Exception:
+            pass
+
     def _mirror_confirmed_exploit(self, vuln: Dict):
         proof = vuln.get("proof") or ""
         loc = vuln.get("location") or vuln.get("target") or ""
@@ -299,9 +320,35 @@ class SharedContextV2:
             logger.warning(f"[Scope] endpoint scope check crashed for {url!r}: {e} — rejecting (fail-closed)")
             return False
 
+    @staticmethod
+    def _looks_like_endpoint(u: str) -> bool:
+        """Reject non-endpoint strings that discovery (esp. JS bundle analysis)
+        scrapes as if they were routes — unresolved template literals
+        (``${...}``/``{{...}}``), i18n keys / enum constants
+        (``FEEDBACK_FIVE_STAR_THANK_YOU``), and bare identifiers (``caption``,
+        ``language``). Spec §13: do not treat every string as an endpoint."""
+        if not u or not isinstance(u, str):
+            return False
+        s = u.strip()
+        if not s:
+            return False
+        if "${" in s or "{{" in s or "}}" in s:
+            return False  # unresolved template literal
+        if "://" in s or s.startswith("/") or "/" in s:
+            return True   # absolute URL, rooted path, or any path with a separator
+        import re as _re
+        if _re.search(r"\.[A-Za-z]{2,5}($|\?|#)", s):
+            return True   # dotted resource (foo.json, bar.php)
+        return False      # bare token / constant / i18n key → not an endpoint
+
     def add_endpoints(self, eps: List, source: str = None):
         with self._state_lock:
             for ep in eps:
+                # Discovery hygiene: drop scraped strings that aren't endpoints
+                # before they reach scope-validation/probing (cuts wasted probes
+                # + AUTHORIZATION_DENIED log noise from JS-extracted junk).
+                if not self._looks_like_endpoint(self._endpoint_url(ep)):
+                    continue
                 if not self._endpoint_in_scope(ep):
                     url = self._endpoint_url(ep)
                     if not any(d.get("url") == url for d in self.external_dependencies):

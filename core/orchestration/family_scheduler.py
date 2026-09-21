@@ -112,6 +112,126 @@ REGISTRY: List[ProbeSpec] = [
 ]
 
 
+# ── Dynamic probe discovery ────────────────────────────────────────────────
+# The REGISTRY above is the CURATED baseline (accurate family/tier). On top of
+# it we AUTO-DISCOVER probes so new ones need no scheduler edit: a probe module
+# just exposes an async `run_*_probe(ctx)` / `run_*_fuzz(ctx)` (single required
+# arg), OR declares metadata explicitly for custom family/tier/lane/args:
+#     PROBE_SPEC  = {"name":..,"func":"run_x_probe","family":"INJECTION","tier":"J"}
+#     PROBE_SPECS = [ {...}, {...} ]
+# Curated entries always win (their metadata is authoritative); discovery only
+# ADDS probes the registry doesn't already cover.
+_FAMILY_HINTS = [
+    (("nosql", "sqli", "inject", "ssti", "xxe", "deserial", "prototype",
+      "redirect", "email", "second_order", "param", "semantic", "fuzz", "dom_sink", "xss"), F.INJECTION),
+    (("authz", "idor", "access", "role", "cross_role"), F.AUTHZ_IDOR),
+    (("session", "cookie", "jwt", "login", "auth"), F.AUTH_SESSION),
+    (("cors", "header", "clickjack", "cache", "smuggl", "host", "logging", "config"), F.INFRA_CONFIG),
+    (("race",), F.RACE),
+    (("rate", "automation", "captcha", "csrf"), F.RATE_LIMIT),
+    (("upload", "file"), F.FILE_UPLOAD),
+    (("crypto",), F.CRYPTO),
+    (("web3",), F.WEB3),
+    (("business", "workflow"), F.BUSINESS_LOGIC),
+    (("secret", "identity", "disclos"), F.SECRET_DISCLOSURE),
+]
+
+
+def _infer_family(name: str) -> "TestFamily":
+    n = (name or "").lower()
+    for kws, fam in _FAMILY_HINTS:
+        if any(k in n for k in kws):
+            return fam
+    return F.API  # safe default: still runs, just grouped under the API team
+
+
+def _coerce_family(v):
+    if isinstance(v, TestFamily):
+        return v
+    try:
+        return TestFamily[str(v).upper()]
+    except Exception:
+        return None
+
+
+def _coerce_tier(v):
+    if isinstance(v, AgentTier):
+        return v
+    return {"J": J, "JUNIOR": J, "S": S, "SENIOR": S}.get(str(v).upper(), J)
+
+
+def _discover_probes() -> List[ProbeSpec]:
+    import importlib
+    import inspect
+    import pkgutil
+    out: List[ProbeSpec] = []
+    try:
+        import core.exploitation as pkg
+    except Exception:
+        return out
+    for mi in pkgutil.iter_modules(pkg.__path__):
+        modname = f"core.exploitation.{mi.name}"
+        try:
+            mod = importlib.import_module(modname)
+        except Exception as e:
+            logger.debug("[FamilyScheduler] discovery skip %s: %s", modname, e)
+            continue
+        # 1) explicit declaration(s) win
+        decls = []
+        if isinstance(getattr(mod, "PROBE_SPECS", None), (list, tuple)):
+            decls = list(mod.PROBE_SPECS)
+        elif isinstance(getattr(mod, "PROBE_SPEC", None), dict):
+            decls = [mod.PROBE_SPEC]
+        if decls:
+            for d in decls:
+                nm = d.get("name") or mi.name
+                out.append(ProbeSpec(
+                    nm, d.get("module", modname), d.get("func") or d.get("entry"),
+                    _coerce_family(d.get("family")) or _infer_family(nm),
+                    _coerce_tier(d.get("tier", "J")), d.get("lane", "net")))
+            continue
+        # 2) heuristic: async run_*_probe / run_*_fuzz taking exactly one required arg (ctx)
+        for attr in dir(mod):
+            if not (attr.startswith("run_") and (attr.endswith("_probe") or attr.endswith("_fuzz"))):
+                continue
+            fn = getattr(mod, attr, None)
+            if not inspect.iscoroutinefunction(fn):
+                continue
+            try:
+                params = inspect.signature(fn).parameters.values()
+                required = [p for p in params if p.default is inspect._empty
+                            and p.kind in (p.POSITIONAL_OR_KEYWORD, p.POSITIONAL_ONLY)]
+                if len(required) != 1:
+                    continue  # needs more than ctx → module should declare PROBE_SPEC
+            except Exception:
+                continue
+            nm = attr[4:].removesuffix("_probe").removesuffix("_fuzz") or attr
+            out.append(ProbeSpec(nm, modname, attr, _infer_family(attr), J, "net"))
+    return out
+
+
+_REGISTRY_CACHE: List[ProbeSpec] = None  # type: ignore
+
+
+def get_registry() -> List[ProbeSpec]:
+    """Curated REGISTRY + auto-discovered probes (curated metadata wins)."""
+    global _REGISTRY_CACHE
+    if _REGISTRY_CACHE is not None:
+        return _REGISTRY_CACHE
+    merged = list(REGISTRY)
+    curated_names = {s.name for s in REGISTRY}
+    for s in _discover_probes():
+        if s.name in curated_names:
+            continue
+        if any(c.module == s.module and c.func == s.func for c in merged):
+            continue  # same callable already curated under another name
+        merged.append(s)
+    _REGISTRY_CACHE = merged
+    logger.info("[FamilyScheduler] registry: %d curated + %d discovered = %d total",
+                len(REGISTRY), len(merged) - len(REGISTRY), len(merged))
+    return _REGISTRY_CACHE
+
+
 async def _run_one(brain, spec: ProbeSpec, browser_lock=None) -> int:
     """Import + run one probe against ctx; add findings; log. Never raises.
     Browser-lane probes are serialized on `browser_lock` (shared browser)."""
@@ -170,17 +290,30 @@ async def run_specialist_probes(brain) -> Dict[str, Any]:
     teams: "OrderedDict[TestFamily, List[ProbeSpec]]" = OrderedDict()
     skipped_families: set = set()
     already = getattr(brain, "_families_spawned", set()) or set()
-    for spec in REGISTRY:
+    # Selectivity profile (scan_profile): 'lab' → exhaustive (every family, max
+    # coverage — authorized labs/CTFs); 'standard' (default) → run a family only
+    # when the plan marks it relevant OR a live surface signal indicates it
+    # (JWT→crypto, chatbot→llm, /graphql→api…), so a real target isn't blasted
+    # with every technique yet advanced probes still auto-fire when applicable.
+    # Set NEO_FULL_BATTERY=1 (or NEO_SCAN_PROFILE=lab) for exhaustive.
+    from core.orchestration.scan_profile import is_exhaustive, surface_relevant, profile
+    full_battery = is_exhaustive()
+    for spec in get_registry():
         if spec.family in already:
             continue  # ran early via adaptive spawn
-        if plan is not None and not plan.is_relevant(spec.family):
-            skipped_families.add(spec.family.value)
-            try:
-                brain._record_family_skipped(spec.family.value)
-            except Exception:
-                pass
-            continue
+        if not full_battery and plan is not None:
+            keep = (surface_relevant(ctx, spec.family.value) is True
+                    or plan.is_relevant(spec.family))
+            if not keep:
+                skipped_families.add(spec.family.value)
+                try:
+                    brain._record_family_skipped(spec.family.value)
+                except Exception:
+                    pass
+                continue
         teams.setdefault(spec.family, []).append(spec)
+    logger.info("[FamilyScheduler] profile=%s (%s)", profile(),
+                "exhaustive" if full_battery else "selective")
     if skipped_families:
         logger.info("[FamilyScheduler] out-of-scope families skipped: %s",
                     sorted(skipped_families))

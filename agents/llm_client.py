@@ -75,6 +75,29 @@ class LLMProvider(ABC):
         res = await self.generate_response(prompt, tier, system, max_tokens, temperature)
         return res.content
 
+    def supports_native_tools(self) -> bool:
+        # Delegate to the harness/provider. Without this method the proxy raised
+        # AttributeError in central_brain's _run_phase native-tools check, which
+        # was swallowed as False — so the native agentic tool loop was NEVER used
+        # even for a tool-capable provider (the JSON-planner path ran instead).
+        try:
+            harness = get_llm()
+            return bool(harness and harness.supports_native_tools())
+        except Exception:
+            return False
+
+    async def generate_with_tools(self, messages, tools, tool_executor=None,
+                                  max_rounds: int = 10, max_tokens: int = 4096,
+                                  tier: TaskTier = TaskTier.SMALL):
+        harness = get_llm()
+        if not harness:
+            await initialize_llm()
+            harness = get_llm()
+        harness_tier = HarnessTaskTier.SMALL if tier == TaskTier.SMALL else HarnessTaskTier.LARGE
+        return await harness.generate_with_tools(
+            messages=messages, tools=tools, tool_executor=tool_executor,
+            max_rounds=max_rounds, max_tokens=max_tokens, tier=harness_tier)
+
     async def generate_json(self, prompt: str, tier: TaskTier = TaskTier.SMALL,
                              system: Optional[str] = None, max_tokens: int = 2048,
                              mandatory_fields: Optional[List[str]] = None) -> Dict:
