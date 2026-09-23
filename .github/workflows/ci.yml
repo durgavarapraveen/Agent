@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, autonous-agent]
+    branches: [main, autonomous_agent]
   pull_request:
     branches: [main]
 
