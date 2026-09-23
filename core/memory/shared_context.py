@@ -337,7 +337,6 @@ class SharedContextV2:
             return True
         # A path segment that is a long random hex/alnum token (baseline 404
         # probes) — e.g. /this-path-…-98765 or /a1b2c3d4e5f6a7b8.
-        import re as _re
         for seg in u.split("?")[0].split("/"):
             if len(seg) >= 16 and _re.fullmatch(r"[a-z0-9]+", seg) and _re.search(r"\d", seg) and _re.search(r"[a-f]", seg):
                 return True
@@ -387,7 +386,6 @@ class SharedContextV2:
             return False  # unresolved template literal
         if "://" in s or s.startswith("/") or "/" in s:
             return True   # absolute URL, rooted path, or any path with a separator
-        import re as _re
         if _re.search(r"\.[A-Za-z]{2,5}($|\?|#)", s):
             return True   # dotted resource (foo.json, bar.php)
         return False      # bare token / constant / i18n key → not an endpoint
@@ -715,7 +713,6 @@ class SharedContextV2:
 
     def _relevance_key(self, objective: str):
         """Extract a path/host token from the objective so matching items sort first."""
-        import re as _re
         m = _re.search(r"https?://[^\s]+|/[\w./-]{2,}", str(objective or ""))
         tok = (m.group(0) if m else "").lower()
         # reduce a full URL to its path for loose contains-matching
