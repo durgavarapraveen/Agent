@@ -58,7 +58,21 @@ try:
     from slowapi.errors import RateLimitExceeded
     from slowapi.middleware import SlowAPIMiddleware
 
-    _LIMITER = Limiter(key_func=get_remote_address, default_limits=[])
+    # P2: apply a default per-client rate limit (was []  → limiter inert, no route
+    # protected). Scan-start and report endpoints trigger expensive LLM/network
+    # work, so a default cap prevents abuse/DoS. Env-tunable.
+    import os as _os
+    _default_rl = _os.getenv("API_RATE_LIMIT", "100/minute")
+    # slowapi/limits parse the limit string LAZILY (per request), so a malformed
+    # value would 500 every request for the process lifetime. Validate eagerly and
+    # fall back safely — consistent with this module's soft-fail philosophy.
+    try:
+        import limits as _limits_lib
+        _limits_lib.parse(_default_rl)
+    except Exception:
+        logger.warning("invalid API_RATE_LIMIT=%r; falling back to 100/minute", _default_rl)
+        _default_rl = "100/minute"
+    _LIMITER = Limiter(key_func=get_remote_address, default_limits=[_default_rl])
     app.state.limiter = _LIMITER
 
     @app.exception_handler(RateLimitExceeded)
@@ -906,18 +920,82 @@ def _run_scan_process(job_id: str, target: str, tier: str,
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
+def _assemble_scan_vulns(scan_id: str, scan: dict) -> tuple:
+    """Single source of truth for a scan's vulnerabilities, used by BOTH the list
+    and the detail endpoints so their counts always agree.
+
+    Assembles the DB (VulnRepo) rows, then merges in any findings that live only
+    in report_data / context (the pipeline does not always persist every finding
+    to the table), enriches DB rows with rich report fields, and finally dedups.
+    Returns (vulns, context)."""
+    vulns = VulnRepo.get_by_scan(scan_id)
+    if not vulns:
+        # Live fallback: the in-flight singleton may hold this scan's results.
+        try:
+            from core.database.pg_store import DatabaseManager as DM
+            live_scan = None
+            with DM.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT scan_id FROM live_results WHERE id = 1")
+                row = cur.fetchone()
+                if row:
+                    live_scan = row[0]
+            if live_scan == scan_id:
+                live = LiveDataRepo.get_results()
+                if live.get("vulnerabilities"):
+                    vulns = live["vulnerabilities"]
+        except Exception:
+            pass
+    report = (scan or {}).get("report_data") or {}
+    # Recon intelligence: prefer the dedicated recon_data table, fall back to the
+    # report's embedded context.
+    context = report.get("context", {})
+    try:
+        from core.database.pg_store import ReconRepo
+        recon = ReconRepo.get(scan_id)
+        if recon:
+            context = recon
+    except Exception:
+        pass
+    report_vulns = list(report.get("vulnerabilities", []))
+    # Merge context-only findings (by title) into the report set.
+    for cv in context.get("vulnerabilities", []) or []:
+        t = (cv.get("title") or "").strip().lower()
+        if t and t not in {(rv.get("title") or "").strip().lower() for rv in report_vulns}:
+            report_vulns.append(cv)
+    # Enrich DB rows with rich report fields.
+    rich_by_title = {}
+    for rv in report_vulns:
+        t = (rv.get("title") or "").strip().lower()
+        if t:
+            rich_by_title[t] = rv
+    RICH_FIELDS = ["critic", "critic_flag", "_compliance", "evidence", "llm_validation",
+                   "screenshot_path", "curl_command", "original_severity", "severity_adjusted_by",
+                   "source", "reproducibility_status", "retest_attempts", "retest_successes",
+                   "_confidence", "_dedup"]
+    for v in vulns:
+        rich = rich_by_title.get((v.get("title") or "").strip().lower())
+        if rich:
+            for field in RICH_FIELDS:
+                if field in rich and field not in v:
+                    v[field] = rich[field]
+    # Add report/context findings not present in the DB rows.
+    db_titles = {(v.get("title") or "").strip().lower() for v in vulns}
+    for rv in report_vulns:
+        t = (rv.get("title") or "").strip().lower()
+        if t and t not in db_titles:
+            vulns.append(rv)
+    return _dedup_vulns(vulns), context
+
+
 def _get_scans() -> list:
     scans = []
     try:
         db_scans = ScanRepo.list_all()
         for s in db_scans:
             report = s.get("report_data") or {}
-            # Count the persisted (deduped) vulnerabilities table — the same
-            # authoritative source the detail page shows — so the list count
-            # matches the detail. report_data holds raw, pre-dedup findings.
-            vulns = VulnRepo.get_by_scan(s["scan_id"])
-            if not vulns:
-                vulns = _dedup_vulns(report.get("vulnerabilities", []))
+            # Same assembly the detail page uses, so the list count matches it.
+            vulns, _ctx = _assemble_scan_vulns(s["scan_id"], s)
             severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
             status_counts = {"CONFIRMED": 0, "REJECTED": 0, "UNCONFIRMED": 0}
             for v in vulns:
@@ -1302,24 +1380,8 @@ def get_scan(scan_id: str):
     scan = ScanRepo.get(scan_id)
     if not scan:
         raise HTTPException(404, "Scan not found")
-    vulns = VulnRepo.get_by_scan(scan_id)
-    # Fallback: if no vulns in DB, check live_results (singleton) for this scan
-    if not vulns:
-        try:
-            from core.database.pg_store import DatabaseManager as DM
-            live_scan = None
-            with DM.get_connection() as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT scan_id FROM live_results WHERE id = 1")
-                row = cur.fetchone()
-                if row:
-                    live_scan = row[0]
-            if live_scan == scan_id:
-                live = LiveDataRepo.get_results()
-                if live.get("vulnerabilities"):
-                    vulns = live["vulnerabilities"]
-        except Exception:
-            pass
+    # Single source of truth (shared with the scan list) so counts always match.
+    vulns, context = _assemble_scan_vulns(scan_id, scan)
     report = scan.get("report_data") or {}
     meta = report.get("metadata", {"target": scan.get("target", ""), "timestamp": str(scan.get("started_at", ""))})
     # Enrich metadata with scan-table fields the frontend needs
@@ -1339,52 +1401,8 @@ def get_scan(scan_id: str):
     meta["started_at"] = str(scan.get("started_at", ""))
     meta["finished_at"] = str(scan.get("finished_at", ""))
     scope = report.get("scope", {})
-    # Recon intelligence: prefer the dedicated recon_data table (written live during
-    # recon), fall back to the report's embedded context.
-    context = report.get("context", {})
-    try:
-        from core.database.pg_store import ReconRepo
-        recon = ReconRepo.get(scan_id)
-        if recon:
-            context = recon
-    except Exception:
-        pass
-    # Enrich DB vulns with rich report data (critic, compliance, evidence, screenshots)
-    # Collect rich vulns from all sources — report_data, context, live_results, context file
-    report_vulns = list(report.get("vulnerabilities", []))
-    # Merge from context's vulnerabilities
-    ctx_vulns = context.get("vulnerabilities", [])
-    for cv in ctx_vulns:
-        t = (cv.get("title") or "").strip().lower()
-        if t and t not in {(rv.get("title") or "").strip().lower() for rv in report_vulns}:
-            report_vulns.append(cv)
-    # All vulnerability data comes from DB only — no .json/.log file reads
-    # Build index by title for matching
-    rich_by_title = {}
-    for rv in report_vulns:
-        t = (rv.get("title") or "").strip().lower()
-        if t:
-            rich_by_title[t] = rv
-    RICH_FIELDS = ["critic", "critic_flag", "_compliance", "evidence", "llm_validation",
-                   "screenshot_path", "curl_command", "original_severity", "severity_adjusted_by",
-                   "source", "reproducibility_status", "retest_attempts", "retest_successes",
-                   "_confidence", "_dedup"]
-    for v in vulns:
-        title_key = (v.get("title") or "").strip().lower()
-        rich = rich_by_title.get(title_key)
-        if rich:
-            for field in RICH_FIELDS:
-                if field in rich and field not in v:
-                    v[field] = rich[field]
-    # If DB has fewer vulns than report, add the extras from report
-    db_titles = {(v.get("title") or "").strip().lower() for v in vulns}
-    for rv in report_vulns:
-        t = (rv.get("title") or "").strip().lower()
-        if t and t not in db_titles:
-            vulns.append(rv)
-
-    vulns = _dedup_vulns(vulns)
-
+    # vulns + context already assembled (DB ∪ report ∪ context, enriched, deduped)
+    # by _assemble_scan_vulns above — the same set the scan list counts.
     severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
     for v in vulns:
         sev = (v.get("severity") or "INFO").upper()
@@ -1549,6 +1567,22 @@ def get_llm_calls(scan_id: str, since: int = 0, limit: int = 200):
         raise HTTPException(500, f"llm-calls unavailable: {e}")
 
 
+@app.get("/api/scans/{scan_id}/jev-decisions")
+def get_jev_decisions(scan_id: str, since: int = 0, limit: int = 200):
+    try:
+        from core.economics import jev_log as _jev
+        entries = _jev.recent(scan_id, since_id=since, limit=limit)
+        return {
+            "scan_id": scan_id,
+            "summary": _jev.summary(scan_id),
+            "count": len(entries),
+            "since": since,
+            "entries": entries,
+        }
+    except Exception as e:
+        raise HTTPException(500, f"jev-decisions unavailable: {e}")
+
+
 # ── SHARED BLACKBOARD — live cross-agent bus (creds/findings/tools/pivots) ──
 @app.get("/api/scans/{scan_id}/blackboard")
 def get_blackboard(scan_id: str, since: int = 0, limit: int = 300):
@@ -1564,6 +1598,34 @@ def get_blackboard(scan_id: str, since: int = 0, limit: int = 300):
         }
     except Exception as e:
         raise HTTPException(500, f"blackboard unavailable: {e}")
+
+
+@app.get("/api/scans/{scan_id}/memory")
+def get_scan_memory(scan_id: str):
+    """Inspect the per-scan memory the agent + Ask(LLM) chat use: the recorded
+    phase-by-phase reasoning (scan_llm_memory) and the fact index (findings /
+    access / recon) that is fed to the model. Read-only."""
+    out = {"scan_id": scan_id, "phase_memory": [], "fact_index": {}, "counts": {}}
+    try:
+        from core.database.pg_store import LLMMemoryRepo
+        out["phase_memory"] = LLMMemoryRepo.get_by_scan(scan_id, limit=500) or []
+    except Exception as e:
+        out["phase_memory_error"] = str(e)
+    try:
+        from core.reporting.scan_chatbot import _load_fact_index
+        out["fact_index"] = _load_fact_index(scan_id) or {}
+    except Exception as e:
+        out["fact_index_error"] = str(e)
+    try:
+        fi = out.get("fact_index") or {}
+        out["counts"] = {
+            "phase_memory_entries": len(out["phase_memory"]),
+            "findings_indexed": len(fi.get("vuln_titles") or []),
+            "access_indexed": len(fi.get("access_gained") or []),
+        }
+    except Exception:
+        pass
+    return out
 
 
 # ── COVERAGE LEDGER + BENCHMARK — persisted, benchmark-agnostic (spec §16-20) ──
@@ -2368,6 +2430,17 @@ def get_tool_outputs(scan_id: str, grouped: bool = False):
 @app.get("/api/scans/{scan_id}/vulnerabilities")
 def get_vulnerabilities(scan_id: str):
     return _dedup_vulns(VulnRepo.get_by_scan(scan_id) or [])
+
+
+@app.get("/api/scans/{scan_id}/findings/{finding_id}")
+def get_finding(scan_id: str, finding_id: str):
+    """Return the COMPLETE stored finding (all fields, untruncated proof/request/
+    response/details/payload) for the UI's click-to-expand full view."""
+    fid = str(finding_id)
+    for v in (VulnRepo.get_by_scan(scan_id) or []):
+        if str(v.get("id")) == fid or str(v.get("finding_id")) == fid:
+            return v
+    raise HTTPException(404, f"finding {finding_id} not found in scan {scan_id}")
 
 
 @app.get("/api/scans/{scan_id}/activity")

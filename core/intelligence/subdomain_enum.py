@@ -629,6 +629,73 @@ class SubdomainEnumerationEngine:
         self.cdn_analyzer = CDNAnalyzer()
         self.vhost_fuzzer = VirtualHostFuzzer()
 
+    def _mk_subdomain(self, name: str, domain: str, source: str) -> "Subdomain":
+        return Subdomain(
+            name=name, domain=domain, ip_addresses=[], cname=None, cdn=None,
+            cloud_storage=None, certificate_issuer=None, certificate_not_before=None,
+            certificate_not_after=None, status_code=None, title=None, technologies=[],
+            source=source, confidence=0.9, discovered_date=datetime.now().isoformat())
+
+    def _operator_subdomains(self, domain: str) -> Set[str]:
+        """Owner-supplied authoritative list — the surest coverage for a domain
+        you control. RECON_SUBDOMAINS_FILE (one host per line) and/or
+        RECON_EXTRA_SUBDOMAINS (comma/space separated). Only names within the
+        apex are kept (still scope-gated downstream)."""
+        import os, re
+        raw: List[str] = []
+        f = os.getenv("RECON_SUBDOMAINS_FILE", "").strip()
+        if f and os.path.exists(f):
+            try:
+                with open(f, "r", encoding="utf-8", errors="replace") as fh:
+                    raw.extend(fh.read().split())
+            except Exception as e:
+                logger.warning(f"[SubdomainEnum] operator file unreadable: {e}")
+        raw.extend(re.split(r"[\s,]+", os.getenv("RECON_EXTRA_SUBDOMAINS", "")))
+        out: Set[str] = set()
+        for h in raw:
+            h = re.sub(r"^[a-z]+://", "", (h or "").strip().lower()).split("/")[0]
+            h = h.lstrip("*.").rstrip(".")
+            if h and (h == domain or h.endswith(f".{domain}")):
+                out.add(h)
+        if out:
+            logger.info(f"[SubdomainEnum] {len(out)} operator-supplied subdomains for {domain}")
+        return out
+
+    async def _active_enum(self, domain: str) -> Set[str]:
+        """Active discovery via Kali: subfinder + assetfinder (fast, broad) and
+        an optional DNS brute (gobuster, when RECON_DNS_WORDLIST is set). Passive
+        CT alone under-discovers (crt.sh flaky, OTX rate-limited). Best-effort:
+        any tool failure is skipped, never fatal. Disable with RECON_ACTIVE_ENUM=false."""
+        import os, re, shlex, asyncio as _aio
+        names: Set[str] = set()
+        if os.getenv("RECON_ACTIVE_ENUM", "true").lower() not in ("1", "true", "yes", "on"):
+            return names
+        try:
+            from agents.kali_executor import KaliDockerExecutor as _K
+        except Exception as e:
+            logger.warning(f"[SubdomainEnum] Kali executor unavailable, active enum skipped: {e}")
+            return names
+        q = shlex.quote(domain)
+        cmds = [f"subfinder -d {q} -silent -all", f"assetfinder --subs-only {q}"]
+        wl = os.getenv("RECON_DNS_WORDLIST", "").strip()
+        if wl and os.path.exists(wl):
+            cmds.append(f"gobuster dns -d {q} -w {shlex.quote(wl)} -q --no-color -t 50")
+        for cmd in cmds:
+            try:
+                res = await _aio.to_thread(_K.run, cmd, 300, True)
+            except Exception as e:
+                logger.warning(f"[SubdomainEnum] active tool failed ({cmd.split()[0]}): {e}")
+                continue
+            for line in (res.get("stdout") or "").splitlines():
+                parts = line.strip().split()
+                if not parts:
+                    continue
+                h = parts[-1].lstrip("*.").lower().rstrip(".")  # last token: bare host or gobuster "Found: host"
+                if (h == domain or h.endswith(f".{domain}")) and re.match(r"^[a-z0-9.\-]+$", h):
+                    names.add(h)
+        logger.info(f"[SubdomainEnum] active enumeration found {len(names)} subdomains for {domain}")
+        return names
+
     async def discover_attack_surface(self, domain: str) -> Dict:
         logger.info(f"[SubdomainEnumerationEngine] Starting attack surface discovery for {domain}...")
         
@@ -645,13 +712,41 @@ class SubdomainEnumerationEngine:
         logger.info(f"[SubdomainEnumerationEngine] Phase 1: Multi-Source Attack Surface Discovery")
         ct_subdomains = await self.ct_scanner.query_all_sources(domain)
 
+        # Phase 1b: Active enumeration + operator-supplied list. Passive CT alone
+        # under-discovers; active tools (subfinder/assetfinder/gobuster-dns) and
+        # the owner's own list close the gap so ALL subdomains of an owned apex
+        # get tested. Deduped by name; each is still scope-gated downstream.
+        _seen = {s.name for s in ct_subdomains}
+        try:
+            _active = await self._active_enum(domain)
+        except Exception as e:
+            logger.warning(f"[SubdomainEnum] active enum error: {e}")
+            _active = set()
+        for name in (_active | self._operator_subdomains(domain)):
+            if name not in _seen:
+                _seen.add(name)
+                src = "operator" if name not in _active else "active_enum"
+                ct_subdomains.append(self._mk_subdomain(name, domain, src))
+
         results['subdomains'].extend(ct_subdomains)
-        
-        # Save subdomains
+
+        # Save subdomains + auto-register each into the live scope working set at
+        # runtime. add_target is gated by the immutable apex contract, so this
+        # admits only in-scope subs (e.g. *.decibyl.ai) — no manual list, no .env.
+        try:
+            from core.security.authorization import TargetScopeValidator as _TSV
+            _tsv = _TSV.get()
+        except Exception:
+            _tsv = None
         for subdomain in ct_subdomains:
             self.db.save_subdomain(subdomain)
-        
-        logger.info(f"[SubdomainEnumerationEngine] Found {len(ct_subdomains)} subdomains from passive intelligence sources")
+            if _tsv is not None:
+                try:
+                    _tsv.add_target(subdomain.name)
+                except Exception:
+                    pass
+
+        logger.info(f"[SubdomainEnumerationEngine] Found {len(ct_subdomains)} subdomains (passive + active + operator)")
         
         # Phase 2: CDN Analysis
         logger.info(f"[SubdomainEnumerationEngine] Phase 2: CDN Analysis")

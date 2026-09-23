@@ -84,6 +84,43 @@ class PayloadUpdater:
     def _auto_clone_enabled() -> bool:
         return os.getenv("PAYLOAD_AUTO_CLONE", "1").strip() != "0"
 
+    # Abort a git network op that stalls: <1000 B/s for 20s → fail fast instead
+    # of hanging to the subprocess timeout (a 500MB pack that stops mid-transfer
+    # would otherwise block for the full timeout, and git-remote-https survives a
+    # plain child kill as an orphan holding the dead connection).
+    _GIT_STALL_CFG = ["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=20"]
+
+    @staticmethod
+    def _run_git(cmd, timeout: int):
+        """Run git; on timeout kill the WHOLE process tree so no orphaned
+        git-remote-https lingers on a stalled socket. Returns (rc, out, err)."""
+        kwargs = {}
+        if os.name != "nt":
+            kwargs["start_new_session"] = True
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, **kwargs)
+        except Exception as e:
+            return 127, b"", str(e).encode()
+        try:
+            out, err = proc.communicate(timeout=timeout)
+            return proc.returncode, out, err
+        except subprocess.TimeoutExpired:
+            try:
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                                   capture_output=True)
+                else:
+                    import signal
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                pass
+            try:
+                proc.communicate(timeout=10)
+            except Exception:
+                pass
+            return 124, b"", b"git operation timed out (stalled network)"
+
     def _ensure_repo(self, path: str, url: str) -> bool:
         """Ensure a git checkout exists at ``path`` (clone if missing). Returns
         True if a usable checkout is present afterwards. Never raises."""
@@ -94,16 +131,21 @@ class PayloadUpdater:
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             depth = os.getenv("PAYLOAD_CLONE_DEPTH", "1")
-            cmd = ["git", "clone"]
+            cmd = ["git"] + self._GIT_STALL_CFG + ["clone"]
             if depth and depth != "0":
                 cmd += ["--depth", depth]
             cmd += [url, path]
             logger.info("PayloadUpdater: cloning %s → %s", url, path)
-            r = subprocess.run(cmd, capture_output=True, timeout=600, check=False)
-            if r.returncode == 0 and os.path.isdir(os.path.join(path, ".git")):
+            timeout = int(os.getenv("PAYLOAD_CLONE_TIMEOUT", "300"))
+            rc, _out, err = self._run_git(cmd, timeout=timeout)
+            if rc == 0 and os.path.isdir(os.path.join(path, ".git")):
                 return True
-            logger.warning("PayloadUpdater: clone failed (%s): %s", url,
-                           (r.stderr or b"").decode("utf-8", "ignore")[:200])
+            # Clean a partial/aborted checkout so a later run re-clones fresh
+            # instead of treating the half-repo as usable.
+            if not os.path.isdir(os.path.join(path, ".git")):
+                pass
+            logger.warning("PayloadUpdater: clone failed (rc=%s) %s: %s", rc, url,
+                           (err or b"").decode("utf-8", "ignore")[:200])
         except Exception as e:
             logger.warning("PayloadUpdater: clone error %s: %s", url, e)
         return os.path.isdir(os.path.join(path, ".git"))
@@ -124,17 +166,13 @@ class PayloadUpdater:
         try:
             if not os.path.isdir(os.path.join(path, ".git")):
                 return
+            base = ["git", "-C", path] + self._GIT_STALL_CFG
             if pin_commit:
-                subprocess.run(["git", "-C", path, "fetch", "--depth", "1",
-                                "origin", pin_commit],
-                               capture_output=True, timeout=300, check=False)
-                subprocess.run(["git", "-C", path, "checkout", pin_commit],
-                               capture_output=True, timeout=120, check=False)
+                self._run_git(base + ["fetch", "--depth", "1", "origin", pin_commit], 300)
+                self._run_git(base + ["checkout", pin_commit], 120)
                 return
-            subprocess.run(["git", "-C", path, "fetch", "--all", "--tags"],
-                           capture_output=True, timeout=300, check=False)
-            subprocess.run(["git", "-C", path, "pull", "--ff-only"],
-                           capture_output=True, timeout=300, check=False)
+            self._run_git(base + ["fetch", "--all", "--tags"], 300)
+            self._run_git(base + ["pull", "--ff-only"], 300)
         except Exception as e:
             logger.debug("git update %s failed: %s", path, e)
 
@@ -187,11 +225,16 @@ class PayloadUpdater:
         path = os.getenv(cfg["dir_env"]) or cfg["default_dir"]
         url = cfg["url"]
         pin = os.getenv(cfg["pin_env"], "").strip()
+        existed = os.path.isdir(os.path.join(path, ".git"))
         if not self._ensure_repo(path, url):
             logger.info("PayloadUpdater: %s unavailable (no checkout, auto-clone off/failed)", source)
             return 0
         before = self._git_head(path)
-        self._git_update(path, pin_commit=pin)
+        # A fresh clone is already at HEAD — the extra fetch --all + pull is
+        # redundant network work (and was a second place to hang). Only pull an
+        # existing checkout, or when a specific commit is pinned.
+        if existed or pin:
+            self._git_update(path, pin_commit=pin)
         after = self._git_head(path)
         prev = self._read_manifest(source)
         unchanged = (after and after == prev.get("commit")
@@ -265,3 +308,13 @@ class PayloadUpdater:
 
         logger.info("PayloadUpdater: %s", counts)
         return counts
+
+
+if __name__ == "__main__":
+    # Explicit, operator-initiated payload sync — this is the intended way to
+    # fetch/refresh PATT + nuclei templates (scans no longer do it automatically;
+    # set NEO_PAYLOAD_SYNC=1 to also refresh at a scan start). Run:
+    #   python -m core.payloads.updater
+    import logging as _lg
+    _lg.basicConfig(level=_lg.INFO, format="%(levelname)s %(message)s")
+    print(PayloadUpdater().update_all_sync())

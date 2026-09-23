@@ -74,7 +74,7 @@ class CanonicalReporter:
         false_pos = by_state.get("FALSE_POSITIVE", 0)
         uncertain = by_state.get("INCONCLUSIVE", 0) + by_state.get("UNCERTAIN", 0)
 
-        return {
+        summary = {
             "total": len(self._findings),
             "confirmed": confirmed,
             "false_positives": false_pos,
@@ -83,6 +83,26 @@ class CanonicalReporter:
             "by_severity": by_severity,
             "by_category": by_category,
         }
+
+        # Jev triage second-opinion aggregate (present only when NEO_JEV_TRIAGE
+        # ran). Surfaces findings the oracle confirmed but the classifier doubts —
+        # a review shortlist, NOT a suppression list (those findings still report).
+        scored = [f for f in self._findings if isinstance(f.get("jev_probability"), (int, float))]
+        if scored:
+            doubtful = [f for f in scored if f["jev_probability"] < 0.5]
+            summary["jev_triage"] = {
+                "scored": len(scored),
+                "corroborated": sum(1 for f in scored if f["jev_probability"] >= 0.5),
+                "doubtful": len(doubtful),
+                "avg_probability": round(sum(f["jev_probability"] for f in scored) / len(scored), 3),
+                "review_shortlist": [
+                    {"title": f.get("title") or f.get("type", "UNKNOWN"),
+                     "severity": f.get("severity", "UNKNOWN"),
+                     "jev_probability": f["jev_probability"]}
+                    for f in sorted(doubtful, key=lambda x: x["jev_probability"])[:10]
+                ],
+            }
+        return summary
 
     def _coverage_summary(self) -> Dict[str, Any]:
         result: Dict[str, Any] = {}

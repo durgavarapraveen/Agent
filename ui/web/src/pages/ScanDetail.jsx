@@ -17,9 +17,11 @@ import AttackRecordingsPanel from "../components/AttackRecordingsPanel";
 import SurfaceDiffPanel from "../components/SurfaceDiffPanel";
 import SastPanel from "../components/SastPanel";
 import CoveragePanel from "../components/CoveragePanel";
-import WatchdogPanel from "../components/WatchdogPanel";
+import LlmCallsPanel from "../components/LlmCallsPanel";
+import JevDecisionsPanel from "../components/JevDecisionsPanel";
+import MemoryPanel from "../components/MemoryPanel";
 import { OsintSection } from "../components/ReconPanel";
-import { methodColor, asText } from "../components/utils";
+import { methodColor, asText, cleanTitle, cleanUrl, reproSteps } from "../components/utils";
 
 export default function ScanDetail() {
   const { scanId } = useParams();
@@ -49,13 +51,15 @@ export default function ScanDetail() {
     { id: "agents", label: "Parallel Agents" },
     { id: "exploits", label: `Exploits (${exploits.length})` },
     { id: "coverage", label: "Coverage" },
-    { id: "watchdog", label: "Watchdog" },
     { id: "recordings", label: "Recordings" },
     { id: "recon", label: "Recon Data" },
     { id: "tool-outputs", label: "Tool Outputs" },
     { id: "activity", label: "Agent Activity" },
     { id: "collected", label: "Collected Data" },
     { id: "logs", label: "Execution Log" },
+    { id: "llmio", label: "LLM I/O" },
+    { id: "jev", label: "Jev Decisions" },
+    { id: "memory", label: "Memory" },
   ];
 
   return (
@@ -89,13 +93,12 @@ export default function ScanDetail() {
 
       {tab === "chat" && <ScanChatPanel scanId={scanId} />}
       {tab === "overview" && <OverviewTab metadata={metadata} severity_counts={severity_counts} test_results={test_results} scope={scope} context={context} vulns={vulnerabilities} executive_summary={executive_summary} />}
-      {tab === "vulns" && <VulnsTab vulns={vulnerabilities} expanded={expandedVuln} setExpanded={setExpandedVuln} />}
+      {tab === "vulns" && <VulnsTab vulns={vulnerabilities} scanId={scanId} expanded={expandedVuln} setExpanded={setExpandedVuln} />}
       {tab === "osint" && <OsintSection osint={context.osint || {}} />}
       {tab === "access" && <AccessGainedPanel scanId={scanId} />}
       {tab === "agents" && <LiveAgentsPanel scanId={scanId} poll={false} />}
-      {tab === "exploits" && <ExploitsTab exploits={exploits} scanId={scanId} />}
+      {tab === "exploits" && <ExploitsTab exploits={exploits} scanId={scanId} baseTarget={metadata?.target || context?.target || ""} />}
       {tab === "coverage" && <CoveragePanel scanId={scanId} />}
-      {tab === "watchdog" && <WatchdogPanel />}
       {tab === "artifacts" && <ArtifactsPanel scanId={scanId} />}
       {tab === "chains" && <AttackChainsPanel scanId={scanId} />}
       {tab === "chain-analysis" && <ChainAnalysisPanel scanId={scanId} />}
@@ -114,6 +117,9 @@ export default function ScanDetail() {
       {tab === "coverage" && <CoverageTab />}
       {tab === "collected" && <CollectedDataTab scanId={scanId} />}
       {tab === "logs" && <LogsTab scanId={scanId} />}
+      {tab === "llmio" && <LlmCallsPanel scanId={scanId} poll={false} />}
+      {tab === "jev" && <JevDecisionsPanel scanId={scanId} poll={false} />}
+      {tab === "memory" && <MemoryPanel scanId={scanId} />}
     </div>
   );
 }
@@ -286,7 +292,7 @@ function SeverityRow({ label, count, total, color }) {
 }
 
 /* ── Vulnerabilities with Filters ────────────────────────────────────────── */
-function VulnsTab({ vulns, expanded, setExpanded }) {
+function VulnsTab({ vulns, scanId, expanded, setExpanded }) {
   const [search, setSearch] = useState("");
   const [sevFilter, setSevFilter] = useState("ALL");
   const [statusFilter, setStatusFilter] = useState("ALL");
@@ -311,8 +317,15 @@ function VulnsTab({ vulns, expanded, setExpanded }) {
     return true;
   });
 
+  const confOf = (v) => (v._confidence?.score || (v.confidence_score ? v.confidence_score * 100 : 0));
   if (sortBy === "severity") {
-    filtered.sort((a, b) => (sevOrder[(a.severity || "INFO").toUpperCase()] || 4) - (sevOrder[(b.severity || "INFO").toUpperCase()] || 4));
+    // NOTE: use ?? not || — CRITICAL maps to 0, which is falsy, so `|| 4` sent
+    // every CRITICAL to the bottom. Tie-break by confidence desc within a
+    // severity so the strongest findings surface first.
+    filtered.sort((a, b) => {
+      const d = (sevOrder[(a.severity || "INFO").toUpperCase()] ?? 4) - (sevOrder[(b.severity || "INFO").toUpperCase()] ?? 4);
+      return d !== 0 ? d : confOf(b) - confOf(a);
+    });
   } else if (sortBy === "status") {
     filtered.sort((a, b) => (a.status || "").localeCompare(b.status || ""));
   } else if (sortBy === "confidence") {
@@ -360,13 +373,11 @@ function VulnsTab({ vulns, expanded, setExpanded }) {
         <table>
           <thead>
             <tr>
-              <th>ID</th>
-              <th>Title</th>
-              <th>Severity</th>
-              <th>Status</th>
-              <th>Type</th>
-              <th>Tool</th>
-              <th>Confidence</th>
+              {["ID", "Title", "Severity", "Status", "Type", "Tool", "Confidence"].map((h) => (
+                <th key={h} style={{ position: "sticky", top: 0, zIndex: 1,
+                    background: "var(--bg-elev,var(--bg))",
+                    boxShadow: "inset 0 -1px 0 var(--border,#20242c)" }}>{h}</th>
+              ))}
             </tr>
           </thead>
           <tbody>
@@ -376,7 +387,8 @@ function VulnsTab({ vulns, expanded, setExpanded }) {
                 <React.Fragment key={origIdx}>
                   <tr className="click-row" onClick={() => setExpanded(expanded === origIdx ? null : origIdx)}>
                     <td style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--accent)" }}>{v.id || `#${origIdx + 1}`}</td>
-                    <td style={{ color: "var(--text-h)", fontWeight: 500, maxWidth: 300 }}>{v.title}</td>
+                    <td style={{ color: "var(--text-h)", fontWeight: 500, maxWidth: 420,
+                                 wordBreak: "break-word", overflowWrap: "anywhere" }}>{cleanTitle(v.title)}</td>
                     <td><span className={`badge ${(v.severity || "info").toLowerCase()}`}>{v.severity}</span></td>
                     <td><span className={`badge ${(v.status || "unconfirmed").toLowerCase()}`}>{v.status || "UNCONFIRMED"}</span></td>
                     <td style={{ fontSize: 12 }}>{v.type}</td>
@@ -394,7 +406,7 @@ function VulnsTab({ vulns, expanded, setExpanded }) {
                   {expanded === origIdx && (
                     <tr>
                       <td colSpan={7} style={{ padding: 0 }}>
-                        <VulnDetail v={v} />
+                        <VulnDetail v={v} scanId={scanId} />
                       </td>
                     </tr>
                   )}
@@ -428,24 +440,112 @@ function FilterSelect({ label, value, onChange, options }) {
   );
 }
 
-function VulnDetail({ v }) {
+function VulnDetail({ v, scanId }) {
   const [showCritic, setShowCritic] = useState(false);
   const [showCompliance, setShowCompliance] = useState(false);
+  const [rawFinding, setRawFinding] = useState(null);
+  const [rawLoading, setRawLoading] = useState(false);
   const screenshotPath = v.screenshot_path;
   const screenshotFilename = screenshotPath ? screenshotPath.split(/[/\\]/).pop() : null;
 
+  const loadFull = async () => {
+    if (rawFinding) { setRawFinding(null); return; }  // toggle off
+    const fid = v.id || v.finding_id;
+    if (!scanId || !fid) { setRawFinding(v); return; }  // fall back to in-memory
+    setRawLoading(true);
+    try {
+      const full = await api.getFinding(scanId, fid);
+      setRawFinding(full || v);
+    } catch {
+      setRawFinding(v);
+    } finally {
+      setRawLoading(false);
+    }
+  };
+
+  // Download the finding (its payload, extracted stego/hidden data, request,
+  // response, proof, evidence) as a file the operator can keep.
+  const downloadFinding = async () => {
+    const fid = v.id || v.finding_id;
+    let data = v;
+    if (scanId && fid) { try { data = await api.getFinding(scanId, fid); } catch { data = v; } }
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `finding-${fid || (v.type || "vuln")}.json`;
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+  };
+
+  // A downloadable server-side artifact tied to this finding (e.g. extracted
+  // steganography data, uploaded file, PoC). Any of these ids → a direct file link.
+  const artifactId = v.artifact_id || v.evidence_artifact_id ||
+    (v.details && (v.details.artifact_id || v.details.extracted_artifact_id));
+  const artifactHref = (scanId && artifactId)
+    ? `/api/scans/${scanId}/artifacts/${artifactId}?download=true` : null;
+
   return (
     <div style={{ padding: "16px 20px", background: "var(--bg)", borderTop: "1px solid var(--border)" }}>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 8 }}>
+        {artifactHref && (
+          <a href={artifactHref} download
+             style={{ background: "var(--accent)", color: "var(--accent-on,#fff)", borderRadius: 6,
+                      padding: "4px 10px", fontSize: 11, fontWeight: 700, textDecoration: "none" }}>
+            ⬇ Download file
+          </a>
+        )}
+        <button onClick={downloadFinding}
+          style={{ background: "var(--bg-2)", border: "1px solid var(--border)", borderRadius: 6,
+                   padding: "4px 10px", fontSize: 11, fontWeight: 600, color: "var(--text)", cursor: "pointer" }}>
+          ⬇ Download finding
+        </button>
+        <button onClick={loadFull} disabled={rawLoading}
+          style={{ background: "var(--bg-2)", border: "1px solid var(--border)", borderRadius: 6,
+                   padding: "4px 10px", fontSize: 11, fontWeight: 600, color: "var(--text)", cursor: "pointer" }}>
+          {rawLoading ? "Loading…" : rawFinding ? "▾ Hide full finding" : "▸ View full finding (raw)"}
+        </button>
+      </div>
+      {rawFinding && (
+        <pre style={{ ...proofPre, maxHeight: 460, marginBottom: 14 }}>
+          {JSON.stringify(rawFinding, null, 2)}
+        </pre>
+      )}
       {/* How to Reproduce — plain English for pentesters */}
       <div style={{ marginBottom: 16, padding: 12, background: "var(--surface-1, #1a1a2e)", borderRadius: 8, borderLeft: "3px solid var(--accent)" }}>
         <div style={{ fontSize: 12, fontWeight: 600, color: "var(--accent)", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>How to Reproduce</div>
-        <div style={{ fontSize: 13, lineHeight: 1.6, color: "var(--text)" }}>
-          {asText(v.details) || "No reproduction steps available."}
-        </div>
+        {(() => {
+          const stored = asText(v.details);
+          if (stored) return <div style={{ fontSize: 13, lineHeight: 1.6, color: "var(--text)", whiteSpace: "pre-wrap" }}>{stored}</div>;
+          const gen = reproSteps(v);
+          if (!gen) return <div style={{ fontSize: 13, color: "var(--text-dim)" }}>No reproduction steps available.</div>;
+          return (
+            <>
+              <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 6, fontStyle: "italic" }}>
+                Derived from the finding (the probe stored no explicit steps):
+              </div>
+              <div style={{ fontSize: 13, lineHeight: 1.6, color: "var(--text)", whiteSpace: "pre-wrap" }}>{gen.text}</div>
+              {gen.curl && (
+                <pre style={{ marginTop: 8, fontSize: 11, fontFamily: "var(--mono)", background: "var(--bg-2,var(--bg-alt))", color: "var(--text-h)", border: "1px solid var(--border)", padding: 8, borderRadius: 4, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{gen.curl}</pre>
+              )}
+            </>
+          );
+        })()}
+        {v.request && (
+          <div style={{ marginTop: 8 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-dim)", marginBottom: 4 }}>Request sent</div>
+            <pre style={{ fontSize: 12, fontFamily: "var(--mono)", background: "var(--bg-2)", color: "var(--text-h)", border: "1px solid var(--border)", padding: 8, borderRadius: 4, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 220, overflow: "auto" }}>{asText(v.request)}</pre>
+          </div>
+        )}
+        {v.response_snippet && (
+          <div style={{ marginTop: 8 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-dim)", marginBottom: 4 }}>Response received</div>
+            <pre style={{ fontSize: 12, fontFamily: "var(--mono)", background: "var(--bg-2)", color: "var(--text-h)", border: "1px solid var(--border)", padding: 8, borderRadius: 4, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 220, overflow: "auto" }}>{asText(v.response_snippet)}</pre>
+          </div>
+        )}
         {v.evidence && (
           <div style={{ marginTop: 8 }}>
             <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-dim)", marginBottom: 4 }}>Evidence</div>
-            <pre style={{ fontSize: 12, fontFamily: "var(--mono)", background: "var(--surface-2, #0e0e12)", padding: 8, borderRadius: 4, whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 200, overflow: "auto" }}>{asText(v.evidence)}</pre>
+            <pre style={{ fontSize: 12, fontFamily: "var(--mono)", background: "var(--bg-2)", color: "var(--text-h)", border: "1px solid var(--border)", padding: 8, borderRadius: 4, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 220, overflow: "auto" }}>{asText(v.evidence)}</pre>
           </div>
         )}
         {v.curl_command && (
@@ -457,7 +557,7 @@ function VulnDetail({ v }) {
       </div>
 
       <div className="vuln-detail-grid">
-        {(v.location || v.target) && <><span className="lbl">Location</span><span>{v.location || v.target}</span></>}
+        {(v.location || v.target) && <><span className="lbl">Location</span><span style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>{cleanUrl(v.location || v.target)}</span></>}
         {v.target && <><span className="lbl">Target</span><span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{v.target}</span></>}
         {(v.source || v.tool) && <><span className="lbl">Source</span><span>{v.source || v.tool}</span></>}
         {v.cve_id && <><span className="lbl">CVE</span><span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--red)" }}>{asText(v.cve_id)}</span></>}
@@ -591,7 +691,7 @@ function VulnDetail({ v }) {
       {v.remediation && (
         <div style={{ marginTop: 12, padding: 12, background: "var(--surface-1, #1a1a2e)", borderRadius: 8, borderLeft: "3px solid var(--green)" }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: "var(--green)", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>Remediation</div>
-          <div style={{ fontSize: 13, lineHeight: 1.6, color: "var(--text)", whiteSpace: "pre-wrap" }}>{asText(v.remediation)}</div>
+          <div style={{ fontSize: 13, lineHeight: 1.6, color: "var(--text)", whiteSpace: "pre-wrap" }}>{cleanTitle(asText(v.remediation))}</div>
         </div>
       )}
     </div>
@@ -599,7 +699,13 @@ function VulnDetail({ v }) {
 }
 
 /* ── Exploits ────────────────────────────────────────────────────────────── */
-function ExploitsTab({ exploits, scanId }) {
+const proofPre = {
+  margin: 0, padding: 8, background: "var(--bg-2)", color: "var(--text-h)",
+  border: "1px solid var(--border)", borderRadius: 4, maxHeight: 200, overflow: "auto",
+  fontFamily: "var(--mono)", fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-word",
+};
+
+function ExploitsTab({ exploits, scanId, baseTarget = "" }) {
   const [reports, setReports] = useState([]);
   const [expandedReport, setExpandedReport] = useState(null);
 
@@ -623,7 +729,7 @@ function ExploitsTab({ exploits, scanId }) {
         const succeeded = ex.success || ex.exploited || ex.proof_found;
         const title = ex.name || ex.title || ex.vulnerability || ex.vuln_id
           || (ex.type ? `${ex.type} Exploit` : `Exploit #${i + 1}`);
-        const target = ex.target || ex.url || ex.location || "-";
+        const target = cleanUrl(ex.target || ex.url || ex.location || ex.endpoint || "") || cleanUrl(baseTarget) || "-";
         const method = ex.method || ex.technique || ex.type || "-";
         const tool = ex.tool || ex.source || ex.source_agent || ex.agent || ex.sandbox
           || (ex.chain_id ? `Chain ${ex.chain_id}` : "-");
@@ -633,8 +739,9 @@ function ExploitsTab({ exploits, scanId }) {
         const details = ex.details || [];
         const step = ex.step ? `Step ${ex.step}` : "";
 
-        // Generate human-readable reproduction steps
-        const howTo = _buildHowToReproduce(ex);
+        // Generate human-readable reproduction steps (fall back to the scan's
+        // base target when the exploit record has no specific endpoint).
+        const howTo = _buildHowToReproduce({ ...ex, target: ex.target || ex.url || ex.location || ex.endpoint || baseTarget });
 
         return (
           <div key={i} className="card" style={{ margin: "0 0 12px" }}>
@@ -681,11 +788,23 @@ function ExploitsTab({ exploits, scanId }) {
               </>}
               {payload && <>
                 <span className="lbl">Payload</span>
-                <pre className="code-block" style={{ maxHeight: 120, margin: 0, whiteSpace: "pre-wrap" }}>{payload}</pre>
+                <pre style={proofPre}>{payload}</pre>
+              </>}
+              {ex.request && <>
+                <span className="lbl">Request sent</span>
+                <pre style={proofPre}>{asText(ex.request)}</pre>
+              </>}
+              {ex.response_snippet && <>
+                <span className="lbl">Response</span>
+                <pre style={proofPre}>{asText(ex.response_snippet)}</pre>
+              </>}
+              {ex.curl_command && <>
+                <span className="lbl">cURL</span>
+                <pre style={proofPre}>{asText(ex.curl_command)}</pre>
               </>}
               {proof && <>
                 <span className="lbl">Proof</span>
-                <pre className="code-block" style={{ maxHeight: 200, margin: 0, whiteSpace: "pre-wrap" }}>{typeof proof === "string" ? proof : JSON.stringify(proof, null, 2)}</pre>
+                <pre style={{ ...proofPre, maxHeight: 240 }}>{typeof proof === "string" ? proof : JSON.stringify(proof, null, 2)}</pre>
               </>}
               {error && <>
                 <span className="lbl">Error</span>
@@ -802,9 +921,11 @@ function _buildHowToReproduce(ex) {
   const type = [ex.sub_type, ex.type, ex.vuln_type, ex.method,
                 ex.title, ex.name, ex.vulnerability]
     .filter(Boolean).join(" ").toLowerCase();
-  const target = ex.target || ex.url || ex.location || "the target";
+  const rawTarget = ex.target || ex.url || ex.location || ex.endpoint || "";
+  const target = cleanUrl(rawTarget) || "the target";
   const chain = ex.chain_id || "";
   const proof = typeof ex.proof === "string" ? ex.proof : "";
+  const payload = typeof ex.payload === "string" ? ex.payload : "";
 
   if ((type.includes("source") && type.includes("map")) || type.includes("sourcemap")) {
     add(`Fetch the source map directly: curl -s ${target}`,
@@ -855,6 +976,16 @@ function _buildHowToReproduce(ex) {
     steps.push("Test with a single quote: add ' to the parameter and check for SQL errors");
     steps.push("Try boolean-based detection: parameter=value' AND 1=1-- vs parameter=value' AND 1=2--");
     steps.push("Use sqlmap for automated exploitation: sqlmap -u \"URL\" --dbs");
+  } else if (type.includes("upload") || /\.(php\d?|phtml|phar|jsp|asp|aspx|svg|html?)\b/i.test(type)) {
+    const m = payload.match(/Uploaded\s+(\S+?)\s+via\s+field\s+'([^']+)'/i);
+    const fname = (m && m[1]) || "shell.php5";
+    const field = (m && m[2]) || "file";
+    steps.push(`Prepare a malicious file (${fname}) containing a web-shell / payload for the server's runtime`);
+    steps.push(`Upload it as multipart/form-data in the '${field}' field to the upload endpoint${rawTarget ? `: ${target}` : ""}`);
+    steps.push(proof ? `Server accepted it — evidence: ${proof.slice(0, 180)}` : "Confirm the server accepts the dangerous extension (no allow-list / content-type check)");
+    steps.push("Find the stored file's URL in the upload response (or by browsing the uploads path), then request it");
+    steps.push("If the server executes the file (e.g. PHP/PHTML runs), you have remote code execution — otherwise it's stored-XSS/content-spoofing depending on type");
+    steps.push(`Example: curl -F "${field}=@${fname}" ${rawTarget ? target : "<upload-endpoint>"}  then  curl -s <stored-file-url>`);
   } else {
     add(`Request the resource: curl -s -D - ${target}`,
         proof ? `Confirm the observed evidence: ${proof.slice(0, 180)}`
@@ -1070,7 +1201,7 @@ function LogsTab({ scanId }) {
       <pre style={{
         background: "var(--bg-alt)", color: "var(--text)", border: "1px solid var(--border)", padding: 16, borderRadius: "var(--radius-sm)",
         fontSize: 12, fontFamily: "var(--mono)", lineHeight: 1.6, maxHeight: 600,
-        overflowY: "auto", overflowX: "auto", whiteSpace: "pre", margin: 0,
+        overflowY: "auto", overflowX: "hidden", whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: 0,
       }}>
         {lines.join("\n")}
       </pre>

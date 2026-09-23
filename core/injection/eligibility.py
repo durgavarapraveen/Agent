@@ -2,6 +2,8 @@ from typing import List, Optional
 from core.domain.endpoint import Endpoint
 from core.domain.identity import Identity
 from core.injection.models import InjectionTest
+from core.common import target_shape as ts
+from core.orchestration import scan_mode
 import uuid
 
 class InjectionEligibilityChecker:
@@ -40,8 +42,9 @@ class InjectionEligibilityChecker:
                 parameter_name=parameter_name
             ))
             
-        # Path Traversal
-        if "GET" in method_set and "file" in parameter_name.lower():
+        # Path Traversal — semantic file-param classification (name/value shape),
+        # not a bare "file" substring gate.
+        if "GET" in method_set and ts.is_file_param(parameter_name):
             applicable.append(InjectionTest(
                 test_id=str(uuid.uuid4()),
                 name="Path Traversal Test",
@@ -50,8 +53,11 @@ class InjectionEligibilityChecker:
                 parameter_name=parameter_name
             ))
             
-        # Command Injection
-        if "POST" in method_set and "cmd" in parameter_name.lower():
+        # Command Injection — cmd-name is only a weak hint (cmd-i can live in any
+        # param). Fire on the hint, or on any param outside FAST mode.
+        if "POST" in method_set and (
+            ts.is_cmd_param(parameter_name) or scan_mode.mode() != scan_mode.FAST
+        ):
             applicable.append(InjectionTest(
                 test_id=str(uuid.uuid4()),
                 name="Command Injection Test",

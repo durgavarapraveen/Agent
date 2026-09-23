@@ -94,6 +94,9 @@ REGISTRY: List[ProbeSpec] = [
     ProbeSpec("file_upload_probe", "core.exploitation.file_upload_probe", "run_file_upload_probe", F.FILE_UPLOAD, S),
     ProbeSpec("cache_poison_probe", "core.exploitation.cache_poison_probe", "run_cache_poison_probe", F.INFRA_CONFIG, J),
     ProbeSpec("ssti_probe", "core.exploitation.ssti_probe", "run_ssti_probe", F.INJECTION, J),
+    ProbeSpec("xss_probe", "core.exploitation.xss_probe", "run_xss_probe", F.INJECTION, J),
+    ProbeSpec("jwt_probe", "core.exploitation.jwt_probe", "run_jwt_probe", F.AUTH_SESSION, J),
+    ProbeSpec("lfi_probe", "core.exploitation.lfi_probe", "run_lfi_probe", F.INJECTION, J),
     ProbeSpec("xxe_probe", "core.exploitation.xxe_probe", "run_xxe_probe", F.INJECTION, J),
     ProbeSpec("mass_assign_probe", "core.exploitation.mass_assign_probe", "run_mass_assign_probe", F.API, J),
     ProbeSpec("rate_limit_probe", "core.exploitation.rate_limit_probe", "run_rate_limit_probe", F.RATE_LIMIT, J),
@@ -106,6 +109,10 @@ REGISTRY: List[ProbeSpec] = [
     ProbeSpec("dns_rebind_probe", "core.exploitation.dns_rebind_probe", "run_dns_rebind_probe", F.API, J),
     ProbeSpec("prototype_pollution_probe", "core.exploitation.prototype_pollution_probe", "run_prototype_pollution_probe", F.INJECTION, J),
     ProbeSpec("logging_detect_probe", "core.exploitation.logging_detect_probe", "run_logging_detect_probe", F.INFRA_CONFIG, J),
+    ProbeSpec("vuln_components_probe", "core.exploitation.vuln_components_probe", "run_vuln_components_probe", F.INFRA_CONFIG, J),
+    ProbeSpec("typosquat_probe", "core.exploitation.typosquat_probe", "run_typosquat_probe", F.INFRA_CONFIG, J),
+    ProbeSpec("route_disclosure_probe", "core.exploitation.route_disclosure_probe", "run_route_disclosure_probe", F.INFRA_CONFIG, J),
+    ProbeSpec("auth_flow_probe", "core.exploitation.auth_flow_probe", "run_auth_flow_probe", F.AUTH_SESSION, S),
     # Browser lane (shared Playwright — serial):
     ProbeSpec("chatbot_exploit", "core.exploitation.chatbot_exploit", "run_chatbot_exploit", F.API, S, "browser"),
     ProbeSpec("browser_agent", "core.actuation.browser_agent", "run_browser_agent", F.INJECTION, S, "browser"),
@@ -252,8 +259,9 @@ async def _run_one(brain, spec: ProbeSpec, browser_lock=None) -> int:
         try:
             ctx.add_vulnerability(f)
             added += 1
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("[%s] dropped a finding on add_vulnerability: %s (%r)",
+                         spec.name, e, (f.get("type") if isinstance(f, dict) else type(f).__name__))
     if findings:
         logger.info("[%s] %d findings (tier=%s family=%s)",
                     spec.name, len(findings), spec.tier.value, spec.family.value)
@@ -726,6 +734,78 @@ def family_for_signal(text: str):
         if any(k in t for k in kws):
             return fam
     return None
+
+
+# Jev routes to EVERY vulnerability family, not a curated subset — a general
+# scanner must never hardcode-skip a family (the right answer differs per site).
+# Derived from the TestFamily enum so new families are covered automatically.
+# Jev's advantage over the keyword matcher is exactly this: it can recognise a
+# family (race / crypto / rate_limit / cloud / ssl_tls / infra_config / …) from
+# a surface signal the keyword list can't. If a routed family has no probes yet,
+# that surfaces as a logged coverage gap (below) rather than a silent skip.
+_JEV_FAMILY_OPTIONS = {f.value: f for f in TestFamily}
+
+
+async def classify_family_jev(text: str, *, scan_id: str = "", cost_log=None):
+    """Opt-in Jev fallback: recover a TestFamily from a surface signal the cheap
+    keyword matcher missed. Returns a TestFamily or None. Best-effort — any
+    failure (no key, outage) yields None so the caller just skips the signal.
+    Gated by NEO_JEV_ROUTING + JEV_API_KEY."""
+    from core.llm.jev_config import jev_routing_enabled
+    if not text or not jev_routing_enabled():
+        return None
+    try:
+        from agents.providers.jev_classifier import get_jev
+        jev = get_jev(cost_log=cost_log, scan_id=scan_id)
+        if jev is None:
+            return None
+        value, prob = await jev.choice(
+            text,
+            "Which web-app vulnerability test family best fits this endpoint/"
+            "surface signal? Choose 'none' if NO known family fits — including a "
+            "vulnerability class not in the list.",
+            list(_JEV_FAMILY_OPTIONS.keys()) + ["none"], site="routing")
+        val = str(value or "").strip().lower()
+        if val and val != "none" and prob >= 0.5:
+            fam = _JEV_FAMILY_OPTIONS.get(val)
+            if fam is not None and any(s.family is fam for s in REGISTRY):
+                return fam
+            # Known family but NO probe registered (or unknown label): it cannot be
+            # fast-routed — spawn_family_team would no-op AND, since it never claims
+            # the family, re-fire every recon cycle wasting a spawn slot. Treat it
+            # like a novel surface: surface the gap once, return None.
+            _surface_novel_family(text, val, prob, scan_id)
+            return None
+        # No known family fits (Jev said 'none', or was unsure). The fixed 14
+        # families cannot express a genuinely NEW vulnerability class, so instead
+        # of silently dropping the endpoint we SURFACE it as a novel-surface gap:
+        # the agentic loop + UniversalProbeEngine still test it generically, and a
+        # human/operator can add a family+probe to cover the class going forward.
+        _surface_novel_family(text, val, prob, scan_id)
+    except Exception:
+        return None
+    return None
+
+
+def _surface_novel_family(text: str, value: str, prob: float, scan_id: str) -> None:
+    """Record an endpoint that fits none of the known families, so a novel vuln
+    class is never silently skipped. Logs + posts to the blackboard (UI-visible);
+    best-effort, never raises."""
+    logger.warning("[Jev] novel surface — no known family fits %r (jev=%s p=%.2f). "
+                   "Left to the agentic loop / UPE; add a family+probe to fast-route "
+                   "it in future.", text[:200], value or "none", prob)
+    if not scan_id:
+        return
+    try:
+        from core.orchestration import blackboard
+        blackboard.post(scan_id, agent_id="jev_router", kind="note",
+                        title="Novel surface: no known vuln family fits",
+                        data={"signal": text[:400], "jev_choice": value or "none",
+                              "confidence": round(float(prob), 3),
+                              "action": "generic agentic/UPE testing; consider a new family+probe"},
+                        ref=f"jev_novel:{text[:180]}")
+    except Exception:
+        pass
 
 
 async def spawn_family_team(brain, family: TestFamily, *, reason: str = "") -> int:

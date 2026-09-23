@@ -36,11 +36,20 @@ logger = logging.getLogger(__name__)
 
 
 def _kali_available() -> bool:
-    """True if the Kali tool container is up (binaries live there, not on the
-    host PATH — critical on Windows where nuclei/sqlmap/dalfox aren't local)."""
+    """True if the Kali tool container is (or can be) up — binaries live there,
+    not on the host PATH (critical on Windows where nuclei/sqlmap/dalfox aren't
+    local).
+
+    P0-D1: auto_create=True. With auto_create=False, a container that simply
+    wasn't running yet made this return False, so the probe short-circuited to
+    `binary_not_found` and NEVER built/ran the command (dalfox never dispatched,
+    sqlmap reported exit_code=-1). `_run_cmd` already dispatches via
+    KaliDockerExecutor.run (which auto-creates), so gating on a *running*
+    container here was the self-inflicted failure. Creating it on demand makes
+    availability consistent with actual dispatch."""
     try:
         from agents.kali_executor import KaliDockerExecutor
-        return bool(KaliDockerExecutor.get_container(auto_create=False))
+        return bool(KaliDockerExecutor.get_container(auto_create=True))
     except Exception:
         return False
 
@@ -82,6 +91,30 @@ def _missing_binary_result(tool: str, binary: str, start: float) -> ToolResult:
         evidence=f"binary_not_found:{binary}",
         execution_time_ms=duration,
     )
+
+
+def _dalfox_query_params(endpoint: Endpoint, cap: int = 6) -> List[str]:
+    """F-X3: query-param names to give dalfox a reflected-XSS surface. Prefer the
+    endpoint's OWN declared query parameters; fall back to a generic, app-agnostic
+    reflected-param vocab (search/redirect/file names) — never target-specific."""
+    names: List[str] = []
+    for p in (getattr(endpoint, "parameters", None) or []):
+        try:
+            if str(getattr(p, "parameter_type", "")).lower().endswith("query") and p.name:
+                names.append(p.name)
+        except Exception:
+            continue
+    if not names:
+        try:
+            from core.common import target_shape as ts
+            names = ["q", "id"] + sorted(ts._SEARCH_NAMES)[:2] + sorted(ts._REDIRECT_NAMES)[:1]
+        except Exception:
+            names = ["q", "id", "search", "redirect"]
+    seen: List[str] = []
+    for n in names:
+        if n and n not in seen:
+            seen.append(n)
+    return seen[:cap]
 
 
 class BaseAdapter:
@@ -349,13 +382,32 @@ class DalfoxAdapter(BaseAdapter):
                               evidence="skipped: SPA catch-all route",
                               execution_time_ms=(time.time() - start) * 1000)
 
-        # Mine params/DOM sinks so param-less SPA URLs still get tested (bare
-        # `dalfox url` on a param-less URL exits non-zero with nothing = the
-        # "Tool dalfox failed" no_result we were seeing). Follow redirects and
-        # cap workers to stay WAF-polite.
+        # F-X3: dalfox `url` mode issues GET requests. A POST-only endpoint (e.g. a
+        # JSON write API) can't be tested this way — pointing dalfox at it just
+        # times out / returns no_result. Skip it (DOM-XSS on those is covered by the
+        # browser-driven dom_sink_monitor).
+        methods = {str(m).upper() for m in (getattr(self.endpoint, "method_set", None) or [])}
+        if methods and "GET" not in methods:
+            return ToolResult(tool_name=self.tool_name, status=ToolStatus.ERROR,
+                              evidence=f"skipped: no GET method (methods={sorted(methods)})",
+                              execution_time_ms=(time.time() - start) * 1000)
+
+        # F-X3: reflected XSS needs a query surface. If the URL carries no query
+        # string, synthesize one from the endpoint's declared query parameters, or
+        # (none declared) a generic, app-agnostic reflected-param vocab — so dalfox
+        # has values to mutate instead of scanning a bare, param-less URL.
+        if "?" not in url:
+            names = _dalfox_query_params(self.endpoint)
+            if names:
+                url = url + "?" + "&".join(f"{n}=1" for n in names)
+
+        # Param + DOM mining and DOM-XSS AST analysis are DEFAULT-ON in current
+        # dalfox (the old `--mining-dom`/`--mining-dict`/`--deep-domxss` flags were
+        # removed — they now only exist as `--skip-*` opt-outs, and `--worker` is
+        # now `--workers`). So we just follow redirects + throttle; mining happens
+        # automatically. (Older flags caused rc=2 "unexpected argument".)
         cmd = ["dalfox", "url", "--url", url,
-               "--mining-dom", "--mining-dict", "--deep-domxss",
-               "--follow-redirects", "--worker", "10", "--delay", "50"]
+               "--follow-redirects", "--workers", "10", "--delay", "50"]
 
         try:
             result = _run_cmd(cmd, 120.0)

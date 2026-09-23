@@ -45,12 +45,27 @@ class RewardPolicy:
         return f"{(strategy or 'default').lower()}|{(test_type or 'any').lower()}"
 
     def _load(self) -> None:
+        # Primary store is the DB (learned_reward_policy). One-time migration:
+        # if the DB is empty but the legacy data/learning/reward_policy.json
+        # exists, import it into the DB and delete the file.
         try:
-            if self.policy_file.exists():
-                with open(self.policy_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                self._policy = data.get("policy", {})
-                self._total_pulls = int(data.get("total_pulls", 0))
+            from core.database.pg_store import RewardPolicyRepo
+            data = RewardPolicyRepo.load()
+            self._policy = data.get("policy", {}) or {}
+            self._total_pulls = int(data.get("total_pulls", 0) or 0)
+            if not self._policy and self.policy_file.exists():
+                try:
+                    with open(self.policy_file, "r", encoding="utf-8") as f:
+                        legacy = json.load(f)
+                    self._policy = legacy.get("policy", {}) or {}
+                    self._total_pulls = int(legacy.get("total_pulls", 0) or 0)
+                    if self._policy and RewardPolicyRepo.save(self._policy, self._total_pulls):
+                        logger.info("[RewardPolicy] migrated %d strategy stats from json → DB",
+                                    len(self._policy))
+                    self.policy_file.unlink()
+                except Exception as e:
+                    logger.debug(f"[RewardPolicy] json migration skipped: {e}")
+            if self._policy:
                 logger.info(f"[RewardPolicy] loaded {len(self._policy)} strategy stats "
                             f"({self._total_pulls} total pulls)")
         except Exception as e:
@@ -59,14 +74,10 @@ class RewardPolicy:
 
     def _persist(self) -> None:
         try:
-            self.policy_file.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.policy_file.with_suffix(".tmp")
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"policy": self._policy, "total_pulls": self._total_pulls,
-                           "updated_at": time.time()}, f, indent=2, default=str)
-            tmp.replace(self.policy_file)
+            from core.database.pg_store import RewardPolicyRepo
+            RewardPolicyRepo.save(self._policy, self._total_pulls)
         except Exception as e:
-            logger.error(f"[RewardPolicy] persist error: {e}")
+            logger.debug(f"[RewardPolicy] persist error: {e}")
 
 
     def record_outcome(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -61,7 +62,13 @@ def _load_fact_index(scan_id: str) -> Dict[str, Any]:
             {"sev": (v.get("severity") or "INFO").upper(),
              "title": v.get("title", ""),
              "loc": v.get("location") or v.get("target", ""),
-             "type": v.get("type", "")}
+             "type": v.get("type", ""),
+             # The captured proof already embeds the REQUEST (incl. the exact
+             # payload sent) AND the RESPONSE, so one compact field lets the chat
+             # answer "…with proof" and "show the payload you used" without
+             # overflowing the fact-index budget.
+             "proof": (str(v.get("proof") or v.get("evidence")
+                           or v.get("request") or "")[:260] or None)}
             for v in vulns[:MAX_VULN_INDEX]
         ],
         "access_gained": [
@@ -109,6 +116,53 @@ def _build_stable_prefix(scan_id: str) -> str:
     return "\n".join(parts)
 
 
+# Per-question retrieval: the fact index keeps only a short proof preview so the
+# cached prefix stays small, but when the operator asks about a specific finding
+# ("show the polyglot payload", "the SQLi request"), we fetch the FULL proof for
+# the matching findings and add it to THAT request only. This is how full,
+# verbatim payloads reach the answer without bloating every call.
+_FULL_PROOF_CAP = 4000     # per matched finding
+_MAX_RETRIEVED = 6
+
+
+def _retrieve_full_proof(scan_id: str, message: str) -> str:
+    try:
+        from core.database.pg_store import VulnRepo
+        vulns = VulnRepo.get_by_scan(scan_id) or []
+    except Exception:
+        return ""
+    terms = {w for w in re.findall(r"[a-z0-9_]{3,}", (message or "").lower())}
+    # Drop generic words so "show me the payload" doesn't match everything.
+    terms -= {"show", "the", "and", "for", "with", "you", "used", "give", "list",
+              "what", "which", "how", "did", "was", "are", "get", "me", "payload",
+              "proof", "request", "response", "endpoint", "vulnerability", "finding"}
+    if not terms:
+        return ""
+    scored = []
+    for v in vulns:
+        hay = " ".join(str(v.get(k, "")) for k in
+                       ("title", "type", "vuln_type", "sub_type", "location",
+                        "target", "source", "tool")).lower()
+        score = sum(1 for t in terms if t in hay)
+        if score:
+            scored.append((score, v))
+    if not scored:
+        return ""
+    scored.sort(key=lambda x: -x[0])
+    blocks = []
+    for _, v in scored[:_MAX_RETRIEVED]:
+        proof = str(v.get("proof") or v.get("request") or v.get("evidence") or "")
+        if not proof:
+            continue
+        blocks.append(f"### {v.get('title', 'finding')}  [{(v.get('severity') or '').upper()}]\n"
+                      f"{proof[:_FULL_PROOF_CAP]}")
+    if not blocks:
+        return ""
+    from core.llm.prompt_safety import fence_untrusted
+    return "\n\n" + fence_untrusted("\n\n".join(blocks),
+                                    label="retrieved_full_proof", max_chars=24_000)
+
+
 async def answer_question(scan_id: str, message: str,
                             history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     from agents.llm_harness_adapter import get_llm, initialize_llm
@@ -132,7 +186,10 @@ async def answer_question(scan_id: str, message: str,
     convo_lines.append(f"OPERATOR: {message[:2000]}")
     convo_lines.append("ANALYST:")
     conversation = "\n\n".join(convo_lines)
-    full_prompt = stable_prefix + "\n\n" + conversation
+    # Pull full, verbatim proof for findings this question is about (kept out of
+    # the cached prefix so it only costs tokens when relevant).
+    retrieved = _retrieve_full_proof(scan_id, message)
+    full_prompt = stable_prefix + retrieved + "\n\n" + conversation
 
     try:
         from agents.universal_llm_harness import TaskTier

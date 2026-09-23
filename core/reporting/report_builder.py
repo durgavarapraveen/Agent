@@ -100,14 +100,21 @@ class CustomReportBuilder:
         masked_findings = []
 
         for v in vulnerabilities:
-            masked_findings.append({
+            row = {
                 "cve": v.get("cve") or v.get("cve_id") or v.get("id", "N/A"),
                 "title": mask_sensitive_data(str(v.get("title", v.get("type", ""))), mask_sensitive),
                 "severity": v.get("severity", "MEDIUM"),
                 "risk_score": v.get("risk_score", 5.0),
                 "remediation": mask_sensitive_data(str(v.get("remediation", "")), mask_sensitive),
                 "estimated_hours": v.get("estimated_hours", 4)
-            })
+            }
+            # Jev triage second-opinion (present only when NEO_JEV_TRIAGE ran). A
+            # calibrated confirmation probability from the System-One classifier —
+            # low values flag a likely false positive the oracle still confirmed.
+            if v.get("jev_probability") is not None:
+                row["jev_probability"] = v.get("jev_probability")
+                row["jev_confirmed"] = v.get("jev_confirmed")
+            masked_findings.append(row)
 
         data = {
             "scan_id": scan_id,
@@ -144,7 +151,12 @@ class CustomReportBuilder:
         else:
             lines.append("- Apply standard security patches and input validation.")
 
-        lines.extend(["\n## Validated Findings Table\n", "| Severity | CVE / ID | Title | Risk Score | Remediation |", "| --- | --- | --- | --- | --- |"])
+        _has_jev = any(v.get("jev_probability") is not None for v in vulnerabilities)
+        _jc = " Jev Conf. |" if _has_jev else ""
+        _jd = " --- |" if _has_jev else ""
+        lines.extend(["\n## Validated Findings Table\n",
+                      f"| Severity | CVE / ID | Title | Risk Score |{_jc} Remediation |",
+                      f"| --- | --- | --- | --- |{_jd} --- |"])
 
         for v in vulnerabilities:
             sev = v.get("severity", "MEDIUM")
@@ -152,7 +164,11 @@ class CustomReportBuilder:
             title = mask_sensitive_data(str(v.get("title", v.get("type", ""))), mask_sensitive)
             score = v.get("risk_score", 5.0)
             rem = mask_sensitive_data(str(v.get("remediation", ""))[:100], mask_sensitive)
-            lines.append(f"| {sev} | {cve} | {title} | {score} | {rem} |")
+            jev_cell = ""
+            if _has_jev:
+                jp = v.get("jev_probability")
+                jev_cell = f" {jp:.0%} |" if isinstance(jp, (int, float)) else " — |"
+            lines.append(f"| {sev} | {cve} | {title} | {score} |{jev_cell} {rem} |")
 
         # Compliance mapping section if configured
         if "compliance_mapping" in self.config.get("sections_to_include", []):
@@ -169,6 +185,8 @@ class CustomReportBuilder:
         masked_target = mask_sensitive_data(target, mask_sensitive)
         comp_mapping = self.build_compliance_mapping(vulnerabilities)
 
+        _has_jev = any(v.get("jev_probability") is not None for v in vulnerabilities)
+        jev_th = "<th>Jev Conf.</th>" if _has_jev else ""
         rows = []
         for v in vulnerabilities:
             sev = str(v.get("severity", "MEDIUM")).upper()
@@ -177,13 +195,18 @@ class CustomReportBuilder:
             score = v.get("risk_score", 5.0)
             rem = html.escape(mask_sensitive_data(str(v.get("remediation", "")), mask_sensitive))
             hours = v.get("estimated_hours", 4)
+            jev_td = ""
+            if _has_jev:
+                jp = v.get("jev_probability")
+                jev_td = (f"<td>{jp:.0%}</td>" if isinstance(jp, (int, float)) else "<td>—</td>")
             rows.append(
                 f"<tr><td><span class='badge {sev.lower()}'>{sev}</span></td>"
                 f"<td>{html.escape(str(cve))}</td><td>{title}</td><td>{score}</td>"
-                f"<td>{rem}</td><td>{hours} hrs</td></tr>"
+                f"{jev_td}<td>{rem}</td><td>{hours} hrs</td></tr>"
             )
 
-        rows_html = "".join(rows) if rows else "<tr><td colspan='6'>No findings recorded.</td></tr>"
+        _ncols = 7 if _has_jev else 6
+        rows_html = "".join(rows) if rows else f"<tr><td colspan='{_ncols}'>No findings recorded.</td></tr>"
 
         # Chart.js counts
         counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
@@ -268,7 +291,7 @@ class CustomReportBuilder:
     <h2>Interactive Findings Table</h2>
     <table id="findingsTable" class="display" style="width:100%">
       <thead>
-        <tr><th>Severity</th><th>CVE / ID</th><th>Title</th><th>Risk Score</th><th>Remediation</th><th>Effort</th></tr>
+        <tr><th>Severity</th><th>CVE / ID</th><th>Title</th><th>Risk Score</th>{jev_th}<th>Remediation</th><th>Effort</th></tr>
       </thead>
       <tbody>
         {rows_html}

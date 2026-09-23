@@ -1,4 +1,5 @@
 import json
+import re as _re
 import threading
 from typing import Dict, List, Optional, Any
 from datetime import datetime as _dt
@@ -10,6 +11,45 @@ from core.coverage.coverage_state import CoverageStateV2
 from core.attack_surface.attack_surface_state import AttackSurfaceState
 
 logger = logging.getLogger(__name__)
+
+# E1/E4: repair endpoint URLs corrupted upstream before they are stored/probed:
+#   - a leading HTTP-method prefix   "GET:https://…"      → "https://…"
+#   - a method-shaped double scheme   "get://https://…"    → "https://…"
+#   - a client-side SPA hash route    "https://h/#/admin"  → "https://h/"
+# Iterative so stacked prefixes ("GET:get://https://…") unwind fully. Generic —
+# no target specifics. Returns "" for un-rendered template junk ("${x}", "{{y}}").
+def _sanitize_endpoint_url(raw: str) -> str:
+    # Un-stack METHOD:/pseudo-scheme prefixes via the shared url_hygiene primitive
+    # (single source of truth for that unwind), then keep this function's own
+    # contract: pass relative paths through unchanged, drop SPA hash fragments,
+    # reject un-rendered template junk.
+    if not raw or "://" not in raw:
+        return raw or ""
+    from core.common.url_hygiene import _strip_stacked_prefixes
+    u = _strip_stacked_prefixes(raw.strip()).strip()
+    # Drop SPA client-route hash fragment — it is not a server request target.
+    if "#" in u:
+        u = u.split("#", 1)[0]
+    if "${" in u or "{{" in u or "`" in u:
+        return ""
+    return u
+
+
+def _dedup_endpoint_location(loc: str) -> str:
+    """Canonical finding-location key (E3): scheme://host/path + sorted parameter
+    NAMES, query values dropped. So /x?id=1 and /x?id=2 dedup, while /x?id and
+    /x?token stay distinct. Falls back to the raw lowercased string on error."""
+    loc = _sanitize_endpoint_url(loc or "")
+    try:
+        from urllib.parse import urlsplit, parse_qsl
+        s = urlsplit(loc)
+        if not s.scheme:
+            return (loc or "").lower()
+        names = sorted({k for k, _ in parse_qsl(s.query, keep_blank_values=True)})
+        base = f"{s.scheme}://{s.netloc}{s.path}".lower().rstrip("/")
+        return base + ("?" + ",".join(names) if names else "")
+    except Exception:
+        return (loc or "").lower()
 
 
 class SharedContextV2:
@@ -135,9 +175,19 @@ class SharedContextV2:
             return str(loc).lower()
 
     def add_vulnerability(self, vuln: Dict):
+        # E2: never store a blank type — derive one from the finding's own fields
+        # so it can't land as an untyped row. Generic; no fixed vocabulary.
+        if not (vuln.get("type") or "").strip():
+            derived = (vuln.get("category") or vuln.get("attack_type")
+                       or vuln.get("vuln_type") or vuln.get("sub_type") or "").strip()
+            vuln["type"] = derived or "UNCATEGORIZED"
         title = (vuln.get("title") or "").lower()
-        vtype = (vuln.get("type") or "").upper()
+        vtype = (vuln.get("type") or "UNCATEGORIZED").upper()
         location = (vuln.get("location") or vuln.get("target") or "").lower()
+        # E3: dedup on the endpoint route + parameter NAMES, dropping query values,
+        # so the same bug reported on /x?id=1 and /x?id=2 collapses to one finding
+        # (without merging genuinely different parameters).
+        _norm_loc = _dedup_endpoint_location(location)
         host = self._vuln_host(vuln)
         host_level = vtype in self._HOST_LEVEL_TYPES or (
             "header" in title and "missing" in title)
@@ -147,7 +197,8 @@ class SharedContextV2:
                 e_title = (existing.get("title") or "").lower()
                 e_type = (existing.get("type") or "").upper()
                 e_loc = (existing.get("location") or existing.get("target") or "").lower()
-                if e_title == title and e_type == vtype and e_loc == location:
+                if e_title == title and e_type == vtype and \
+                        _dedup_endpoint_location(e_loc) == _norm_loc:
                     return
                 # P1-11 / P1.14: same host-level control on the same host → one
                 # root finding. Preserve the per-endpoint evidence by recording
@@ -261,15 +312,15 @@ class SharedContextV2:
     @staticmethod
     def _endpoint_url(ep) -> str:
         if isinstance(ep, str):
-            return ep
+            return _sanitize_endpoint_url(ep)
         if isinstance(ep, dict):
-            return ep.get("url") or ep.get("name") or ""
-        return getattr(ep, "url", "") or ""
+            return _sanitize_endpoint_url(ep.get("url") or ep.get("name") or "")
+        return _sanitize_endpoint_url(getattr(ep, "url", "") or "")
 
     @staticmethod
     def canonical_endpoint_id(method: str, url: str) -> str:
         from core.domain.endpoint import canonical_endpoint_key
-        return canonical_endpoint_key(method, url)
+        return canonical_endpoint_key(method, _sanitize_endpoint_url(url))
 
     # P1.12: probe artifacts the scanner itself generates — must never become
     # normal attack-surface discoveries.
@@ -342,6 +393,7 @@ class SharedContextV2:
         return False      # bare token / constant / i18n key → not an endpoint
 
     def add_endpoints(self, eps: List, source: str = None):
+        _newly_added: List[str] = []
         with self._state_lock:
             for ep in eps:
                 # Discovery hygiene: drop scraped strings that aren't endpoints
@@ -380,8 +432,30 @@ class SharedContextV2:
                 else:
                     eid = getattr(ep, "endpoint_id", None) or self.canonical_endpoint_id(
                         getattr(ep, "method", "GET"), getattr(ep, "url", str(ep)))
+                # Store the sanitized URL too, not just a clean id, so the surface
+                # classifier and probes don't re-derive corrupted targets (E1/E4).
+                if isinstance(ep, dict) and ep.get("url"):
+                    ep["url"] = _sanitize_endpoint_url(ep["url"])
+                elif isinstance(ep, str):
+                    ep = _sanitize_endpoint_url(ep)
                 if eid not in self.endpoints:
                     self.endpoints[eid] = ep
+                    _newly_added.append(str(eid))
+        # Broadcast newly-discovered attack surface to the shared blackboard so
+        # other agents can pick it up (kind="tool"). One concise post per batch,
+        # not per endpoint; skip trivial single adds to keep the board readable.
+        if len(_newly_added) >= 3:
+            try:
+                from core.orchestration import blackboard as _bb
+                _sid = getattr(self, "scan_id", "") or getattr(self, "_scan_id", "")
+                _preview = ", ".join(e.split("://")[-1][:80] for e in _newly_added[:10])
+                _bb.post(_sid, source or "recon", "tool",
+                         f"Discovered {len(_newly_added)} new endpoints",
+                         data={"count": len(_newly_added), "source": source or "",
+                               "sample": _newly_added[:20]},
+                         ref=f"surface:{source or 'recon'}:{len(self.endpoints)}")
+            except Exception:
+                pass
 
     def get_endpoints(self) -> List:
         with self._state_lock:
@@ -575,18 +649,104 @@ class SharedContextV2:
                 pending.append(test_id)
         return pending
 
+    # Per-key caps for the LLM-facing agent context. This is REFERENCE TEXT only —
+    # agents read real/full data from ctx methods — so we project each item to its
+    # essential fields, cap counts, and put objective-relevant items first. Without
+    # this, serializing all endpoints+captured_requests+vulns+exploit_results (with
+    # nested bodies/headers/proofs) into every step ballooned requests to ~140K
+    # tokens each. Env-tunable.
+    _CTX_CAPS = {
+        "endpoints": 40, "captured_requests": 25, "vulnerabilities": 40,
+        "exploit_results": 25, "parameters": 60, "directories": 60,
+        "subdomains": 50, "js_files": 40, "headers": 40, "secrets": 30,
+        "technologies": 40, "ips": 40, "ports": 40,
+    }
+
+    @staticmethod
+    def _ctx_cap(key: str, default: int) -> int:
+        import os as _os
+        try:
+            return max(1, int(_os.getenv(f"AGENT_CTX_MAX_{key.upper()}", str(default))))
+        except Exception:
+            return default
+
+    @staticmethod
+    def _get(item, *names, default=""):
+        for n in names:
+            if isinstance(item, dict):
+                if item.get(n) not in (None, ""):
+                    return item.get(n)
+            else:
+                v = getattr(item, n, None)
+                if v not in (None, ""):
+                    return v
+        return default
+
+    def _project_item(self, key: str, item):
+        """Project one list item to its essential, LLM-useful fields (drops verbose
+        bodies/headers/proof blobs). Falls back to a truncated string."""
+        try:
+            if key == "endpoints":
+                params = self._get(item, "parameters", "params", default=[]) or []
+                pnames = [str(self._get(p, "name", default=p))[:40] for p in params][:12] if isinstance(params, list) else []
+                return {"path": str(self._get(item, "path", "url", "location"))[:160],
+                        "methods": self._get(item, "method_set", "methods", "method", default="GET"),
+                        "params": pnames}
+            if key == "captured_requests":
+                return {"method": self._get(item, "method", default="GET"),
+                        "url": str(self._get(item, "url", "location", "target"))[:200],
+                        "params": list((self._get(item, "fields", default={}) or {}).keys())[:12]
+                                  if isinstance(self._get(item, "fields", default={}), dict) else [],
+                        "ct": str(self._get(item, "content_type", default=""))[:60]}
+            if key == "vulnerabilities":
+                return {"type": self._get(item, "type", "vuln_type", "sub_type", default="?"),
+                        "location": str(self._get(item, "location", "target", "url"))[:160],
+                        "severity": self._get(item, "severity", default=""),
+                        "status": self._get(item, "status", default=("confirmed" if self._get(item, "confirmed") else ""))}
+            if key == "exploit_results":
+                return {"type": self._get(item, "type", "vuln_type", default="?"),
+                        "location": str(self._get(item, "location", "target", "url"))[:160],
+                        "status": self._get(item, "status", default="")}
+        except Exception:
+            pass
+        if isinstance(item, (str, int, float, bool)):
+            return item
+        return str(item)[:200]
+
+    def _relevance_key(self, objective: str):
+        """Extract a path/host token from the objective so matching items sort first."""
+        import re as _re
+        m = _re.search(r"https?://[^\s]+|/[\w./-]{2,}", str(objective or ""))
+        tok = (m.group(0) if m else "").lower()
+        # reduce a full URL to its path for loose contains-matching
+        tok = _re.sub(r"^https?://[^/]+", "", tok)
+        return tok.strip()
+
     def get_context_for_agent(self, objective: str, context_keys: list = None) -> Dict[str, Any]:
         context = {"target": self.target, "objective": objective}
         keys = context_keys or []
+        rel = self._relevance_key(objective)
         for key in keys:
             val = getattr(self, key, None)
-            if val is not None:
-                if isinstance(val, dict):
-                    context[key] = dict(val)
-                elif isinstance(val, list):
-                    context[key] = list(val)
-                else:
-                    context[key] = val
+            if val is None:
+                continue
+            if isinstance(val, list):
+                cap = self._ctx_cap(key, self._CTX_CAPS.get(key, 50))
+                items = val
+                if rel and key in ("endpoints", "captured_requests", "vulnerabilities", "exploit_results"):
+                    # objective-relevant items first, so the cap keeps what matters
+                    def _match(it):
+                        blob = str(self._get(it, "location", "url", "target", "path", default="")).lower()
+                        return rel in blob
+                    items = sorted(val, key=lambda it: 0 if _match(it) else 1)
+                projected = [self._project_item(key, it) for it in items[:cap]]
+                if len(val) > cap:
+                    projected.append(f"...(+{len(val) - cap} more {key} omitted; query ctx for full data)")
+                context[key] = projected
+            elif isinstance(val, dict):
+                context[key] = dict(val)
+            else:
+                context[key] = val
         return context
 
     def build_llm_context(self, task: str, params: Dict[str, Any], memory_retriever=None, tool_learning=None) -> Dict[str, Any]:

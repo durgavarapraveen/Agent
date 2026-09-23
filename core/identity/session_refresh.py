@@ -16,9 +16,27 @@ class SessionRefreshHandler:
         if not session:
             return False
 
-        # A session that still holds an Authorization header can be reused; otherwise
-        # it must be re-established through a full login.
-        if session.headers.get("Authorization"):
+        # A session that still holds any reusable credential material can be
+        # reused; otherwise it must be re-established through a full login.
+        # Covers bearer (Authorization), custom token headers, cookie sessions,
+        # and refresh-token artifacts — not just the Authorization header.
+        headers = dict(getattr(session, "headers", {}) or {})
+        cookies = dict(getattr(session, "cookies", {}) or {})
+        header_names = {k.lower() for k in headers.keys()}
+        cookie_names = {k.lower() for k in cookies.keys()}
+
+        has_auth_header = bool(headers.get("Authorization"))
+        has_token_header = any(
+            n in header_names for n in ("x-auth-token", "x-access-token", "authentication")
+        )
+        has_cookie_session = bool(cookies) or any(
+            any(s in n for s in ("sess", "sid", "auth", "token", "jwt")) for n in cookie_names
+        )
+        has_refresh_artifact = bool(getattr(session, "refresh_token", None)) or any(
+            "refresh" in n for n in (header_names | cookie_names)
+        )
+
+        if has_auth_header or has_token_header or has_cookie_session or has_refresh_artifact:
             self.session_manager.auth_health_metrics["session_refreshes"] += 1
             logger.info(f"SESSION_REFRESHED identity={identity_id}")
             print(f"SESSION_REFRESHED identity={identity_id}")

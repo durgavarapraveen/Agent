@@ -238,6 +238,10 @@ class RetestEngine:
         "MISSING_HEADER", "TLS_WEAKNESS", "NIKTO_FINDING",
         "NUCLEI_MATCH", "INFO_DISCLOSURE",
     }
+    # Correlation/chain meta-findings are handled separately (see can_reproduce):
+    # they are NOT a single reproducible request, so we PRESERVE the correlation
+    # engine's own verdict rather than blanket-confirm or HEAD-replay them.
+    _CORRELATION_TYPES = {"ATTACK_CHAIN", "CORRELATION"}
 
     # Exploit-derived findings need payload replay, not generic HEAD probes
     _EXPLOIT_CONFIRM_TYPES = {
@@ -254,6 +258,12 @@ class RetestEngine:
         min_success_threshold: int = 2
     ) -> Tuple[bool, int]:
         ftype = str(finding.get("type") or "").upper()
+        # Correlation/chain: not single-request reproducible (location = joined URLs
+        # → HEAD replay always 0/3). Do NOT replay and do NOT blanket-confirm; keep
+        # the correlation engine's own verdict (it gates by likelihood, and the
+        # constituent legs are retested independently as their own findings).
+        if ftype in self._CORRELATION_TYPES:
+            return (str(finding.get("status") or "").upper() == "CONFIRMED", attempts)
         if ftype in self._AUTO_CONFIRM_TYPES:
             return True, attempts
 

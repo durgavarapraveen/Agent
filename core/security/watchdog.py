@@ -125,7 +125,7 @@ class Watchdog:
             b = self.budget
             if self._requests >= b.max_requests:
                 return f"max_requests {b.max_requests} reached"
-            if (time.time() - self._start) >= b.max_runtime_s:
+            if b.max_runtime_s > 0 and (time.time() - self._start) >= b.max_runtime_s:
                 return f"max_runtime {b.max_runtime_s}s reached"
             if (self._bytes / 1_048_576.0) >= b.max_bandwidth_mb:
                 return f"max_bandwidth {b.max_bandwidth_mb}MB reached"

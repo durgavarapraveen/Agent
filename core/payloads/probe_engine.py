@@ -35,6 +35,38 @@ class UniversalProbeEngine:
             oracle = get_oracle_engine()
         self.oracle = oracle
 
+    async def _jev_corroborate(self, finding: Dict[str, Any], vuln_class: str,
+                               evidence: Dict[str, Any]) -> None:
+        """Opt-in Jev triage: attach a fast second-opinion confirmation probability
+        to a finding the oracle already confirmed. ANNOTATION ONLY — it never drops
+        or downgrades a finding (a general scanner must not skip a real bug on a
+        classifier's word); downstream ranking/reporting can use jev_probability."""
+        try:
+            from core.llm.jev_config import jev_triage_enabled
+            if not jev_triage_enabled():
+                return
+            from agents.providers.jev_classifier import get_jev
+            jev = get_jev(scan_id=finding.get("scan_id", "") if isinstance(finding, dict) else "")
+            if jev is None:
+                return
+            state = {
+                "vuln_class": vuln_class,
+                "payload": evidence.get("payload", ""),
+                "status_code": evidence.get("status_code"),
+                "response_time_ms": evidence.get("response_time_ms"),
+                "response_body": str(evidence.get("response_body", ""))[:4000],
+                "expected_result": evidence.get("expected_result", ""),
+            }
+            confirmed, prob = await jev.noul(
+                state,
+                f"Does this HTTP response genuinely CONFIRM a real {vuln_class} "
+                f"vulnerability (not a false positive, error page, or WAF block)?",
+                site="triage")
+            finding["jev_confirmed"] = bool(confirmed)
+            finding["jev_probability"] = round(float(prob), 4)
+        except Exception as e:  # annotation must never break probing
+            logger.debug("[Jev] corroboration skipped: %s", e)
+
     async def probe(self, endpoint: str, vuln_class: str, ctx,
                     parameter: str = "q", budget: int = 15) -> List[Dict[str, Any]]:
         """Run one (endpoint, vuln_class) test plan; return finding dicts."""
@@ -76,6 +108,7 @@ class UniversalProbeEngine:
                 pass
             if result.is_vulnerable:
                 findings.append(self._build_finding(endpoint, parameter, p, vuln_class, result, status))
+                await self._jev_corroborate(findings[-1], vuln_class, evidence)
                 ctx.add_vulnerability(findings[-1])
                 if scan_mode.stop_after_first():
                     break  # FAST: one confirmation per (endpoint, class) is enough

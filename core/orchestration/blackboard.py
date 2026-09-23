@@ -79,6 +79,16 @@ def post(scan_id: str, agent_id: str, kind: str, title: str,
                 conn.commit()
     except Exception as e:
         logger.debug(f"[Blackboard] post skipped ({kind}): {e}")
+    # Reactive trigger: access-gained / credentials should prompt an immediate
+    # authenticated re-test rather than waiting for the next phase. Only RECORD
+    # here (cheap); the orchestrator runs the actual bounded re-test.
+    if kind in ("pivot", "cred"):
+        try:
+            from core.orchestration import reactions
+            reactions.request(scan_id, "authed_retest",
+                              {"kind": kind, "title": str(title)[:200], "ref": ref})
+        except Exception:
+            pass
 
 
 def recent(scan_id: str, since_id: int = 0, limit: int = 200) -> List[Dict[str, Any]]:

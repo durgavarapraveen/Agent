@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import socket
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -39,6 +40,23 @@ class NetworkDiscovery:
         p = urlparse(t if "://" in t else f"//{t}")
         return p.hostname or t
 
+    def _scan_ports(self) -> List[int]:
+        # Base = default common set, merged with any ports already discovered on
+        # ctx/recon and an optional NEO_SCAN_PORTS env override (comma list).
+        ports = set(_COMMON_PORTS)
+        for attr in ("open_ports", "discovered_ports", "ports"):
+            for p in (getattr(self.ctx, attr, None) or []):
+                try:
+                    ports.add(int(p))
+                except (TypeError, ValueError):
+                    pass
+        env = os.getenv("NEO_SCAN_PORTS", "")
+        for tok in env.replace(";", ",").split(","):
+            tok = tok.strip()
+            if tok.isdigit():
+                ports.add(int(tok))
+        return sorted(ports)
+
     async def _scan_port(self, host: str, port: int) -> Optional[int]:
         async with self._sem:
             try:
@@ -71,8 +89,9 @@ class NetworkDiscovery:
         except Exception as e:
             logger.debug("[NetworkDiscovery] resolve failed %s: %s", host, e)
 
-        logger.info("[NetworkDiscovery] scanning %d ports on %s", len(_COMMON_PORTS), host)
-        results = await asyncio.gather(*[self._scan_port(host, p) for p in _COMMON_PORTS])
+        scan_ports = self._scan_ports()
+        logger.info("[NetworkDiscovery] scanning %d ports on %s", len(scan_ports), host)
+        results = await asyncio.gather(*[self._scan_port(host, p) for p in scan_ports])
         open_ports = sorted(p for p in results if p)
 
         findings: List[Dict[str, Any]] = []

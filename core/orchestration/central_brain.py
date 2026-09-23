@@ -109,6 +109,7 @@ from core.execution.executors.authorization import AuthorizationExecutor
 from core.execution.executors.sql_injection import SQLiExecutor
 from core.execution.executors.xss import XSSExecutor
 from core.execution.executors.generic import (
+    ApiHygieneExecutor,
     CORSExecutor, InfoDisclosureExecutor, GraphQLExecutor,
     WebSocketExecutor, BusinessLogicExecutor, PathTraversalExecutor,
     JWTExecutor, NoSQLiExecutor, FileUploadExecutor,
@@ -162,7 +163,7 @@ from core.findings.finding_store import FindingStore as FindingStoreV2
 from core.coverage.security_test_catalog import build_default_catalog
 from core.coverage.applicability_engine import ApplicabilityEngine
 from core.coverage.coverage_matrix import CoverageMatrix, CoverageState
-from core.coverage.convergence_engine import ConvergenceEngine as ConvergenceEngineV2
+from core.coverage.convergence_engine import ConvergenceEngineV2
 from core.attack_surface.endpoint_inventory import EndpointInventoryV2
 
 # P3 — Integration + Reporting
@@ -374,6 +375,33 @@ class CentralBrain(
             self.__adaptive_planner = planner
         return planner
 
+    @staticmethod
+    def _endpoint_param_names(e, url: str) -> list:
+        """All injectable parameter names for an endpoint: query-string keys +
+        declared parameters (list of str / list of objects with .name / dict).
+        Falls back to ['q'] only when nothing is discovered. Generic."""
+        import urllib.parse as _up
+        names: list = []
+        try:
+            for k, _v in _up.parse_qsl(_up.urlparse(url).query):
+                if k and k not in names:
+                    names.append(k)
+        except Exception:
+            pass
+        decl = None
+        if isinstance(e, dict):
+            decl = e.get("parameters")
+        else:
+            decl = getattr(e, "parameters", None)
+        if isinstance(decl, dict):
+            decl = list(decl.keys())
+        for prm in (decl or []):
+            nm = prm if isinstance(prm, str) else (
+                prm.get("name") if isinstance(prm, dict) else getattr(prm, "name", ""))
+            if nm and nm not in names:
+                names.append(str(nm))
+        return names or ["q"]
+
     async def _run_universal_probe_engine(self, max_endpoints: int = 25):
         """P1: run the catalog-driven UniversalProbeEngine across discovered
         endpoints for the core vuln classes. Bounded; findings are added to ctx
@@ -417,13 +445,14 @@ class CentralBrain(
                 e.get("url") if isinstance(e, dict) else getattr(e, "url", ""))
             if not url:
                 continue
-            param = "q"
-            if isinstance(e, dict) and e.get("parameters"):
-                p0 = e["parameters"]
-                param = (p0[0] if isinstance(p0, list) and p0 else
-                         next(iter(p0), "q") if isinstance(p0, dict) else "q")
-            for vc in classes:
-                jobs.append((url, param, vc))
+            # Fan out over EVERY discovered parameter (query string + declared),
+            # not just the first — testing one param per endpoint was why real
+            # injectable params (e.g. a search 'q' alongside 'category') went
+            # untested. Bounded per endpoint so the job list can't explode.
+            params = self._endpoint_param_names(e, url)
+            for param in params[:8]:
+                for vc in classes:
+                    jobs.append((url, param, vc))
 
         async def _probe_job(job):
             url, param, vc = job
@@ -518,7 +547,16 @@ class CentralBrain(
             # Instance-level counter (NOT state.iterations, which resets every time
             # the state machine re-enters the same phase — that reset is exactly why
             # the 10-min / 20-iteration caps never fired and the phase looped ~2h).
-            limit = int(os.getenv("PHASE_NO_PROGRESS_LIMIT", "15"))
+            # P1-J3: scale the no-progress cap with target size so a large target
+            # with legitimately slow discovery isn't force-advanced like a stalled
+            # small one. Base is env-tunable; +1 per 50 discovered endpoints,
+            # capped so it can't grow unbounded.
+            _base = int(os.getenv("PHASE_NO_PROGRESS_LIMIT", "15"))
+            try:
+                _n_eps = len(getattr(self.ctx, "endpoints", []) or [])
+            except Exception:
+                _n_eps = 0
+            limit = min(_base + _n_eps // 50, _base * 3)
             if self._no_progress_iters >= limit:
                 logger.warning(
                     f"Phase {state.phase_name} made no new progress across "
@@ -534,8 +572,86 @@ class CentralBrain(
         except Exception:
             pass
 
+        # Jev phase gate (opt-in): the count-based guard above only catches ZERO
+        # progress; Jev catches a SEMANTIC stall — a phase making slow, low-value,
+        # repetitive progress that trickles just enough to evade the counter (the
+        # "13 findings over 3h" case). The verdict is pre-computed asynchronously
+        # by _jev_phase_progress_check() and cached here, because this method is
+        # sync and cannot await. Fail-open: absent/false → no effect.
+        if getattr(self, "_jev_phase_giveup", False):
+            logger.warning(f"Phase {state.phase_name} flagged stalled by Jev score "
+                           f"gate — exiting early (anti-loop).")
+            gu = getattr(self, "_no_progress_phases", None)
+            if gu is None:
+                gu = set(); self._no_progress_phases = gu
+            gu.add(state.phase_name)
+            self._jev_phase_giveup = False  # consume; re-evaluated next iteration
+            return True
+
         return False
-        
+
+    async def _jev_phase_progress_check(self) -> None:
+        """Opt-in async companion to _should_exit_phase. Asks Jev whether the
+        current phase is still making meaningful progress; caches a give-up verdict
+        onto self for the sync exit check to read. Best-effort, fail-open — any
+        failure leaves the verdict unset so only the deterministic guards apply."""
+        try:
+            from core.llm.jev_config import jev_phase_gate_enabled
+            if not jev_phase_gate_enabled():
+                return
+            state = getattr(self, "phase_state", None)
+            if state is None:
+                return
+            pn = (getattr(state, "phase_name", "") or "")
+            if any(k in pn.upper() for k in ("REPORT", "FINAL", "COMPLETE")):
+                return  # never cut reporting
+            no_prog = int(getattr(self, "_no_progress_iters", 0) or 0)
+            if no_prog < 3:
+                return  # only consult Jev once a stall is plausible (saves calls)
+            from agents.providers.jev_classifier import get_jev
+            jev = get_jev(scan_id=getattr(self, "_scan_id", ""))
+            if jev is None:
+                return
+            vulns = len(getattr(self.ctx, "vulnerabilities", []) or [])
+            exploits = len(getattr(self.ctx, "exploit_results", []) or [])
+            eps = len(getattr(self.ctx, "endpoints", []) or [])
+            state_blob = {
+                "phase": pn,
+                "iterations": int(getattr(state, "iterations", 0) or 0),
+                "checks_without_new_progress": no_prog,
+                "confirmed_vulnerabilities": vulns,
+                "exploits": exploits,
+                "endpoints_discovered": eps,
+            }
+            # Memory enrichment: when agent-memory is on, give Jev a small, recent
+            # slice of what the phase has actually been doing (findings + notes) so
+            # it can tell a genuine stall (re-running the same work) from real but
+            # slow progress — far sharper than the numeric counters alone. Bounded
+            # to ~1200 chars so Jev's 32k state cap and cost stay small; skipped
+            # (no regression) when memory is off or unavailable.
+            try:
+                from core.memory.memory_manager import AgentMemory, memory_enabled
+                if memory_enabled():
+                    mem = AgentMemory(scan_id=getattr(self, "_scan_id", ""), ctx=self.ctx)
+                    recent = await mem.search(
+                        f"recent actions, findings and repeated work in the {pn} phase", k=6)
+                    if recent:
+                        state_blob["recent_activity"] = str(recent)[:1200]
+            except Exception as _me:
+                logger.debug("[Jev] phase memory enrichment skipped: %s", _me)
+            stalled, prob = await jev.noul(
+                state_blob,
+                "This is a security-scan phase's live progress (with recent_activity "
+                "when available). Has it stalled — i.e. is it repeating the same work "
+                "without producing meaningful NEW results, so continuing is unlikely "
+                "to help? Answer yes only if clearly stuck.",
+                site="phase_gate")
+            if stalled and prob >= 0.7:
+                self._jev_phase_giveup = True
+                logger.info("[Jev] phase '%s' scored stalled (p=%.2f)", pn, prob)
+        except Exception as e:
+            logger.debug("[Jev] phase progress check skipped: %s", e)
+
     def request_stop(self):
         self._stop_requested = True
         self._stop_file.parent.mkdir(parents=True, exist_ok=True)
@@ -692,6 +808,13 @@ class CentralBrain(
                     _cap = int(os.getenv("PHASE_MAX_ENTRIES", "3"))
                 except ValueError:
                     _cap = 3
+                # P1-J3: with convergence-based completion (P1-F1) a large target
+                # may legitimately need a few more re-entries to reach coverage.
+                # Scale modestly with endpoint count, hard-capped to stay loop-safe.
+                try:
+                    _cap = min(_cap + (len(getattr(self.ctx, "endpoints", []) or []) // 100), 6)
+                except Exception:
+                    pass
                 for _p, _c in (getattr(self, "_phase_entry_counts", {}) or {}).items():
                     if _c >= _cap and _p not in completed:
                         completed.add(_p)
@@ -813,9 +936,7 @@ class CentralBrain(
         self.target_profile = None  # Populated in run() after tool validation
         
         
-        # Accept KNOWLEDGE_DB_PATH (canonical) with legacy KNOWLEDGE_DB fallback.
         db_path = os.getenv("KNOWLEDGE_DB_PATH") \
-                  or os.getenv("KNOWLEDGE_DB") \
                   or str(self.report_dir / "findings.db")
         self.persistent_knowledge_store = PersistentKnowledgeStore(db_path)
         self.target_id = f"tgt_{uuid.uuid4().hex[:12]}"
@@ -836,6 +957,44 @@ class CentralBrain(
         from core.security.authorization import TargetScopeValidator
         from core.security.scope_facade import get_scope_authority
         auth_targets = self.scope.get("domains") or self.scope.get("authorized_targets") or [target]
+        # Wire operator-supplied subdomains (RECON_EXTRA_SUBDOMAINS /
+        # RECON_SUBDOMAINS_FILE) into the launch scope so each is explicitly
+        # authorized AND seeded as a target even if enumeration misses it. Only
+        # hosts within an already-authorized apex are admitted — a stray
+        # unrelated host can NEVER widen scope through this path.
+        try:
+            import os as _os, re as _re
+            def _sn(h):
+                h = _re.sub(r"^[a-z]+://", "", (h or "").strip().lower()).split("/")[0]
+                return h.lstrip("*.").rstrip(".")
+            _bases = set()
+            for _t in auth_targets:
+                _n = _sn(_t)
+                _n = _n[4:] if _n.startswith("www.") else _n
+                if _n and not _re.match(r"^\d{1,3}(\.\d{1,3}){3}$", _n):
+                    _bases.add(_n)
+            _raw = []
+            _f = _os.getenv("RECON_SUBDOMAINS_FILE", "").strip()
+            if _f and _os.path.exists(_f):
+                with open(_f, "r", encoding="utf-8", errors="replace") as _fh:
+                    _raw.extend(_fh.read().split())
+            _raw.extend(_re.split(r"[\s,]+", _os.getenv("RECON_EXTRA_SUBDOMAINS", "")))
+            _seen = {_sn(_t) for _t in auth_targets}
+            _added = []
+            for _h in _raw:
+                _n = _sn(_h)
+                if not _n or _n in _seen:
+                    continue
+                if any(_n == _b or _n.endswith("." + _b) for _b in _bases):
+                    auth_targets = auth_targets + [_n]
+                    _seen.add(_n); _added.append(_n)
+                else:
+                    logger.warning("[Scope] operator subdomain '%s' outside authorized apex %s — ignored",
+                                   _n, sorted(_bases))
+            if _added:
+                logger.info("[Scope] wired %d operator subdomains into launch scope: %s", len(_added), _added)
+        except Exception as _e:
+            logger.warning("[Scope] operator-subdomain merge skipped: %s", _e)
         tsv = TargetScopeValidator(auth_targets)
         TargetScopeValidator.set(tsv)
 
@@ -1114,6 +1273,7 @@ class CentralBrain(
         self.authz_executor = AuthorizationExecutor(timeout_seconds=30)
         self.cors_executor = CORSExecutor(timeout_seconds=15)
         self.info_disc_executor = InfoDisclosureExecutor(timeout_seconds=15)
+        self.api_hygiene_executor = ApiHygieneExecutor(timeout_seconds=15)
         self.graphql_executor = GraphQLExecutor(timeout_seconds=15)
         self.ws_executor = WebSocketExecutor(timeout_seconds=15)
         self.bizlogic_executor = BusinessLogicExecutor(timeout_seconds=30)
@@ -1473,6 +1633,149 @@ class CentralBrain(
             # CRLF
             "crlf_basic_01": self.info_disc_executor,
             "crlf_header_01": self.info_disc_executor,
+            # ── Catalog-ID aliases → existing GENERIC executors ──────────────
+            # security_test_catalog.py uses a different id scheme than the
+            # registry above; without these the planner's SecurityExperiments
+            # for those ids hit NO_EXECUTOR. All targets below are the same
+            # target-agnostic executors used elsewhere (shape/discovery driven).
+            "auth_username_enum_01": self.auth_executor,
+            "auth_account_lockout_01": self.auth_executor,
+            "auth_remember_me_01": self.auth_executor,
+            "auth_logout_01": self.auth_executor,
+            "auth_session_expiry_01": self.auth_executor,
+            "auth_concurrent_sessions_01": self.auth_executor,
+            "auth_password_reset_01": self.auth_executor,
+            "client_auth_bypass_01": self.auth_executor,
+            "authz_object_level_01": self.idor_executor,
+            "authz_function_level_01": self.role_escalation_executor,
+            "authz_role_boundary_01": self.role_escalation_executor,
+            "biz_privilege_workflow_01": self.role_escalation_executor,
+            "authz_api_auth_01": self.authz_executor,
+            "authz_method_tampering_01": self.authz_executor,
+            "authz_parameter_pollution_01": self.authz_executor,
+            "authz_hidden_endpoint_01": self.hidden_resource_executor,
+            "sqli_second_order_01": self.sqli_advanced_executor,
+            "sqli_header_01": self.sqli_executor,
+            "sqli_json_01": self.sqli_executor,
+            "xss_attribute_ctx_01": self.xss_executor,
+            "xss_js_ctx_01": self.xss_executor,
+            "xss_url_ctx_01": self.xss_executor,
+            "xss_encoded_01": self.xss_executor,
+            "xss_svg_01": self.xss_executor,
+            "xss_event_handler_01": self.xss_executor,
+            "xss_mutation_01": self.xss_executor,
+            "ssti_jinja2_01": self.ssti_executor,
+            "ssti_detection_01": self.ssti_executor,
+            "el_injection_01": self.ssti_executor,
+            "cmdi_chained_01": self.cmdi_executor,
+            "cmdi_substitution_01": self.cmdi_executor,
+            "path_lfi_01": self.pathtraversal_executor,
+            "path_null_byte_01": self.pathtraversal_executor,
+            "path_sensitive_files_01": self.pathtraversal_executor,
+            "path_backup_files_01": self.pathtraversal_executor,
+            "ssrf_dns_rebind_01": self.ssrf_executor,
+            "ssrf_cloud_metadata_01": self.ssrf_executor,
+            "xxe_ssrf_01": self.xxe_executor,
+            "csrf_origin_01": self.csrf_executor,
+            "csrf_method_override_01": self.csrf_executor,
+            "csrf_json_01": self.csrf_executor,
+            "cors_reflected_01": self.cors_executor,
+            "cors_null_origin_01": self.cors_executor,
+            "misconfig_cors_null_01": self.cors_executor,
+            "api_excessive_data_01": self.api_hygiene_executor,
+            "api_content_type_01": self.api_hygiene_executor,
+            "api_version_01": self.api_hygiene_executor,
+            "api_pagination_01": self.api_hygiene_executor,
+            "api_batch_01": self.api_hygiene_executor,
+            "api_graphql_introspection_01": self.graphql_executor,
+            "api_graphql_mutation_01": self.graphql_executor,
+            "api_graphql_dos_01": self.graphql_executor,
+            "api_graphql_batching_01": self.graphql_executor,
+            "graphql_depth_01": self.graphql_executor,
+            "graphql_alias_01": self.graphql_executor,
+            "graphql_field_suggestion_01": self.graphql_executor,
+            "graphql_mutation_auth_01": self.graphql_executor,
+            "graphql_subscription_01": self.graphql_executor,
+            "api_ws_hijack_01": self.ws_executor,
+            "api_ws_auth_01": self.ws_executor,
+            "ws_auth_01": self.ws_executor,
+            "ws_injection_01": self.ws_executor,
+            "ws_flood_01": self.ws_executor,
+            "ws_origin_01": self.ws_executor,
+            "api_rate_limit_01": self.ratelimit_executor,
+            "rate_login_01": self.ratelimit_executor,
+            "rate_api_01": self.ratelimit_executor,
+            "rate_password_reset_01": self.ratelimit_executor,
+            "rate_otp_01": self.ratelimit_executor,
+            "biz_price_manipulation_01": self.bizlogic_executor,
+            "biz_quantity_01": self.bizlogic_executor,
+            "biz_workflow_bypass_01": self.bizlogic_executor,
+            "biz_replay_01": self.bizlogic_executor,
+            "biz_coupon_abuse_01": self.bizlogic_executor,
+            "biz_state_abuse_01": self.bizlogic_executor,
+            "biz_negative_testing_01": self.bizlogic_executor,
+            "biz_time_manipulation_01": self.bizlogic_executor,
+            "param_negative_01": self.bizlogic_executor,
+            "param_overflow_01": self.bizlogic_executor,
+            "client_dom_sink_01": self.dom_xss_executor,
+            "client_postmessage_01": self.live_postmsg_executor,
+            "client_prototype_01": self.protopollution_executor,
+            "client_csp_01": self.csp_executor,
+            "config_csp_01": self.csp_executor,
+            "misconfig_csp_01": self.csp_executor,
+            "config_hsts_01": self.csp_executor,
+            "misconfig_hsts_01": self.csp_executor,
+            "config_xframe_01": self.csp_executor,
+            "config_cookie_flags_01": self.csp_executor,
+            "misconfig_cookie_flags_01": self.csp_executor,
+            "open_redirect_01": self.openredirect_executor,
+            "redirect_open_01": self.openredirect_executor,
+            "redirect_schema_01": self.openredirect_executor,
+            "redirect_double_encode_01": self.openredirect_executor,
+            "client_url_handling_01": self.openredirect_executor,
+            "info_stack_trace_01": self.info_disc_executor,
+            "info_debug_endpoint_01": self.info_disc_executor,
+            "info_version_header_01": self.info_disc_executor,
+            "info_source_map_01": self.info_disc_executor,
+            "client_js_sourcemap_01": self.info_disc_executor,
+            "client_localstorage_01": self.info_disc_executor,
+            "info_error_stack_01": self.error_leak_executor,
+            "info_git_exposed_01": self.backup_scanner_executor,
+            "info_env_file_01": self.backup_scanner_executor,
+            "header_injection_01": self.header_ratelimit_executor,
+            "header_host_01": self.header_ratelimit_executor,
+            "host_header_routing_01": self.header_ratelimit_executor,
+            "crlf_response_split_01": self.header_ratelimit_executor,
+            "config_tls_01": self.crypto_weakness_executor,
+            "deser_python_01": self.deser_executor,
+            "cache_poison_01": self.cache_poison_executor,
+            "cache_deception_01": self.cache_poison_executor,
+            "cache_key_01": self.cache_poison_executor,
+            "smuggle_clte_01": self.smuggling_executor,
+            "smuggle_tecl_01": self.smuggling_executor,
+            "smuggle_te_te_01": self.smuggling_executor,
+            "smuggle_tete_01": self.smuggling_executor,
+            "dns_takeover_01": self.takeover_executor,
+            "mfa_otp_brute_01": self.mfa_bypass_executor,
+            "mfa_otp_reuse_01": self.mfa_bypass_executor,
+            "mfa_otp_leak_01": self.mfa_bypass_executor,
+            "mfa_backup_code_01": self.mfa_bypass_executor,
+            "auth_sec_question_01": self.sec_question_executor,
+            "auth_sec_question_enum_01": self.sec_question_executor,
+            "auth_sec_question_brute_01": self.sec_question_executor,
+            "upload_archive_path_01": self.upload_advanced_executor,
+            "mass_assign_role_01": self.mass_assign_executor,
+            "mass_assign_price_01": self.mass_assign_executor,
+            "mass_assign_status_01": self.mass_assign_executor,
+            "param_hpp_01": self.mass_assign_executor,
+            "param_type_juggle_01": self.mass_assign_executor,
+            "crlf_log_injection_01": self.loginjection_executor,
+            "email_injection_01": self.loginjection_executor,
+            "email_html_injection_01": self.loginjection_executor,
+            "race_coupon_01": self.race_executor,
+            "race_transfer_01": self.race_executor,
+            "race_registration_01": self.race_executor,
+            "race_vote_01": self.race_executor,
         }
         self._register_capabilities()
         # Share one Portfolio globally so core.common.tool_retry can consult it.
@@ -1499,6 +1802,20 @@ class CentralBrain(
         self.applicability_engine = ApplicabilityEngine(self.test_catalog_v2, self.attack_surface)
         self.coverage_matrix = CoverageMatrix([], [])
         self.convergence_engine = ConvergenceEngineV2(self.coverage_matrix)
+        # P1-F2: the completion validator built earlier holds the now-dead V1
+        # engine; rebuild it against the LIVE V2 engine so REPORTING validates
+        # real coverage. (coverage_engine kept for its get_blocked_tests view.)
+        try:
+            self.completion_validator = CompletionValidator(self.coverage_engine, self.convergence_engine)
+        except Exception:
+            pass
+        # P1-F1: expose the live convergence engine on ctx so the phase-DAG
+        # completion predicates gate on real coverage, not "first finding".
+        try:
+            if getattr(self, "ctx", None) is not None:
+                self.ctx.convergence_engine = self.convergence_engine
+        except Exception:
+            pass
 
         # ── P3: Integration + Reporting ──
         self.pipeline_v2 = ExecutionPipelineV2(
@@ -1651,6 +1968,17 @@ class CentralBrain(
                 self.coverage_matrix.update_state(ep_id, test_id, CoverageState.NOT_DISCOVERED)
 
         self.convergence_engine = ConvergenceEngineV2(self.coverage_matrix)
+        # P1-F2 / P1-F1: keep the completion validator and ctx-exposed engine
+        # pointed at the freshly-rebuilt live V2 engine.
+        try:
+            self.completion_validator = CompletionValidator(self.coverage_engine, self.convergence_engine)
+        except Exception:
+            pass
+        try:
+            if getattr(self, "ctx", None) is not None:
+                self.ctx.convergence_engine = self.convergence_engine
+        except Exception:
+            pass
         self.pipeline_v2 = ExecutionPipelineV2(
             executor_registry=self.executor_registry,
             tool_portfolio=self.tool_portfolio,
@@ -2399,12 +2727,22 @@ class CentralBrain(
         # P1: refresh the payload catalog from community sources (nuclei /
         # PayloadsAllTheThings) so probes test current payloads, not stale code.
         # No-op unless the *_DIR env vars point at checkouts; always guarded.
+        # Payload-repo git sync (PATT/nuclei) is OPT-IN — it must NOT run on every
+        # scan. Cloning/fetching large repos (nuclei-templates is 500MB+) can stall
+        # on the network and block scan start; and re-fetching each run is wasted
+        # work. Fetch only when the operator explicitly intends to, via
+        # NEO_PAYLOAD_SYNC=1 (or the standalone `python -m core.payloads.updater`).
+        # Default: use whatever payloads are already on disk.
         try:
-            from core.payloads.updater import PayloadUpdater
-            # interval-guarded: pulls PATT/nuclei + re-ingests at most once/day
-            counts = PayloadUpdater().maybe_update()
-            if any(counts.values()):
-                logger.info(f"[PayloadUpdater] ingested {counts}")
+            import os as _os
+            if (_os.getenv("NEO_PAYLOAD_SYNC", "0") or "0").strip().lower() in ("1", "true", "yes", "on"):
+                from core.payloads.updater import PayloadUpdater
+                counts = PayloadUpdater().maybe_update()
+                if any(counts.values()):
+                    logger.info(f"[PayloadUpdater] ingested {counts}")
+            else:
+                logger.info("[PayloadUpdater] auto-sync off (NEO_PAYLOAD_SYNC=1 to refresh); "
+                            "using payloads already on disk")
         except Exception as e:
             logger.debug(f"[PayloadUpdater] skipped: {e}")
 
@@ -2509,10 +2847,36 @@ class CentralBrain(
 
                 # §26/§46: external watchdog / kill switch — stop the scan on a
                 # budget breach or out-of-band kill, independent of the LLM.
+                # SOFT deadline: once the runtime budget is nearly spent, force
+                # REPORTING so the scan finalizes (report + benchmark) with what it
+                # has, instead of being hard-killed mid-phase with nothing scored.
+                # HARD breach: still finalize via REPORTING once before halting, so
+                # even a true budget breach produces a report rather than a bare
+                # checkpoint. A kill-switch skips straight to halt.
                 try:
                     from core.security.watchdog import get_watchdog
                     _wd = get_watchdog()
-                    if not _wd.should_continue():
+                    _reporting = (self.current_phase == ExecutionPhase.REPORTING)
+                    _soft = float(os.getenv("BUDGET_SOFT_EXIT_FRAC", "0.85"))
+                    _hard = not _wd.should_continue()
+                    _soft_hit = (not _hard) and _wd.elapsed_fraction() >= _soft
+
+                    if (_hard or _soft_hit) and not _reporting and \
+                            not getattr(self, "_forced_report", False):
+                        self._forced_report = True
+                        self._soft_deadline_hit = True
+                        _why = _wd.breach_reason() if _hard else \
+                            f"soft deadline {_wd.elapsed_fraction():.0%} of budget"
+                        logger.critical(
+                            "WATCHDOG %s: %s — finalizing via REPORTING (graceful)",
+                            "HARD" if _hard else "SOFT", _why)
+                        await self._flush_partial("watchdog-graceful")
+                        self.checkpointer.save_checkpoint(self)
+                        self.current_phase = ExecutionPhase.REPORTING
+                        continue
+                    if _hard and (_reporting or getattr(self, "_forced_report", False)):
+                        # Already reporting (or asked to) and still breached — the
+                        # report itself overran or a kill switch fired: hard halt.
                         logger.critical("WATCHDOG STOP: %s — checkpointing and halting",
                                         _wd.breach_reason())
                         self.checkpointer.save_checkpoint(self)
@@ -2535,6 +2899,29 @@ class CentralBrain(
                 # and visible in the UI. Idempotent (upsert), so it's safe to
                 # repeat every phase.
                 await self._flush_partial(f"after {self.current_phase.value}")
+
+                # Reactive trigger: if an agent gained access / harvested creds
+                # during this phase (posted pivot/cred to the blackboard), run the
+                # authenticated battery NOW so IDOR/BOLA/authz probes fire with the
+                # new session instead of waiting. Bounded + capped + flag-gated to
+                # avoid loops/cost; skipped once winding down to reporting.
+                try:
+                    from core.orchestration import reactions
+                    _rx = reactions.take(self._scan_id)
+                    if (_rx and reactions.enabled()
+                            and not getattr(self, "_soft_deadline_hit", False)
+                            and reactions.reacted_count(self._scan_id) < reactions.max_reactions()
+                            and self.current_phase != ExecutionPhase.REPORTING):
+                        n = reactions.note_reacted(self._scan_id)
+                        logger.info(f"[Reactive] access/creds observed → authenticated re-test "
+                                    f"(reaction {n}/{reactions.max_reactions()})")
+                        self._log_activity("reactive", "Access gained → re-running authenticated battery",
+                                           detail=f"triggered by {len(_rx)} blackboard event(s)")
+                        from core.orchestration.family_scheduler import run_authenticated_battery
+                        await run_authenticated_battery(self)
+                        await self._flush_partial("after reactive authed re-test")
+                except Exception as _rxe:
+                    logger.warning(f"[Reactive] authed re-test skipped (non-fatal): {_rxe}")
 
                 # P0-4: mark this phase completed so the scheduler never re-enters
                 # it (breaks the RECON -> ACTIVE_SCANNING -> RECON loop).
@@ -3037,7 +3424,8 @@ class CentralBrain(
         ahead of the ACTIVE_SCANNING sweep) instead of waiting. Bounded by
         ADAPTIVE_SPAWN_MAX (default 6) and deduped; the sweep skips what ran here."""
         try:
-            from core.orchestration.family_scheduler import family_for_signal, spawn_family_team
+            from core.orchestration.family_scheduler import (
+                family_for_signal, spawn_family_team, classify_family_jev)
             cap = int(os.getenv("ADAPTIVE_SPAWN_MAX", "6"))
             if self._adaptive_spawns >= cap:
                 return
@@ -3057,6 +3445,9 @@ class CentralBrain(
             picks: "OrderedDict[Any, str]" = OrderedDict()
             for sig in signals:
                 fam = family_for_signal(sig)
+                if fam is None:  # opt-in Jev routing recovers missed signals
+                    fam = await classify_family_jev(
+                        sig, scan_id=getattr(self, "_scan_id", ""))
                 if fam is None or fam in self._families_spawned or fam in picks:
                     continue
                 picks[fam] = sig
@@ -3652,6 +4043,24 @@ class CentralBrain(
             # observed data; Dispatcher runs the full applicable battery at each
             # real point (no guessed ?q=). This is the primary injection path;
             # UPE below is the endpoint-level fallback.
+            # A1–A3: enrich the request surface (HTML forms, query-string URLs,
+            # JS fetch/route params) so the classifier has real query/body/form
+            # injection points — otherwise SPA targets yield only header/path
+            # points and injection classes have nowhere to place payloads.
+            try:
+                from core.recon.request_surface_miner import mine_request_surface, mine_well_known
+                _mined = await mine_request_surface(self.ctx)
+                if _mined:
+                    logger.info("[SurfaceMiner] +%s captured, +%s endpoints",
+                                _mined.get("captured_requests", 0), _mined.get("endpoints", 0))
+                # F2/F3: well-known paths — API-spec endpoint seeding + file exposures.
+                _wk = await mine_well_known(self.ctx)
+                if _wk:
+                    logger.info("[WellKnown] +%s seeded, %s file exposures",
+                                _wk.get("seeded", 0), _wk.get("exposures", 0))
+            except Exception as e:
+                logger.warning(f"[SurfaceMiner] failed (non-fatal): {e}")
+
             surface_findings = []
             try:
                 from core.orchestration.dispatcher import run_dispatcher
@@ -3662,6 +4071,25 @@ class CentralBrain(
                                    f"Dispatcher: {len(surface_findings)} findings", tool="dispatcher")
             except Exception as e:
                 logger.warning(f"[Dispatcher] failed (non-fatal): {e}")
+
+            # A4: authenticated pass. If session credentials exist, re-mine the
+            # surface as the authenticated user (discovers login-gated endpoints)
+            # and re-run the dispatcher; the coverage ledger dedups points already
+            # tested anonymously, so only the new authed surface is exercised.
+            if (not getattr(self, "_authed_dispatch_done", False) and
+                    (getattr(self.ctx, "auth_headers", None) or
+                     getattr(self.ctx, "auth_sessions", None))):
+                self._authed_dispatch_done = True
+                try:
+                    from core.recon.request_surface_miner import mine_request_surface as _mine
+                    from core.orchestration.dispatcher import run_dispatcher as _rd
+                    await _mine(self.ctx, use_auth=True)
+                    authed_findings = await _rd(self.ctx)
+                    if authed_findings:
+                        surface_findings += authed_findings
+                        logger.info(f"[Dispatcher/authed] {len(authed_findings)} additional findings")
+                except Exception as e:
+                    logger.warning(f"[Dispatcher/authed] failed (non-fatal): {e}")
 
             # ── P1: Universal Probe Engine (endpoint-level fallback) ──
             try:
@@ -3692,6 +4120,24 @@ class CentralBrain(
                 await run_specialist_probes(self)
             except Exception as e:
                 logger.warning(f"[FamilyScheduler] failed (non-fatal): {e}")
+
+            # ── D: confirmation pass. Actively verify findings the probes only
+            #    DISPATCHED (UNCONFIRMED/CANDIDATE/NEEDS_REVIEW): access-control via
+            #    an HTTP differential that also strips SPA/soft-404 catch-all false
+            #    positives, and JWT forgery by replaying the forged token. Updates
+            #    finding status in place. Generic; complements the P2 differential
+            #    cross-identity tester (IDOR/BOLA).
+            try:
+                from core.exploitation.finding_verifier import verify_findings
+                _vc = await verify_findings(self.ctx)
+                if _vc:
+                    logger.info("[Verifier] confirmed=%s fp=%s",
+                                _vc.get("confirmed", 0), _vc.get("false_positive", 0))
+                    self._log_activity("finding_verifier",
+                                       f"Verified: +{_vc.get('confirmed',0)} confirmed, "
+                                       f"{_vc.get('false_positive',0)} FP", tool="finding_verifier")
+            except Exception as e:
+                logger.warning(f"[Verifier] failed (non-fatal): {e}")
 
             # Coverage-gate: force any plan-relevant family that didn't run before
             # ACTIVE_SCANNING is allowed to close.
@@ -5393,6 +5839,7 @@ class CentralBrain(
         while agents_this_phase < max_agents:
             if hasattr(self, 'phase_state'):
                 self.phase_state.iterations = agents_this_phase
+                await self._jev_phase_progress_check()  # opt-in; caches give-up verdict
                 if self._should_exit_phase():
                     logger.warning(f"Phase {phase} exit conditions met.")
                     break
@@ -5781,6 +6228,7 @@ class CentralBrain(
         while agents_this_phase < max_agents:
             if hasattr(self, 'phase_state'):
                 self.phase_state.iterations = agents_this_phase
+                await self._jev_phase_progress_check()  # opt-in; caches give-up verdict
                 if self._should_exit_phase():
                     logger.warning(f"Phase {phase} exit conditions met.")
                     break
@@ -6744,8 +7192,10 @@ class CentralBrain(
             url = ep if isinstance(ep, str) else (ep.get("url", "") if isinstance(ep, dict) else "")
             if url and "?" in url:
                 test_urls.append(url)
-        # Also add common search/query endpoints discovered or generic
-        search_paths = ["/search", "/#/search"]
+        # Generic search seed; SPA/app-specific search routes come from the
+        # discovered endpoints below (crawl / ctx.endpoints), not a hardcoded
+        # app-specific hash route.
+        search_paths = ["/search"]
         for ep in (getattr(self.ctx, "endpoints", []) or []):
             ep_url = ep if isinstance(ep, str) else (ep.get("url", "") if isinstance(ep, dict) else "")
             if ep_url and any(k in ep_url.lower() for k in ["search", "query", "find", "lookup"]):
@@ -6892,7 +7342,29 @@ class CentralBrain(
             cred = creds[0]
             token = cred.get("session_token", "")
             if token:
-                for path in ["/api/admin", "/rest/admin", "/administration", "/api/Users"]:
+                # Discovery-first: admin/user endpoints found during the scan,
+                # then the centralized generic admin role list (endpoint_hints) —
+                # no app-specific paths hardcoded here.
+                authed_paths = []
+                try:
+                    from core.common import endpoint_hints
+                    from urllib.parse import urlparse
+                    for full in (endpoint_hints.discover_endpoints(self.ctx, "admin", include_fallback=True)
+                                 + endpoint_hints.discover_endpoints(self.ctx, "user_profile", include_fallback=False)):
+                        pp = urlparse(full).path or ""
+                        if pp and pp not in authed_paths:
+                            authed_paths.append(pp)
+                except Exception:
+                    authed_paths = ["/admin", "/administration", "/api/admin"]
+                # Modern apps route admin under varied paths; let the LLM propose
+                # candidates from the discovered surface + detected tech stack.
+                try:
+                    for pp in await self._llm_admin_path_candidates():
+                        if pp and pp not in authed_paths:
+                            authed_paths.append(pp)
+                except Exception:
+                    pass
+                for path in authed_paths[:25]:
                     url = f"{target}{path}"
                     cmd = (
                         f'curl -s -o /dev/null -w "%{{http_code}}" -k --max-time 10 '
@@ -7193,11 +7665,18 @@ class CentralBrain(
                 rounds = 35
 
             try:
+                # Per-subdomain recon is a self-contained parallel researcher —
+                # isolate it (no shared-memory tools): each host is independent, so
+                # there's nothing to carry over, and isolation avoids cross-host
+                # context bleed. (Verifier agents are already isolated by
+                # construction; the main phase executor stays AUTO.)
+                from core.memory.memory_manager import ContextMode as _CM
                 executor = AgenticExecutor(
                     llm_harness=llm_harness,
                     tool_invocation_engine=self.tool_invocation_engine,
                     shared_context=self.ctx,
                     auth_context=auth_context,
+                    context_mode=_CM.ISOLATED,
                 )
                 # Pre-attach a tracker with the subdomain-specific id so the UI
                 # sees one card per host instead of them all collapsing into
@@ -7822,53 +8301,201 @@ class CentralBrain(
             base = "https://" + base
         base = base.split("#")[0].rstrip("/") + "/"
 
+        from core.common import endpoint_hints
         candidates = []
+        # Discovered-first: register endpoints ACTUALLY seen during the scan
+        # (captured requests / crawl / extractor) always lead, so a live target
+        # route beats operator config and generic guesses alike — the real
+        # endpoint is hit before any dead-path probing (no 500 noise on paths
+        # the app doesn't expose).
+        candidates.extend(endpoint_hints.discover_endpoints(
+            self.ctx, "register", include_fallback=False))
+        # Operator override next (used when discovery found nothing).
         if cfg.get("AUTH_REGISTER_URL", ""):
             candidates.append(cfg.get("AUTH_REGISTER_URL", ""))
-        for p in ("api/Users", "api/auth/register", "api/register",
-                  "api/v1/auth/register", "register", "users"):
+        # Generic app-agnostic guesses LAST, only as a fallback when discovery
+        # found nothing. No target-specific paths — real routes come from the
+        # discovered list above.
+        for p in ("api/auth/register", "api/register", "api/v1/auth/register",
+                  "auth/register", "register", "signup", "users"):
             candidates.append(urljoin(base, p))
-        login_url = cfg.get("AUTH_LOGIN_URL", "") or urljoin(base, "rest/user/login")
+        candidates = list(dict.fromkeys(candidates))
+        # Login URL: explicit config → discovered login endpoint → generic
+        # fallback (not an app-specific "/rest/user/login" default).
+        _disc_login = endpoint_hints.discover_endpoints(
+            self.ctx, "login", include_fallback=False)
+        login_url = ((_disc_login[0] if _disc_login else "")
+                     or cfg.get("AUTH_LOGIN_URL", "")
+                     or urljoin(base, "login"))
         uname_field = cfg.get("AUTH_USERNAME_FIELD", "email") or "email"
         pw_field = cfg.get("AUTH_PASSWORD_FIELD", "password") or "password"
         tok_path = cfg.get("AUTH_TOKEN_JSON_PATH", "authentication.token") or "authentication.token"
 
+        def _cred_result(role, url):
+            return {
+                "role": role, "auth_type": "json", "login_url": login_url,
+                "username": email_holder["email"], "password": email_holder["pw"],
+                "username_field": uname_field, "password_field": pw_field,
+                "token_json_path": tok_path,
+            }
+
+        email_holder = {}
+        # Compact, secret-free evidence trail (kind, url, status) fed to Jev to
+        # decide whether authentication is POSSIBLE, regardless of outcome.
+        auth_signals: list = []
+
         async def _register_one(client, role: str):
             email = f"scan_{secrets.token_hex(5)}@example.com"
             pw = "Sc@n_" + secrets.token_hex(6)
+            email_holder["email"], email_holder["pw"] = email, pw
+            # Generic, app-agnostic seed bodies (simplest first).
             payloads = [
-                {"email": email, "password": pw, "passwordRepeat": pw,
-                 "securityQuestion": {"id": 1}, "securityAnswer": "test"},  # juice-shop
                 {"email": email, "password": pw},
                 {"username": email, "password": pw},
+                {"email": email, "password": pw, "passwordRepeat": pw},
             ]
+            hint = None  # (url, error_text) from the most informative rejection
             for url in candidates:
                 for body in payloads:
                     try:
                         r = await client.post(url, json=body)
                     except Exception:
                         continue
+                    auth_signals.append(("register", url, r.status_code))
                     if r.status_code in (200, 201):
                         logger.info(f"[Auth] self-registered throwaway account "
                                     f"'{role}' at {url} ({r.status_code})")
-                        return {
-                            "role": role, "auth_type": "json", "login_url": login_url,
-                            "username": email, "password": pw,
-                            "username_field": uname_field, "password_field": pw_field,
-                            "token_json_path": tok_path,
-                        }
+                        return _cred_result(role, url)
+                    if r.status_code in (400, 422) and hint is None:
+                        try:
+                            txt = r.text
+                        except Exception:
+                            txt = ""
+                        if txt:
+                            hint = (url, txt)
+            # Static seeds all failed. Instead of a hardcoded app-specific body,
+            # ask the LLM to synthesize a valid registration body from the
+            # server's OWN validation error — fully target-agnostic. One extra
+            # call, only on failure; retry once.
+            if hint:
+                url, err = hint
+                body = await self._llm_register_body(url, email, pw, err)
+                if body:
+                    # Force our known credentials so the returned cred matches
+                    # exactly what we registered (ignore any LLM-invented values
+                    # for the credential fields).
+                    body[uname_field] = email
+                    body[pw_field] = pw
+                    if "email" in body:
+                        body["email"] = email
+                    if "passwordRepeat" in body:
+                        body["passwordRepeat"] = pw
+                    try:
+                        r = await client.post(url, json=body)
+                        if r.status_code in (200, 201):
+                            logger.info(f"[Auth] self-registered '{role}' at {url} "
+                                        f"via LLM-synthesized body ({r.status_code})")
+                            return _cred_result(role, url)
+                    except Exception:
+                        pass
             return None
 
         # Two distinct identities so cross-role replay / AuthzMatrix can test
         # HORIZONTAL access control (identity A reaching identity B's objects =
         # IDOR/BOLA), not just vertical (unauth vs user). Falls back to one if the
         # target only accepts a single signup.
+        # Login URL candidates (ordered, app-agnostic; app-specific shapes last).
+        # Registration runs early — before the SPA's real login endpoint is
+        # captured — so the discovered/generic single guess (e.g. "/login", an SPA
+        # route that returns index.html, no token) silently yields 0 identities and
+        # every authenticated test is skipped. Resolve the real one by trying each.
+        # Fully target-agnostic: config → discovered login endpoints → generic
+        # login leaves tried as SIBLINGS of each register endpoint (login usually
+        # shares the register API root) and relative to the base. No app-specific
+        # paths.
+        _login_leaves = ("login", "signin", "sign-in", "authenticate",
+                         "sessions", "session", "token")
+        login_candidates = []
+        # Discovered login endpoints lead (same ordering as register above).
+        login_candidates.extend(_disc_login)
+        if cfg.get("AUTH_LOGIN_URL", ""):
+            login_candidates.append(cfg.get("AUTH_LOGIN_URL", ""))
+        for reg in candidates:
+            parent = reg.rsplit("/", 1)[0] if "/" in reg.split("://", 1)[-1] else reg
+            for leaf in _login_leaves:
+                login_candidates.append(parent + "/" + leaf)
+        for leaf in _login_leaves:
+            login_candidates.append(urljoin(base, leaf))
+            login_candidates.append(urljoin(base, "api/" + leaf))
+            login_candidates.append(urljoin(base, "auth/" + leaf))
+        login_candidates = list(dict.fromkeys([u for u in login_candidates if u]))[:32]
+
+        def _dig(obj, path):
+            cur = obj
+            for part in (path or "").split("."):
+                if isinstance(cur, dict):
+                    cur = cur.get(part)
+                else:
+                    return None
+            return cur
+
+        async def _resolve_login_url(client, email, pw):
+            """First candidate URL that returns an auth token for the creds."""
+            body = {uname_field: email, pw_field: pw}
+            for url in login_candidates:
+                try:
+                    r = await client.post(url, json=body)
+                except Exception:
+                    continue
+                auth_signals.append(("login", url, r.status_code))
+                if r.status_code not in (200, 201):
+                    continue
+                try:
+                    tok = _dig(r.json(), tok_path)
+                except Exception:
+                    tok = None
+                if tok and isinstance(tok, str) and len(tok) > 20:
+                    return url
+            return ""
+
         creds = []
         async with get_scoped_client(timeout=20, follow_redirects=True) as client:
             for role in ("user_a", "user_b"):
                 c = await _register_one(client, role)
                 if c:
                     creds.append(c)
+            # Point creds at a login URL that actually mints a token (best-effort;
+            # keeps the original guess if none resolves so nothing regresses).
+            if creds:
+                real_login = await _resolve_login_url(
+                    client, creds[0]["username"], creds[0]["password"])
+                if real_login:
+                    for c in creds:
+                        c["login_url"] = real_login
+                    logger.info(f"[Auth] resolved login endpoint for self-reg identities: {real_login}")
+                else:
+                    logger.warning("[Auth] self-reg: no login URL returned a token — "
+                                   "authenticated tests may be skipped")
+            else:
+                # No signup accepted. Still probe whether a LOGIN endpoint EXISTS
+                # (responds 400/401/405/422, not 404) with throwaway creds — we
+                # only read the status. This is the signal that tells Jev an auth
+                # surface exists even when open registration is closed; without it
+                # Jev only ever sees register-404s and can't judge auth-possible.
+                probe_body = {uname_field: f"scan_{secrets.token_hex(4)}@example.com",
+                              pw_field: secrets.token_hex(8)}
+                for url in login_candidates[:8]:
+                    try:
+                        r = await client.post(url, json=probe_body)
+                    except Exception:
+                        continue
+                    auth_signals.append(("login", url, r.status_code))
+        # Jev verdict: is authentication POSSIBLE on this target — run whether or
+        # not our throwaway signup succeeded, so downstream phases / the human
+        # queue know if an auth surface exists to pursue (e.g. registration
+        # closed but a login endpoint answers, or a signup rejected only on body
+        # shape). Opt-in classifier; degrades to the concrete signal when off.
+        await self._jev_auth_possible(bool(creds), auth_signals)
         if not creds:
             logger.info("[Auth] self-registration: no registration endpoint accepted a signup")
             return
@@ -7877,6 +8504,117 @@ class CentralBrain(
         self.ctx.auth_credentials = lst
         logger.info(f"[Auth] self-registration seeded {len(creds)} identity(ies) "
                     f"for horizontal access-control testing: {[c['role'] for c in creds]}")
+
+    async def _jev_auth_possible(self, registered: bool, signals: list) -> None:
+        """Ask Jev (opt-in classifier) whether authentication is POSSIBLE on this
+        target from the register/login evidence, and record the verdict on ctx.
+        Runs whether or not our signup succeeded. Best-effort: with Jev off /
+        unavailable it falls back to the concrete signal (a minted cred proves
+        auth is possible; otherwise unknown)."""
+        verdict = True if registered else None
+        prob = 1.0 if registered else 0.0
+        try:
+            from agents.providers.jev_classifier import get_jev
+            jev = get_jev(scan_id=getattr(self, "_scan_id", ""))
+            if jev is not None and jev.is_available():
+                # Dedup so the evidence isn't flooded with identical repeats
+                # (register is attempted per-identity × per-payload), which would
+                # otherwise fill the cap with the same 404 and hide login signals.
+                seen: set = set()
+                uniq = []
+                for t in (signals or []):
+                    if t not in seen:
+                        seen.add(t)
+                        uniq.append(t)
+                evid = {
+                    "self_register_succeeded": registered,
+                    # endpoint + HTTP status only — no bodies, no creds
+                    "attempts": [{"kind": k, "url": u, "status": s}
+                                 for (k, u, s) in uniq[:24]],
+                }
+                v, p = await jev.noul(
+                    evid,
+                    "Given these registration/login endpoint attempts (URL + HTTP "
+                    "status), is user authentication POSSIBLE on this target — "
+                    "i.e. does an auth surface exist that could yield a valid "
+                    "session (an open signup, or a login endpoint that accepts "
+                    "credentials)? Judge by response shape, not just 2xx: a login "
+                    "endpoint answering 400/401/403/405/422 (not 404) EXISTS and "
+                    "means an auth surface is present, so authentication is "
+                    "possible. A 200/201 on a signup or login is a strong yes. "
+                    "Only 404/blocked on every candidate (no responsive auth "
+                    "endpoint at all) points to no.",
+                    name="auth_possible", site="triage")
+                if v is not None:
+                    verdict, prob = v, p
+        except Exception as e:
+            logger.debug("[Auth] Jev auth-possibility check skipped: %s", e)
+        try:
+            self.ctx.auth_possible = {
+                "value": (bool(verdict) if verdict is not None else None),
+                "probability": round(float(prob or 0.0), 3),
+                "self_register": registered,
+            }
+        except Exception:
+            pass
+        logger.info("[Auth] authentication possible? %s (p=%.2f, self_register=%s)",
+                    verdict, float(prob or 0.0), registered)
+
+    async def _llm_register_body(self, url: str, email: str, pw: str,
+                                 error_text: str) -> dict:
+        """Synthesize a registration request body from the server's OWN
+        validation error (target-agnostic). Returns {} on any failure so the
+        caller falls back gracefully."""
+        try:
+            prompt = (
+                "A JSON account-registration request to a web API was rejected. "
+                "Infer the required fields from the server's validation error and "
+                "return ONLY a JSON object for a body that would register a new "
+                "account. Use minimal valid placeholder values for any extra "
+                "required fields.\n"
+                f"Endpoint: {url}\n"
+                f"Credential fields should use email={email}, password={pw}.\n"
+                f"Server error response (truncated):\n{(error_text or '')[:1200]}"
+            )
+            body = await self.llm.generate_json(prompt, tier=TaskTier.SMALL,
+                                                max_tokens=400)
+            return body if isinstance(body, dict) and body else {}
+        except Exception:
+            return {}
+
+    async def _llm_admin_path_candidates(self, limit: int = 8) -> list:
+        """LLM-proposed admin/privileged URL paths for THIS target, inferred
+        from discovered endpoints + detected technologies. Modern apps route
+        admin under varied paths, so this augments discovery. Returns [] on any
+        failure."""
+        try:
+            eps = []
+            for e in (getattr(self.ctx, "endpoints", []) or [])[:60]:
+                u = e if isinstance(e, str) else (e.get("url", "") if isinstance(e, dict) else "")
+                if u:
+                    eps.append(u)
+            _t = getattr(self.ctx, "technologies", None)
+            techs = (list(_t)[:15] if isinstance(_t, dict) else (list(_t or [])[:15]))
+            if not eps and not techs:
+                return []
+            prompt = (
+                "You are mapping a web app's admin/privileged surface. From the "
+                "discovered endpoints and detected technologies, propose up to "
+                f"{limit} likely ADMIN or privileged URL PATHS (leading slash, no "
+                "host) a regular user should NOT reach. Prefer paths consistent "
+                "with the app's own routing style. Return JSON "
+                "{\"paths\": [\"/...\"]}.\n"
+                f"Endpoints: {eps}\nTechnologies: {techs}"
+            )
+            data = await self.llm.generate_json(prompt, tier=TaskTier.SMALL,
+                                                max_tokens=300)
+            out = []
+            for p in ((data.get("paths") if isinstance(data, dict) else []) or []):
+                if isinstance(p, str) and p.startswith("/") and len(p) < 120:
+                    out.append(p.split("?")[0])
+            return out[:limit]
+        except Exception:
+            return []
 
     async def _setup_auth_session(self) -> None:
         self.auth_session = None
@@ -8072,40 +8810,41 @@ class CentralBrain(
                                 continue
                             if resp.status_code not in (200, 201):
                                 break  # non-transient failure — try next body shape
-                        # Extract token
-                        token = None
+                        # Token/session-shape agnostic: accept a JWT, an opaque
+                        # bearer token, OR a session cookie — was eyJ-only, which
+                        # dropped every non-JWT login and lost credential-replay /
+                        # cross-role coverage on cookie/opaque-token apps.
+                        from core.common import auth_shape as _ash
                         try:
-                            j = resp.json()
-                            if isinstance(j, dict):
-                                auth = j.get("authentication") or {}
-                                token = (auth.get("token") if isinstance(auth, dict) else None) \
-                                    or j.get("access_token") or j.get("token") or j.get("id_token")
+                            _j = resp.json()
                         except Exception:
-                            pass
-                        if not token or not isinstance(token, str) or not token.startswith("eyJ"):
+                            _j = None
+                        _sess = _ash.extract_session(_j, getattr(resp, "headers", None))
+                        token = _sess.get("token")
+                        if not token:
                             continue
-                        # Decode JWT for role
-                        role = ""
-                        try:
-                            p = token.split(".")[1]
-                            p += "=" * (-len(p) % 4)
-                            payload = _json.loads(_b64.urlsafe_b64decode(p).decode("utf-8", "ignore"))
-                            data = payload.get("data") or payload
-                            if isinstance(data, dict):
-                                role = data.get("role", "")
-                        except Exception:
-                            pass
+                        _transport = _sess.get("transport", "bearer")
+                        _cookie_name = _sess.get("cookie_name", "")
+                        # Role from JWT across modern claim shapes (roles[]/scope/
+                        # realm_access.roles/cognito:groups/namespaced); "" if opaque.
+                        role = _ash.primary_role(token) if _sess.get("is_jwt") else ""
                         # Attach token, publish, persist
                         cred["token"] = token
                         cred["role"] = role
                         cred["login_url"] = lurl
+                        cred["transport"] = _transport
                         hdrs = dict(getattr(self.ctx, "auth_headers", {}) or {})
-                        hdrs["Authorization"] = f"Bearer {token}"
-                        self.ctx.auth_headers = hdrs
+                        cookies = dict(getattr(self.ctx, "auth_cookies", {}) or {})
+                        if _transport == "cookie" and _cookie_name:
+                            cookies[_cookie_name] = token
+                            self.ctx.auth_cookies = cookies
+                        else:
+                            hdrs["Authorization"] = f"Bearer {token}"
+                            self.ctx.auth_headers = hdrs
                         try:
                             set_active_auth(
                                 headers=hdrs,
-                                cookies=getattr(self.ctx, "auth_cookies", {}) or {},
+                                cookies=cookies,
                                 sessions=getattr(self.ctx, "auth_sessions", {}) or {},
                             )
                         except Exception:

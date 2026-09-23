@@ -417,9 +417,20 @@ class CorrelationEngine:
 
     def get_findings(self) -> List[Dict]:
         findings = []
+        _seen = set()  # dedup: one chain per (rule name, host-set) — the combinatorial
+                       # fa×fb loop otherwise emits many near-identical chains (e.g. one
+                       # CORS finding × N info-disclosure findings → N duplicate chains).
         for chain in self.chains:
             if chain.likelihood < 0.3:
                 continue
+            from urllib.parse import urlparse as _up
+            _hosts = frozenset(
+                _up(str(f.get("target") or f.get("location") or "")).hostname or ""
+                for f in chain.findings)
+            _key = (chain.name, _hosts)
+            if _key in _seen:
+                continue
+            _seen.add(_key)
             finding_titles = ", ".join(f.get("title", "?") for f in chain.findings)
             findings.append({
                 "title": f"Attack Chain: {chain.name}",

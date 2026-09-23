@@ -27,10 +27,14 @@ def _collect_hypotheses(brain) -> list:
 class Checkpointer:
 
     def __init__(self, checkpoints_dir: str = None):
-        from core.common.reports_config import reports_enabled, reports_dir
+        from core.common.reports_config import reports_enabled
         self._reports_enabled = reports_enabled()
         if checkpoints_dir is None:
-            checkpoints_dir = str(reports_dir() / "checkpoints")
+            # Resume state lives under the hidden runtime dir (matches
+            # core/orchestration/resume.py's reader), NOT reports/ — the
+            # reports/ tree is opt-in (REPORTS_ENABLED) and must never be
+            # created just to hold checkpoints.
+            checkpoints_dir = str(Path(".antigravity") / "checkpoints")
         self.checkpoints_dir = Path(checkpoints_dir)
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
@@ -89,6 +93,13 @@ class Checkpointer:
         target_slug = brain.target.replace('://', '_').replace('/', '_').replace(':', '_')
         checkpoint_id = f"checkpoint_{target_slug}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         filepath = self.checkpoints_dir / f"{checkpoint_id}.json"
+        # Guarantee the target dir exists at write time (CWD / late-set dir can
+        # differ from __init__'s mkdir) — otherwise the final watchdog checkpoint
+        # is lost to [Errno 2] No such file or directory.
+        try:
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
 
         try:
             ctx = brain.ctx

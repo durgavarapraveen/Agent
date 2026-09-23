@@ -9,6 +9,7 @@ import LiveAgentsPanel from "../components/LiveAgentsPanel";
 import BlackboardPanel from "../components/BlackboardPanel";
 import AttackGraphPanel from "../components/AttackGraphPanel";
 import LlmCallsPanel from "../components/LlmCallsPanel";
+import JevDecisionsPanel from "../components/JevDecisionsPanel";
 import HumanAssistPanel from "../components/HumanAssistPanel";
 import ScanChatPanel from "../components/ScanChatPanel";
 import ArtifactsPanel from "../components/ArtifactsPanel";
@@ -236,6 +237,7 @@ function LiveScanDetail({ jobId }) {
     { id: "blackboard", label: "Blackboard" },
     { id: "attackgraph", label: "Attack Graph" },
     { id: "llmio", label: "LLM I/O" },
+    { id: "jev", label: "Jev Decisions" },
     { id: "human", label: "Human Assist" },
     { id: "activity", label: "Agent Activity" },
     { id: "requests", label: `Requests (${requests.length})` },
@@ -310,6 +312,7 @@ function LiveScanDetail({ jobId }) {
       {tab === "blackboard" && <BlackboardPanel scanId={jobId} poll={isRunning} />}
       {tab === "attackgraph" && <AttackGraphPanel scanId={jobId} poll={isRunning} />}
       {tab === "llmio" && <LlmCallsPanel scanId={jobId} poll={isRunning} />}
+      {tab === "jev" && <JevDecisionsPanel scanId={jobId} poll={isRunning} />}
       {tab === "human" && <HumanAssistPanel scanId={jobId} poll={isRunning} />}
       {tab === "artifacts" && <ArtifactsPanel scanId={jobId} poll />}
       {tab === "requests" && <RequestsSection requests={requests} />}
@@ -581,8 +584,6 @@ function VulnsSection({ vulns }) {
   const [sevFilter, setSevFilter] = useState("ALL");
   const [expanded, setExpanded] = useState(null);
 
-  const sevOrder = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, INFO: 4 };
-
   let filtered = vulns.filter(v => {
     if (sevFilter !== "ALL" && (v.severity || "").toUpperCase() !== sevFilter) return false;
     if (search) {
@@ -594,7 +595,9 @@ function VulnsSection({ vulns }) {
     return true;
   });
 
-  filtered.sort((a, b) => (sevOrder[(a.severity || "INFO").toUpperCase()] || 4) - (sevOrder[(b.severity || "INFO").toUpperCase()] || 4));
+  // Newest-first: findings arrive in discovery order, so the most recent is last;
+  // reverse so the latest finding shows at the top during a live scan.
+  filtered = filtered.slice().reverse();
 
   if (vulns.length === 0) return <div className="empty">No vulnerabilities discovered yet</div>;
 

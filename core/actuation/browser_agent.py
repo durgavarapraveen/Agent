@@ -154,8 +154,14 @@ class BrowserAgent:
                 ep.get("url", "") if isinstance(ep, dict) else getattr(ep, "url", "") or "")
             if not url:
                 continue
-            path_lower = url.lower()
-            if any(kw in path_lower for kw in ("/admin", "/dashboard", "/settings", "/profile")):
+            try:
+                from core.common import target_shape as ts
+                _privileged = ts.is_privileged_path(url)
+            except Exception:
+                path_lower = url.lower()
+                _privileged = any(kw in path_lower for kw in
+                                  ("/admin", "/dashboard", "/settings", "/profile"))
+            if _privileged:
                 goals.append(BrowserGoal(
                     url=url,
                     goal=f"Navigate to {url}. Check if admin/restricted content is accessible. "

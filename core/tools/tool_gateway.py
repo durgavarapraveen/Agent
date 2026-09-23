@@ -36,6 +36,23 @@ class ToolGateway:
                 tier=_tier,
             )
             if not _policy_decision.allowed:
+                from core.security.policy_engine import DenyReason
+                # Benign dedup: a fresh result already exists — this is a SKIP, not
+                # a failure or scope violation. Return the explicit SKIPPED_FRESH
+                # status (success=True) so it doesn't inflate failure/scope counts
+                # or read as a security event. Logged at INFO, not WARNING.
+                if _policy_decision.reason_code == DenyReason.DUPLICATE_SUPPRESSED.value:
+                    logger.info(
+                        "POLICY_SKIP(dedup): tool=%s target=%s id=%s — %s",
+                        invocation.tool_id or invocation.operation, _policy_decision.target,
+                        _policy_decision.action_id, _policy_decision.reason)
+                    from core.common.schemas import ToolExecutionStatus
+                    return ToolResult(
+                        tool=invocation.tool_id or invocation.operation or "unknown",
+                        capability=invocation.operation or "unknown",
+                        status=ToolExecutionStatus.SKIPPED_FRESH,
+                        target=invocation.target,
+                    )
                 logger.warning(
                     "POLICY_DENIED: action=%s reason=%s code=%s target=%s id=%s",
                     _policy_decision.action, _policy_decision.reason,
@@ -232,6 +249,12 @@ class ToolGateway:
             if not result.success:
                 err_detail = result.error.message if result.error else ""
                 stderr_detail = getattr(result, "stderr", "") or ""
+                # Strip curl/wget progress-meter noise so the real error line
+                # (printed LAST) survives the [:500] truncation and is classified
+                # correctly (e.g. rc=6 "could not resolve host" -> ENVIRONMENT skip,
+                # not a generic PERMANENT failure).
+                from core.common.error_translator import ErrorTranslator as _ET
+                stderr_detail = _ET.clean_stderr(stderr_detail)
                 msg = f"{err_detail} | stderr={stderr_detail[:500]}" if stderr_detail else (err_detail or "Tool execution failed")
                 raise RuntimeError(msg)
                 
@@ -462,6 +485,30 @@ class ToolGateway:
                 result.status = derived
         except Exception as _e:
             logger.debug(f"status reconciliation skipped: {_e}")
+        # A 200 that is actually a WAF/anti-bot INTERSTITIAL is not real content.
+        # Downgrade it to BLOCKED so it isn't cached, isn't mined for endpoints /
+        # findings, and feeds WAF backoff (STEP 5b). Strict body fingerprint only,
+        # so legitimate pages are never downgraded and real findings are kept.
+        try:
+            cur = str(getattr(result, "status", "")).upper()
+            if cur in ("SUCCESS", "COMPLETED", "PARTIAL", "PARTIAL_SUCCESS"):
+                from core.tools.rate_limiter import is_waf_challenge
+                hit, sig = is_waf_challenge(str(getattr(result, "stdout", "") or ""))
+                if hit:
+                    from core.common.schemas import ToolExecutionStatus
+                    logger.warning(
+                        "WAF_INTERSTITIAL: tool=%s body is a challenge page "
+                        "(marker=%r) — downgrading %s->BLOCKED, not ingesting",
+                        getattr(result, "tool", "?"), sig, cur)
+                    result.status = ToolExecutionStatus.BLOCKED
+                    try:
+                        md = dict(getattr(result, "metadata", {}) or {})
+                        md["waf_interstitial"] = sig
+                        result.metadata = md
+                    except Exception:
+                        pass
+        except Exception as _e:
+            logger.debug(f"waf-interstitial check skipped: {_e}")
         return result
     
     def _stamp_cached(self, result):

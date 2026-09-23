@@ -3,6 +3,7 @@ from core.access_control.unauthenticated import UnauthenticatedTest
 from core.access_control.horizontal import HorizontalTest
 from core.access_control.vertical import VerticalTest
 from core.access_control.idor import IdorTest
+from core.common import target_shape as ts
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +29,9 @@ class MatrixEngine:
         matrix_results = {}
         idor_result = "REJECTED"
         
-        # 1. Baseline - get the status of the owner (assume standard user 0 is owner)
-        standard_users = [uid for uid, iden in self.identities.items() if iden.role == "standard"]
+        # 1. Baseline - get the status of the owner (first non-privileged authed user,
+        # selected by relative privilege rank rather than a "standard" literal)
+        standard_users = [uid for uid, iden in self.identities.items() if ts.role_rank(iden.role) == 1]
         if not standard_users:
             return
             
@@ -57,7 +59,7 @@ class MatrixEngine:
             elif isinstance(test, VerticalTest):
                 for admin_id, result in results.items():
                     # For vertical, we might need to know the admin's actual response status
-                    admins = [uid for uid, iden in self.identities.items() if iden.role == "administrator"]
+                    admins = [uid for uid, iden in self.identities.items() if ts.is_admin_role(iden.role)]
                     if admins:
                         admin_resp = self.replayer.replay(request_node, identity_id=admins[0])
                         matrix_results[admins[0]] = admin_resp["status"] if admin_resp else 0

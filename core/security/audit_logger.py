@@ -70,13 +70,22 @@ def mask_sensitive_pii(text: str) -> str:
     return s
 
 
+def _file_audit_enabled() -> bool:
+    """The tamper-evident audit trail lives in the DB (audit_log table) by
+    default. Set NEO_FILE_AUDIT=1 to ALSO mirror it to data/audit.log
+    (off by default — no on-disk audit file)."""
+    return os.getenv("NEO_FILE_AUDIT", "0").lower() in ("1", "true", "yes", "on")
+
+
 class AuditLogger:
 
     def __init__(self, log_path: str = "data/audit.log"):
         self.log_path = Path(log_path)
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.log_path.exists():
-            self.log_path.touch()
+        self._file = _file_audit_enabled()
+        if self._file:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            if not self.log_path.exists():
+                self.log_path.touch()
 
     def _calculate_hash(self, previous_hash: str, entry_body: Dict[str, Any]) -> str:
         body_json = json.dumps(entry_body, sort_keys=True)
@@ -84,6 +93,16 @@ class AuditLogger:
         return hashlib.sha256(raw_str.encode("utf-8")).hexdigest()
 
     def get_last_entry(self) -> Optional[Dict[str, Any]]:
+        # Chain head from the DB when the on-disk mirror is off.
+        if not self._file:
+            try:
+                from core.database.pg_store import AuditRepo
+                h = AuditRepo.last_event_hash()
+                if not h:
+                    return None
+                return {"entry_id": AuditRepo.event_count(), "current_hash": h}
+            except Exception:
+                return None
         if not self.log_path.exists() or self.log_path.stat().st_size == 0:
             return None
 
@@ -170,15 +189,30 @@ class AuditLogger:
         full_entry["previous_hash"] = prev_hash
         full_entry["current_hash"] = current_hash
 
-        line = json.dumps(full_entry) + "\n"
-        # Best-effort rotation. Never raises — a rotation failure must not
-        # block an audit write.
+        # Primary sink: DB hash-chained audit_log table.
         try:
-            self._maybe_rotate()
+            from core.database.pg_store import AuditRepo
+            AuditRepo.log_event(action, target,
+                                {"details": details, "user": user, "entry_id": entry_id,
+                                 "timestamp": timestamp,
+                                 "correlation_id": entry_body["correlation_id"],
+                                 "scan_id": entry_body["scan_id"],
+                                 "experiment_id": entry_body["experiment_id"]},
+                                previous_hash=prev_hash, current_hash=current_hash)
         except Exception as e:
-            logger.warning("Audit log rotation skipped: %s", e)
-        with open(self.log_path, mode="a", encoding="utf-8") as f:
-            f.write(line)
+            logger.debug("audit DB write skipped: %s", e)
+
+        # Optional on-disk mirror (NEO_FILE_AUDIT=1).
+        if self._file:
+            line = json.dumps(full_entry) + "\n"
+            # Best-effort rotation. Never raises — a rotation failure must not
+            # block an audit write.
+            try:
+                self._maybe_rotate()
+            except Exception as e:
+                logger.warning("Audit log rotation skipped: %s", e)
+            with open(self.log_path, mode="a", encoding="utf-8") as f:
+                f.write(line)
 
         return full_entry
 

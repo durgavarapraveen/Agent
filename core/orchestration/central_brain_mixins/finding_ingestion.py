@@ -9,6 +9,60 @@ logger = logging.getLogger(__name__)
 
 class FindingIngestionMixin:
     def _stamp_and_add_vuln(self, v: dict, source: str = "", parser: str = "regex") -> None:
+        # Universal URL hygiene: un-stack any "GET:get://https://…" endpoint-id
+        # corruption on EVERY finding as it enters (single choke covering all
+        # probes/paths). Only rewrites a field when the cleaned URL is a real
+        # http(s) URL, so clean/relative values are left untouched.
+        try:
+            from core.common.url_hygiene import canonical_http_url as _canon
+            _base = getattr(getattr(self, "ctx", None), "target", "") or ""
+            for _k in ("location", "target", "url", "affected_endpoint"):
+                _val = v.get(_k)
+                if isinstance(_val, str) and _val and ("get://" in _val or _val[:8].upper().startswith(("GET:", "POST:", "PUT:", "HEAD:"))):
+                    _c = _canon(_val, _base)
+                    if _c.startswith(("http://", "https://")):
+                        v[_k] = _c
+            # Same corruption leaks into human-readable strings (e.g. race_probe
+            # title "race_condition: GET:https://…"). Collapse get:// and the
+            # "METHOD:https://" colon-scheme so titles/descriptions read cleanly.
+            for _k in ("title", "description"):
+                _s = v.get(_k)
+                if isinstance(_s, str) and _s and ("get://" in _s or re.search(
+                        r'\b(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS):(?:get://)?https?://', _s)):
+                    _s = _s.replace("get://", "")
+                    _s = re.sub(r'\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS):(https?://)', r'\1 \2', _s)
+                    v[_k] = _s
+        except Exception:
+            pass
+        # Scope guard: never report a finding whose endpoint host belongs to a
+        # DIFFERENT registrable domain than the scan target (e.g. a third-party
+        # CDN like js.maxmind.com scraped from a source-map reference). We
+        # compare against the scan target's own domain rather than the
+        # authorization singleton, which may not be scoped in every context
+        # (a bare is_authorized() there would wrongly drop legitimate findings).
+        # Relative/host-less locations and same-domain subdomains are kept.
+        try:
+            from urllib.parse import urlparse
+
+            def _reg(h: str) -> str:  # last two labels ~ registrable domain
+                parts = (h or "").lower().strip(".").split(".")
+                return ".".join(parts[-2:]) if len(parts) >= 2 else (h or "").lower()
+
+            _tgt = getattr(getattr(self, "ctx", None), "target", "") or ""
+            _tgt_host = urlparse(_tgt if "://" in _tgt else "http://" + _tgt).hostname or ""
+            _fhost = ""
+            for _k in ("location", "target", "url", "affected_endpoint"):
+                _u = v.get(_k)
+                if isinstance(_u, str) and _u.startswith(("http://", "https://")):
+                    _fhost = urlparse(_u).hostname or ""
+                    if _fhost:
+                        break
+            if _tgt_host and _fhost and _reg(_fhost) != _reg(_tgt_host):
+                logger.info("[ingest] dropped out-of-scope finding host=%s (target=%s) title=%r",
+                            _fhost, _tgt_host, str(v.get("title"))[:80])
+                return
+        except Exception:
+            pass
         try:
             from core.evidence.confidence_model import compute, ConfidenceInputs, label
             already = float(v.get("confidence_score") or 0.0)
@@ -36,6 +90,109 @@ class FindingIngestionMixin:
                         and not is_confirmable_without_validation(kind):
                     v["status"] = "UNCONFIRMED"
                     v.setdefault("_downgraded_by", "observation_gate")
+        except Exception:
+            pass
+        # P0-A1: uniform confirming-oracle gate. Every finding funnels through
+        # here, but only probes routed via UniversalProbeEngine/violation_tester
+        # were oracle-checked before. Re-verify CONFIRMED findings against the
+        # canonical OracleEngine so a self-reported "CONFIRMED" can't reach the
+        # DB unless a real oracle agrees. Fail-safe & generic:
+        #   - only acts when an oracle EXISTS for the class (unknown class stays
+        #     inconclusive, never downgraded),
+        #   - only downgrades when we actually fed the oracle response evidence
+        #     AND it refuted (is_vulnerable False, no oracle error),
+        #   - never UPGRADES status (confirmation still earned elsewhere).
+        try:
+            from core.evidence.oracle import get_oracle_engine
+            if str(v.get("status") or "").upper() == "CONFIRMED":
+                _eng = get_oracle_engine()
+                # Normalize the class key (oracle keys are UPPER_SNAKE) so a
+                # multi-word type like "JWT Forgery" maps to "JWT_FORGERY" and
+                # lookups match by design, not by luck.
+                _cls = (v.get("type") or v.get("attack_type") or "").upper().replace(" ", "_").replace("-", "_")
+                if _cls and _cls in getattr(_eng, "_oracles", {}):
+                    # Map generic finding fields onto the keys oracles read.
+                    _resp = (v.get("response_body") or v.get("response_snippet")
+                             or v.get("response") or v.get("evidence") or v.get("proof") or "")
+                    if isinstance(_resp, (dict, list)):
+                        _resp = str(_resp)
+                    _ev = {
+                        "response_body": _resp,
+                        "response_headers": v.get("response_headers") or v.get("headers") or {},
+                        "status_code": v.get("status_code") or v.get("response_code"),
+                        "canary": v.get("canary") or v.get("marker") or v.get("payload") or "",
+                        "payload": v.get("payload") or "",
+                        "elapsed_ms": v.get("elapsed_ms") or v.get("timing_ms") or 0,
+                        "oob_interaction": v.get("oob_interaction") or v.get("interaction"),
+                        "evidence_id": v.get("evidence_id") or v.get("finding_id") or v.get("id"),
+                    }
+                    # Only judge when there is real response evidence to judge on;
+                    # absent evidence => inconclusive, leave status untouched.
+                    if _resp:
+                        _res = _eng.evaluate(_cls, _ev)
+                        _reason = (getattr(_res, "reasoning", "") or "")
+                        if (not getattr(_res, "is_vulnerable", False)
+                                and not _reason.startswith("Oracle error")
+                                and not _reason.startswith("No oracle")):
+                            v["status"] = "UNCONFIRMED"
+                            v.setdefault("_downgraded_by", "oracle_gate")
+                            v.setdefault("_oracle_reason", _reason)
+        except Exception:
+            pass
+        # P0-A2: run the evidence-tiered confirmation gates that
+        # FindingStateMachine.mark_confirmed() wraps (ReproductionGate P0.8 +
+        # FindingConfirmationGate P0.6). mark_confirmed itself is FSM-bound
+        # (requires a VALIDATING->CONFIRMED transition) and was never called on
+        # this path, so its gates were dead. We invoke the same gates here at the
+        # single ingestion choke. A CONFIRMED finding that fails a gate is
+        # DOWNGRADED to NEEDS_REVIEW (never dropped, never silently kept).
+        try:
+            if str(v.get("status") or "").upper() == "CONFIRMED":
+                _fid = str(v.get("finding_id") or v.get("id") or "")
+                _cat = (v.get("type") or v.get("category") or v.get("attack_type") or "GENERIC")
+                _gate_reason = ""
+                # ReproductionGate only gates findings that ACTUALLY carry
+                # reproduction responses. With none provided it returns PENDING,
+                # which must be read as "not attempted / not required" — NOT a
+                # rejection — otherwise every single-shot oracle-confirmed finding
+                # would be wrongly downgraded. So we run it only when the probe
+                # supplied reproduction_responses (multi-attempt repro evidence).
+                _repro = v.get("reproduction_responses")
+                if _repro:
+                    try:
+                        from core.verification.reproduction_gate import ReproductionGate
+                        _rg = ReproductionGate()
+                        _rg.check_reproducible(_fid, v, responses=_repro)
+                        _ok, _rr = _rg.is_confirmation_allowed(_fid)
+                        if not _ok:
+                            _gate_reason = f"reproduction_gate:{_rr}"
+                    except ImportError:
+                        pass
+                if not _gate_reason:
+                    # FindingConfirmationGate's active guards at this choke reject
+                    # LLM-wording-only and status-code-only "confirmations" — the
+                    # two FP shapes we most want to keep out of CONFIRMED.
+                    try:
+                        from core.verification.finding_confirmation_gate import FindingConfirmationGate
+                        _cg = FindingConfirmationGate()
+                        _cg.register(_fid, _cat)
+                        # The gate's LLM-wording/status-code checks read `proof`.
+                        # Many probes put their evidence in `details` (often a
+                        # dict) and never set `proof`, which would make the gate
+                        # read empty text and wrongly reject them. Pass a
+                        # normalized copy whose `proof` falls back to
+                        # evidence/details so the gate judges real evidence.
+                        _pv = v.get("proof") or v.get("evidence") or v.get("details") or ""
+                        _eval_v = v if v.get("proof") else {**v, "proof": _pv if isinstance(_pv, str) else str(_pv)}
+                        _stage, _reason = _cg.evaluate(_fid, _eval_v)
+                        if getattr(_stage, "value", str(_stage)) == "rejected":
+                            _gate_reason = f"confirmation_gate:{_reason}"
+                    except ImportError:
+                        pass
+                if _gate_reason:
+                    v["status"] = "NEEDS_REVIEW"
+                    v.setdefault("_downgraded_by", "confirmation_gate")
+                    v.setdefault("_gate_reason", _gate_reason)
         except Exception:
             pass
         # P3-3: decision provenance — every ingested finding is a decision.
@@ -176,13 +333,22 @@ class FindingIngestionMixin:
                 item_sev = str(item.get("severity", "") or "").upper()
                 sev = item_sev if item_sev else default_sev
                 confirmed = item.get("status") in (200, 201) or item_sev in ("CRITICAL", "HIGH")
+                # Clean any GET:get://https:// corruption before it's baked into
+                # the title (the title is built here, before _stamp runs).
+                _raw_loc = item.get("path", item.get("url", item.get("endpoint", target)))
+                try:
+                    from core.common.url_hygiene import canonical_http_url as _canon
+                    _c = _canon(str(_raw_loc or ""), target or "")
+                    _loc = _c if _c.startswith(("http://", "https://")) else str(_raw_loc or "")
+                except Exception:
+                    _loc = str(_raw_loc or "")
                 vuln = {
                     "type": test_id.upper(),
-                    "title": f"Deterministic test: {test_name} on {item.get('path', item.get('url', item.get('endpoint', target)))}",
+                    "title": f"Deterministic test: {test_name} on {_loc}",
                     "severity": sev,
                     "status": "CONFIRMED" if confirmed else "UNCONFIRMED",
                     "target": target,
-                    "location": item.get("path", item.get("url", item.get("endpoint", ""))),
+                    "location": _loc,
                     "evidence": item.get("body_snippet", item.get("description", "")),
                     "source": "deterministic_executor",
                     "test_id": test_id,

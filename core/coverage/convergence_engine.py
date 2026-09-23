@@ -25,7 +25,11 @@ class ConvergenceStatus:
     reason: str = ""
 
 
-class ConvergenceEngine:
+class ConvergenceEngineV2:
+    # P1-F4: renamed from ConvergenceEngine to end the same-name collision with
+    # core.convergence.convergence_engine.ConvergenceEngine (V1). This is the
+    # CoverageMatrix-backed engine used live by central_brain. A backward-compat
+    # alias is kept at the bottom of this module.
 
     def __init__(self, coverage_matrix=None) -> None:
         self.matrix = coverage_matrix
@@ -124,3 +128,8 @@ class ConvergenceEngine:
             "stall_minutes": stall_min,
             "history_points": len(self._history),
         }
+
+
+# P1-F4: backward-compatible alias for any legacy importer that still uses the
+# old name from this module. Prefer ConvergenceEngineV2 going forward.
+ConvergenceEngine = ConvergenceEngineV2

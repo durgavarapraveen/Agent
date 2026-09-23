@@ -118,6 +118,10 @@ class ToolInvocationEngine:
             if _tracker is not None:
                 try:
                     _fc = len(getattr(result, "findings", None) or []) if hasattr(result, "findings") else 0
+                    # A tool invocation (incl. its fallback-chain attempts) is one
+                    # executed step — set it so the card shows steps>0, not 0.
+                    _tracker.heartbeat(steps_taken=max(1, int(getattr(result, "attempts", 1) or 1)),
+                                       findings_count=_fc)
                     _tracker.finish(status="completed" if result.success else "failed",
                                     findings=([None] * _fc) if _fc else None)
                 except Exception:

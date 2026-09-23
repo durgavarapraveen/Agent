@@ -392,7 +392,13 @@ export function OsintSection({ osint }) {
         </div>
       )}
 
-      {osintTab === "dns" && osint.domain_intelligence && Object.keys(osint.domain_intelligence).length > 0 && (
+      {osintTab === "dns" && osint.domain_intelligence && typeof osint.domain_intelligence === "string" && (
+        <div className="card" style={{ padding: 16 }}>
+          <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", fontFamily: "var(--mono)", fontSize: 12, margin: 0, color: "var(--text)" }}>{osint.domain_intelligence}</pre>
+        </div>
+      )}
+
+      {osintTab === "dns" && osint.domain_intelligence && typeof osint.domain_intelligence === "object" && Object.keys(osint.domain_intelligence).length > 0 && (
         <div className="card" style={{ padding: 16 }}>
           <div style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: "8px 16px" }}>
             {Object.entries(osint.domain_intelligence).map(([k, v]) => (

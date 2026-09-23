@@ -39,6 +39,39 @@ def memory_enabled() -> bool:
         "1", "true", "yes", "on")
 
 
+class ContextMode:
+    """How much shared context an agent gets — the per-role context policy from
+    the multi-agent-harness pattern (isolated verifiers vs context-carrying
+    workers). A string constant, not an Enum, to keep call sites trivial.
+
+    AUTO      honour the global NEO_AGENT_MEMORY flag — exact current behaviour.
+    ISOLATED  no shared-memory tools: fresh, self-contained. For verifiers and
+              independent parallel researchers (anti-anchoring, no re-discovery
+              cost because the task is self-contained).
+    MEMORY    compact index + on-demand memory tools. For workers/continuation
+              agents that build on prior investigation (avoids re-discovery).
+    FORK      bounded-memory substitute for a full history-fork. We deliberately
+              map it to MEMORY: inheriting the whole supervisor history would
+              overflow the window on a long scan, so agents PULL the slice they
+              need instead (the reason memory-as-tool exists).
+    """
+    AUTO = "auto"
+    ISOLATED = "isolated"
+    MEMORY = "memory"
+    FORK = "fork"
+
+
+def resolve_memory_on(context_mode: str = "") -> bool:
+    """Does this agent get the memory subsystem, given its context_mode?
+    AUTO defers to the global flag so unspecified spawns are unchanged."""
+    m = (context_mode or ContextMode.AUTO).strip().lower()
+    if m == ContextMode.ISOLATED:
+        return False
+    if m in (ContextMode.MEMORY, ContextMode.FORK):
+        return True
+    return memory_enabled()  # AUTO
+
+
 def _current_scan_id() -> str:
     return os.getenv("ANTIGRAVITY_SCAN_ID", "") or ""
 

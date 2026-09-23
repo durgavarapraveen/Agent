@@ -78,6 +78,55 @@ class Dispatcher:
             self._classifier = get_surface_classifier()
         return self._classifier
 
+    async def _prioritize_surfaces(self, surfaces, ctx):
+        """Rank endpoints by Jev-estimated attack value so the highest-value ones
+        are probed in the EARLIEST concurrency waves. Matters when the fan-out is
+        large/slow or the budget/watchdog cuts it short — you want the likely-
+        exploitable endpoints hit before time runs out. One batched Jev call per
+        ~20 surfaces (cheap, typed). Fail-open: original order on any issue."""
+        try:
+            import os
+            if (os.getenv("NEO_JEV_PRIORITIZE", "1") or "1").strip().lower() in ("0", "false", "no", "off"):
+                return surfaces
+            from core.llm.jev_config import jev_enabled
+            if not jev_enabled() or len(surfaces) < 4:
+                return surfaces
+            from agents.providers.jev_classifier import get_jev, JevClassifier
+            sid = getattr(ctx, "scan_id", "") or getattr(ctx, "_scan_id", "")
+            jev = get_jev(scan_id=sid)
+            if jev is None:
+                return surfaces
+            WEIGHT = {"high": 3.0, "medium": 2.0, "low": 1.0, "none": 0.0}
+            scores = {}
+            cap = min(len(surfaces), 60)  # bound the prioritization cost
+            for start in range(0, cap, 20):
+                chunk = surfaces[start:start + 20]
+                state, questions = {}, {}
+                for i, s in enumerate(chunk):
+                    k = f"s{i}"
+                    state[k] = {
+                        "url": getattr(s, "url", ""),
+                        "points": [p.key() for p in (getattr(s, "injection_points", []) or [])[:6]],
+                        "classes": list(getattr(s, "applicable_classes", []) or [])[:8],
+                    }
+                    questions[k] = {"type": "score",
+                                    "instructions": ("Rate how likely this endpoint yields a real, "
+                                                     "high-impact web vulnerability worth testing FIRST."),
+                                    "options": ["high", "medium", "low", "none"]}
+                ans = await jev.classify(state, questions, site="prioritize")
+                for i, s in enumerate(chunk):
+                    val, prob = JevClassifier._value_prob(ans.get(f"s{i}") or {})
+                    scores[id(s)] = WEIGHT.get(str(val).lower(), 1.0) + float(prob or 0.0) * 0.1
+            if not scores:
+                return surfaces
+            ranked = sorted(surfaces, key=lambda s: scores.get(id(s), 0.5), reverse=True)
+            logger.info("[Dispatch] Jev-prioritized %d endpoints (top=%s)",
+                        len(ranked), getattr(ranked[0], "url", "")[:80] if ranked else "-")
+            return ranked
+        except Exception as e:
+            logger.debug("[Dispatch] surface prioritization skipped: %s", e)
+            return surfaces
+
     async def run(self, ctx) -> List[Dict[str, Any]]:
         budget = self._int_env("DISPATCH_BUDGET", 0)          # 0 = all payloads
         max_surfaces = self._int_env("DISPATCH_MAX_SURFACES", 40)
@@ -91,6 +140,9 @@ class Dispatcher:
         ledger = CoverageLedger(scan_id=_sid, target=getattr(ctx, "target", ""))
 
         surfaces = self.classifier.classify(ctx)
+        # Test the highest-value endpoints first (early concurrency waves), so a
+        # large/slow fan-out or a budget/watchdog cutoff still covers what matters.
+        surfaces = await self._prioritize_surfaces(surfaces, ctx)
         findings: List[Dict[str, Any]] = []
         delegated_seen: Dict[str, int] = {}
         upload_needed = False

@@ -46,8 +46,10 @@ def build_replay_sessions(
         Session = None
 
     roles_loaded = []
+    roles_failed = []  # P2: surface roles that dropped out (auth/preload failure)
     for role, mgr in getattr(multi_auth, "sessions", {}).items():
         if not getattr(mgr, "authenticated", False):
+            roles_failed.append(role)
             continue
         norm_role = normalize_role(role)
         ident_id = role  # keep the UI's own label as the identity id
@@ -78,6 +80,7 @@ def build_replay_sessions(
                 roles_loaded.append(role)
             except Exception as e:
                 logger.debug(f"[IdentityBridge] session preload failed for {role}: {e}")
+                roles_failed.append(role)
 
     if shared_context is not None:
         try:
@@ -87,8 +90,12 @@ def build_replay_sessions(
 
     logger.info(f"[IdentityBridge] wired {len(roles_loaded)} real role sessions into "
                 f"replay/access-control engine: {roles_loaded}")
+    if roles_failed:
+        logger.warning("[IdentityBridge] %d role(s) failed to authenticate/load and were "
+                       "dropped: %s", len(roles_failed), roles_failed)
     return {
         "roles": list(getattr(multi_auth, "sessions", {}).keys()),
         "identities": list(identity_manager.identities.keys()),
         "sessions_loaded": roles_loaded,
+        "roles_failed": roles_failed,
     }

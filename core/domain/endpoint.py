@@ -72,6 +72,18 @@ class Endpoint(DomainModel):
 def canonical_endpoint_key(method: str, url: str) -> str:
     try:
         from urllib.parse import urlsplit, parse_qsl, urlencode
+        # Sanitize first: strip any stacked METHOD:/scheme:// artifact so a
+        # re-normalized endpoint id ("get:https://host" → "get://https://host")
+        # can't bake a pseudo-scheme into the key. This is the single storage
+        # choke — clean here and every id (coverage, state, dedup, tool targets
+        # derived from ids) is clean.
+        try:
+            from core.common.url_hygiene import canonical_http_url
+            _cu = canonical_http_url(url)
+            if _cu:
+                url = _cu
+        except Exception:
+            pass
         m = (method or "GET").upper()
         sp = urlsplit(url)
         scheme = (sp.scheme or "https").lower()

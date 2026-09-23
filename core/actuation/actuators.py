@@ -42,7 +42,34 @@ def _extract_token(payload) -> Optional[str]:
                 if seen:
                     return
     _walk(payload)
-    return seen[0] if seen else None
+    if seen:
+        return seen[0]
+    # Fallback: no known key matched — scan any string value that *looks* like a
+    # token (JWT or opaque bearer) so tokens under unexpected key names are caught.
+    try:
+        from core.common import auth_shape as ash
+    except Exception:
+        ash = None
+    if ash is not None:
+        shaped: list = []
+        def _scan(node):
+            if shaped:
+                return
+            if isinstance(node, dict):
+                for v in node.values():
+                    _scan(v)
+            elif isinstance(node, list):
+                for v in node:
+                    _scan(v)
+            elif isinstance(node, str):
+                if ash.is_jwt(node) or ash.looks_like_token(node):
+                    shaped.append(node)
+        _scan(payload)
+        if shaped:
+            # prefer a real JWT if present
+            shaped.sort(key=lambda s: 0 if ash.is_jwt(s) else 1)
+            return shaped[0]
+    return None
 
 
 def _b64url(data: bytes) -> str:

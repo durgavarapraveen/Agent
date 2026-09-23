@@ -43,6 +43,10 @@ class DenyReason(str, Enum):
     DNS_REBIND_BLOCKED = "DNS_REBIND_BLOCKED"
     SUBPROCESS_BLOCKED = "SUBPROCESS_BLOCKED"
     PRECONDITION_FAILED = "PRECONDITION_FAILED"
+    # Benign skip: a fresh result is already recorded, so re-running the tool is
+    # redundant. NOT a failure or scope breach — the caller should treat it as a
+    # skipped/cached success, not a denial.
+    DUPLICATE_SUPPRESSED = "DUPLICATE_SUPPRESSED"
 
 
 @dataclass(frozen=True)
@@ -346,9 +350,11 @@ class PolicyEngine:
                     "tool_category": operation,
                 })
                 if not verdict.allow:
+                    _code = (DenyReason.DUPLICATE_SUPPRESSED
+                             if topic == "duplicate_suppression"
+                             else DenyReason.PRECONDITION_FAILED)
                     return self._emit(_deny(
-                        action, verdict.reason,
-                        DenyReason.PRECONDITION_FAILED,
+                        action, verdict.reason, _code,
                         target=str(target),
                         detail=verdict.detail,
                     ))

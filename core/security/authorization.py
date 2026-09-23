@@ -209,9 +209,41 @@ class TargetScopeValidator:
     def discovered_out_of_scope(self) -> list:
         return sorted(getattr(self, "_discovered_out_of_scope", set()))
 
+    def _related_to_scope(self, norm: str) -> bool:
+        """True if `norm` shares a brand label with an in-scope target
+        (e.g. api.decibyl.com or decibyl.ai-backup.s3… vs scope decibyl.ai) —
+        an out-of-scope asset worth surfacing to the operator. Unrelated
+        third-party hosts (fonts.googleapis.com) return False and are ignored.
+        Never authorizes anything; used only to record a DiscoveredAsset."""
+        try:
+            toks = getattr(self, "_brand_toks", None)
+            if toks is None:
+                toks = set()
+                for a in self._baseline_scope:
+                    parts = [p for p in str(a).split(".") if p]
+                    if len(parts) >= 2 and not re.match(r"^\d+$", parts[-2]):
+                        toks.add(parts[-2].lower())
+                self._brand_toks = toks
+            n = norm.lower()
+            return any(t and t in n for t in toks)
+        except Exception:
+            return False
+
     def is_authorized(self, target: str) -> bool:
         if not target:
             return False
+        # Relative, SAME-ORIGIN reference (path / fragment / query, e.g. "/login",
+        # "/#/register", "?q=1") — it resolves against the already-authorized target
+        # host, so it is in scope by definition. Without this, _normalize_target
+        # collapses "/login" → "" and the host check DENIES the target's OWN routes,
+        # blocking the crawler/browser from login/register/cart pages (lost coverage).
+        # Excludes protocol-relative URLs ("//host", "/\host") that point at a
+        # DIFFERENT host — those fall through to the normal host check — and pseudo
+        # schemes (javascript:/data:/file:) which are not same-origin navigations.
+        _t = str(target).strip()
+        if _t.startswith(("#", "?")) or (
+                _t.startswith("/") and not _t.startswith("//") and not _t.startswith("/\\")):
+            return True
         norm = self._normalize_target(target)
         if norm in PASSIVE_OSINT_DOMAINS:
             return True
@@ -237,6 +269,12 @@ class TargetScopeValidator:
                 self.note_resolution(norm)
                 return True
             logger.warning(f"[TargetScopeValidator] DENIED host={norm} scope={self.authorized_scope}")
+            # Surface (do NOT authorize) brand-related out-of-scope assets the
+            # scan bumps into — e.g. api.decibyl.com, decibyl.ai-backup.s3… —
+            # so the operator sees them in the Coverage panel and can widen scope
+            # if they own them. Unrelated third-party hosts are ignored.
+            if self._related_to_scope(norm):
+                self._note_discovered_out_of_scope(norm)
             return False
 
         # Check if target is an IP address belonging to an in-scope domain.

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+from core.common import target_shape as ts
+
 
 @dataclass
 class SecurityTest:
@@ -114,16 +116,16 @@ def _has_login(**kw: Any) -> bool:
     return kw.get("has_login", False)
 
 def _has_api(**kw: Any) -> bool:
-    path = kw.get("path", "")
-    return "/api/" in path or "/rest/" in path or "/v1/" in path or "/v2/" in path
+    # Delegate to shared target-shape: API-ish path (incl. graphql/rpc/v\d+) + api.* host.
+    return ts.is_api_endpoint(kw.get("path", "") or kw.get("url", ""))
 
 def _has_file_param(**kw: Any) -> bool:
     params = kw.get("parameters", [])
-    return any(p.get("name", "").lower() in ("file", "filename", "upload", "attachment", "document", "image") for p in params)
+    return any(ts.is_file_param(p.get("name", ""), p.get("value", "")) for p in params)
 
 def _has_redirect(**kw: Any) -> bool:
     params = kw.get("parameters", [])
-    return any(p.get("name", "").lower() in ("redirect", "return", "next", "url", "goto", "target", "dest", "continue", "returnurl", "redirect_uri") for p in params)
+    return any(ts.is_redirect_param(p.get("name", ""), p.get("value", "")) for p in params)
 
 def _has_email_param(**kw: Any) -> bool:
     params = kw.get("parameters", [])
@@ -131,7 +133,7 @@ def _has_email_param(**kw: Any) -> bool:
 
 def _has_search(**kw: Any) -> bool:
     params = kw.get("parameters", [])
-    return any(p.get("name", "").lower() in ("q", "query", "search", "keyword", "term", "s") for p in params)
+    return any(ts.is_search_param(p.get("name", ""), p.get("value", "")) for p in params)
 
 def _has_numeric_id(**kw: Any) -> bool:
     path = kw.get("path", "")

@@ -281,15 +281,19 @@ class SqlmapAdapter:
         flags = [f"-u {target}", "--batch", "-o"]
 
         if profile:
-            # DBMS detection from technology stack (HexStrike pattern)
-            if profile.has_php:
-                flags.append("--dbms=mysql")
-            elif profile.has_dotnet:
-                flags.append("--dbms=mssql")
-            elif profile.has_java:
-                flags.append("--dbms=oracle")
-            elif profile.has_python_web:
-                flags.append("--dbms=postgresql")
+            # Only pin --dbms when the DB is ACTUALLY fingerprinted (explicit
+            # dbms attr, or an open DB port). A web-stack guess (has_php ⇒ mysql)
+            # is not DB evidence, so otherwise omit it and let sqlmap auto-detect.
+            _port_dbms = {3306: "mysql", 5432: "postgresql", 1433: "mssql",
+                          1521: "oracle"}
+            dbms = getattr(profile, "dbms", None) or getattr(profile, "database", None)
+            if not dbms:
+                for _p in (getattr(profile, "open_ports", None) or []):
+                    if _p in _port_dbms:
+                        dbms = _port_dbms[_p]
+                        break
+            if dbms:
+                flags.append(f"--dbms={dbms}")
 
             # Expert defaults: maximum coverage. Expert would rather burn 10 min
             # per URL than miss a blind time-based SQLi. All techniques (BEUSTQ),
@@ -357,15 +361,12 @@ class DalfoxAdapter:
             pass
         flags = [f"url --url {target}"]
 
-        if profile:
-            # DOM mining for SPA targets
-            if profile.has_spa or params.get("mining_dom"):
-                flags.append("--mining-dom")
-            if params.get("mining_dict"):
-                flags.append("--mining-dict")
-            # WAF bypass mode
-            if profile.waf_detected:
-                flags.append("--waf-evasion")
+        # Param/DOM mining and DOM-XSS AST analysis are DEFAULT-ON in current
+        # dalfox; the old --mining-dom/--mining-dict flags were removed (they only
+        # exist as --skip-* opt-outs now), so we no longer pass them (they caused
+        # rc=2 "unexpected argument"). Follow redirects for SPA targets.
+        if profile and (profile.has_spa or params.get("mining_dom") or params.get("mining_dict")):
+            flags.append("--follow-redirects")
         return {"command": f"dalfox {' '.join(flags)}"}
 
 

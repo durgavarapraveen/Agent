@@ -58,7 +58,13 @@ class InvariantEngine:
             for k, v in snap.headers.items():
                 if k.lower() == "set-cookie" and "=" in v:
                     name = v.split("=", 1)[0].strip().lower()
-                    if any(t in name for t in ("sess", "sid", "auth", "token", "jwt")):
+                    vlow = v.lower()
+                    # Signal 1: session-like name substring.
+                    name_match = any(t in name for t in ("sess", "sid", "auth", "token", "jwt"))
+                    # Signal 2: cookie carries session-like attributes (HttpOnly/Secure)
+                    # — these mark server-side session material regardless of name.
+                    attr_match = ("httponly" in vlow) or ("secure" in vlow)
+                    if name_match or attr_match:
                         names.add(name)
             return names
         shared = session_cookies(success) & session_cookies(failure)

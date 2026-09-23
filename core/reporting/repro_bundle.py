@@ -19,18 +19,24 @@ def _to_curl(method: str, url: str, headers: Optional[Dict] = None,
 
 
 def _extract_request_from_finding(v: Dict) -> Dict[str, Any]:
-    url = v.get("location") or v.get("target") or ""
-    method = "GET"
+    # P0-A5: prefer the REAL request captured by proof_util.attach_proof
+    # (method/target/location/request/curl_command) over regex-guessing from the
+    # title, so the PoC bundle reproduces exactly what was sent. Regex parsing is
+    # a fallback only when the finding carries no captured request.
+    url = v.get("target") or v.get("location") or v.get("url") or ""
+    method = str(v.get("method") or "").upper() or "GET"
     body = None
     headers = {"User-Agent": "AntiGravity-Repro/1.0"}
-    # Common signal: "POST ..." in title
+    _had_captured = bool(v.get("method") or v.get("request") or v.get("curl_command"))
+    # Common signal: "POST ..." in title (only if no captured method/url)
     title = str(v.get("title") or "")
     m = re.match(r"^\s*([A-Z]+)\s+(https?://\S+)", title)
-    if m:
+    if m and not _had_captured:
         method = m.group(1); url = m.group(2)
-    # Look for a JSON body inside details/evidence
+    # Look for a JSON body inside details/evidence (fallback only — a captured
+    # request already carries the real body, don't fabricate one over it).
     text = (v.get("details") or "") + "\n" + (v.get("evidence") or "")
-    body_match = re.search(r"\{[^{}]{5,300}\}", text)
+    body_match = None if _had_captured else re.search(r"\{[^{}]{5,300}\}", text)
     if body_match:
         candidate = body_match.group(0)
         try:
@@ -41,7 +47,7 @@ def _extract_request_from_finding(v: Dict) -> Dict[str, Any]:
         except Exception:
             pass
     # Look for a payload string (?q=..., '/rest/... --')
-    payload_match = re.search(r"payload[=:]?\s*['\"]([^'\"]{5,200})['\"]", text, re.IGNORECASE)
+    payload_match = None if _had_captured else re.search(r"payload[=:]?\s*['\"]([^'\"]{5,200})['\"]", text, re.IGNORECASE)
     if payload_match and "?" not in url:
         pl = payload_match.group(1)
         url = url + ("&" if "?" in url else "?") + f"q={pl}"
@@ -84,13 +90,16 @@ def _readme(v: Dict, req: Dict) -> str:
 def _bundle_zip(v: Dict) -> bytes:
     import io, zipfile
     req = _extract_request_from_finding(v)
-    curl = _to_curl(**req)
+    # P0-A5: prefer the real captured curl (proof_util.curl_for) over a rebuilt one.
+    curl = v.get("curl_command") or _to_curl(**req)
     py = _playwright_script(req["url"])
     readme = _readme(v, req)
+    _resp = v.get("response_snippet") or ""
     transcript = (
         f"===== REQUEST =====\n{req['method']} {req['url']}\n"
         + "\n".join(f"{k}: {vv}" for k, vv in (req['headers'] or {}).items())
         + (f"\n\n{req['body']}" if req.get('body') else "")
+        + (f"\n\n===== RESPONSE =====\n{_resp[:8000]}" if _resp else "")
         + f"\n\n===== EVIDENCE =====\n{(v.get('evidence') or v.get('proof') or '')[:8000]}\n"
     )
     buf = io.BytesIO()

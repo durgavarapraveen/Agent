@@ -23,7 +23,11 @@ class AdaptivePlanner:
         ctx = brain.ctx
         phase = brain.current_phase
 
-        if phase == ExecutionPhase.UNDERSTAND:
+        # P1-F3: the live first phase is BUSINESS_UNDERSTANDING (see
+        # central_brain init/order); the old ExecutionPhase.UNDERSTAND branch
+        # never fired, leaving this fallback transition dead. Match the real phase
+        # (accept both, since UNDERSTAND still exists as a distinct enum member).
+        if phase in (ExecutionPhase.BUSINESS_UNDERSTANDING, ExecutionPhase.UNDERSTAND):
             # §3: once the app is understood (features/workflows observed) move to
             # recon. "Understood" = we have endpoints or a captured user journey.
             if (ctx.endpoints or getattr(ctx, "captured_requests", None)

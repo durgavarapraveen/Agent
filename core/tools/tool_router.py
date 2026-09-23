@@ -4,6 +4,22 @@ from core.common.schemas import ToolInvocation, ToolResult
 
 logger = logging.getLogger(__name__)
 
+
+def _dalfox_oob_callback():
+    """Return an active OOB collaborator HTTP callback URL for dalfox --blind, or
+    None when no collaborator is configured (then --blind is dropped)."""
+    try:
+        from core.oob import get_collaborator
+        c = get_collaborator()
+        if c and c.is_active():
+            tok = c.new_token("dalfox_blind")
+            url = getattr(tok, "http_url", None)
+            return url if url else None
+    except Exception as e:
+        logger.debug(f"dalfox OOB callback unavailable: {e}")
+    return None
+
+
 class ToolRouter:
     
     def __init__(self, tool_registry):
@@ -179,7 +195,9 @@ class ToolRouter:
                         # "unexpected argument '--skip-bav'"), which the pipeline
                         # then mislabels as a WAF block. The BAV scan is optional;
                         # dropping the flag lets the XSS scan run.
-                        invocation.params["command"] = f"dalfox url {t} --silence --no-color"
+                        # dalfox 3.x requires the target as a flag (`url --url <URL>`);
+                        # the bare positional errors rc=2 "required arguments: --url".
+                        invocation.params["command"] = f"dalfox url --url {t} --silence --no-color"
                     elif tname == "arjun":
                         invocation.params["command"] = f"arjun -u {t} --stable"
                     else:
@@ -280,6 +298,17 @@ class ToolRouter:
                 # instead of failing rc=2.
                 base_cmd_l = invocation.params.get("command", "").split()
                 base_bin = (base_cmd_l[0] if base_cmd_l else "").lower()
+                # dirsearch: LLMs emit ffuf/httpx-style flags dirsearch rejects
+                # (rc=2 "no such option: --status"). Translate to dirsearch's own
+                # flags so it runs instead of failing — preserves the intent:
+                #   --status[-codes] <codes>  -> -i <codes>  (--include-status)
+                #   --method <M>              -> -m <M>       (--http-method)
+                if base_bin.endswith("dirsearch") or base_bin == "dirsearch":
+                    clean_args = _re.sub(r'--status(?:-codes)?(?:\s+|=)([0-9,]+)',
+                                         r'-i \1', clean_args)
+                    clean_args = _re.sub(r'--method(?:\s+|=)([A-Za-z]+)',
+                                         r'-m \1', clean_args)
+                    clean_args = _re.sub(r'\s+', ' ', clean_args).strip()
                 _PER_TOOL_STRIP = {
                     # feroxbuster uses -s "200 301" (space-sep), NOT ffuf's -mc "200,301"
                     "feroxbuster": [
@@ -322,6 +351,34 @@ class ToolRouter:
                         # collapse double spaces
                         clean_args = _re.sub(r'\s+', ' ', clean_args).strip()
                         break
+
+                # dalfox: flags that REQUIRE a value fail rc=2 when an LLM/planner
+                # passes them bare (observed: `--blind` with no callback URL →
+                # "a value is required for '--blind <BLIND_CALLBACK_URL>'"). For
+                # --blind, fill the OOB collaborator URL when one is active (enables
+                # blind-XSS detection); otherwise drop it. Other value-required flags
+                # with no value are dropped so the scan still runs.
+                if base_bin.endswith("dalfox") or base_bin == "dalfox":
+                    _DALFOX_VALUE_FLAGS = ("--blind", "--cookie", "--header", "--data",
+                                           "--method", "--user-agent", "--custom-payload",
+                                           "--proxy", "--delay", "--timeout", "--worker",
+                                           "--workers", "--output", "--found-action")
+                    for _flag in _DALFOX_VALUE_FLAGS:
+                        # a value is present only if a non-dash token follows the flag
+                        _m = _re.search(rf'{_re.escape(_flag)}(?:\s+(?!-)(\S+))?', clean_args)
+                        if not _m:
+                            continue
+                        if _m.group(1):
+                            continue  # flag already has a value
+                        if _flag == "--blind":
+                            _cb = _dalfox_oob_callback()
+                            if _cb:
+                                clean_args = _re.sub(_re.escape(_flag), f'--blind {_cb}', clean_args, count=1)
+                                logger.info("Filled bare dalfox --blind with OOB callback")
+                                continue
+                        clean_args = _re.sub(rf'{_re.escape(_flag)}(?=\s|$)', '', clean_args, count=1).strip()
+                        clean_args = _re.sub(r'\s+', ' ', clean_args).strip()
+                        logger.info(f"Stripped bare value-required dalfox flag {_flag}")
 
                 # Validate --top-ports value is a positive integer
                 top_ports_match = _re.search(r'--top-ports\s+(\S+)', clean_args)

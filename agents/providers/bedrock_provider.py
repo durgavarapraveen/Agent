@@ -41,6 +41,37 @@ _PRICING = {
 }
 
 
+def _sanitize_tool_call_args(msg: dict) -> dict:
+    """Ensure every tool_call's `function.arguments` is VALID JSON. The OpenAI-style
+    gateway re-parses that JSON-encoded string, so a malformed one (emitted by a
+    model or built by a caller) 400s the request. Re-serialise from the parsed dict;
+    fall back to '{}' when unparseable. Returns a shallow-copied, safe message."""
+    if not isinstance(msg, dict) or not msg.get("tool_calls"):
+        return msg
+    out = dict(msg)
+    fixed = []
+    for tc in msg.get("tool_calls") or []:
+        try:
+            fn = dict(tc.get("function") or {})
+            raw = fn.get("arguments", "{}")
+            if isinstance(raw, str):
+                try:
+                    parsed = json.loads(raw or "{}")
+                    if not isinstance(parsed, (dict, list)):
+                        parsed = {}
+                except Exception:
+                    parsed = {}
+                fn["arguments"] = json.dumps(parsed)
+            else:
+                fn["arguments"] = json.dumps(raw if isinstance(raw, (dict, list)) else {})
+            tc2 = dict(tc); tc2["function"] = fn
+            fixed.append(tc2)
+        except Exception:
+            fixed.append(tc)
+    out["tool_calls"] = fixed
+    return out
+
+
 def _price_for(model: str) -> tuple:
     m = (model or "").lower()
     for key, price in _PRICING.items():
@@ -78,6 +109,14 @@ class BedrockProvider(LLMProvider):
         if u.endswith("/chat/completions"):
             u = u[: -len("/chat/completions")]
         return u
+
+    def _extra_body(self) -> dict:
+        """Mantle gateway request extras. AWS_BEDROCK_DATA_RETENTION=none opts the
+        prompt/response out of provider data sharing (data stays in-region). Empty
+        (unset) sends nothing, so direct-Bedrock/other gateways are unaffected."""
+        import os
+        dr = os.getenv("AWS_BEDROCK_DATA_RETENTION", "").strip()
+        return {"data_retention": dr} if dr else {}
 
     def _mint_token(self) -> str:
         """Fresh short-term gateway token from the AWS credential chain; falls
@@ -237,7 +276,8 @@ class BedrockProvider(LLMProvider):
                                  timeout=90.0, max_retries=2)
             resp = await client.chat.completions.create(
                 model=model, messages=messages,
-                max_tokens=max_tokens, temperature=temperature)
+                max_tokens=max_tokens, temperature=temperature,
+                extra_body=self._extra_body())
         except Exception as e:
             logger.warning("Bedrock gateway request failed: %s", e)
             return LLMResponse(content="", provider="bedrock", model=model, error=str(e),
@@ -390,7 +430,10 @@ class BedrockProvider(LLMProvider):
         # PENTESTING_TOOLS are already OpenAI-shaped; normalize any bare fn dicts.
         oai_tools = [t if t.get("type") == "function"
                      else {"type": "function", "function": t} for t in (tools or [])]
-        conv = list(messages)
+        # Sanitize any inbound assistant tool_calls: `function.arguments` is a
+        # JSON-encoded string the gateway re-parses — a malformed one (from a prior
+        # turn / caller) 400s the whole request. Re-serialise each to valid JSON.
+        conv = [_sanitize_tool_call_args(m) for m in messages]
         total_in = total_out = 0
         start = time.monotonic()
         last_text = ""
@@ -403,7 +446,8 @@ class BedrockProvider(LLMProvider):
             for _round in range(max(1, max_rounds)):
                 resp = await client.chat.completions.create(
                     model=model, messages=conv, tools=oai_tools,
-                    tool_choice="auto", max_tokens=max_tokens)
+                    tool_choice="auto", max_tokens=max_tokens,
+                    extra_body=self._extra_body())
                 u = getattr(resp, "usage", None)
                 if u:
                     total_in += int(getattr(u, "prompt_tokens", 0) or 0)
@@ -414,6 +458,22 @@ class BedrockProvider(LLMProvider):
                     last_text = msg.content
                 if not tool_calls or not tool_executor:
                     break
+                # Parse each tool_call's arguments ONCE. The gateway re-parses the
+                # `function.arguments` string on the NEXT request, so echoing the
+                # model's raw (sometimes malformed) JSON caused a 400
+                # "Expecting ',' delimiter". Re-serialise from the parsed dict so the
+                # echoed turn always carries VALID JSON; fall back to {} if unparseable.
+                parsed_args = []
+                for tc in tool_calls:
+                    try:
+                        a = json.loads(tc.function.arguments or "{}")
+                        if not isinstance(a, dict):
+                            a = {}
+                    except Exception:
+                        logger.debug("[Bedrock/gateway-tools] repaired malformed tool args for %s",
+                                     getattr(tc.function, "name", "?"))
+                        a = {}
+                    parsed_args.append(a)
                 # Echo the assistant turn (with tool_calls) then each tool result.
                 conv.append({
                     "role": "assistant",
@@ -421,14 +481,11 @@ class BedrockProvider(LLMProvider):
                     "tool_calls": [{
                         "id": tc.id, "type": "function",
                         "function": {"name": tc.function.name,
-                                     "arguments": tc.function.arguments},
-                    } for tc in tool_calls],
+                                     "arguments": json.dumps(parsed_args[i])},
+                    } for i, tc in enumerate(tool_calls)],
                 })
-                for tc in tool_calls:
-                    try:
-                        args = json.loads(tc.function.arguments or "{}")
-                    except Exception:
-                        args = {}
+                for i, tc in enumerate(tool_calls):
+                    args = parsed_args[i]
                     try:
                         result = tool_executor(tc.function.name, args)
                         if _aio.iscoroutine(result):

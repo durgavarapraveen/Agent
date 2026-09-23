@@ -87,11 +87,25 @@ def extract_links(html: str, base_url: str = "") -> Dict[str, List[str]]:
     }
 
 
-_API_RE = re.compile(r"[\"']?(/(?:api|v\d+|rest|graphql)[\w/\-\.]*)[\"']?")
+_API_RE = re.compile(
+    r"[\"']?(/(?:api|v\d+|rest|graphql|gql|bff|svc|service|backend|gateway|internal)"
+    r"[\w/\-\.]*)[\"']?"
+)
+# Mine fetch()/axios/XHR string-literal URLs (absolute or root-relative paths).
+_FETCH_RE = re.compile(
+    r"(?:fetch|axios(?:\.\w+)?|\.open)\s*\(\s*[\"'`]([^\"'`\s]+)[\"'`]",
+    re.I,
+)
 
 
 def extract_api_routes(text: str) -> List[str]:
-    return list(dict.fromkeys(m.group(1) for m in _API_RE.finditer(text or "")))
+    txt = text or ""
+    routes = [m.group(1) for m in _API_RE.finditer(txt)]
+    for m in _FETCH_RE.finditer(txt):
+        u = m.group(1)
+        if u.startswith("/") or u.startswith("http"):
+            routes.append(u)
+    return list(dict.fromkeys(routes))
 
 
 _FILE_LINK_RE = re.compile(r"https?://\S+\.(?:zip|tar|gz|7z|rar|bak|sql|env|log|pem|key|pdf|xlsx?|docx?)",

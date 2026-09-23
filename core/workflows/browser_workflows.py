@@ -216,10 +216,20 @@ def create_csrf_workflow(
 
 def create_token_refresh_workflow(
     api_base_url: str,
-    token_endpoint: str = "/api/token",
-    refresh_endpoint: str = "/api/token/refresh",
+    token_endpoint: str = "",
+    refresh_endpoint: str = "",
     identity_id: str = "",
 ) -> BrowserWorkflow:
+    # Derive token endpoints from discovery/caller when provided; only fall back
+    # to the well-known defaults as a last resort.
+    token_endpoint = token_endpoint or "/api/token"
+    refresh_endpoint = refresh_endpoint or (
+        token_endpoint.rstrip("/") + "/refresh" if token_endpoint else "/api/token/refresh")
+    # Enumerate common token storage keys instead of only 'token'.
+    _storage_keys = ("token", "access_token", "jwt", "id_token", "authToken")
+    _store_lookup = " || ".join(
+        f"localStorage.getItem('{k}') || sessionStorage.getItem('{k}')" for k in _storage_keys
+    ) + " || 'no_stored_token'"
     return BrowserWorkflow(
         name="API Token Refresh",
         workflow_type="token_refresh",
@@ -232,7 +242,7 @@ def create_token_refresh_workflow(
                          script=f"fetch('{token_endpoint}').then(r=>r.json()).then(d=>JSON.stringify(d)).catch(e=>'ERR:'+e)",
                          evidence_capture=True),
             WorkflowStep("token_use", "eval", "Use token for API call",
-                         script="localStorage.getItem('token') || sessionStorage.getItem('token') || 'no_stored_token'",
+                         script=_store_lookup,
                          evidence_capture=True),
             WorkflowStep("token_refresh", "eval", "Attempt token refresh",
                          script=f"fetch('{refresh_endpoint}', {{method:'POST'}}).then(r=>r.status+' '+r.statusText).catch(e=>'ERR:'+e)",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -62,6 +63,31 @@ class ApplicabilityEngine:
                 return ApplicabilityResult.NOT_DISCOVERED, f"Feature '{feature_key}' not yet probed by recon"
             if not features[feature_key]:
                 return ApplicabilityResult.NOT_APPLICABLE, f"Feature '{feature_key}' confirmed absent"
+
+        # Generic surface gate (env COVERAGE_STRICT_APPLICABILITY, default on):
+        # a test whose attack class needs an INPUT to exercise (injection/xss/…)
+        # is genuinely NOT_APPLICABLE to a GET/HEAD endpoint that exposes no
+        # parameters and no query — there is nothing to inject into. This stops
+        # every input-dependent test counting as "applicable" on every static
+        # endpoint (the ~235-tests-×-every-endpoint denominator explosion that
+        # pinned coverage near 0%). It only ever marks a cell NOT_APPLICABLE when
+        # there is provably no input surface, so it does not hide a real gap.
+        # Body-bearing methods (POST/PUT/PATCH/DELETE) are always kept.
+        if os.getenv("COVERAGE_STRICT_APPLICABILITY", "1").strip().lower() in ("1", "true", "yes", "on"):
+            _INPUT_DEPENDENT = {
+                "injection", "sql_injection", "sqli", "nosql", "nosql_injection",
+                "xss", "ssti", "command_injection", "cmdi", "xxe", "open_redirect",
+                "path_traversal", "lfi", "rfi", "ssrf", "ldap", "xpath",
+            }
+            at = (test.attack_type or "").lower()
+            method = (endpoint.get("method") or "GET").upper()
+            params = parameters or endpoint.get("parameters", [])
+            url = endpoint.get("url", "") or endpoint.get("path", "")
+            has_query = "?" in url and "=" in url.split("?", 1)[1]
+            if at in _INPUT_DEPENDENT and method in ("GET", "HEAD") \
+                    and not params and not has_query:
+                return ApplicabilityResult.NOT_APPLICABLE, \
+                    "no input surface (no params/query on a GET) for input-dependent test"
 
         if self.is_applicable(test, endpoint, parameters, identities):
             return ApplicabilityResult.APPLICABLE, ""

@@ -287,8 +287,16 @@ export const api = {
     request(`/api/scans/${id}/blackboard?since=${since}&limit=${limit}`).catch(() => ({
       scan_id: id, summary: {}, count: 0, since, entries: [],
     })),
+  getFinding: (id, findingId) =>
+    request(`/api/scans/${id}/findings/${encodeURIComponent(findingId)}`),
+  getScanMemory: (id) =>
+    request(`/api/scans/${id}/memory`).catch(() => ({ phase_memory: [], fact_index: {}, counts: {} })),
   getLlmCalls: (id, since = 0, limit = 200) =>
     request(`/api/scans/${id}/llm-calls?since=${since}&limit=${limit}`).catch(() => ({
+      scan_id: id, summary: {}, count: 0, since, entries: [],
+    })),
+  getJevDecisions: (id, since = 0, limit = 200) =>
+    request(`/api/scans/${id}/jev-decisions?since=${since}&limit=${limit}`).catch(() => ({
       scan_id: id, summary: {}, count: 0, since, entries: [],
     })),
   getAttackGraph: (id) => request(`/api/scans/${id}/attack-graph`).catch(() => ({

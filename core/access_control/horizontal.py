@@ -1,11 +1,13 @@
 from core.access_control.base import AccessControlTest, AuthorizationOracle
+from core.common import target_shape as ts
 
 class HorizontalTest(AccessControlTest):
     def execute(self, request_node, identities) -> dict:
         results = {}
-        
-        # We need at least two standard users
-        standard_users = [uid for uid, iden in identities.items() if iden.role == "standard"]
+
+        # We need at least two authenticated, non-privileged (peer) users —
+        # selected by relative privilege rank, not a "standard" literal.
+        standard_users = [uid for uid, iden in identities.items() if ts.role_rank(iden.role) == 1]
         if len(standard_users) < 2:
             return results
             

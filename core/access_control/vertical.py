@@ -1,12 +1,15 @@
 from core.access_control.base import AccessControlTest, AuthorizationOracle
+from core.common import target_shape as ts
 
 class VerticalTest(AccessControlTest):
     def execute(self, request_node, identities) -> dict:
         results = {}
-        
-        standard_users = [uid for uid, iden in identities.items() if iden.role == "standard"]
-        admins = [uid for uid, iden in identities.items() if iden.role == "administrator"]
-        
+
+        # Select by relative privilege: non-privileged authenticated users vs
+        # privileged (admin) identities — not "standard"/"administrator" literals.
+        standard_users = [uid for uid, iden in identities.items() if ts.role_rank(iden.role) == 1]
+        admins = [uid for uid, iden in identities.items() if ts.is_admin_role(iden.role)]
+
         if not standard_users or not admins:
             return results
             
