@@ -732,6 +732,25 @@ class CentralBrain(
         except Exception as _e:
             logger.debug(f"hypothesis summary skipped: {_e}")
 
+        # §7.2/§7.5 FINALIZE LATCH: once the watchdog has routed us into graceful
+        # finalize (soft deadline or hard breach), run REPORTING exactly once and
+        # then terminate. Without this, the DAG scheduler below sees the phases the
+        # soft-deadline jump SKIPPED (ACTIVE_SCANNING/EXPLOITATION) as still
+        # incomplete and re-enters them — bouncing REPORTING -> ACTIVE_SCANNING and
+        # letting the run overrun the hard 7200s cap by ~33 min (scan c12701a6,
+        # implemented.md §7.2 & §7.5). The latch is forward-only and takes
+        # precedence over the scheduler while finalizing.
+        if getattr(self, "_soft_deadline_hit", False) or getattr(self, "_forced_report", False):
+            _done = set(getattr(self, "_completed_phases", set()) or set())
+            if ExecutionPhase.REPORTING.value in _done:
+                logger.info("FINALIZE_LATCH: REPORTING complete — terminating scan loop "
+                            "(no re-entry into skipped scan phases).")
+                self.current_phase = None
+            else:
+                logger.info("FINALIZE_LATCH: winding down — forcing REPORTING (single hop).")
+                self.transition_phase(ExecutionPhase.REPORTING)
+            return
+
         # P0-4: prefer the dependency-aware scheduler when we have enough
         # context. Fall back to the legacy state-machine only if the DAG
         # can't produce a next phase (typically because prereqs aren't met
@@ -9333,6 +9352,13 @@ CRITICAL RULES:
             tier=TaskTier.SMALL,
             max_tokens=800,
         )
+        # generate_response() returns a NormalizedLLMResponse, but the JSON report
+        # and self.reporter.generate() expect a plain string — passing the object
+        # crashed the enterprise report with "'NormalizedLLMResponse' object has no
+        # attribute 'replace'" (implemented.md §9.4). Extract .content.
+        exec_summary = getattr(exec_summary, "content", exec_summary)
+        if not isinstance(exec_summary, str):
+            exec_summary = str(exec_summary or "")
 
         # ── Finding validation + compliance mapping (production-grade layer) ──
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")

@@ -116,7 +116,13 @@ class ToolGateway:
             fresh = get_freshness()
             _op = invocation.operation or ""
             _tgt = invocation.target or ""
-            if _op and _tgt and fresh.has_fresh_result(_tgt, _op):
+            # Scope the freshness key by TOOL (§6). The bare (target, operation)
+            # key is host-level, so ONE tool's fresh result suppressed EVERY other
+            # tool's probe with the same operation on that host — starving active
+            # scanning (executed=3 in scan c12701a6). A finer key can only ALLOW
+            # more runs, never deny more, so it cannot cause a new false-skip.
+            _fscope = invocation.tool_id or ""
+            if _op and _tgt and fresh.has_fresh_result(_tgt, _op, scope=_fscope):
                 from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus
                 logger.info(f"FRESHNESS_SKIP: operation={_op} target={_tgt}")
                 try:
@@ -293,9 +299,11 @@ class ToolGateway:
             elif _status == "SUCCESS":
                 if _tgt:
                     waf.record_success(_tgt)
-            # Freshness: only cache SUCCESS results.
+            # Freshness: only cache SUCCESS results. Scope by tool (§6) so the
+            # record matches the tool-scoped has_fresh_result gate above.
             if _status == "SUCCESS" and _tgt and invocation.operation:
-                get_freshness().record(_tgt, invocation.operation)
+                get_freshness().record(_tgt, invocation.operation,
+                                       scope=invocation.tool_id or "")
         except Exception as _e:
             logger.debug(f"post-exec accounting skipped: {_e}")
         

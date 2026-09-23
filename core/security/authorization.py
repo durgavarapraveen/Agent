@@ -268,7 +268,19 @@ class TargetScopeValidator:
             if self._host_in_scope(norm):
                 self.note_resolution(norm)
                 return True
-            logger.warning(f"[TargetScopeValidator] DENIED host={norm} scope={self.authorized_scope}")
+            # De-dupe denial logging (§10): every request to an out-of-scope host
+            # (e.g. fonts.googleapis.com) hit this line, producing 871 identical
+            # WARNINGs in scan c12701a6 — ~half of all warnings, burying real
+            # signal. Log each unique denied host ONCE at WARNING; repeats go to
+            # DEBUG. The deny decision itself is unchanged.
+            _seen = getattr(self, "_denied_logged", None)
+            if _seen is None:
+                _seen = self._denied_logged = set()
+            if norm not in _seen:
+                _seen.add(norm)
+                logger.warning(f"[TargetScopeValidator] DENIED host={norm} scope={self.authorized_scope}")
+            else:
+                logger.debug(f"[TargetScopeValidator] DENIED host={norm} (repeat)")
             # Surface (do NOT authorize) brand-related out-of-scope assets the
             # scan bumps into — e.g. api.decibyl.com, decibyl.ai-backup.s3… —
             # so the operator sees them in the Coverage panel and can widen scope

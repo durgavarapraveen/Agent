@@ -233,8 +233,8 @@ class CriticAgent:
     # --------------------------------------------------------- Phase 27 helpers
 
     @staticmethod
-    def _check_confirmation_gate(self, finding: Dict[str, Any],
-                                ftype: str) -> Optional[CriticVerdict]:
+    def _check_confirmation_gate(finding: Dict[str, Any],
+                                 ftype: str) -> Optional[CriticVerdict]:
         try:
             from core.verification.finding_confirmation_gate import (
                 FindingConfirmationGate, ConfirmationStage,
@@ -258,6 +258,7 @@ class CriticAgent:
             pass
         return None
 
+    @staticmethod
     def _is_spa_false_positive(finding: Dict[str, Any]) -> bool:
         spa_indicators = finding.get("spa_catch_all", False)
         if spa_indicators:

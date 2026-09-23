@@ -70,7 +70,10 @@ class Watchdog:
     def __init__(self, budget: Optional[ScanBudget] = None):
         self.budget = budget or ScanBudget.from_env()
         self._lock = threading.RLock()
-        self._start = time.time()
+        # Monotonic clock for durations: immune to system wall-clock adjustments
+        # (NTP steps, DST) that could otherwise skew the runtime budget over a
+        # multi-hour scan. Never mix with time.time() here (implemented.md §7.5).
+        self._start = time.monotonic()
         self._requests = 0
         self._bytes = 0
         self._llm_cost = 0.0
@@ -125,7 +128,7 @@ class Watchdog:
             b = self.budget
             if self._requests >= b.max_requests:
                 return f"max_requests {b.max_requests} reached"
-            if b.max_runtime_s > 0 and (time.time() - self._start) >= b.max_runtime_s:
+            if b.max_runtime_s > 0 and (time.monotonic() - self._start) >= b.max_runtime_s:
                 return f"max_runtime {b.max_runtime_s}s reached"
             if (self._bytes / 1_048_576.0) >= b.max_bandwidth_mb:
                 return f"max_bandwidth {b.max_bandwidth_mb}MB reached"
@@ -144,7 +147,7 @@ class Watchdog:
             b = self.budget
             if b.max_runtime_s <= 0:
                 return 0.0
-            return (time.time() - self._start) / b.max_runtime_s
+            return (time.monotonic() - self._start) / b.max_runtime_s
         except Exception:
             return 0.0
 
@@ -166,7 +169,7 @@ class Watchdog:
         with self._lock:
             return {
                 "requests": self._requests,
-                "elapsed_s": round(time.time() - self._start, 1),
+                "elapsed_s": round(time.monotonic() - self._start, 1),
                 "bandwidth_mb": round(self._bytes / 1_048_576.0, 2),
                 "llm_cost": round(self._llm_cost, 2),
                 "browser_sessions": self._browser_sessions,

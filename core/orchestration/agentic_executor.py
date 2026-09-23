@@ -914,24 +914,36 @@ class AgenticExecutor:
         logger.info(f"[AgenticExecutor] Available tools: {sorted(available)}")
         return available
 
+    # Flags every scanner needs to name its TARGET. Stripping these silently
+    # neutered nuclei/sqlmap/ffuf/katana in scan c12701a6 (see implemented.md
+    # §9.2): the tool ran with no target and produced nothing. These are safe —
+    # the target is scope-validated upstream; the allowlist's job is to block
+    # dangerous flags (arbitrary file write / shell / script), not the target.
+    _TARGET_FLAGS = {"-u", "--url", "-l", "--list", "-target", "--target", "-host", "--host"}
+
     TOOL_ARG_ALLOWLIST: Dict[str, set] = {
         "nmap": {"-p", "-sV", "-sC", "-sS", "-sT", "-sU", "-A", "-O", "-T0", "-T1", "-T2", "-T3", "-T4", "-T5",
                  "--top-ports", "--script", "--open", "-Pn", "-n", "--min-rate", "--max-rate", "-oN", "-oX", "-oG"},
-        "sqlmap": {"--batch", "--level", "--risk", "--dbs", "--tables", "--dump", "--forms", "--crawl",
-                   "--random-agent", "--technique", "--tamper", "-p", "--data", "--cookie", "--headers",
-                   "--method", "--threads", "--timeout", "--retries", "--dbms", "--os"},
-        "nuclei": {"-t", "--tags", "-s", "--severity", "-as", "--automatic-scan", "-rl", "--rate-limit",
-                   "-c", "--concurrency", "-H", "--header", "--follow-redirects", "-j", "--jsonl"},
-        "dalfox": {"--blind", "--cookie", "--header", "--data", "--method", "--mining-dict",
-                   "--follow-redirects", "--timeout", "--delay", "--only-discovery", "-p"},
-        "ffuf": {"-w", "-mc", "-fc", "-fs", "-fw", "-fl", "-t", "-p", "-H", "-X", "-d", "-r",
-                 "-recursion", "-recursion-depth", "-e", "-ac", "-timeout"},
-        "gobuster": {"-w", "-t", "-x", "-s", "-b", "-r", "--timeout", "--delay", "-k", "-a"},
-        "nikto": {"-C", "-T", "-p", "-ssl", "-timeout", "-Plugins", "-maxtime"},
-        "wpscan": {"--enumerate", "--plugins-detection", "--force", "--disable-tls-checks",
+        "sqlmap": {"-u", "--url", "-r", "-g", "--batch", "--level", "--risk", "--dbs", "--tables", "--dump",
+                   "--forms", "--crawl", "--flush-session", "--random-agent", "--technique", "--tamper", "-p",
+                   "--data", "--cookie", "--headers", "--method", "--threads", "--timeout", "--retries",
+                   "--dbms", "--os"},
+        "nuclei": {"-u", "-l", "-t", "-tags", "--tags", "-s", "-severity", "--severity", "-as", "--automatic-scan",
+                   "-rl", "--rate-limit", "-c", "--concurrency", "-H", "--header", "-fr", "--follow-redirects",
+                   "-j", "-jsonl", "--jsonl", "-silent", "-nc", "-duc", "-timeout", "-retries"},
+        "dalfox": {"url", "--url", "--blind", "--cookie", "--header", "--data", "--method", "--mining-dict",
+                   "--follow-redirects", "--timeout", "--delay", "--only-discovery", "-p", "--silence",
+                   "--no-color", "--user-agent"},
+        "ffuf": {"-u", "-w", "-mc", "-fc", "-fs", "-fw", "-fl", "-t", "-p", "-H", "-X", "-d", "-r",
+                 "-recursion", "-recursion-depth", "-e", "-ac", "-s", "-c", "-timeout", "-maxtime", "-rate"},
+        "gobuster": {"-u", "-w", "-t", "-x", "-s", "-b", "-r", "--timeout", "--delay", "-k", "-a", "-q", "-e", "-n"},
+        "nikto": {"-h", "-host", "-url", "-C", "-T", "-p", "-ssl", "-timeout", "-Plugins", "-maxtime",
+                  "-nointeractive"},
+        "wpscan": {"--url", "--enumerate", "--plugins-detection", "--force", "--disable-tls-checks",
                    "--random-user-agent", "--stealthy"},
         "hydra": {"-l", "-L", "-p", "-P", "-t", "-w", "-f", "-s", "-V"},
-        "katana": {"-d", "-jc", "-kf", "-ef", "-ct", "-rl", "-timeout", "-H", "-xhr"},
+        "katana": {"-u", "-list", "-d", "-depth", "-jc", "-kf", "-ef", "-ct", "-rl", "-c", "-aff", "-timeout",
+                   "-H", "-xhr", "-silent", "-nc", "-fx"},
     }
 
     @staticmethod
@@ -949,6 +961,7 @@ class AgenticExecutor:
         if not allowlist:
             return raw_args
 
+        allowlist = allowlist | AgenticExecutor._TARGET_FLAGS
         sanitized = []
         i = 0
         while i < len(tokens):
