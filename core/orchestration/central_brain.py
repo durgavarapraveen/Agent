@@ -4717,6 +4717,17 @@ class CentralBrain(
                 except Exception as _pe_err:
                     logger.debug(f"attack-path correlation skipped: {_pe_err}")
 
+                # Phase 8: forward attack-path engine — construct ranked
+                # multi-step candidate paths over ALL findings (not only the
+                # evidence-linked confirmed chains above), with transparent
+                # factors. Merges into ctx.attack_chains for the report.
+                try:
+                    from core.common.config import get_config as _cfg_ape
+                    if _cfg_ape().get_bool("ATTACK_PATH_ENGINE_ENABLED", True):
+                        self._run_attack_path_engine()
+                except Exception as _ape_err:
+                    logger.debug(f"attack-path engine skipped: {_ape_err}")
+
             # Adversarial Critic (Planner–Worker–Critic loop) — semantic second
             # opinion that challenges each surviving finding and quarantines the
             # confidently-rejected ones before they reach the report.
@@ -8279,6 +8290,33 @@ class CentralBrain(
             self.ctx.add_vulnerability(f)
         if findings:
             logger.info(f"[CloudPrivesc] added {len(findings)} cloud privilege-escalation findings")
+
+    def _run_attack_path_engine(self) -> None:
+        """Construct ranked forward attack paths over ctx.vulnerabilities and
+        merge them into ctx.attack_chains (the report's source) + persist to the
+        attack graph. Deterministic; transparent factors; non-fatal."""
+        from core.attack_surface.attack_path_engine import AttackPathEngine
+        from core.orchestration.infra_agents import to_attack_chains
+
+        paths = AttackPathEngine(list(self.ctx.vulnerabilities or []),
+                                 identities=list(getattr(self.ctx, "identities", []) or [])
+                                 ).generate()
+        if not paths:
+            return
+        chains = to_attack_chains(paths)
+        cur = self.ctx.get("attack_chains", []) or []
+        if isinstance(cur, dict):
+            cur = list(cur.values())
+        if not isinstance(cur, list):
+            cur = []
+        self.ctx.update("attack_chains", cur + chains)
+        try:
+            from core.database.pg_store import AttackGraphRepo
+            AttackGraphRepo.bulk_upsert(getattr(self, "_scan_id", "") or "", chains)
+        except Exception as e:
+            logger.debug("[AttackPathEngine] persist skipped: %s", e)
+        logger.info("[AttackPathEngine] %d ranked attack paths (top score=%.3f)",
+                    len(paths), paths[0].get("score", 0))
 
     def _analyze_infra_agents(self) -> None:
         """Run the Kubernetes / cloud / dependency-SCA agents (opt-in) and merge
