@@ -1095,6 +1095,19 @@ _MIGRATIONS: List[tuple] = [
      "job_id TEXT PRIMARY KEY, status TEXT, label TEXT, "
      "steps JSONB DEFAULT '[]'::jsonb, result JSONB, error TEXT, "
      "created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());"),
+    ("0003_engagements",
+     "CREATE TABLE IF NOT EXISTS engagements ("
+     "engagement_id TEXT PRIMARY KEY, name TEXT NOT NULL, "
+     "status TEXT DEFAULT 'draft', spec JSONB NOT NULL DEFAULT '{}'::jsonb, "
+     "created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());"),
+    ("0004_engagement_runs",
+     "CREATE TABLE IF NOT EXISTS engagement_runs ("
+     "run_id TEXT PRIMARY KEY, engagement_id TEXT NOT NULL, "
+     "target TEXT DEFAULT '', scan_id TEXT DEFAULT '', "
+     "status TEXT DEFAULT 'pending', tier TEXT DEFAULT 'POC', reason TEXT DEFAULT '', "
+     "created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());"
+     "CREATE INDEX IF NOT EXISTS idx_engagement_runs_eng "
+     "ON engagement_runs (engagement_id);"),
 ]
 
 
@@ -2183,6 +2196,105 @@ class ReviewRepo:
                 updated = cur.rowcount
                 conn.commit()
                 return updated > 0
+
+
+class EngagementRepo:
+    """Persist the Engagement aggregate (spec §1). Best-effort like the others.
+
+    The full authorization spec is stored as JSONB in ``spec`` so the domain
+    model can round-trip without a wide, brittle column set. ``status`` is
+    denormalized for cheap listing/filtering.
+    """
+
+    @staticmethod
+    def create(engagement_id: str, name: str, status: str, spec: Dict):
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO engagements (engagement_id, name, status, spec)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (engagement_id) DO UPDATE
+                    SET name = EXCLUDED.name, status = EXCLUDED.status,
+                        spec = EXCLUDED.spec, updated_at = NOW()
+                """, (engagement_id, name, status, _dumps(spec, default=str)))
+                conn.commit()
+        return engagement_id
+
+    @staticmethod
+    def update_status(engagement_id: str, status: str):
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE engagements SET status = %s, updated_at = NOW() "
+                    "WHERE engagement_id = %s", (status, engagement_id))
+                conn.commit()
+
+    @staticmethod
+    def get(engagement_id: str) -> Optional[Dict]:
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SELECT * FROM engagements WHERE engagement_id = %s",
+                            (engagement_id,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    @staticmethod
+    def list_all(limit: int = 200, offset: int = 0) -> List[Dict]:
+        limit = max(1, min(int(limit or 200), 2000))
+        offset = max(0, int(offset or 0))
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT * FROM engagements ORDER BY created_at DESC "
+                    "LIMIT %s OFFSET %s", (limit, offset))
+                return [dict(r) for r in cur.fetchall()]
+
+
+class EngagementRunRepo:
+    """Runs launched under an engagement (spec §1: Engagement → Run)."""
+
+    @staticmethod
+    def create(run_id: str, engagement_id: str, target: str = "",
+               tier: str = "POC", status: str = "pending", reason: str = ""):
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO engagement_runs
+                        (run_id, engagement_id, target, tier, status, reason)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (run_id) DO NOTHING
+                """, (run_id, engagement_id, target, tier, status, reason))
+                conn.commit()
+        return run_id
+
+    @staticmethod
+    def update(run_id: str, **fields):
+        cols = {k: v for k, v in fields.items()
+                if k in ("status", "scan_id", "target", "reason")}
+        if not cols:
+            return
+        sets = ["updated_at = NOW()"]
+        vals = []
+        for k, v in cols.items():
+            sets.append(f"{k} = %s")
+            vals.append(v)
+        vals.append(run_id)
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE engagement_runs SET {', '.join(sets)} "
+                    f"WHERE run_id = %s", vals)
+                conn.commit()
+
+    @staticmethod
+    def list_by_engagement(engagement_id: str, limit: int = 500) -> List[Dict]:
+        limit = max(1, min(int(limit or 500), 2000))
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT * FROM engagement_runs WHERE engagement_id = %s "
+                    "ORDER BY created_at DESC LIMIT %s", (engagement_id, limit))
+                return [dict(r) for r in cur.fetchall()]
 
 
 class CampaignRepo:
