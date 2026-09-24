@@ -149,6 +149,51 @@ def _run_sca(cfg, scope, default_target) -> Dict[str, List]:
     return res
 
 
+_SEV_SCORE = {"CRITICAL": 9.5, "HIGH": 8.0, "MEDIUM": 5.0, "LOW": 2.0, "INFO": 1.0}
+
+
+def to_attack_chains(paths: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Convert infra agents' attack-path objects into the chain shape consumed
+    by both the report SVG (``ctx.attack_chains`` → step ``title``) and
+    ``AttackGraphRepo.bulk_upsert`` (chain_id/description/score/steps/impact).
+
+    Each chain's steps read start → per-step action → target so the rendered
+    graph shows the whole path origin-to-objective.
+    """
+    chains: List[Dict[str, Any]] = []
+    for p in paths or []:
+        if not isinstance(p, dict):
+            continue
+        sev = str(p.get("severity", "MEDIUM")).upper()
+        steps: List[Dict[str, Any]] = [
+            {"title": p.get("starting_position", "start"), "type": "start"}]
+        for s in p.get("steps", []) or []:
+            label = s.get("action", "") or s.get("result", "") or "step"
+            steps.append({"title": label, "type": s.get("action", "step"),
+                          "target": s.get("target", ""),
+                          "precondition": s.get("precondition", ""),
+                          "tool": s.get("tool", "")})
+        steps.append({"title": p.get("target", "objective"), "type": "objective"})
+        chains.append({
+            "chain_id": p.get("attack_path_id", ""),
+            "id": p.get("attack_path_id", ""),
+            "name": p.get("objective", ""),
+            "description": p.get("objective", ""),
+            "severity": sev,
+            "score": _SEV_SCORE.get(sev, 5.0),
+            "status": p.get("status", "hypothesized"),
+            "impact": p.get("objective", ""),
+            "final_impact": p.get("target", ""),
+            "steps": steps,
+            "techniques": p.get("techniques", []),
+            "evidence": p.get("evidence", ""),
+            "detection_confidence": p.get("detection_confidence"),
+            "exploit_confidence": p.get("exploit_confidence"),
+            "source": p.get("source", "infra_attack_path"),
+        })
+    return chains
+
+
 def collect_infra_findings(cfg, scope: Dict[str, Any],
                            default_target: str = "") -> Dict[str, Any]:
     """Run whichever infra agents are configured; merge findings + attack paths.

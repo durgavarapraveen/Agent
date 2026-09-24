@@ -8284,17 +8284,39 @@ class CentralBrain(
         """Run the Kubernetes / cloud / dependency-SCA agents (opt-in) and merge
         their findings into ctx so the exploitation-phase attack-path correlation
         reasons over them. Each agent is Engagement scope-gated and non-fatal."""
-        from core.orchestration.infra_agents import collect_infra_findings
+        from core.orchestration.infra_agents import (
+            collect_infra_findings, to_attack_chains)
         from core.common.config import get_config as _cfg
 
         result = collect_infra_findings(
             _cfg(), getattr(self, "scope", {}) or {}, default_target=self.ctx.target)
         for f in result.get("findings", []):
             self.ctx.add_vulnerability(f)
+
         paths = result.get("attack_paths", [])
         if paths:
+            # Raw paths kept for API/native consumers.
             existing = self.ctx.get("infra_attack_paths", []) or []
             self.ctx.update("infra_attack_paths", list(existing) + list(paths))
+
+            # Surface in the report: merge into ctx.attack_chains (the report's
+            # attack-path SVG source), coercing whatever shape is already there
+            # into a list first.
+            chains = to_attack_chains(paths)
+            cur = self.ctx.get("attack_chains", []) or []
+            if isinstance(cur, dict):
+                cur = list(cur.values())
+            if not isinstance(cur, list):
+                cur = []
+            self.ctx.update("attack_chains", cur + chains)
+
+            # Persist to the attack-graph store so the UI shows them (best-effort).
+            try:
+                from core.database.pg_store import AttackGraphRepo
+                AttackGraphRepo.bulk_upsert(getattr(self, "_scan_id", "") or "", chains)
+            except Exception as e:
+                logger.debug("[InfraAgents] attack-graph persist skipped: %s", e)
+
         if result.get("ran"):
             logger.info("[InfraAgents] %s → %d findings, %d attack paths",
                         ", ".join(result["ran"]),

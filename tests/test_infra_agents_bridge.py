@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from core.orchestration.infra_agents import collect_infra_findings
+from core.orchestration.infra_agents import collect_infra_findings, to_attack_chains
 
 
 class FakeCfg:
@@ -93,6 +93,41 @@ def test_empty_snapshot_yields_nothing(tmp_path):
     res = collect_infra_findings(cfg, {"domains": ["good.com"]}, default_target="good.com")
     assert res["ran"] == ["kubernetes"]
     assert res["attack_paths"] == [] and res["findings"] == []
+
+
+def test_to_attack_chains_is_report_and_repo_shaped():
+    paths = [{
+        "attack_path_id": "p1", "objective": "Obtain cluster-admin",
+        "starting_position": "ServiceAccount:kube-system/ci", "target": "cluster",
+        "severity": "CRITICAL", "status": "hypothesized",
+        "steps": [{"action": "assume_subject", "target": "ci"},
+                  {"action": "abuse_grant", "target": "cluster"}],
+        "techniques": ["K8sRBACAbuse"], "evidence": "e",
+        "detection_confidence": 0.9, "exploit_confidence": 0.8,
+        "source": "k8s_attack_path",
+    }]
+    chains = to_attack_chains(paths)
+    c = chains[0]
+    # AttackGraphRepo.bulk_upsert fields
+    assert c["chain_id"] == "p1" and c["score"] == 9.5 and c["status"] == "hypothesized"
+    # report _attack_path_svg reads steps[].title; first=start, last=objective
+    titles = [s["title"] for s in c["steps"]]
+    assert titles[0] == "ServiceAccount:kube-system/ci" and titles[-1] == "cluster"
+    assert "assume_subject" in titles
+
+
+def test_collected_paths_convert_to_chains(tmp_path):
+    snap = {"clusterroles": [{"metadata": {"name": "cluster-admin"}, "kind": "ClusterRole",
+                              "rules": [{"verbs": ["*"], "resources": ["*"]}]}],
+            "clusterrolebindings": [{"metadata": {"name": "b"}, "kind": "ClusterRoleBinding",
+                                     "roleRef": {"kind": "ClusterRole", "name": "cluster-admin"},
+                                     "subjects": [{"kind": "ServiceAccount", "name": "ci",
+                                                   "namespace": "kube-system"}]}]}
+    cfg = FakeCfg({"K8S_SNAPSHOT_FILE": _write(tmp_path, "k8s.json", snap),
+                   "K8S_CLUSTER_ID": "c"})
+    res = collect_infra_findings(cfg, {}, default_target="app")
+    chains = to_attack_chains(res["attack_paths"])
+    assert chains and all(ch["steps"] and ch["chain_id"] for ch in chains)
 
 
 if __name__ == "__main__":
