@@ -148,6 +148,48 @@ class ToolGateway:
         except Exception as _e:
             logger.debug(f"freshness gate skipped: {_e}")
 
+        # STEP 2b-bis (Phase 11): Action-ledger duplicate gate. Freshness keys on
+        # (target, operation, tool); this finer fingerprint also covers method,
+        # parameter NAMES, payload class and identity, so the *same probe* under a
+        # different random operand is recognized as a duplicate and skipped. The
+        # claim is atomic, so concurrent agents cannot both run it. Opt-in.
+        _action_fp = None
+        try:
+            from core.common.config import get_config as _cfg_ad
+            if _cfg_ad().get_bool("ACTION_DEDUP_ENABLED", True):
+                from core.orchestration.action_ledger import (
+                    action_fingerprint, get_ledger)
+                _action_fp = action_fingerprint(
+                    invocation.tool_id, invocation.operation or "",
+                    invocation.target or "", invocation.params or {},
+                    invocation.audit_context)
+                _ledger = get_ledger(invocation.session_id or "")
+                if not _ledger.claim(_action_fp):
+                    ok, reason = _ledger.should_execute(_action_fp)
+                    from core.common.schemas import (
+                        ToolResult as SchemaToolResult, ToolExecutionStatus)
+                    logger.info("ACTION_DEDUP_SKIP: %s %s on %s (%s)",
+                                invocation.tool_id, invocation.operation,
+                                invocation.target, reason)
+                    try:
+                        from core.observability.scan_metrics import get_metrics
+                        get_metrics().inc("duplicate_tool_calls")
+                    except Exception:
+                        pass
+                    return SchemaToolResult(
+                        tool=invocation.tool_id or "unknown",
+                        capability=invocation.operation or "unknown",
+                        status=ToolExecutionStatus.SKIPPED_FRESH,
+                        exit_code=0, target=invocation.target or "",
+                        stdout=f"[SKIPPED_DUPLICATE] identical action already "
+                               f"{reason} this session; not re-executed.",
+                        data={"duplicate_action": True, "fingerprint": _action_fp},
+                        metadata={"reason": f"duplicate action ({reason})",
+                                  "execution_state": "SKIPPED_DUPLICATE"},
+                    )
+        except Exception as _e:
+            logger.debug(f"action-ledger gate skipped: {_e}")
+
         # STEP 2c (P1-7): Tool health gate — refuse invocation of a tool
         # already in COOLDOWN or UNAVAILABLE state; pick a replacement
         # instead of wasting an LLM round on a known-broken binary.
@@ -306,6 +348,21 @@ class ToolGateway:
                                        scope=invocation.tool_id or "")
         except Exception as _e:
             logger.debug(f"post-exec accounting skipped: {_e}")
+
+        # STEP 5c (Phase 11): record the action outcome in the ledger. A
+        # transient outcome (timeout/error) is released so one retry is allowed;
+        # any conclusive outcome blocks re-execution of the identical action.
+        if _action_fp is not None:
+            try:
+                from core.orchestration.action_ledger import get_ledger
+                _st = getattr(result.status, "value", str(result.status)).lower()
+                _map = {"success": "success", "partial": "success",
+                        "partial_success": "success", "blocked": "blocked",
+                        "failed": "failed", "timeout": "timeout", "error": "error"}
+                get_ledger(invocation.session_id or "").record(
+                    _action_fp, _map.get(_st, "success"))
+            except Exception as _e:
+                logger.debug(f"action-ledger record skipped: {_e}")
         
         # STEP 6: Cache It (only cache successes — failed results should not poison future calls)
         if result.success:
