@@ -1800,11 +1800,127 @@ def get_attack_graph(scan_id: str):
 
 
 # ── ATTACK CHAINS — LLM-synthesised exploitation paths ────────────────────
+def _build_attack_chains(scan_id: str) -> list:
+    """Construct attack chains from THIS scan's findings with the forward
+    AttackPathEngine, mapped to the shape the UI card renders. Deterministic and
+    available mid-scan (reads persisted findings, not the live process)."""
+    try:
+        from core.orchestration.central_brain import VulnRepo as _VR  # noqa
+    except Exception:
+        pass
+    try:
+        vulns = VulnRepo.get_by_scan(scan_id) or []
+    except Exception:
+        vulns = []
+    if not vulns:
+        return []
+    from core.verification.impact_engine import _class_of, assess_impact, ImpactLevel, _IMPACT_ORDER
+    from core.common.finding_ref import finding_location
+
+    _SEV = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
+
+    def _loc(f):
+        return finding_location(f) or f.get("location") or f.get("target") or f.get("url") or ""
+
+    # Kill-chain stage for each finding (which rung of a compromise it enables).
+    _STAGE_OF = {
+        "sqli": "initial_access", "xss": "initial_access", "ssrf": "lateral_movement",
+        "open_redirect": "initial_access", "security_header": "initial_access",
+        "other": "initial_access",
+        "info_disclosure": "credential_access",
+        "idor": "privilege_escalation", "authz": "privilege_escalation",
+    }
+    _STAGE_LABEL = {
+        "initial_access": "Initial access", "credential_access": "Credential / secret access",
+        "privilege_escalation": "Privilege escalation", "lateral_movement": "Lateral movement",
+        "collection": "Sensitive data access",
+    }
+    _STAGE_ORDER = ["initial_access", "credential_access", "privilege_escalation",
+                    "lateral_movement", "collection"]
+
+    def _stage(f):
+        cls = _class_of(f)
+        try:
+            lvl, _ = assess_impact(f)
+            if _IMPACT_ORDER[lvl] >= _IMPACT_ORDER[ImpactLevel.SENSITIVE_DATA_ACCESS_PROVEN]:
+                return "collection"
+        except Exception:
+            pass
+        return _STAGE_OF.get(cls, "initial_access")
+
+    # Bucket findings by stage, best (highest severity) first within each.
+    buckets = {}
+    for f in vulns:
+        buckets.setdefault(_stage(f), []).append(f)
+    for st in buckets:
+        buckets[st].sort(key=lambda x: _SEV.get((x.get("severity") or "INFO").upper(), 0), reverse=True)
+
+    def _mk_step(f, leads=None):
+        return {"vuln_title": f.get("title") or _class_of(f), "vuln_location": _loc(f),
+                "leads_to": leads}
+
+    chains = []
+
+    # 1) Primary kill-chain: the strongest finding at each present stage, in order.
+    present = [s for s in _STAGE_ORDER if buckets.get(s)]
+    if len(present) >= 2:
+        steps = []
+        for i, st in enumerate(present):
+            f = buckets[st][0]
+            nxt = _STAGE_LABEL[present[i + 1]] if i + 1 < len(present) else "Full compromise"
+            steps.append(_mk_step(f, nxt))
+        worst = max((buckets[s][0] for s in present),
+                    key=lambda x: _SEV.get((x.get("severity") or "INFO").upper(), 0))
+        chains.append({
+            "name": "End-to-end compromise chain",
+            "severity": (worst.get("severity") or "HIGH").upper(),
+            "narrative": "Chains the strongest finding at each stage into a single "
+                         "path from the internet to sensitive resources: "
+                         + " → ".join(_STAGE_LABEL[s] for s in present) + ".",
+            "business_impact": f"Reaches {_STAGE_LABEL[present[-1]].lower()} by chaining "
+                               f"{len(present)} stages.",
+            "steps": steps,
+            "status": "hypothesized",
+        })
+
+    # 2) Standalone chains for each CRITICAL/HIGH finding (deduped by canonical id).
+    seen = set()
+    for f in vulns:
+        sev = (f.get("severity") or "INFO").upper()
+        if _SEV.get(sev, 0) < 3:
+            continue
+        key = (_class_of(f), _loc(f))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            lvl, reasons = assess_impact(f)
+        except Exception:
+            lvl, reasons = None, []
+        chains.append({
+            "name": f.get("title") or _class_of(f),
+            "severity": sev,
+            "narrative": (f.get("details") or f.get("proof") or "")[:300],
+            "business_impact": (f"Impact: {lvl.value}" if lvl else "") +
+                               (f" — {reasons[0]}" if reasons else ""),
+            "steps": [
+                {"vuln_title": "Reachable from the internet", "vuln_location": _loc(f),
+                 "leads_to": f.get("title") or _class_of(f)},
+                {"vuln_title": f.get("title") or _class_of(f), "vuln_location": _loc(f),
+                 "leads_to": (lvl.value if lvl else "impact")},
+            ],
+            "status": "hypothesized",
+        })
+
+    # Highest severity first.
+    chains.sort(key=lambda c: _SEV.get((c.get("severity") or "INFO").upper(), 0), reverse=True)
+    return chains
+
+
 @app.get("/api/scans/{scan_id}/attack-chains")
 def get_attack_chains(scan_id: str):
     try:
-        from core.database.pg_store import AttackChainRepo
-        chains = AttackChainRepo.get_by_scan(scan_id) if hasattr(AttackChainRepo, "get_by_scan") else []
+        chains = _build_attack_chains(scan_id)
         return {"scan_id": scan_id, "count": len(chains), "chains": chains}
     except Exception as e:
         raise HTTPException(500, f"attack chains unavailable: {e}")
@@ -1812,9 +1928,8 @@ def get_attack_chains(scan_id: str):
 
 @app.post("/api/scans/{scan_id}/attack-chains/regenerate")
 async def regenerate_attack_chains(scan_id: str):
-    from core.reporting.chain_intelligence import synthesize_chains
     try:
-        chains = await synthesize_chains(scan_id)
+        chains = _build_attack_chains(scan_id)
         return {"scan_id": scan_id, "count": len(chains), "chains": chains}
     except Exception as e:
         raise HTTPException(500, f"regenerate failed: {e}")
