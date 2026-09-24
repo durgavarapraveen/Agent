@@ -68,7 +68,7 @@ def _class_of(finding: Dict[str, Any]) -> str:
         return "open_redirect"
     if "idor" in raw or "bola" in raw or "broken object" in raw:
         return "idor"
-    if "sql" in raw and "inject" in raw:
+    if "sqli" in raw or ("sql" in raw and "inject" in raw):
         return "sqli"
     if "privilege" in raw or "privesc" in raw or "authoriz" in raw or "access control" in raw:
         return "authz"
