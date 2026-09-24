@@ -8,6 +8,9 @@ from core.domain.engagement import (
     Engagement, EngagementStatus, EnvironmentType,
     Organization, Project, Environment, Run, RunStatus,
 )
+from core.domain.finding_lifecycle import (
+    FindingLifecycle, can_transition, advance, infer_lifecycle, set_lifecycle,
+)
 
 __all__ = [
     "DomainModel", "Endpoint", "DiscoveryState",
@@ -16,4 +19,6 @@ __all__ = [
     "Application", "Host", "Technology", "Workflow", "Page", "File", "DataObject",
     "Engagement", "EngagementStatus", "EnvironmentType",
     "Organization", "Project", "Environment", "Run", "RunStatus",
+    "FindingLifecycle", "can_transition", "advance", "infer_lifecycle",
+    "set_lifecycle",
 ]

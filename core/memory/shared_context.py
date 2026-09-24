@@ -240,6 +240,15 @@ class SharedContextV2:
             except Exception:
                 pass
 
+            # Phase 6: stamp a canonical lifecycle state inferred from the
+            # finding's own signals (status / evidence / exploit flags) so every
+            # finding carries one ordered state. Best-effort, never blocks.
+            try:
+                from core.domain.finding_lifecycle import infer_lifecycle
+                vuln.setdefault("lifecycle", infer_lifecycle(vuln).value)
+            except Exception:
+                pass
+
             self.vulnerabilities.append(vuln)
             # P0-1: a deterministically CONFIRMED vulnerability is also an
             # exploitation result. Mirror it into exploit_results so it persists
