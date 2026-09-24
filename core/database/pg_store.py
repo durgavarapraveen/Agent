@@ -1100,6 +1100,12 @@ _MIGRATIONS: List[tuple] = [
      "engagement_id TEXT PRIMARY KEY, name TEXT NOT NULL, "
      "status TEXT DEFAULT 'draft', spec JSONB NOT NULL DEFAULT '{}'::jsonb, "
      "created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());"),
+    ("0005_llm_cost_log",
+     "CREATE TABLE IF NOT EXISTS llm_cost_log ("
+     "id BIGSERIAL PRIMARY KEY, scan_id TEXT, provider TEXT, model TEXT, "
+     "input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, "
+     "cost_usd DOUBLE PRECISION DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW());"
+     "CREATE INDEX IF NOT EXISTS idx_llm_cost_log_scan ON llm_cost_log (scan_id);"),
     ("0004_engagement_runs",
      "CREATE TABLE IF NOT EXISTS engagement_runs ("
      "run_id TEXT PRIMARY KEY, engagement_id TEXT NOT NULL, "

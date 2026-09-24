@@ -4,14 +4,13 @@ import { api } from "../api";
 // Phase 6.1 (LLM cost) + Phase 5.3 (executive dollar risk).
 export default function CostRiskPanel({ scanId }) {
   const [cost, setCost] = useState(null);
-  const [risk, setRisk] = useState(null);
   const [routing, setRouting] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let alive = true;
-    Promise.all([api.getScanCost(scanId), api.getScanRisk(scanId), api.getModelRoles()])
-      .then(([c, r, mr]) => { if (alive) { setCost(c); setRisk(r); setRouting(mr); } })
+    Promise.all([api.getScanCost(scanId), api.getModelRoles()])
+      .then(([c, mr]) => { if (alive) { setCost(c); setRouting(mr); } })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, [scanId]);
@@ -27,60 +26,12 @@ export default function CostRiskPanel({ scanId }) {
     return hit;
   };
 
-  if (loading) return <div style={{ color: "var(--text-dim)", padding: 16 }}>Loading cost & risk…</div>;
+  if (loading) return <div style={{ color: "var(--text-dim)", padding: 16 }}>Loading LLM cost…</div>;
 
-  const usd = (n) => "$" + Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 0 });
   const usd4 = (n) => "$" + Number(n || 0).toFixed(4);
-  const trend = risk?.trend || {};
-  const trendColor = trend.direction === "up" ? "var(--red)" : trend.direction === "down" ? "var(--green)" : "var(--text-dim)";
 
   return (
     <div>
-      {/* Executive risk in dollars */}
-      <div className="card" style={{ marginBottom: 16 }}>
-        <h3>Executive Risk Estimate</h3>
-        <div className="card-grid">
-          <div className="stat-card">
-            <span className="label">Total Portfolio Risk</span>
-            <span className="value" style={{ color: "var(--red)" }}>{usd(risk?.total_risk_usd)}</span>
-          </div>
-          <div className="stat-card">
-            <span className="label">Findings Priced</span>
-            <span className="value">{risk?.finding_count || 0}</span>
-          </div>
-          {trend.direction && trend.direction !== "baseline" && (
-            <div className="stat-card">
-              <span className="label">Trend vs last scan</span>
-              <span className="value" style={{ color: trendColor, fontSize: 18 }}>
-                {trend.direction === "up" ? "▲" : trend.direction === "down" ? "▼" : "—"} {usd(Math.abs(trend.delta_usd))} ({trend.delta_pct}%)
-              </span>
-            </div>
-          )}
-        </div>
-        {risk?.top_findings?.length > 0 && (
-          <div style={{ marginTop: 12 }}>
-            <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 6 }}>Top cost drivers</div>
-            <div className="table-wrap">
-              <table>
-                <thead><tr><th>Finding</th><th>Severity</th><th style={{ textAlign: "right" }}>Est. cost</th></tr></thead>
-                <tbody>
-                  {risk.top_findings.map((f, i) => (
-                    <tr key={i}>
-                      <td style={{ color: "var(--text-h)" }}>{f.title}</td>
-                      <td><span className={`badge ${(f.severity || "info").toLowerCase()}`}>{(f.severity || "").toUpperCase()}</span></td>
-                      <td style={{ textAlign: "right", fontFamily: "var(--mono)" }}>{usd(f.dollars)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-        <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-dim)" }}>
-          Modeled on IBM "Cost of a Data Breach" methodology (data-type × industry × regulatory × severity). Indicative, not a guarantee.
-        </div>
-      </div>
-
       {/* LLM cost */}
       <div className="card">
         <h3>LLM Cost (this scan)</h3>

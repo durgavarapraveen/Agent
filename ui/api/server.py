@@ -1576,22 +1576,28 @@ def get_scan_cost(scan_id: str):
         breakdown = get_cost_log().get_cost_breakdown(scan_id)
         if breakdown.get("requests"):
             return breakdown
-        # Fallback: aggregate from the DB table if the log is empty here.
+        # Fallback: aggregate directly from llm_calls (populated by every scan
+        # process, in or out of this API process) — this is the authoritative
+        # per-model token/cost record. The separate llm_cost_log table is a
+        # secondary sink and may be empty; llm_calls always has the data.
         try:
             from core.memory.database import DatabaseManager
             with DatabaseManager.get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT provider, model, SUM(input_tokens), SUM(output_tokens), "
-                        "SUM(cost_usd), COUNT(*) FROM llm_cost_log WHERE scan_id=%s "
-                        "GROUP BY provider, model", (scan_id,))
+                        "SELECT provider, model, "
+                        "COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0), "
+                        "COALESCE(SUM(cost_usd),0), COUNT(*) FROM llm_calls "
+                        "WHERE scan_id=%s GROUP BY provider, model", (scan_id,))
                     rows = cur.fetchall()
-            by_model, total = {}, 0.0
+            by_model, total, tin, tout = {}, 0.0, 0, 0
             for prov, model, itok, otok, cost, cnt in rows:
+                itok, otok = int(itok or 0), int(otok or 0)
                 by_model[f"{prov}/{model}"] = {"requests": cnt, "input_tokens": itok,
                                                "output_tokens": otok, "cost_usd": float(cost or 0)}
-                total += float(cost or 0)
+                total += float(cost or 0); tin += itok; tout += otok
             return {"scan_id": scan_id, "total_cost_usd": round(total, 6),
+                    "total_input_tokens": tin, "total_output_tokens": tout,
                     "requests": sum(v["requests"] for v in by_model.values()),
                     "by_model": by_model}
         except Exception:

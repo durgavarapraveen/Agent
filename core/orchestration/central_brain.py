@@ -2694,6 +2694,16 @@ class CentralBrain(
                 return await self._run_main_loop_impl(auth_document=auth_document, phases=phases)
 
     async def _run_main_loop_impl(self, auth_document: str = "", phases: list = None):
+        # Flip the persisted scan status to "running": the row was created as
+        # "starting" by the API before this subprocess launched, and only the
+        # in-memory copy was advanced — so a restart (or the DB-backed views)
+        # would otherwise show "starting" for the whole run. Best-effort.
+        try:
+            from core.database.pg_store import ScanRepo
+            ScanRepo.update_status(getattr(self, "_scan_id", "") or "", "running")
+        except Exception as _e:
+            logger.debug(f"scan status->running skipped: {_e}")
+
         # §39: start a fresh budget window (requests/runtime/bandwidth/impact/kill)
         # for this scan. The planner spends within it; it cannot raise it.
         try:
