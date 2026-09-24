@@ -9,9 +9,46 @@ from core.llm.model_roles import (
 
 @pytest.fixture(autouse=True)
 def _clear(monkeypatch):
+    from core.llm import model_availability as ma
     pricing.reset_cache()
+    ma.reset_cache()
     yield
     pricing.reset_cache()
+    ma.reset_cache()
+
+
+def test_distinct_family_pricing():
+    # glm-5 flagship is pricier than a small qwen — not the same generic rate.
+    assert pricing.price_for("zai.glm-5") == (0.60, 2.20)
+    assert pricing.price_for("qwen.qwen3-coder-30b") == (0.30, 1.20)
+    assert pricing.price_for("qwen.qwen3-vl-235b") == (0.30, 0.90)
+    assert pricing.price_for("amazon.titan-embed-text-v2:0") == (0.02, 0.0)
+    assert pricing.price_for("zai.glm-5") != pricing.price_for("qwen.qwen3-32b")
+
+
+def test_capability_auto_routing_over_pool():
+    from core.llm.model_roles import ModelRole, pick_model_for_role
+    pool = ["anthropic.claude-haiku-4-5", "deepseek.v3.2",
+            "anthropic.claude-opus-4-5", "qwen.qwen3-coder-30b",
+            "qwen.qwen3-vl-235b", "amazon.titan-embed-text-v2:0", "zai.glm-5"]
+    assert "coder" in pick_model_for_role(ModelRole.CODING, pool)
+    assert "vl" in pick_model_for_role(ModelRole.VISION, pool)
+    assert "embed" in pick_model_for_role(ModelRole.EMBEDDING, pool)
+    assert "haiku" in pick_model_for_role(ModelRole.FAST, pool)
+    # reasoning prefers a strong model, not embed/coder
+    r = pick_model_for_role(ModelRole.REASONING, pool)
+    assert r and "embed" not in r and "coder" not in r
+
+
+def test_model_for_role_uses_allowlist_pool_for_capability(monkeypatch):
+    monkeypatch.setenv("AWS_BEDROCK_ALLOWED_MODELS",
+                       "qwen.qwen3-coder-30b,deepseek.v3.2,amazon.titan-embed-text-v2:0")
+    monkeypatch.setenv("AWS_BEDROCK_SMALL_MODEL", "deepseek.v3.2")
+    monkeypatch.setenv("AWS_BEDROCK_LARGE_MODEL", "deepseek.v3.2")
+    from core.llm.model_roles import ModelRole, model_for_role, role_source
+    assert "coder" in model_for_role(ModelRole.CODING)      # picks the coder model
+    assert role_source(ModelRole.CODING) == "auto"
+    assert "embed" in model_for_role(ModelRole.EMBEDDING)
 
 
 # ── pricing ────────────────────────────────────────────────────────────

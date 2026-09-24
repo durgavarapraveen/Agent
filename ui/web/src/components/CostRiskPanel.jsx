@@ -146,8 +146,9 @@ export default function CostRiskPanel({ scanId }) {
                             downgraded
                           </span>
                         ) : (
-                          <span className={`badge ${r.configured ? "info" : "low"}`}>
-                            {r.configured ? "configured" : "fallback"}
+                          <span className={`badge ${r.source === "configured" ? "info" : r.source === "auto" ? "medium" : "low"}`}
+                            title={r.source === "auto" ? "Auto-selected by capability from your accessible models" : r.source === "configured" ? "Set via AWS_BEDROCK_<ROLE>_MODEL" : "Default small/large model"}>
+                            {r.source || (r.configured ? "configured" : "fallback")}
                           </span>
                         )}
                       </td>

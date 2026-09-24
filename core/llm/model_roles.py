@@ -63,12 +63,53 @@ def _small_large() -> Tuple[str, str]:
         return "", ""
 
 
-def model_for_role(role: ModelRole) -> str:
-    """Resolve a role to a concrete model id: explicit env → sensible fallback.
+# Per-role capability preferences (ordered substrings). When no explicit env id
+# is set, the best-matching ACCESSIBLE model is chosen so roles use appropriate
+# distinct models instead of all falling back to the one large model.
+_ROLE_PREFERENCES = {
+    ModelRole.CODING: ["qwen3-coder", "coder", "devstral", "code"],
+    ModelRole.VISION: ["qwen3-vl", "-vl", "vision", "multimodal", "pixtral",
+                       "palmyra-vision", "nova-2-multimodal"],
+    ModelRole.EMBEDDING: ["titan-embed-text", "embed-v4", "embed-multilingual",
+                          "embed", "embedding"],
+    ModelRole.FAST: ["haiku", "nova-micro", "nova-lite", "mini", "flash",
+                     "small", "-3b", "-8b", "nano", "qwen3-32b"],
+    ModelRole.REASONING: ["deepseek-r1", "deepseek-v3.2", "deepseek", "glm-5",
+                          "glm", "opus", "sonnet", "thinking", "70b"],
+    ModelRole.PLANNER: ["deepseek-r1", "opus", "glm-5", "deepseek-v3.2",
+                        "sonnet", "glm", "thinking", "70b"],
+}
 
-    FAST falls back to the small model; every other role to the large model.
-    VISION/EMBEDDING with no override fall back to large (which may not actually
-    support that modality — callers should check ``has_role_model`` first).
+
+def pick_model_for_role(role: ModelRole, pool) -> str:
+    """Best model in ``pool`` for a role by capability keywords, or "" if none.
+
+    ``pool`` is an iterable of model ids. Preference order within a role decides
+    ties; the first pool id containing a preferred substring wins.
+    """
+    ids = [str(m) for m in (pool or [])]
+    for pref in _ROLE_PREFERENCES.get(role, []):
+        for m in ids:
+            if pref in m.lower():
+                return m
+    return ""
+
+
+def _cached_pool():
+    """Models we may route among WITHOUT a network call: the explicit allowlist,
+    else an already-discovered set (never triggers discovery here)."""
+    try:
+        from core.llm.model_availability import allowlist, cached_available
+        return allowlist() or cached_available()
+    except Exception:
+        return set()
+
+
+def model_for_role(role: ModelRole) -> str:
+    """Resolve a role to a concrete model id.
+
+    Precedence: explicit env id → capability match over the accessible pool →
+    small/large fallback. The result is always gated to an accessible model.
     """
     small, large = _small_large()
     env = _ROLE_ENV.get(role)
@@ -76,9 +117,11 @@ def model_for_role(role: ModelRole) -> str:
     if env:
         chosen = os.getenv(env, "").strip()
     if not chosen:
-        chosen = small if role in _FAST_ROLES else large
-    # Gate to models the account can actually access; swap to an accessible
-    # fallback (small/large) when the chosen one is not allowed.
+        # No explicit id: pick the best accessible model for this role's
+        # capability (coder/vision/embed/fast/reasoning) so we don't send every
+        # task to the one large model.
+        pick = pick_model_for_role(role, _cached_pool())
+        chosen = pick or (small if role in _FAST_ROLES else large)
     try:
         from core.llm.model_availability import enforce
         return enforce(chosen, fallbacks=[small, large])
@@ -87,16 +130,30 @@ def model_for_role(role: ModelRole) -> str:
 
 
 def configured_model(role: ModelRole) -> str:
-    """The role's model BEFORE accessibility enforcement — the explicit env id,
-    else the small/large fallback. Compare with ``model_for_role`` to detect a
-    downgrade (configured model not accessible → swapped)."""
+    """The role's model BEFORE accessibility enforcement — explicit env id, else
+    the capability pick, else the small/large fallback. Compare with
+    ``model_for_role`` to detect a downgrade (not accessible → swapped)."""
     env = _ROLE_ENV.get(role)
     if env:
         v = os.getenv(env, "").strip()
         if v:
             return v
+    pick = pick_model_for_role(role, _cached_pool())
+    if pick:
+        return pick
     small, large = _small_large()
     return small if role in _FAST_ROLES else large
+
+
+def role_source(role: ModelRole) -> str:
+    """How the role's model was chosen: 'configured' (env), 'auto' (capability
+    match over accessible models), or 'fallback' (small/large default)."""
+    env = _ROLE_ENV.get(role)
+    if env and os.getenv(env, "").strip():
+        return "configured"
+    if pick_model_for_role(role, _cached_pool()):
+        return "auto"
+    return "fallback"
 
 
 def has_role_model(role: ModelRole) -> bool:

@@ -1528,10 +1528,16 @@ def get_model_roles():
     price so the UI never shows a fabricated cost)."""
     try:
         from core.llm.model_roles import (
-            ModelRole, model_for_role, has_role_model, configured_model)
+            ModelRole, model_for_role, has_role_model, configured_model, role_source)
         from core.economics.pricing import price_for, is_known
-        from core.llm.model_availability import is_allowed, allowlist
+        from core.llm.model_availability import is_allowed, allowlist, discover_available
         from core.llm.zdr import status as zdr_status
+        # Warm discovery so capability-based auto-routing has the accessible-model
+        # pool to choose from (this is an explicit, user-initiated view).
+        try:
+            discover_available(force=True)
+        except Exception:
+            pass
         roles = []
         pricing = {}
         for r in ModelRole:
@@ -1541,6 +1547,7 @@ def get_model_roles():
                 "role": r.value,
                 "model": model,
                 "configured": has_role_model(r),
+                "source": role_source(r),
                 "accessible": is_allowed(model),
                 "downgraded": wanted != model,
                 "wanted": wanted,

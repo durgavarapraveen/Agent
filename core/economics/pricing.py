@@ -37,11 +37,26 @@ _DEFAULT_PRICING: Dict[str, Tuple[float, float]] = {
     "deepseek-v3.1": (0.27, 1.10),
     "deepseek-v3.2": (0.27, 0.42),
     "deepseek-r1": (0.55, 2.19),
-    # Other gateway models
+    # Other gateway models (best-effort public estimates — override exact
+    # contract rates with LLM_PRICING_JSON). Kept distinct per family/size.
     "qwen": (0.20, 0.60),
+    "qwen3-32b": (0.15, 0.60),
+    "qwen3-coder": (0.30, 1.20),
+    "qwen3-vl": (0.30, 0.90),
+    "qwen3-next": (0.25, 1.00),
     "gpt-oss": (0.15, 0.60),
-    "glm": (0.20, 0.60),
+    "glm": (0.30, 1.10),
+    "glm-4.7": (0.30, 1.10),
+    "glm-5": (0.60, 2.20),
     "llama": (0.20, 0.60),
+    "llama4": (0.25, 0.85),
+    "mistral-large": (2.00, 6.00),
+    "mistral-small": (0.20, 0.60),
+    "ministral": (0.10, 0.30),
+    "kimi": (0.55, 2.20),
+    "minimax": (0.30, 1.10),
+    "grok": (3.00, 15.00),
+    "nemotron": (0.20, 0.80),
     # Amazon Nova / Titan (Bedrock)
     "nova-micro": (0.035, 0.14),
     "nova-lite": (0.06, 0.24),

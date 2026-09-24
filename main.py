@@ -85,6 +85,15 @@ async def run_single(target: str, auth_file: str | None = None, tier: str = "POC
     # Expose the scan id so the LLM harness records per-scan cost (Phase 6.1).
     os.environ["ANTIGRAVITY_SCAN_ID"] = str(scan_id or getattr(brain, "_scan_id", "") or target)
 
+    # Warm the accessible-model discovery once so capability-based role routing
+    # (coder→coding, VL→vision, …) has the pool to choose from during this scan
+    # instead of sending every task to the one large model. Best-effort.
+    try:
+        from core.llm.model_availability import discover_available
+        discover_available(force=True)
+    except Exception:
+        pass
+
     if credentials:
         cred_list = credentials if isinstance(credentials, list) else [credentials]
         # Feed the multi-role auth manager: one live session per role.

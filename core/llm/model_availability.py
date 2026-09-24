@@ -90,6 +90,12 @@ def reset_cache() -> None:
     _discovered = None
 
 
+def cached_available() -> Set[str]:
+    """Already-discovered models, WITHOUT triggering a network call. Empty until
+    something calls discover_available()."""
+    return set(_discovered or set())
+
+
 def is_allowed(model: str) -> bool:
     if not model:
         return False
@@ -128,7 +134,7 @@ def enforce(model: str, fallbacks: Optional[List[str]] = None) -> str:
 def _print_report() -> int:
     """Print accessible models, the role→model mapping, pricing and ZDR status."""
     from core.llm.model_roles import (
-        ModelRole, model_for_role, has_role_model, configured_model)
+        ModelRole, model_for_role, configured_model, role_source)
     from core.economics.pricing import price_for, is_known
     from core.llm.zdr import status as zdr_status
 
@@ -167,7 +173,7 @@ def _print_report() -> int:
             src = "downgraded"
             downgrades.append((r.value, wanted, model))
         else:
-            src = "configured" if has_role_model(r) else "fallback"
+            src = role_source(r)  # configured | auto | fallback
         acc = "yes" if is_allowed(model) else "BLOCKED"
         pin, pout = price_for(model)
         rate = f"{pin}/{pout}" if is_known(model) else "no price"
