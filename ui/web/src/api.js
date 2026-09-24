@@ -368,6 +368,9 @@ export const api = {
   getScanRisk: (scanId) =>
     request(`/api/scans/${scanId}/risk`)
       .catch(() => ({ scan_id: scanId, total_risk_usd: 0, by_severity: {}, top_findings: [], trend: {} })),
+  getModelRoles: () =>
+    request(`/api/llm/model-roles`)
+      .catch(() => ({ roles: [], pricing: {} })),
   getChainAnalysis: (scanId) =>
     request(`/api/scans/${scanId}/chain-analysis`)
       .catch(() => ({ chain_count: 0, rescore: { upgraded_count: 0, upgrades: [] }, narratives: [] })),

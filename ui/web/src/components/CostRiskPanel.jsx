@@ -5,15 +5,27 @@ import { api } from "../api";
 export default function CostRiskPanel({ scanId }) {
   const [cost, setCost] = useState(null);
   const [risk, setRisk] = useState(null);
+  const [routing, setRouting] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let alive = true;
-    Promise.all([api.getScanCost(scanId), api.getScanRisk(scanId)])
-      .then(([c, r]) => { if (alive) { setCost(c); setRisk(r); } })
+    Promise.all([api.getScanCost(scanId), api.getScanRisk(scanId), api.getModelRoles()])
+      .then(([c, r, mr]) => { if (alive) { setCost(c); setRisk(r); setRouting(mr); } })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, [scanId]);
+
+  // Map a "provider/model" cost key to its known per-1M rate (substring match).
+  const rateFor = (modelKey) => {
+    const p = routing?.pricing || {};
+    const id = String(modelKey).split("/").pop().toLowerCase();
+    let hit = null;
+    for (const [m, v] of Object.entries(p)) {
+      if (id.includes(String(m).toLowerCase())) hit = v;
+    }
+    return hit;
+  };
 
   if (loading) return <div style={{ color: "var(--text-dim)", padding: 16 }}>Loading cost & risk…</div>;
 
@@ -91,15 +103,43 @@ export default function CostRiskPanel({ scanId }) {
           </div>
         </div>
         {cost?.by_model && Object.keys(cost.by_model).length > 0 && (
-          <div style={{ marginTop: 12, fontSize: 12, color: "var(--text-dim)" }}>
-            {Object.entries(cost.by_model).map(([model, v]) => (
-              <div key={model} style={{ display: "flex", gap: 16, marginBottom: 4 }}>
-                <span style={{ fontWeight: 600, color: "var(--text)", minWidth: 220 }}>{model}</span>
-                <span>{v.requests} req</span>
-                <span>{((v.input_tokens || 0) + (v.output_tokens || 0)).toLocaleString()} tok</span>
-                <span>{usd4(v.cost_usd)}</span>
-              </div>
-            ))}
+          <div className="table-wrap" style={{ marginTop: 12 }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>Provider / Model</th>
+                  <th style={{ textAlign: "right" }}>Requests</th>
+                  <th style={{ textAlign: "right" }}>Input tok</th>
+                  <th style={{ textAlign: "right" }}>Output tok</th>
+                  <th style={{ textAlign: "right" }}>Rate $/1M (in / out)</th>
+                  <th style={{ textAlign: "right" }}>Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(cost.by_model).map(([model, v]) => {
+                  const rate = rateFor(model);
+                  const unknown = rate && rate.known === false;
+                  return (
+                    <tr key={model}>
+                      <td style={{ color: "var(--text-h)", fontFamily: "var(--mono)" }}>
+                        {model}
+                        {unknown && (
+                          <span className="badge low" title="No known rate — cost shown as $0. Set LLM_PRICING_JSON."
+                            style={{ marginLeft: 8 }}>no price</span>
+                        )}
+                      </td>
+                      <td style={{ textAlign: "right" }}>{v.requests}</td>
+                      <td style={{ textAlign: "right", fontFamily: "var(--mono)" }}>{(v.input_tokens || 0).toLocaleString()}</td>
+                      <td style={{ textAlign: "right", fontFamily: "var(--mono)" }}>{(v.output_tokens || 0).toLocaleString()}</td>
+                      <td style={{ textAlign: "right", fontFamily: "var(--mono)" }}>
+                        {rate ? `$${rate.input_per_1m} / $${rate.output_per_1m}` : "—"}
+                      </td>
+                      <td style={{ textAlign: "right", fontFamily: "var(--mono)" }}>{usd4(v.cost_usd)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         )}
         {(!cost || cost.requests === 0) && (
@@ -108,6 +148,47 @@ export default function CostRiskPanel({ scanId }) {
           </div>
         )}
       </div>
+
+      {/* Model routing: which model handles which task role */}
+      {routing?.roles?.length > 0 && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <h3>Model Routing</h3>
+          <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 8 }}>
+            Tasks are routed to different Bedrock models by role — cheap work to a fast model,
+            hard reasoning to a strong one. Fallback = using the small/large default (set the
+            role's env var to override).
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Role</th><th>Model</th><th>Source</th>
+                  <th style={{ textAlign: "right" }}>Rate $/1M (in / out)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {routing.roles.map((r) => {
+                  const rate = routing.pricing?.[r.model];
+                  return (
+                    <tr key={r.role}>
+                      <td style={{ color: "var(--text-h)", textTransform: "capitalize" }}>{r.role}</td>
+                      <td style={{ fontFamily: "var(--mono)" }}>{r.model || "—"}</td>
+                      <td>
+                        <span className={`badge ${r.configured ? "info" : "low"}`}>
+                          {r.configured ? "configured" : "fallback"}
+                        </span>
+                      </td>
+                      <td style={{ textAlign: "right", fontFamily: "var(--mono)" }}>
+                        {rate ? (rate.known ? `$${rate.input_per_1m} / $${rate.output_per_1m}` : "no price") : "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1518,6 +1518,35 @@ def get_understanding(scan_id: str):
 
 
 # ── LLM COST (Phase 6.1) ──────────────────────────────────────────────────
+@app.get("/api/llm/model-roles")
+def get_model_roles():
+    """Task→model routing (spec Phase 28/32) + per-model pricing (Phase 29).
+
+    Shows which Bedrock model handles each role (fast/reasoning/planner/coding/
+    vision/embedding), whether it is explicitly configured or a small/large
+    fallback, and the authoritative per-1M rate (flagging models with no known
+    price so the UI never shows a fabricated cost)."""
+    try:
+        from core.llm.model_roles import ModelRole, model_for_role, has_role_model
+        from core.economics.pricing import price_for, is_known
+        roles = []
+        pricing = {}
+        for r in ModelRole:
+            model = model_for_role(r)
+            roles.append({
+                "role": r.value,
+                "model": model,
+                "configured": has_role_model(r),
+            })
+            if model and model not in pricing:
+                pin, pout = price_for(model)
+                pricing[model] = {"input_per_1m": pin, "output_per_1m": pout,
+                                  "known": is_known(model)}
+        return {"roles": roles, "pricing": pricing}
+    except Exception as e:
+        raise HTTPException(500, f"model roles read failed: {e}")
+
+
 @app.get("/api/scans/{scan_id}/cost")
 def get_scan_cost(scan_id: str):
     """Per-scan LLM spend breakdown. Reads the in-process cost log, falling back
