@@ -106,12 +106,25 @@ class BedrockProvider(LLMProvider):
         return u
 
     def _extra_body(self) -> dict:
-        """Mantle gateway request extras. AWS_BEDROCK_DATA_RETENTION=none opts the
-        prompt/response out of provider data sharing (data stays in-region). Empty
-        (unset) sends nothing, so direct-Bedrock/other gateways are unaffected."""
-        import os
-        dr = os.getenv("AWS_BEDROCK_DATA_RETENTION", "").strip()
+        """Mantle gateway request extras. Under ZDR (default) this sends
+        ``data_retention: "none"`` so prompts/completions are not retained or
+        shared by the provider. Empty only when ZDR is disabled AND no explicit
+        AWS_BEDROCK_DATA_RETENTION is set (direct-Bedrock/other gateways then
+        receive nothing)."""
+        try:
+            from core.llm.zdr import data_retention_value
+            dr = data_retention_value()
+        except Exception:
+            import os
+            dr = os.getenv("AWS_BEDROCK_DATA_RETENTION", "").strip()
         return {"data_retention": dr} if dr else {}
+
+    def _zdr_headers(self) -> dict:
+        try:
+            from core.llm.zdr import zdr_headers
+            return zdr_headers()
+        except Exception:
+            return {}
 
     def _mint_token(self) -> str:
         """Fresh short-term gateway token from the AWS credential chain; falls
@@ -286,6 +299,7 @@ class BedrockProvider(LLMProvider):
             # which stalled the planner and starved the phase no-progress guard).
             client = AsyncOpenAI(base_url=self._sdk_base_url(),
                                  api_key=self._mint_token(),
+                                 default_headers=self._zdr_headers() or None,
                                  timeout=90.0, max_retries=2)
             resp = await client.chat.completions.create(
                 model=model, messages=messages,
@@ -455,6 +469,7 @@ class BedrockProvider(LLMProvider):
             from openai import AsyncOpenAI
             client = AsyncOpenAI(base_url=self._sdk_base_url(),
                                  api_key=self._mint_token(),
+                                 default_headers=self._zdr_headers() or None,
                                  timeout=90.0, max_retries=2)
             for _round in range(max(1, max_rounds)):
                 resp = await client.chat.completions.create(

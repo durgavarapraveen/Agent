@@ -153,16 +153,31 @@ export default function CostRiskPanel({ scanId }) {
       {routing?.roles?.length > 0 && (
         <div className="card" style={{ marginTop: 16 }}>
           <h3>Model Routing</h3>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+            <span className={`badge ${routing?.zdr?.zdr_required ? "info" : "low"}`}>
+              {routing?.zdr?.zdr_required ? "ZDR ON" : "ZDR OFF"}
+            </span>
+            {routing?.zdr?.zdr_required && (
+              <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+                data_retention=“{routing.zdr.data_retention || "none"}” · prompt/response content not stored
+              </span>
+            )}
+            {routing?.allowlist?.length > 0 && (
+              <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+                · allowlist: {routing.allowlist.join(", ")}
+              </span>
+            )}
+          </div>
           <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 8 }}>
             Tasks are routed to different Bedrock models by role — cheap work to a fast model,
             hard reasoning to a strong one. Fallback = using the small/large default (set the
-            role's env var to override).
+            role's env var to override). Routing is restricted to accessible models only.
           </div>
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Role</th><th>Model</th><th>Source</th>
+                  <th>Role</th><th>Model</th><th>Source</th><th>Access</th>
                   <th style={{ textAlign: "right" }}>Rate $/1M (in / out)</th>
                 </tr>
               </thead>
@@ -176,6 +191,11 @@ export default function CostRiskPanel({ scanId }) {
                       <td>
                         <span className={`badge ${r.configured ? "info" : "low"}`}>
                           {r.configured ? "configured" : "fallback"}
+                        </span>
+                      </td>
+                      <td>
+                        <span className={`badge ${r.accessible ? "info" : "critical"}`}>
+                          {r.accessible ? "accessible" : "blocked"}
                         </span>
                       </td>
                       <td style={{ textAlign: "right", fontFamily: "var(--mono)" }}>

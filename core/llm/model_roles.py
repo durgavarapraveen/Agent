@@ -70,13 +70,20 @@ def model_for_role(role: ModelRole) -> str:
     VISION/EMBEDDING with no override fall back to large (which may not actually
     support that modality — callers should check ``has_role_model`` first).
     """
-    env = _ROLE_ENV.get(role)
-    if env:
-        v = os.getenv(env, "").strip()
-        if v:
-            return v
     small, large = _small_large()
-    return small if role in _FAST_ROLES else large
+    env = _ROLE_ENV.get(role)
+    chosen = ""
+    if env:
+        chosen = os.getenv(env, "").strip()
+    if not chosen:
+        chosen = small if role in _FAST_ROLES else large
+    # Gate to models the account can actually access; swap to an accessible
+    # fallback (small/large) when the chosen one is not allowed.
+    try:
+        from core.llm.model_availability import enforce
+        return enforce(chosen, fallbacks=[small, large])
+    except Exception:
+        return chosen
 
 
 def has_role_model(role: ModelRole) -> bool:

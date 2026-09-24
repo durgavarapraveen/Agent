@@ -1529,6 +1529,8 @@ def get_model_roles():
     try:
         from core.llm.model_roles import ModelRole, model_for_role, has_role_model
         from core.economics.pricing import price_for, is_known
+        from core.llm.model_availability import is_allowed, allowlist
+        from core.llm.zdr import status as zdr_status
         roles = []
         pricing = {}
         for r in ModelRole:
@@ -1537,14 +1539,28 @@ def get_model_roles():
                 "role": r.value,
                 "model": model,
                 "configured": has_role_model(r),
+                "accessible": is_allowed(model),
             })
             if model and model not in pricing:
                 pin, pout = price_for(model)
                 pricing[model] = {"input_per_1m": pin, "output_per_1m": pout,
                                   "known": is_known(model)}
-        return {"roles": roles, "pricing": pricing}
+        return {"roles": roles, "pricing": pricing, "zdr": zdr_status(),
+                "allowlist": sorted(allowlist())}
     except Exception as e:
         raise HTTPException(500, f"model roles read failed: {e}")
+
+
+@app.get("/api/llm/available-models")
+def get_available_models():
+    """Best-effort discovery of the Bedrock models this account/gateway can use,
+    plus the configured allowlist (spec: use only accessible models)."""
+    try:
+        from core.llm.model_availability import discover_available, allowlist
+        return {"available": sorted(discover_available()),
+                "allowlist": sorted(allowlist())}
+    except Exception as e:
+        raise HTTPException(500, f"model discovery failed: {e}")
 
 
 @app.get("/api/scans/{scan_id}/cost")
