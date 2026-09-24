@@ -192,12 +192,36 @@ class SharedContextV2:
         host_level = vtype in self._HOST_LEVEL_TYPES or (
             "header" in title and "missing" in title)
 
+        # Phase 21: canonical structural identity (asset+endpoint+class+param+
+        # auth) — independent of the free-text title so one logical vuln has one
+        # identity even when agents phrase it differently.
+        try:
+            from core.common.finding_ref import finding_fingerprint
+            _fp = finding_fingerprint(vuln)
+            vuln.setdefault("fingerprint", _fp)
+        except Exception:
+            _fp = None
+
         with self._state_lock:
             for existing in self.vulnerabilities:
+                # Primary dedup: same canonical fingerprint = same finding.
+                # Attach the newly-seen endpoint as evidence and drop the copy.
+                if _fp and existing.get("fingerprint") == _fp:
+                    loc_new = vuln.get("location") or vuln.get("target") or ""
+                    if loc_new:
+                        aff = existing.setdefault("affected_endpoints", [])
+                        if loc_new not in aff:
+                            aff.append(loc_new)
+                    return
                 e_title = (existing.get("title") or "").lower()
                 e_type = (existing.get("type") or "").upper()
                 e_loc = (existing.get("location") or existing.get("target") or "").lower()
-                if e_title == title and e_type == vtype and \
+                # Legacy fallback (for findings without a fingerprint): title +
+                # type + location, now also parameter-aware so distinct params on
+                # the same route are not wrongly merged.
+                e_param = (existing.get("parameter") or existing.get("param") or "").lower()
+                v_param = (vuln.get("parameter") or vuln.get("param") or "").lower()
+                if e_title == title and e_type == vtype and e_param == v_param and \
                         _dedup_endpoint_location(e_loc) == _norm_loc:
                     return
                 # P1-11 / P1.14: same host-level control on the same host → one
