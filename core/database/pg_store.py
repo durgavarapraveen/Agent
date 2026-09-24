@@ -1100,6 +1100,15 @@ _MIGRATIONS: List[tuple] = [
      "engagement_id TEXT PRIMARY KEY, name TEXT NOT NULL, "
      "status TEXT DEFAULT 'draft', spec JSONB NOT NULL DEFAULT '{}'::jsonb, "
      "created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());"),
+    ("0006_http_exchanges",
+     "CREATE TABLE IF NOT EXISTS http_exchanges ("
+     "id BIGSERIAL PRIMARY KEY, scan_id TEXT, fingerprint TEXT, "
+     "method TEXT, url TEXT, req_headers JSONB, req_body TEXT, "
+     "status INTEGER DEFAULT 0, resp_headers JSONB, resp_body TEXT, "
+     "hits INTEGER DEFAULT 1, first_seen TIMESTAMPTZ DEFAULT NOW(), "
+     "last_seen TIMESTAMPTZ DEFAULT NOW());"
+     "CREATE UNIQUE INDEX IF NOT EXISTS ux_http_exchanges_scan_fp "
+     "ON http_exchanges (scan_id, fingerprint);"),
     ("0005_llm_cost_log",
      "CREATE TABLE IF NOT EXISTS llm_cost_log ("
      "id BIGSERIAL PRIMARY KEY, scan_id TEXT, provider TEXT, model TEXT, "

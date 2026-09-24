@@ -58,8 +58,23 @@ export default function ArtifactsPanel({ scanId, poll = false }) {
   const activeIsValid = subTabs.some(t => t.id === activeTab);
   const currentTab = activeIsValid ? activeTab : (subTabs[0]?.id || "poc");
 
+  const KIND_LABEL = {
+    sarif: "SARIF report (machine-readable findings)",
+    report_json: "Canonical JSON report",
+    report_html: "HTML report",
+    repro_bundle: "Reproduction bundle (steps to re-run an attack)",
+    sbom: "Software bill of materials",
+    har: "HTTP archive (captured traffic)",
+  };
+  const kindLabel = (k) => KIND_LABEL[k] || String(k || "artifact").replace(/_/g, " ");
+
   return (
     <div>
+      <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 10 }}>
+        Files this scan produced as evidence — <strong>PoC</strong> scripts that reproduce a finding,
+        <strong> screenshots</strong> captured during exploitation, and <strong>other</strong> outputs
+        (reports, SARIF, reproduction bundles). Click to view or download.
+      </div>
       <div style={{ display: "flex", gap: 12, marginBottom: 12, borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
         {subTabs.map(t => (
           <button key={t.id} className="btn btn-sm"
@@ -136,7 +151,7 @@ export default function ArtifactsPanel({ scanId, poll = false }) {
             <tbody>
               {others.map(a => (
                 <tr key={a.id}>
-                  <td><span style={{ fontFamily: "var(--mono)", fontSize: 11 }}>{a.kind}</span></td>
+                  <td><span style={{ fontSize: 12 }}>{kindLabel(a.kind)}</span></td>
                   <td>{a.name}</td>
                   <td>{(a.size_bytes / 1024).toFixed(1)} KB</td>
                   <td style={{ fontSize: 11 }}>{a.created_at}</td>

@@ -373,6 +373,9 @@ export const api = {
   getModelRoles: () =>
     request(`/api/llm/model-roles`)
       .catch(() => ({ roles: [], pricing: {} })),
+  getHttpExchanges: (id) =>
+    request(`/api/scans/${id}/http-exchanges`)
+      .catch(() => ({ exchanges: [], count: 0, total_sent: 0 })),
   getChainAnalysis: (scanId) =>
     request(`/api/scans/${scanId}/chain-analysis`)
       .catch(() => ({ chain_count: 0, rescore: { upgraded_count: 0, upgrades: [] }, narratives: [] })),

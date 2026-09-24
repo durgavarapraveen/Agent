@@ -1779,6 +1779,20 @@ def answer_human_request(scan_id: str, request_id: str, body: HumanAnswer):
 
 
 # ── ATTACK GRAPH — persisted node/edge graph (B1) ─────────────────────────
+@app.get("/api/scans/{scan_id}/http-exchanges")
+def get_http_exchanges(scan_id: str, limit: int = 2000):
+    """Every HTTP request the agent sent + its response, deduped by canonical
+    fingerprint (method+path+param-names+body-shape) with a hit count."""
+    try:
+        from core.economics.http_log import list_by_scan
+        rows = list_by_scan(scan_id, limit=limit)
+        return {"scan_id": scan_id, "count": len(rows),
+                "total_sent": sum(int(r.get("hits", 1)) for r in rows),
+                "exchanges": rows}
+    except Exception as e:
+        raise HTTPException(500, f"http exchanges unavailable: {e}")
+
+
 @app.get("/api/scans/{scan_id}/attack-graph")
 def get_attack_graph(scan_id: str):
     try:

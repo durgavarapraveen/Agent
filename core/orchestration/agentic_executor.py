@@ -1742,6 +1742,18 @@ RULES:
                 except Exception:
                     pass
 
+                # Record the full request/response (deduped, payload + response)
+                # so the Requests tab shows exactly what was sent and returned.
+                try:
+                    from core.economics.http_log import record_exchange
+                    record_exchange(
+                        getattr(self, "scan_id", "") or "", method, url,
+                        req_headers=headers, req_body=body,
+                        status=resp.status_code, resp_headers=dict(resp.headers),
+                        resp_body=resp.text)
+                except Exception:
+                    pass
+
                 self._auto_detect_vulns(method, url, body, resp.status_code, resp.text)
                 self._capture_auth_from_response(url, resp, req_method=method, req_body=body)
                 self._harvest_emails_and_hashes(url, resp.text)

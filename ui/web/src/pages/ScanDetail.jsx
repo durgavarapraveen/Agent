@@ -112,7 +112,7 @@ export default function ScanDetail() {
       {tab === "post-exploit" && <PostExploitTab scanId={scanId} />}
       {tab === "recon" && <ReconPanel context={context} scanId={scanId} />}
       {tab === "tool-outputs" && <ToolOutputsTab scanId={scanId} />}
-      {tab === "requests" && <RequestsTab capturedData={context.captured_requests || {}} />}
+      {tab === "requests" && <RequestsTab capturedData={context.captured_requests || {}} scanId={scanId} />}
       {tab === "coverage" && <CoverageTab />}
       {tab === "collected" && <CollectedDataTab scanId={scanId} />}
       {tab === "logs" && <LogsTab scanId={scanId} />}
@@ -1087,13 +1087,71 @@ const pillBtn = { border: "1px solid var(--border)", borderRadius: 16, padding: 
 const preBoxSD = { background: "var(--bg-surface, #f5f5f7)", color: "var(--text)", border: "1px solid var(--border)", padding: 10, borderRadius: 8, fontSize: 12, lineHeight: 1.5, maxHeight: 220, overflow: "auto" };
 
 /* ── Requests ────────────────────────────────────────────────────────────── */
-function RequestsTab({ capturedData }) {
-  // Tool executions live in the "Tool Outputs" tab — keeping them here would
-  // duplicate the same rows across two tabs. This tab now shows only real
-  // HTTP requests captured by Playwright/Chromium.
+function RequestsTab({ capturedData, scanId }) {
+  // Shows every HTTP request the agent SENT (with its payload) and the RESPONSE,
+  // deduplicated by canonical fingerprint (method + path + param names + body
+  // shape) with a hit count — the actual attack traffic, not just browser hits.
   const [expanded, setExpanded] = useState(null);
   const [methodFilter, setMethodFilter] = useState("ALL");
+  const [exchanges, setExchanges] = useState(null);
+  const [totalSent, setTotalSent] = useState(0);
 
+  useEffect(() => {
+    if (!scanId) { setExchanges([]); return; }
+    api.getHttpExchanges(scanId).then((r) => {
+      setExchanges(Array.isArray(r.exchanges) ? r.exchanges : []);
+      setTotalSent(r.total_sent || 0);
+    }).catch(() => setExchanges([]));
+  }, [scanId]);
+
+  if (exchanges === null) return <div style={{ padding: 16, color: "var(--text-dim)" }}>Loading requests…</div>;
+
+  if (exchanges.length > 0) {
+    const methods = [...new Set(exchanges.map(r => (r.method || "").toUpperCase()).filter(Boolean))];
+    const filtered = methodFilter === "ALL" ? exchanges : exchanges.filter(r => (r.method || "").toUpperCase() === methodFilter);
+    const jstr = (h) => { try { return Object.entries(h || {}).map(([k, v]) => `${k}: ${v}`).join("\n"); } catch { return ""; } };
+    return (
+      <>
+        <div className="filter-bar" style={{ marginBottom: 12 }}>
+          <FilterSelect label="Method" value={methodFilter} onChange={setMethodFilter} options={["ALL", ...methods]} />
+          <span style={{ fontSize: 12, color: "var(--text-dim)" }}>
+            {filtered.length} unique requests · {totalSent} total sent (duplicates collapsed)
+          </span>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Method</th><th>URL</th><th>Status</th><th>Payload</th><th>×</th></tr></thead>
+            <tbody>
+              {filtered.map((r, i) => (
+                <React.Fragment key={i}>
+                  <tr className="click-row" onClick={() => setExpanded(expanded === i ? null : i)}>
+                    <td><span className="badge" style={{ background: methodColor(r.method) + "22", color: methodColor(r.method) }}>{r.method}</span></td>
+                    <td style={{ fontFamily: "var(--mono)", fontSize: 11, maxWidth: 460, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.url}</td>
+                    <td><span style={{ color: r.status >= 200 && r.status < 300 ? "var(--green)" : r.status >= 400 ? "var(--red)" : r.status >= 300 ? "var(--yellow)" : "var(--text-dim)" }}>{r.status || "-"}</span></td>
+                    <td style={{ fontFamily: "var(--mono)", fontSize: 11, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)" }}>{r.req_body ? String(r.req_body).slice(0, 80) : "-"}</td>
+                    <td style={{ fontSize: 11, color: "var(--text-dim)" }}>{r.hits > 1 ? `${r.hits}×` : ""}</td>
+                  </tr>
+                  {expanded === i && (
+                    <tr><td colSpan={5} style={{ padding: 0 }}>
+                      <div style={{ padding: 16, background: "var(--bg)", display: "grid", gap: 10 }}>
+                        <div><div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", marginBottom: 3 }}>REQUEST HEADERS</div><pre style={preBoxSD}>{jstr(r.req_headers) || "(none)"}</pre></div>
+                        {r.req_body && <div><div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", marginBottom: 3 }}>PAYLOAD (body sent)</div><pre style={preBoxSD}>{r.req_body}</pre></div>}
+                        <div><div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", marginBottom: 3 }}>RESPONSE {r.status} HEADERS</div><pre style={preBoxSD}>{jstr(r.resp_headers) || "(none)"}</pre></div>
+                        <div><div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", marginBottom: 3 }}>RESPONSE BODY</div><pre style={preBoxSD}>{r.resp_body || "(empty)"}</pre></div>
+                        <div style={{ fontSize: 11, color: "var(--text-dim)" }}>Sent {r.hits}× · first {r.first_seen} · last {r.last_seen}</div>
+                      </div>
+                    </td></tr>
+                  )}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </>
+    );
+  }
+
+  // Fallback: browser-captured requests (older scans without exchange capture).
   const httpReqs = capturedData.http_requests || [];
 
   const methods = [...new Set(httpReqs.map(r => (r.method || "").toUpperCase()).filter(Boolean))];

@@ -361,7 +361,7 @@ function LiveScanDetail({ jobId }) {
       {tab === "jev" && <JevDecisionsPanel scanId={jobId} poll={isRunning} />}
       {tab === "human" && <HumanAssistPanel scanId={jobId} poll={isRunning} />}
       {tab === "artifacts" && <ArtifactsPanel scanId={jobId} poll />}
-      {tab === "requests" && <RequestsSection requests={requests} />}
+      {tab === "requests" && <RequestsSection requests={requests} jobId={jobId} />}
       {tab === "logs" && <LogsSection logRef={logRef} jobId={jobId} />}
     </div>
   );
@@ -797,9 +797,66 @@ function ExploitsSection({ exploits }) {
 }
 
 
-function RequestsSection({ requests }) {
+function RequestsSection({ requests, jobId }) {
   const [expanded, setExpanded] = useState(null);
-  if (requests.length === 0) return <div className="empty">No captured requests yet</div>;
+  const [exchanges, setExchanges] = useState(null);
+  const [totalSent, setTotalSent] = useState(0);
+
+  useEffect(() => {
+    if (!jobId) { setExchanges([]); return; }
+    let alive = true;
+    const load = () => api.getHttpExchanges(jobId).then((r) => {
+      if (!alive) return;
+      setExchanges(Array.isArray(r.exchanges) ? r.exchanges : []);
+      setTotalSent(r.total_sent || 0);
+    }).catch(() => alive && setExchanges([]));
+    load();
+    const t = setInterval(load, 5000);  // refresh live during the scan
+    return () => { alive = false; clearInterval(t); };
+  }, [jobId]);
+
+  const jstr = (h) => { try { return Object.entries(h || {}).map(([k, v]) => `${k}: ${v}`).join("\n"); } catch { return ""; } };
+  const preBox = { background: "var(--bg-2, #11151c)", color: "var(--text-h)", border: "1px solid var(--border)", padding: 10, borderRadius: 6, fontSize: 12, lineHeight: 1.5, maxHeight: 200, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all", margin: 0 };
+
+  if (exchanges && exchanges.length > 0) {
+    return (
+      <div>
+        <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 10 }}>
+          {exchanges.length} unique requests · {totalSent} total sent (duplicates collapsed) · payload + response captured
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Method</th><th>URL</th><th>Status</th><th>Payload</th><th>×</th></tr></thead>
+            <tbody>
+              {exchanges.map((r, i) => (
+                <React.Fragment key={i}>
+                  <tr className="click-row" onClick={() => setExpanded(expanded === i ? null : i)}>
+                    <td><span className="badge" style={{ background: methodColor(r.method) + "22", color: methodColor(r.method) }}>{r.method}</span></td>
+                    <td style={{ fontFamily: "var(--mono)", fontSize: 11, maxWidth: 460, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.url}</td>
+                    <td><span style={{ color: r.status >= 200 && r.status < 300 ? "var(--green)" : r.status >= 400 ? "var(--red)" : "var(--text-dim)" }}>{r.status || "-"}</span></td>
+                    <td style={{ fontFamily: "var(--mono)", fontSize: 11, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)" }}>{r.req_body ? String(r.req_body).slice(0, 70) : "-"}</td>
+                    <td style={{ fontSize: 11, color: "var(--text-dim)" }}>{r.hits > 1 ? `${r.hits}×` : ""}</td>
+                  </tr>
+                  {expanded === i && (
+                    <tr><td colSpan={5} style={{ padding: 0 }}>
+                      <div style={{ padding: 14, background: "var(--bg)", display: "grid", gap: 10 }}>
+                        <div><div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", marginBottom: 3 }}>REQUEST HEADERS</div><pre style={preBox}>{jstr(r.req_headers) || "(none)"}</pre></div>
+                        {r.req_body && <div><div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", marginBottom: 3 }}>PAYLOAD (body sent)</div><pre style={preBox}>{r.req_body}</pre></div>}
+                        <div><div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", marginBottom: 3 }}>RESPONSE {r.status} BODY</div><pre style={preBox}>{r.resp_body || "(empty)"}</pre></div>
+                        <div style={{ fontSize: 11, color: "var(--text-dim)" }}>Sent {r.hits}× · last {r.last_seen}</div>
+                      </div>
+                    </td></tr>
+                  )}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
+
+  if ((requests || []).length === 0) return <div className="empty">No requests captured yet. Attack requests appear here (with payload + response) as the agent sends them.</div>;
 
   return (
     <div className="table-wrap">
@@ -817,20 +874,8 @@ function RequestsSection({ requests }) {
               {expanded === i && (
                 <tr><td colSpan={4} style={{ padding: 0 }}>
                   <div style={{ padding: 14, background: "var(--bg)" }}>
-                    {r.headers && (
-                      <>
-                        <h3>Headers</h3>
-                        <div className="code-block" style={{ maxHeight: 150 }}>
-                          {typeof r.headers === "object" ? Object.entries(r.headers).map(([k, v]) => `${k}: ${v}`).join("\n") : r.headers}
-                        </div>
-                      </>
-                    )}
-                    {r.post_data && (
-                      <>
-                        <h3 style={{ marginTop: 10 }}>Body</h3>
-                        <div className="code-block" style={{ maxHeight: 150 }}>{r.post_data}</div>
-                      </>
-                    )}
+                    {r.headers && (<><h3>Headers</h3><div className="code-block" style={{ maxHeight: 150 }}>{typeof r.headers === "object" ? Object.entries(r.headers).map(([k, v]) => `${k}: ${v}`).join("\n") : r.headers}</div></>)}
+                    {r.post_data && (<><h3 style={{ marginTop: 10 }}>Body</h3><div className="code-block" style={{ maxHeight: 150 }}>{r.post_data}</div></>)}
                   </div>
                 </td></tr>
               )}
