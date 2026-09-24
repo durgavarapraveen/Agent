@@ -127,7 +127,8 @@ def enforce(model: str, fallbacks: Optional[List[str]] = None) -> str:
 # ── CLI: `python -m core.llm.model_availability` ────────────────────────
 def _print_report() -> int:
     """Print accessible models, the role→model mapping, pricing and ZDR status."""
-    from core.llm.model_roles import ModelRole, model_for_role, has_role_model
+    from core.llm.model_roles import (
+        ModelRole, model_for_role, has_role_model, configured_model)
     from core.economics.pricing import price_for, is_known
     from core.llm.zdr import status as zdr_status
 
@@ -156,14 +157,27 @@ def _print_report() -> int:
               "or set AWS_BEDROCK_ALLOWED_MODELS to pin them).")
 
     print("\n=== Role -> model routing ===")
-    print(f"{'ROLE':<11} {'MODEL':<48} {'SRC':<10} {'ACCESS':<8} RATE $/1M (in/out)")
+    print(f"{'ROLE':<11} {'MODEL':<44} {'SRC':<12} {'ACCESS':<8} RATE $/1M (in/out)")
+    downgrades = []
     for r in ModelRole:
         model = model_for_role(r)
-        src = "configured" if has_role_model(r) else "fallback"
+        wanted = configured_model(r)
+        downgraded = wanted != model
+        if downgraded:
+            src = "downgraded"
+            downgrades.append((r.value, wanted, model))
+        else:
+            src = "configured" if has_role_model(r) else "fallback"
         acc = "yes" if is_allowed(model) else "BLOCKED"
         pin, pout = price_for(model)
         rate = f"{pin}/{pout}" if is_known(model) else "no price"
-        print(f"{r.value:<11} {model[:48]:<48} {src:<10} {acc:<8} {rate}")
+        print(f"{r.value:<11} {model[:44]:<44} {src:<12} {acc:<8} {rate}")
+    if downgrades:
+        print("\n  Downgraded (configured model not accessible -> swapped to an "
+              "allowed fallback):")
+        for role, wanted, got in downgrades:
+            print(f"    {role}: wanted {wanted!r} -> using {got!r} "
+                  f"(add {wanted!r} to AWS_BEDROCK_ALLOWED_MODELS to keep it)")
 
     z = zdr_status()
     print(f"\n=== ZDR ===\n  required={z['zdr_required']}  "

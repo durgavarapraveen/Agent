@@ -189,9 +189,16 @@ export default function CostRiskPanel({ scanId }) {
                       <td style={{ color: "var(--text-h)", textTransform: "capitalize" }}>{r.role}</td>
                       <td style={{ fontFamily: "var(--mono)" }}>{r.model || "—"}</td>
                       <td>
-                        <span className={`badge ${r.configured ? "info" : "low"}`}>
-                          {r.configured ? "configured" : "fallback"}
-                        </span>
+                        {r.downgraded ? (
+                          <span className="badge critical"
+                            title={`Configured model "${r.wanted}" is not accessible — swapped to "${r.model}". Add it to AWS_BEDROCK_ALLOWED_MODELS to keep it.`}>
+                            downgraded
+                          </span>
+                        ) : (
+                          <span className={`badge ${r.configured ? "info" : "low"}`}>
+                            {r.configured ? "configured" : "fallback"}
+                          </span>
+                        )}
                       </td>
                       <td>
                         <span className={`badge ${r.accessible ? "info" : "critical"}`}>

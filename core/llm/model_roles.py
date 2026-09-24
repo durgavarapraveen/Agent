@@ -86,6 +86,19 @@ def model_for_role(role: ModelRole) -> str:
         return chosen
 
 
+def configured_model(role: ModelRole) -> str:
+    """The role's model BEFORE accessibility enforcement — the explicit env id,
+    else the small/large fallback. Compare with ``model_for_role`` to detect a
+    downgrade (configured model not accessible → swapped)."""
+    env = _ROLE_ENV.get(role)
+    if env:
+        v = os.getenv(env, "").strip()
+        if v:
+            return v
+    small, large = _small_large()
+    return small if role in _FAST_ROLES else large
+
+
 def has_role_model(role: ModelRole) -> bool:
     """True when the role has an EXPLICIT model configured (not just a fallback).
     Use for VISION/EMBEDDING before assuming the modality is available."""

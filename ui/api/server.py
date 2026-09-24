@@ -1527,7 +1527,8 @@ def get_model_roles():
     fallback, and the authoritative per-1M rate (flagging models with no known
     price so the UI never shows a fabricated cost)."""
     try:
-        from core.llm.model_roles import ModelRole, model_for_role, has_role_model
+        from core.llm.model_roles import (
+            ModelRole, model_for_role, has_role_model, configured_model)
         from core.economics.pricing import price_for, is_known
         from core.llm.model_availability import is_allowed, allowlist
         from core.llm.zdr import status as zdr_status
@@ -1535,11 +1536,14 @@ def get_model_roles():
         pricing = {}
         for r in ModelRole:
             model = model_for_role(r)
+            wanted = configured_model(r)
             roles.append({
                 "role": r.value,
                 "model": model,
                 "configured": has_role_model(r),
                 "accessible": is_allowed(model),
+                "downgraded": wanted != model,
+                "wanted": wanted,
             })
             if model and model not in pricing:
                 pin, pout = price_for(model)
