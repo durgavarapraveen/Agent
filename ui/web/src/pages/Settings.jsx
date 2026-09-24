@@ -27,10 +27,12 @@ export default function Settings() {
   // Metasploit auxiliary scanners (read-only network verification).
   const [msfEnabled, setMsfEnabled] = useState(false);
   const [msfMsg, setMsfMsg] = useState("");
+  const [modelRoles, setModelRoles] = useState(null);
   useEffect(() => {
     api.getLlmProvider().then(r => setProvider(r.provider || "claude_cli")).catch(() => {});
     api.getDeepseekKey().then(r => setDsConfigured(!!r.configured)).catch(() => {});
     api.getMetasploit().then(r => setMsfEnabled(!!r.enabled)).catch(() => {});
+    api.getModelRoles().then(setModelRoles).catch(() => {});
   }, []);
   const saveProvider = (p) => {
     setProvider(p);
@@ -167,6 +169,62 @@ export default function Settings() {
               {dsMsg || (dsConfigured ? "✓ A DeepSeek key is saved." : "No DeepSeek key set — scans will fail until you add one.")}
             </div>
           </div>
+        )}
+      </div>
+
+      <div className="card">
+        <h3>LLM Models &amp; Cost</h3>
+        <p style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 12 }}>
+          Which Bedrock model handles each task role, whether it is accessible, and the per-1M
+          rate. Read-only — configure with the <code>AWS_BEDROCK_&lt;ROLE&gt;_MODEL</code>,
+          <code> AWS_BEDROCK_ALLOWED_MODELS</code> and <code>LLM_PRICING_JSON</code> env vars.
+        </p>
+        {!modelRoles && <div style={{ color: "var(--text-dim)", fontSize: 13 }}>Loading…</div>}
+        {modelRoles && (
+          <>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+              <span className={`badge ${modelRoles.zdr?.zdr_required ? "info" : "low"}`}>
+                {modelRoles.zdr?.zdr_required ? "ZDR ON" : "ZDR OFF"}
+              </span>
+              {modelRoles.zdr?.zdr_required && (
+                <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+                  data_retention=“{modelRoles.zdr.data_retention || "none"}” · prompt/response content not stored
+                </span>
+              )}
+              {modelRoles.allowlist?.length > 0 && (
+                <span style={{ fontSize: 11, color: "var(--text-dim)" }}>· allowlist: {modelRoles.allowlist.join(", ")}</span>
+              )}
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>Role</th><th>Model</th><th>Source</th><th>Access</th><th style={{ textAlign: "right" }}>Rate $/1M (in/out)</th></tr>
+                </thead>
+                <tbody>
+                  {(modelRoles.roles || []).map((r) => {
+                    const rate = modelRoles.pricing?.[r.model];
+                    return (
+                      <tr key={r.role}>
+                        <td style={{ color: "var(--text-h)", textTransform: "capitalize" }}>{r.role}</td>
+                        <td style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{r.model || "—"}</td>
+                        <td>
+                          {r.downgraded ? (
+                            <span className="badge critical" title={`Configured "${r.wanted}" not accessible — using "${r.model}". Add it to AWS_BEDROCK_ALLOWED_MODELS.`}>downgraded</span>
+                          ) : (
+                            <span className={`badge ${r.configured ? "info" : "low"}`}>{r.configured ? "configured" : "fallback"}</span>
+                          )}
+                        </td>
+                        <td><span className={`badge ${r.accessible ? "info" : "critical"}`}>{r.accessible ? "accessible" : "blocked"}</span></td>
+                        <td style={{ textAlign: "right", fontFamily: "var(--mono)", fontSize: 12 }}>
+                          {rate ? (rate.known ? `$${rate.input_per_1m} / $${rate.output_per_1m}` : "no price") : "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </div>
 

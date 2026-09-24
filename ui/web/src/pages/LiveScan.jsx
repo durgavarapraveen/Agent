@@ -22,9 +22,18 @@ export default function LiveScan() {
   const [jobs, setJobs] = useState([]);
   const [selected, setSelected] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [recentScans, setRecentScans] = useState([]);
   const navigate = useNavigate();
 
   const autoSelected = useRef(false);
+
+  // Fallback so the page is never blank when nothing is actively running:
+  // show the most recent scans (click to open their detail).
+  useEffect(() => {
+    api.getScans()
+      .then((list) => setRecentScans(Array.isArray(list) ? list.slice(0, 12) : []))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     const p = createPoller(
@@ -61,10 +70,36 @@ export default function LiveScan() {
       </div>
 
       {jobs.length === 0 ? (
-        <div className="empty">
-          <div className="empty-icon">&#9881;</div>
-          No active or recent scans. Start a scan from the Targets page.
-        </div>
+        recentScans.length === 0 ? (
+          <div className="empty">
+            <div className="empty-icon">&#9881;</div>
+            No active or recent scans. Start a scan from the Targets page.
+          </div>
+        ) : (
+          <div>
+            <div className="empty" style={{ padding: 16, marginBottom: 12 }}>
+              No scan is running right now. Recent scans below — click to open, or start a new one.
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Target</th><th>Status</th><th>Started</th><th>Scan ID</th></tr></thead>
+                <tbody>
+                  {recentScans.map((s) => {
+                    const id = s.scan_id || s.job_id;
+                    return (
+                      <tr key={id} style={{ cursor: "pointer" }} onClick={() => navigate(`/scans/${id}`)}>
+                        <td style={{ color: "var(--text-h)" }}>{s.target}</td>
+                        <td><span className={`badge ${(s.status || "").toLowerCase()}`}>{(s.status || "").toUpperCase()}</span></td>
+                        <td style={{ fontSize: 12, color: "var(--text-dim)" }}>{s.started_at ? new Date(s.started_at).toLocaleString() : "—"}</td>
+                        <td style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{id}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )
       ) : (
         <>
           {running.length > 0 && (
