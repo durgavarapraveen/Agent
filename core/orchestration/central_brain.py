@@ -4492,6 +4492,14 @@ class CentralBrain(
                 except Exception as e:
                     logger.warning(f"[CloudPrivesc] analysis failed (non-fatal): {e}")
 
+            # Kubernetes / cloud-provider / dependency-SCA agents (opt-in). Their
+            # findings feed the attack-path correlation below via ctx.
+            if _get_cfg_synth().get_bool("INFRA_AGENTS_ENABLED", False):
+                try:
+                    self._analyze_infra_agents()
+                except Exception as e:
+                    logger.warning(f"[InfraAgents] analysis failed (non-fatal): {e}")
+
             # General agentic exploitation (opt-in) — an oracle/evidence-driven
             # ReAct loop with the full actuator toolkit (HTTP, JWT, encode, upload,
             # real browser) that actively demonstrates vulns on the authorized
@@ -8271,6 +8279,26 @@ class CentralBrain(
             self.ctx.add_vulnerability(f)
         if findings:
             logger.info(f"[CloudPrivesc] added {len(findings)} cloud privilege-escalation findings")
+
+    def _analyze_infra_agents(self) -> None:
+        """Run the Kubernetes / cloud / dependency-SCA agents (opt-in) and merge
+        their findings into ctx so the exploitation-phase attack-path correlation
+        reasons over them. Each agent is Engagement scope-gated and non-fatal."""
+        from core.orchestration.infra_agents import collect_infra_findings
+        from core.common.config import get_config as _cfg
+
+        result = collect_infra_findings(
+            _cfg(), getattr(self, "scope", {}) or {}, default_target=self.ctx.target)
+        for f in result.get("findings", []):
+            self.ctx.add_vulnerability(f)
+        paths = result.get("attack_paths", [])
+        if paths:
+            existing = self.ctx.get("infra_attack_paths", []) or []
+            self.ctx.update("infra_attack_paths", list(existing) + list(paths))
+        if result.get("ran"):
+            logger.info("[InfraAgents] %s → %d findings, %d attack paths",
+                        ", ".join(result["ran"]),
+                        len(result.get("findings", [])), len(paths))
 
     async def _scan_modern_apis(self) -> None:
         from core.exploitation.modern_api import ModernAPIScanner
