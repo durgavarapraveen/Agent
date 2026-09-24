@@ -33,12 +33,7 @@ from agents.universal_llm_harness import (
 logger = logging.getLogger(__name__)
 
 # Approx Bedrock pricing (USD per 1M tokens) for cost estimation.
-_PRICING = {
-    "haiku": (0.80, 4.0),
-    "sonnet": (3.0, 15.0),
-    "opus": (15.0, 75.0),
-    "deepseek": (0.28, 0.42),
-}
+# Pricing now lives in core.economics.pricing (authoritative + env-overridable).
 
 
 def _sanitize_tool_call_args(msg: dict) -> dict:
@@ -73,11 +68,11 @@ def _sanitize_tool_call_args(msg: dict) -> dict:
 
 
 def _price_for(model: str) -> tuple:
-    m = (model or "").lower()
-    for key, price in _PRICING.items():
-        if key in m:
-            return price
-    return (1.0, 3.0)
+    # Authoritative per-model rates (env-overridable). Unknown models return
+    # (0, 0) + a one-time warning instead of a fabricated default, so cost is
+    # never a made-up number (spec Phase 29).
+    from core.economics.pricing import price_for as _pf
+    return _pf(model)
 
 
 class BedrockProvider(LLMProvider):
@@ -164,6 +159,17 @@ class BedrockProvider(LLMProvider):
     def get_large_model(self) -> str:
         return self.large_model
 
+    def get_model_for_role(self, role) -> str:
+        """Resolve a task role (fast/reasoning/planner/coding/vision/embedding)
+        to a concrete model id, falling back to this provider's small/large."""
+        try:
+            from core.llm.model_roles import ModelRole, model_for_role, _FAST_ROLES
+            r = role if isinstance(role, ModelRole) else ModelRole(str(role).lower())
+            m = model_for_role(r)
+            return m or (self.small_model if r in _FAST_ROLES else self.large_model)
+        except Exception:
+            return self.large_model
+
     def supports_native_tools(self) -> bool:
         # generate_with_tools speaks the Anthropic Messages tool schema
         # (anthropic_version + input_schema) for Claude on Bedrock, AND — via the
@@ -194,8 +200,15 @@ class BedrockProvider(LLMProvider):
         temperature: float = 0.3,
         response_format: Optional[str] = None,
         tier: TaskTier = TaskTier.SMALL,
+        model: str = "",
+        role: Any = None,
     ) -> LLMResponse:
-        model = self.get_model_for_tier(tier)
+        # Model selection precedence: explicit model > role > tier. Role routing
+        # (spec Phase 28/32) sends cheap tasks to a fast model and hard reasoning
+        # to a strong one; resp.model carries the actual id so cost_log accounts
+        # tokens per model correctly.
+        model = model or (self.get_model_for_role(role) if role is not None
+                          else self.get_model_for_tier(tier))
         if self._use_gateway():
             return await self._gateway_chat(prompt, system, max_tokens, temperature,
                                             response_format, model)

@@ -35,19 +35,11 @@ logger = logging.getLogger(__name__)
 
 # Nominal per-1M-token pricing (USD) — Haiku 4.5 / Sonnet 4 published rates.
 # Used for accounting only; a Max-plan CLI call has no marginal API cost.
-_PRICING = {
-    "haiku": (0.80, 4.0),
-    "sonnet": (3.0, 15.0),
-    "opus": (15.0, 75.0),
-}
-
-
 def _price_for(model: str) -> tuple:
-    m = (model or "").lower()
-    for key, price in _PRICING.items():
-        if key in m:
-            return price
-    return (0.80, 4.0)  # default to haiku rate
+    # Authoritative per-model rates (env-overridable); unknown → (0, 0) + warn,
+    # never a fabricated default (spec Phase 29).
+    from core.economics.pricing import price_for as _pf
+    return _pf(model)
 
 
 class ClaudeCLIProvider(LLMProvider):
