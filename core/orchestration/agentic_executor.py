@@ -368,6 +368,21 @@ class AgenticExecutor:
         context_hint: str = "",
     ) -> AgenticResult:
         self._phase = phase or ""
+
+        # Phase 12: steer the LLM toward the highest information-gain next
+        # actions (untested params/classes not already tried), computed
+        # deterministically from state. Appended to context_hint so it flows
+        # through the existing prompt path. Opt-in, non-fatal.
+        try:
+            from core.common.config import get_config as _cfg_ig
+            if _cfg_ig().get_bool("INFO_GAIN_HINTS_ENABLED", True):
+                from core.orchestration.info_gain import priority_actions_hint
+                _ig = priority_actions_hint(self.ctx, str(self.scan_id or ""), top=5)
+                if _ig:
+                    context_hint = (context_hint + "\n\n" + _ig) if context_hint else _ig
+        except Exception as _ig_err:
+            logger.debug(f"info-gain hint skipped: {_ig_err}")
+
         self._available_tools = self._probe_tool_availability()
         available_tools_str = ", ".join(sorted(self._available_tools)) if self._available_tools else "none (use http_request for all testing)"
 
