@@ -273,6 +273,16 @@ class SharedContextV2:
             except Exception:
                 pass
 
+            # Phase 19/23: grade proven impact and reconcile lifecycle — a noisy
+            # class (open redirect, info disclosure, missing header) with no
+            # impact evidence is capped at SUSPECTED, so "parameter accepted" no
+            # longer reads as a confirmed vulnerability. Best-effort.
+            try:
+                from core.verification.impact_engine import gate_finding
+                gate_finding(vuln)
+            except Exception:
+                pass
+
             self.vulnerabilities.append(vuln)
             # P0-1: a deterministically CONFIRMED vulnerability is also an
             # exploitation result. Mirror it into exploit_results so it persists
