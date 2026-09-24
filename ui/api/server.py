@@ -54,6 +54,13 @@ except Exception as _rr_err:  # never let a router import break the whole API
     import logging as _l
     _l.getLogger("antigravity.api").warning("engagements router not loaded: %s", _rr_err)
 
+try:
+    from ui.api.routers.kubernetes import router as _k8s_router
+    app.include_router(_k8s_router)
+except Exception as _rr_err:  # never let a router import break the whole API
+    import logging as _l
+    _l.getLogger("antigravity.api").warning("kubernetes router not loaded: %s", _rr_err)
+
 # ── Rate limiting ─────────────────────────────────────────────────────────
 # `slowapi` is a soft dependency. When installed, it caps the abuse-prone
 # endpoints (scan launch, kill-all, RAG ingest) per-IP; when absent, the app
