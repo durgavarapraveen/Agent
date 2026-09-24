@@ -122,3 +122,57 @@ def enforce(model: str, fallbacks: Optional[List[str]] = None) -> str:
     logger.warning("[availability] %r may not be accessible and no allowlist is "
                    "configured; using it as-is", model)
     return model
+
+
+# ── CLI: `python -m core.llm.model_availability` ────────────────────────
+def _print_report() -> int:
+    """Print accessible models, the role→model mapping, pricing and ZDR status."""
+    from core.llm.model_roles import ModelRole, model_for_role, has_role_model
+    from core.economics.pricing import price_for, is_known
+    from core.llm.zdr import status as zdr_status
+
+    print("\n=== Bedrock model availability ===")
+    al = allowlist()
+    print(f"Allowlist (AWS_BEDROCK_ALLOWED_MODELS): "
+          f"{', '.join(sorted(al)) if al else '(none — all allowed)'}")
+
+    # Force discovery for the CLI regardless of the opt-in flag (explicit action).
+    reset_cache()
+    try:
+        available = discover_available(force=True)
+    except Exception as e:
+        available = set()
+        print(f"Discovery error: {e}")
+    if available:
+        print(f"\nAccessible models ({len(available)}):")
+        for m in sorted(available):
+            allowed = (not al) or _matches(m, al)
+            mark = "*" if allowed else "-"  # * = in allowlist / usable
+            print(f"  {mark} {m}")
+        if al:
+            print("  (* = permitted by your allowlist; - = discovered but excluded)")
+    else:
+        print("\nNo models discovered (need Bedrock creds / gateway reachable, "
+              "or set AWS_BEDROCK_ALLOWED_MODELS to pin them).")
+
+    print("\n=== Role -> model routing ===")
+    print(f"{'ROLE':<11} {'MODEL':<48} {'SRC':<10} {'ACCESS':<8} RATE $/1M (in/out)")
+    for r in ModelRole:
+        model = model_for_role(r)
+        src = "configured" if has_role_model(r) else "fallback"
+        acc = "yes" if is_allowed(model) else "BLOCKED"
+        pin, pout = price_for(model)
+        rate = f"{pin}/{pout}" if is_known(model) else "no price"
+        print(f"{r.value:<11} {model[:48]:<48} {src:<10} {acc:<8} {rate}")
+
+    z = zdr_status()
+    print(f"\n=== ZDR ===\n  required={z['zdr_required']}  "
+          f"data_retention={z['data_retention']!r}  "
+          f"persist_content={z['persist_content']}")
+    print()
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(_print_report())
