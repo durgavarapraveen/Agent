@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { api } from "../api";
 
 /* ── Recon sub-nav sections ─────────────────────────────────────────────── */
 const SECTIONS = [
@@ -696,9 +697,10 @@ function ToolResultsSection({ scanId, toolExecutions }) {
 
   useEffect(() => {
     if (!scanId) return;
-    fetch(`/api/scans/${scanId}/tool-outputs?grouped=true`)
-      .then(r => r.json())
-      .then(setToolOutputs)
+    // Use the authenticated api client (bare fetch dropped the X-API-Key and a
+    // non-array error body crashed .map → blank screen). Always coerce to array.
+    api.getToolOutputs(scanId, true)
+      .then((d) => setToolOutputs(Array.isArray(d) ? d : (d?.tools || d?.outputs || [])))
       .catch(() => setToolOutputs([]));
   }, [scanId]);
 

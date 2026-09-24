@@ -52,20 +52,14 @@ export default function ScanDetail() {
     { id: "exploits", label: `Exploits (${exploits.length})` },
     { id: "post-exploit", label: "Post-Exploit" },
     { id: "chains", label: "Attack Chains" },
-    { id: "chain-analysis", label: "Chain Analysis" },
     { id: "coverage", label: "Coverage" },
     { id: "sast", label: "SAST" },
-    { id: "recordings", label: "Recordings" },
     { id: "recon", label: "Recon Data" },
     { id: "requests", label: "Requests" },
     { id: "tool-outputs", label: "Tool Outputs" },
-    { id: "activity", label: "Agent Activity" },
     { id: "collected", label: "Collected Data" },
     { id: "artifacts", label: "Artifacts" },
     { id: "fixes", label: "Fix Suggestions" },
-    { id: "diff", label: "Scan Diff" },
-    { id: "surface-diff", label: "Surface Diff" },
-    { id: "regressions", label: "Regressions" },
     { id: "logs", label: "Execution Log" },
     { id: "llmio", label: "LLM I/O" },
     { id: "cost-risk", label: "Cost & Models" },
@@ -112,18 +106,12 @@ export default function ScanDetail() {
       {tab === "coverage" && <CoveragePanel scanId={scanId} />}
       {tab === "artifacts" && <ArtifactsPanel scanId={scanId} />}
       {tab === "chains" && <AttackChainsPanel scanId={scanId} />}
-      {tab === "chain-analysis" && <ChainAnalysisPanel scanId={scanId} />}
       {tab === "cost-risk" && <CostRiskPanel scanId={scanId} />}
       {tab === "fixes" && <FixSuggestionsPanel scanId={scanId} />}
-      {tab === "recordings" && <AttackRecordingsPanel scanId={scanId} />}
-      {tab === "regressions" && <RegressionPanel scanId={scanId} />}
-      {tab === "diff" && <ScanDiffPanel scanId={scanId} />}
-      {tab === "surface-diff" && <SurfaceDiffPanel scanId={scanId} />}
       {tab === "sast" && <SastPanel scanId={scanId} />}
       {tab === "post-exploit" && <PostExploitTab scanId={scanId} />}
       {tab === "recon" && <ReconPanel context={context} scanId={scanId} />}
       {tab === "tool-outputs" && <ToolOutputsTab scanId={scanId} />}
-      {tab === "activity" && <ActivityLog scanId={scanId} />}
       {tab === "requests" && <RequestsTab capturedData={context.captured_requests || {}} />}
       {tab === "coverage" && <CoverageTab />}
       {tab === "collected" && <CollectedDataTab scanId={scanId} />}

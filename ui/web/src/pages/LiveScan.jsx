@@ -282,7 +282,6 @@ function LiveScanDetail({ jobId }) {
     { id: "cost-risk", label: "Cost & Models" },
     { id: "jev", label: "Jev Decisions" },
     { id: "human", label: "Human Assist" },
-    { id: "activity", label: "Agent Activity" },
     { id: "requests", label: `Requests (${requests.length})` },
     { id: "logs", label: `Logs (${logs.total})` },
   ];
@@ -688,13 +687,26 @@ function VulnsSection({ vulns }) {
                   <tr><td colSpan={6} style={{ padding: 0 }}>
                     <div style={{ padding: "14px 20px", background: "var(--bg)", borderTop: "1px solid var(--border)" }}>
                       <div className="vuln-detail-grid">
-                        {asText(v.details || v.description) && <><span className="lbl">Details</span><span>{asText(v.details || v.description)}</span></>}
-                        {asText(v.proof || v.evidence) && <><span className="lbl">Proof</span><span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{asText(v.proof || v.evidence)}</span></>}
+                        {(v.location || v.target || v.url) && <><span className="lbl">Location</span><span style={{ fontFamily: "var(--mono)", fontSize: 12, wordBreak: "break-all" }}>{v.location || v.target || v.url}</span></>}
+                        {(v.parameter || v.param || v.injection_point) && <><span className="lbl">Parameter</span><span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{v.parameter || v.param || v.injection_point}</span></>}
+                        {(v.lifecycle || v.status) && <><span className="lbl">State</span><span>{v.lifecycle || v.status}</span></>}
+                        {v.impact_level && <><span className="lbl">Impact</span><span>{v.impact_level}</span></>}
+                        {asText(v.details || v.description) && <><span className="lbl">Details</span><span style={{ whiteSpace: "pre-wrap" }}>{asText(v.details || v.description)}</span></>}
+                        {asText(v.proof || v.evidence) && <><span className="lbl">Proof</span><span style={{ fontFamily: "var(--mono)", fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{asText(v.proof || v.evidence)}</span></>}
+                        {(v.payload) && <><span className="lbl">Payload</span><span style={{ fontFamily: "var(--mono)", fontSize: 12, wordBreak: "break-all" }}>{asText(v.payload)}</span></>}
+                        {asText(v.request) && <><span className="lbl">Request</span><pre style={{ margin: 0, fontFamily: "var(--mono)", fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 200, overflow: "auto" }}>{asText(v.request)}</pre></>}
+                        {asText(v.response_snippet || v.response) && <><span className="lbl">Response</span><pre style={{ margin: 0, fontFamily: "var(--mono)", fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 200, overflow: "auto" }}>{asText(v.response_snippet || v.response)}</pre></>}
+                        {asText(v.curl) && <><span className="lbl">cURL</span><pre style={{ margin: 0, fontFamily: "var(--mono)", fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{asText(v.curl)}</pre></>}
                         {asText(v.tool || v.source) && <><span className="lbl">Tool</span><span>{asText(v.tool || v.source)}</span></>}
-                        {asText(v.remediation) && <><span className="lbl">Remediation</span><span>{asText(v.remediation)}</span></>}
+                        {asText(v.remediation) && <><span className="lbl">Remediation</span><span style={{ whiteSpace: "pre-wrap" }}>{asText(v.remediation)}</span></>}
                         {v.cve_id && <><span className="lbl">CVE</span><span>{asText(v.cve_id)}</span></>}
                         {v.cwe_id && <><span className="lbl">CWE</span><span>{asText(v.cwe_id)}</span></>}
                       </div>
+                      {!asText(v.details || v.description) && !asText(v.proof || v.evidence) && !asText(v.request) && (
+                        <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 8 }}>
+                          This finding recorded no detail/proof/request. Open it in Scan History after the scan for the full record.
+                        </div>
+                      )}
                     </div>
                   </td></tr>
                 )}

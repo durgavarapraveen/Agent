@@ -302,7 +302,9 @@ export const api = {
   getAttackGraph: (id) => request(`/api/scans/${id}/attack-graph`).catch(() => ({
     scan_id: id, nodes: [], edges: [], node_count: 0, edge_count: 0, exploited_count: 0,
   })),
-  getToolOutputs: (id) => request(`/api/scans/${id}/tool-outputs`),
+  getToolOutputs: (id, grouped = false) =>
+    request(`/api/scans/${id}/tool-outputs${grouped ? "?grouped=true" : ""}`)
+      .catch(() => []),
   getActivity: (id) => request(`/api/scans/${id}/activity`),
   getUnderstanding: (id) => request(`/api/scans/${id}/understanding`).catch(() => ({})),
   getLlmProvider: () => request(`/api/settings/llm-provider`).catch(() => ({ provider: "claude_cli", options: ["claude_cli", "bedrock", "deepseek"] })),
