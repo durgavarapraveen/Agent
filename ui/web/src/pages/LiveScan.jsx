@@ -13,6 +13,10 @@ import JevDecisionsPanel from "../components/JevDecisionsPanel";
 import HumanAssistPanel from "../components/HumanAssistPanel";
 import ScanChatPanel from "../components/ScanChatPanel";
 import ArtifactsPanel from "../components/ArtifactsPanel";
+import CostRiskPanel from "../components/CostRiskPanel";
+import CoveragePanel from "../components/CoveragePanel";
+import AttackChainsPanel from "../components/AttackChainsPanel";
+import SastPanel from "../components/SastPanel";
 import { methodColor, fmtDate, parseTs, asText } from "../components/utils";
 
 const PHASES = ["BUSINESS_UNDERSTANDING", "RECON", "ACTIVE_SCANNING", "EXPLOITATION", "REPORTING"];
@@ -267,11 +271,15 @@ function LiveScanDetail({ jobId }) {
     { id: "vulns", label: `Vulnerabilities (${vulns.length})` },
     { id: "access", label: "Access Gained" },
     { id: "exploits", label: `Exploits (${exploits.length})` },
+    { id: "chains", label: "Attack Chains" },
+    { id: "coverage", label: "Coverage" },
+    { id: "sast", label: "SAST" },
     { id: "artifacts", label: "Artifacts / PoC" },
     { id: "agents", label: "Parallel Agents" },
     { id: "blackboard", label: "Blackboard" },
     { id: "attackgraph", label: "Attack Graph" },
     { id: "llmio", label: "LLM I/O" },
+    { id: "cost-risk", label: "Cost & Models" },
     { id: "jev", label: "Jev Decisions" },
     { id: "human", label: "Human Assist" },
     { id: "activity", label: "Agent Activity" },
@@ -342,6 +350,10 @@ function LiveScanDetail({ jobId }) {
       {tab === "vulns" && <VulnsSection vulns={vulns} />}
       {tab === "access" && <AccessGainedPanel scanId={jobId} poll />}
       {tab === "exploits" && <ExploitsSection exploits={exploits} />}
+      {tab === "chains" && <AttackChainsPanel scanId={jobId} />}
+      {tab === "coverage" && <CoveragePanel scanId={jobId} />}
+      {tab === "sast" && <SastPanel scanId={jobId} />}
+      {tab === "cost-risk" && <CostRiskPanel scanId={jobId} />}
       {tab === "activity" && <ActivityLog scanId={jobId} poll />}
       {tab === "agents" && <LiveAgentsPanel scanId={jobId} poll />}
       {tab === "blackboard" && <BlackboardPanel scanId={jobId} poll={isRunning} />}
