@@ -21,16 +21,6 @@ class NmapAdapter(BaseAdapter):
     def execute(self, args: Dict[str, Any]) -> Tuple[ToolAttempt, List[SecurityFinding]]:
         start = time.time()
 
-        if not shutil.which("nmap"):
-            duration = (time.time() - start) * 1000
-            logger.warning("nmap binary not found in PATH")
-            return ToolAttempt(
-                tool_name=self.tool_name,
-                status=ExecutionStatus.FAILED,
-                evidence="nmap binary not found",
-                execution_time_ms=duration,
-            ), []
-
         # Prefer XML output — the previous text-regex parser only matched
         # `NN/tcp open service` lines and silently returned empty on any
         # -oG / -oX / -sU / IPv6 output. XML is stable across nmap versions.
@@ -40,14 +30,28 @@ class NmapAdapter(BaseAdapter):
 
         findings: List[SecurityFinding] = []
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout)
+            # P0-D2: nmap lives in the Kali container, not on the host PATH
+            # (always absent on Windows). Run locally only when present; otherwise
+            # dispatch through KaliDockerExecutor (same scope validation as other
+            # tools) instead of hard-failing "binary not found".
+            if shutil.which("nmap"):
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout)
+                rc, out, err = result.returncode, result.stdout, result.stderr
+            else:
+                import shlex
+                from agents.kali_executor import KaliDockerExecutor
+                cmd_str = " ".join(shlex.quote(c) for c in cmd)
+                r = KaliDockerExecutor.run(cmd_str, timeout=int(self.timeout), auto_install=True)
+                rc = r.get("returncode")
+                rc = rc if rc is not None else 1
+                out, err = r.get("stdout", "") or "", r.get("stderr", "") or ""
             duration = (time.time() - start) * 1000
 
-            status = ExecutionStatus.COMPLETED if result.returncode == 0 else ExecutionStatus.FAILED
-            evidence = (result.stdout or "") + "\n" + (result.stderr or "")
+            status = ExecutionStatus.COMPLETED if rc == 0 else ExecutionStatus.FAILED
+            evidence = (out or "") + "\n" + (err or "")
 
             if status == ExecutionStatus.COMPLETED:
-                findings = self._parse_output(result.stdout)
+                findings = self._parse_output(out)
 
             attempt = ToolAttempt(
                 tool_name=self.tool_name,

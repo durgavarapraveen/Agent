@@ -117,11 +117,17 @@ def enforce(topic: str, ctx: Dict[str, Any]) -> PolicyVerdict:
             from core.knowledge.freshness import get_freshness
         except Exception as e:
             return _fail_closed_import(t, "core.knowledge.freshness", e)
+        # Scope by tool (§6) to match the tool-scoped record in tool_gateway.
+        # Without this, the host-level (target, operation) key let one tool's
+        # fresh result deny every other tool's probe on the host (executed=3 in
+        # scan c12701a6). Finer key → can only allow more, never deny more.
         if get_freshness().has_fresh_result(ctx.get("target", ""),
-                                            ctx.get("operation", "")):
+                                            ctx.get("operation", ""),
+                                            scope=str(ctx.get("tool", "") or "")):
             return PolicyVerdict(False,
                 "fresh result already recorded — skip redundant tool call",
-                {"target": ctx.get("target"), "operation": ctx.get("operation")})
+                {"target": ctx.get("target"), "operation": ctx.get("operation"),
+                 "tool": ctx.get("tool")})
         return PolicyVerdict(True)
 
     if t == "tool_health":

@@ -212,7 +212,10 @@ class LLMClient:
 async def llm_extract(text: str, instruction: str, tier: TaskTier = TaskTier.SMALL) -> Dict:
     client = LLMClient.get()
     prompt = f"{instruction}\n\nInput:\n{text[:6000]}\n\nJSON only."
-    return await client.generate_json(prompt, tier=tier)
+    # Mechanical extraction — no RAG analysis/recommendations prefix (see harness).
+    from agents.universal_llm_harness import rag_disabled
+    with rag_disabled():
+        return await client.generate_json(prompt, tier=tier)
 
 
 async def llm_analyze(text: str, question: str, tier: TaskTier = TaskTier.LARGE) -> str:

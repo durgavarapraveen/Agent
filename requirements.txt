@@ -10,7 +10,6 @@ psycopg2-binary
 python-docx
 python-dotenv
 playwright
-fastmcp
 httpx
 impacket
 jinja2

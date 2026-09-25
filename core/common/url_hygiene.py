@@ -65,6 +65,16 @@ def canonical_http_url(raw: str, base: str = "") -> str:
         _head, _frag = s.split("/#/", 1)
         if "://" in _frag:
             s = _frag
+    # Stacked-scheme WRAPPER: "https://<junk>https://<realhost>/…" (e.g.
+    # "https://GET:get://https://host/p"). A single real scheme leads, but the
+    # authority is junk and the true URL is embedded later. Work on the pre-query
+    # part only so a legit query param like "?url=https://x" is NOT mistaken for
+    # corruption; if >1 http(s) scheme marker appears there, keep from the LAST.
+    _bp, _sep, _q = s.partition("?")
+    _ms = list(re.finditer(r'https?://', _bp, re.IGNORECASE))
+    if len(_ms) > 1:
+        _bp = _bp[_ms[-1].start():]
+        s = _bp + (_sep + _q if _sep else "")
     s = _strip_stacked_prefixes(s)
     # Reject obvious non-URLs / template artifacts.
     low = s.lower()

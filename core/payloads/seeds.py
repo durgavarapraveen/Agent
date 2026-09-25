@@ -55,4 +55,16 @@ SEED_PAYLOADS = [
        severity="HIGH", confirm_patterns=["polluted"]),
     # Host header injection
     _p("host_header_injection", "Host: evil.example.com", context="header", severity="MEDIUM"),
+    # Cache poisoning — unkeyed header reflection. A unique marker host/value in an
+    # unkeyed request header that surfaces in the (cacheable) response body/headers
+    # proves the header influences the cached response. Generic; no app specifics.
+    _p("cache_poisoning", "X-Forwarded-Host: cachepoison-x9k2.evil.example.com",
+       context="header", severity="MEDIUM", confirm_patterns=["cachepoison-x9k2.evil.example.com"]),
+    _p("cache_poisoning", "X-Forwarded-Scheme: nothttps", context="header", severity="MEDIUM"),
+    _p("cache_poisoning", "X-Forwarded-Host: cachepoison-x9k2.evil.example.com\r\nX-Forwarded-Scheme: http",
+       context="header", severity="MEDIUM", confirm_patterns=["cachepoison-x9k2.evil.example.com"]),
+    _p("cache_poisoning", "X-Host: cachepoison-x9k2.evil.example.com",
+       context="header", severity="MEDIUM", confirm_patterns=["cachepoison-x9k2.evil.example.com"]),
+    _p("cache_poisoning", "X-Forwarded-Prefix: /cachepoison-x9k2",
+       context="header", severity="MEDIUM", confirm_patterns=["cachepoison-x9k2"]),
 ]

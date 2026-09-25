@@ -47,6 +47,14 @@ def log(scan_id: str, *, provider: str = "", model: str = "", tier: str = "",
     scan_id = scan_id or current_scan_id()
     if not scan_id:
         return
+    # ZDR: never persist prompt/response CONTENT — keep metadata only.
+    try:
+        from core.llm.zdr import persist_content_allowed
+        if not persist_content_allowed():
+            system = prompt = response = ""
+            kind = (kind or "text") + "|zdr"
+    except Exception:
+        pass
     try:
         from core.database.pg_store import DatabaseManager
         with DatabaseManager.get_connection() as conn:

@@ -24,6 +24,39 @@ class LLMFindingValidator:
                 return None
         return client
 
+    async def _jev_prescreen(self, finding: Dict):
+        """Opt-in Jev pre-screen. Returns an `_llm_validation` dict to EXEMPT a
+        finding the classifier is highly confident is real (so the LLM validator
+        can skip it), or None to fall through to the LLM. Never returns a
+        false-positive verdict — recall is preserved; only cost drops. Fail-open."""
+        try:
+            from core.llm.jev_config import jev_validate_enabled
+            if not jev_validate_enabled():
+                return None
+            from agents.providers.jev_classifier import get_jev
+            jev = get_jev(scan_id=finding.get("scan_id", "") if isinstance(finding, dict) else "")
+            if jev is None:
+                return None
+            state = {
+                "type": finding.get("type") or finding.get("category") or finding.get("title", ""),
+                "severity": finding.get("severity", ""),
+                "url": finding.get("url") or finding.get("endpoint", ""),
+                "evidence": str(finding.get("evidence") or finding.get("description", ""))[:3000],
+                "payload": str(finding.get("payload", ""))[:500],
+            }
+            real, prob = await jev.noul(
+                state,
+                "Is this security finding clearly a REAL, valid vulnerability (not a "
+                "false positive)? Answer yes only when the evidence is unambiguous.",
+                site="validate")
+            if real and prob >= 0.9:
+                return {"is_valid": True, "confidence": round(float(prob), 3),
+                        "reasoning": "Jev pre-screen high-confidence real; "
+                                     "LLM validation skipped", "source": "jev"}
+        except Exception as e:  # pre-screen must never break validation
+            logger.debug("[Jev] validate pre-screen skipped: %s", e)
+        return None
+
     async def validate_finding(self, finding: Dict) -> Dict:
         async with self._semaphore:
             llm = await self._get_llm()
@@ -244,6 +277,15 @@ class LLMFindingValidator:
                     "confidence": 0.9 if is_tool_confirmed else 0.5,
                     "reasoning": "tool-confirmed; LLM validation skipped"
                                     if is_tool_confirmed else "info severity — no validation"})
+                continue
+            # Jev pre-screen (opt-in): a cheap System-One second opinion. If Jev is
+            # highly confident the finding is real, EXEMPT it from the expensive LLM
+            # validator — saving a call with recall preserved. Jev never marks a
+            # finding false-positive here; anything it is unsure about still goes to
+            # the LLM below. Fail-open: no key / off / error → falls through to LLM.
+            jev_v = await self._jev_prescreen(f)
+            if jev_v is not None:
+                f.setdefault("_llm_validation", jev_v)
                 continue
             needs_validation.append((orig_idx, f))
 

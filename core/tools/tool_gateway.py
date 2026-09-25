@@ -36,6 +36,23 @@ class ToolGateway:
                 tier=_tier,
             )
             if not _policy_decision.allowed:
+                from core.security.policy_engine import DenyReason
+                # Benign dedup: a fresh result already exists — this is a SKIP, not
+                # a failure or scope violation. Return the explicit SKIPPED_FRESH
+                # status (success=True) so it doesn't inflate failure/scope counts
+                # or read as a security event. Logged at INFO, not WARNING.
+                if _policy_decision.reason_code == DenyReason.DUPLICATE_SUPPRESSED.value:
+                    logger.info(
+                        "POLICY_SKIP(dedup): tool=%s target=%s id=%s — %s",
+                        invocation.tool_id or invocation.operation, _policy_decision.target,
+                        _policy_decision.action_id, _policy_decision.reason)
+                    from core.common.schemas import ToolExecutionStatus
+                    return ToolResult(
+                        tool=invocation.tool_id or invocation.operation or "unknown",
+                        capability=invocation.operation or "unknown",
+                        status=ToolExecutionStatus.SKIPPED_FRESH,
+                        target=invocation.target,
+                    )
                 logger.warning(
                     "POLICY_DENIED: action=%s reason=%s code=%s target=%s id=%s",
                     _policy_decision.action, _policy_decision.reason,
@@ -99,7 +116,13 @@ class ToolGateway:
             fresh = get_freshness()
             _op = invocation.operation or ""
             _tgt = invocation.target or ""
-            if _op and _tgt and fresh.has_fresh_result(_tgt, _op):
+            # Scope the freshness key by TOOL (§6). The bare (target, operation)
+            # key is host-level, so ONE tool's fresh result suppressed EVERY other
+            # tool's probe with the same operation on that host — starving active
+            # scanning (executed=3 in scan c12701a6). A finer key can only ALLOW
+            # more runs, never deny more, so it cannot cause a new false-skip.
+            _fscope = invocation.tool_id or ""
+            if _op and _tgt and fresh.has_fresh_result(_tgt, _op, scope=_fscope):
                 from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus
                 logger.info(f"FRESHNESS_SKIP: operation={_op} target={_tgt}")
                 try:
@@ -124,6 +147,48 @@ class ToolGateway:
                 )
         except Exception as _e:
             logger.debug(f"freshness gate skipped: {_e}")
+
+        # STEP 2b-bis (Phase 11): Action-ledger duplicate gate. Freshness keys on
+        # (target, operation, tool); this finer fingerprint also covers method,
+        # parameter NAMES, payload class and identity, so the *same probe* under a
+        # different random operand is recognized as a duplicate and skipped. The
+        # claim is atomic, so concurrent agents cannot both run it. Opt-in.
+        _action_fp = None
+        try:
+            from core.common.config import get_config as _cfg_ad
+            if _cfg_ad().get_bool("ACTION_DEDUP_ENABLED", True):
+                from core.orchestration.action_ledger import (
+                    action_fingerprint, get_ledger)
+                _action_fp = action_fingerprint(
+                    invocation.tool_id, invocation.operation or "",
+                    invocation.target or "", invocation.params or {},
+                    invocation.audit_context)
+                _ledger = get_ledger(invocation.session_id or "")
+                if not _ledger.claim(_action_fp):
+                    ok, reason = _ledger.should_execute(_action_fp)
+                    from core.common.schemas import (
+                        ToolResult as SchemaToolResult, ToolExecutionStatus)
+                    logger.info("ACTION_DEDUP_SKIP: %s %s on %s (%s)",
+                                invocation.tool_id, invocation.operation,
+                                invocation.target, reason)
+                    try:
+                        from core.observability.scan_metrics import get_metrics
+                        get_metrics().inc("duplicate_tool_calls")
+                    except Exception:
+                        pass
+                    return SchemaToolResult(
+                        tool=invocation.tool_id or "unknown",
+                        capability=invocation.operation or "unknown",
+                        status=ToolExecutionStatus.SKIPPED_FRESH,
+                        exit_code=0, target=invocation.target or "",
+                        stdout=f"[SKIPPED_DUPLICATE] identical action already "
+                               f"{reason} this session; not re-executed.",
+                        data={"duplicate_action": True, "fingerprint": _action_fp},
+                        metadata={"reason": f"duplicate action ({reason})",
+                                  "execution_state": "SKIPPED_DUPLICATE"},
+                    )
+        except Exception as _e:
+            logger.debug(f"action-ledger gate skipped: {_e}")
 
         # STEP 2c (P1-7): Tool health gate — refuse invocation of a tool
         # already in COOLDOWN or UNAVAILABLE state; pick a replacement
@@ -232,6 +297,12 @@ class ToolGateway:
             if not result.success:
                 err_detail = result.error.message if result.error else ""
                 stderr_detail = getattr(result, "stderr", "") or ""
+                # Strip curl/wget progress-meter noise so the real error line
+                # (printed LAST) survives the [:500] truncation and is classified
+                # correctly (e.g. rc=6 "could not resolve host" -> ENVIRONMENT skip,
+                # not a generic PERMANENT failure).
+                from core.common.error_translator import ErrorTranslator as _ET
+                stderr_detail = _ET.clean_stderr(stderr_detail)
                 msg = f"{err_detail} | stderr={stderr_detail[:500]}" if stderr_detail else (err_detail or "Tool execution failed")
                 raise RuntimeError(msg)
                 
@@ -270,11 +341,28 @@ class ToolGateway:
             elif _status == "SUCCESS":
                 if _tgt:
                     waf.record_success(_tgt)
-            # Freshness: only cache SUCCESS results.
+            # Freshness: only cache SUCCESS results. Scope by tool (§6) so the
+            # record matches the tool-scoped has_fresh_result gate above.
             if _status == "SUCCESS" and _tgt and invocation.operation:
-                get_freshness().record(_tgt, invocation.operation)
+                get_freshness().record(_tgt, invocation.operation,
+                                       scope=invocation.tool_id or "")
         except Exception as _e:
             logger.debug(f"post-exec accounting skipped: {_e}")
+
+        # STEP 5c (Phase 11): record the action outcome in the ledger. A
+        # transient outcome (timeout/error) is released so one retry is allowed;
+        # any conclusive outcome blocks re-execution of the identical action.
+        if _action_fp is not None:
+            try:
+                from core.orchestration.action_ledger import get_ledger
+                _st = getattr(result.status, "value", str(result.status)).lower()
+                _map = {"success": "success", "partial": "success",
+                        "partial_success": "success", "blocked": "blocked",
+                        "failed": "failed", "timeout": "timeout", "error": "error"}
+                get_ledger(invocation.session_id or "").record(
+                    _action_fp, _map.get(_st, "success"))
+            except Exception as _e:
+                logger.debug(f"action-ledger record skipped: {_e}")
         
         # STEP 6: Cache It (only cache successes — failed results should not poison future calls)
         if result.success:
@@ -462,6 +550,30 @@ class ToolGateway:
                 result.status = derived
         except Exception as _e:
             logger.debug(f"status reconciliation skipped: {_e}")
+        # A 200 that is actually a WAF/anti-bot INTERSTITIAL is not real content.
+        # Downgrade it to BLOCKED so it isn't cached, isn't mined for endpoints /
+        # findings, and feeds WAF backoff (STEP 5b). Strict body fingerprint only,
+        # so legitimate pages are never downgraded and real findings are kept.
+        try:
+            cur = str(getattr(result, "status", "")).upper()
+            if cur in ("SUCCESS", "COMPLETED", "PARTIAL", "PARTIAL_SUCCESS"):
+                from core.tools.rate_limiter import is_waf_challenge
+                hit, sig = is_waf_challenge(str(getattr(result, "stdout", "") or ""))
+                if hit:
+                    from core.common.schemas import ToolExecutionStatus
+                    logger.warning(
+                        "WAF_INTERSTITIAL: tool=%s body is a challenge page "
+                        "(marker=%r) — downgrading %s->BLOCKED, not ingesting",
+                        getattr(result, "tool", "?"), sig, cur)
+                    result.status = ToolExecutionStatus.BLOCKED
+                    try:
+                        md = dict(getattr(result, "metadata", {}) or {})
+                        md["waf_interstitial"] = sig
+                        result.metadata = md
+                    except Exception:
+                        pass
+        except Exception as _e:
+            logger.debug(f"waf-interstitial check skipped: {_e}")
         return result
     
     def _stamp_cached(self, result):

@@ -85,6 +85,15 @@ async def run_single(target: str, auth_file: str | None = None, tier: str = "POC
     # Expose the scan id so the LLM harness records per-scan cost (Phase 6.1).
     os.environ["ANTIGRAVITY_SCAN_ID"] = str(scan_id or getattr(brain, "_scan_id", "") or target)
 
+    # Warm the accessible-model discovery once so capability-based role routing
+    # (coder→coding, VL→vision, …) has the pool to choose from during this scan
+    # instead of sending every task to the one large model. Best-effort.
+    try:
+        from core.llm.model_availability import discover_available
+        discover_available(force=True)
+    except Exception:
+        pass
+
     if credentials:
         cred_list = credentials if isinstance(credentials, list) else [credentials]
         # Feed the multi-role auth manager: one live session per role.
@@ -133,9 +142,12 @@ async def run_single(target: str, auth_file: str | None = None, tier: str = "POC
         except Exception as e:
             logger.error(f"Final vulnerability flush failed: {e}")
 
-    # Phase 3.1 / 3.3: persist the attack-surface baseline for future incremental
-    # diffs, and check for regressions against tracked fixed findings.
-    _post_scan_surface_and_regression(brain, scan_id or getattr(brain, "_scan_id", None) or target)
+    # Phase 3.1 / 3.3: ASM monitoring — persist the attack-surface baseline for
+    # future incremental diffs and check regressions. Only useful when rescanning
+    # the same target over time; opt-in via NEO_ASM_MONITORING (default off) so
+    # one-off scans don't write data/{baselines,regression,asm}.
+    if os.getenv("NEO_ASM_MONITORING", "0").lower() in ("1", "true", "yes", "on"):
+        _post_scan_surface_and_regression(brain, scan_id or getattr(brain, "_scan_id", None) or target)
 
     # Phase 4.5: correlate grey-box SAST findings with the scan's DAST findings.
     _sast = os.getenv("ANTIGRAVITY_SAST_FINDINGS", "")

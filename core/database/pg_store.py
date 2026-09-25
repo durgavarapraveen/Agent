@@ -427,6 +427,15 @@ def _init_schema():
                     data JSONB DEFAULT '{}'::jsonb
                 );
 
+                -- Cross-scan RL reward policy (was data/learning/reward_policy.json).
+                -- Single-row global state keyed by `name`.
+                CREATE TABLE IF NOT EXISTS learned_reward_policy (
+                    name TEXT PRIMARY KEY,
+                    policy JSONB DEFAULT '{}'::jsonb,
+                    total_pulls INTEGER DEFAULT 0,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+
                 CREATE TABLE IF NOT EXISTS cve_cache (
                     cve_id TEXT PRIMARY KEY,
                     cvss REAL DEFAULT 0,
@@ -828,6 +837,25 @@ def _init_schema():
                 );
                 CREATE INDEX IF NOT EXISTS idx_llm_calls_scan ON llm_calls(scan_id, id);
 
+                -- Jev decision log: every typed decision Jev (System-One) made,
+                -- in order, per scan — routing / phase_gate / tool_gate / triage.
+                -- Feeds the UI "Jev Decisions" tab (state/question secret-scrubbed).
+                CREATE TABLE IF NOT EXISTS jev_decisions (
+                    id SERIAL PRIMARY KEY,
+                    scan_id TEXT REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    site TEXT DEFAULT '',            -- routing|phase_gate|tool_gate|triage
+                    decision_type TEXT DEFAULT '',   -- noul|choice|score
+                    question TEXT DEFAULT '',
+                    state_preview TEXT DEFAULT '',
+                    value TEXT DEFAULT '',
+                    probability NUMERIC DEFAULT 0,
+                    model TEXT DEFAULT '',
+                    duration_ms INT DEFAULT 0,
+                    error TEXT DEFAULT '',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_jev_decisions_scan ON jev_decisions(scan_id, id);
+
                 -- Persisted attack graph (B1): one row per scan holding the
                 -- node/edge graph so the UI can render it live. Upserted as the
                 -- graph is (re)built and as nodes get exploited during chaining.
@@ -1067,6 +1095,34 @@ _MIGRATIONS: List[tuple] = [
      "job_id TEXT PRIMARY KEY, status TEXT, label TEXT, "
      "steps JSONB DEFAULT '[]'::jsonb, result JSONB, error TEXT, "
      "created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());"),
+    ("0003_engagements",
+     "CREATE TABLE IF NOT EXISTS engagements ("
+     "engagement_id TEXT PRIMARY KEY, name TEXT NOT NULL, "
+     "status TEXT DEFAULT 'draft', spec JSONB NOT NULL DEFAULT '{}'::jsonb, "
+     "created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());"),
+    ("0006_http_exchanges",
+     "CREATE TABLE IF NOT EXISTS http_exchanges ("
+     "id BIGSERIAL PRIMARY KEY, scan_id TEXT, fingerprint TEXT, "
+     "method TEXT, url TEXT, req_headers JSONB, req_body TEXT, "
+     "status INTEGER DEFAULT 0, resp_headers JSONB, resp_body TEXT, "
+     "hits INTEGER DEFAULT 1, first_seen TIMESTAMPTZ DEFAULT NOW(), "
+     "last_seen TIMESTAMPTZ DEFAULT NOW());"
+     "CREATE UNIQUE INDEX IF NOT EXISTS ux_http_exchanges_scan_fp "
+     "ON http_exchanges (scan_id, fingerprint);"),
+    ("0005_llm_cost_log",
+     "CREATE TABLE IF NOT EXISTS llm_cost_log ("
+     "id BIGSERIAL PRIMARY KEY, scan_id TEXT, provider TEXT, model TEXT, "
+     "input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, "
+     "cost_usd DOUBLE PRECISION DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW());"
+     "CREATE INDEX IF NOT EXISTS idx_llm_cost_log_scan ON llm_cost_log (scan_id);"),
+    ("0004_engagement_runs",
+     "CREATE TABLE IF NOT EXISTS engagement_runs ("
+     "run_id TEXT PRIMARY KEY, engagement_id TEXT NOT NULL, "
+     "target TEXT DEFAULT '', scan_id TEXT DEFAULT '', "
+     "status TEXT DEFAULT 'pending', tier TEXT DEFAULT 'POC', reason TEXT DEFAULT '', "
+     "created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());"
+     "CREATE INDEX IF NOT EXISTS idx_engagement_runs_eng "
+     "ON engagement_runs (engagement_id);"),
 ]
 
 
@@ -1751,6 +1807,32 @@ class AuditRepo:
                 cur.execute("SELECT * FROM execution_audit ORDER BY timestamp DESC LIMIT %s", (limit,))
                 return [dict(r) for r in cur.fetchall()]
 
+    @staticmethod
+    def last_event_hash() -> Optional[str]:
+        """Head of the audit_log hash-chain (last current_hash), or None."""
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT current_hash FROM audit_log ORDER BY id DESC LIMIT 1")
+                row = cur.fetchone()
+                return row[0] if row else None
+
+    @staticmethod
+    def event_count() -> int:
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM audit_log")
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+
+    @staticmethod
+    def last_execution_hash() -> Optional[str]:
+        """Head of the execution_audit hash-chain (last hash), or None."""
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT hash FROM execution_audit ORDER BY id DESC LIMIT 1")
+                row = cur.fetchone()
+                return row[0] if row else None
+
 
 class ScheduleRepo:
 
@@ -2129,6 +2211,105 @@ class ReviewRepo:
                 updated = cur.rowcount
                 conn.commit()
                 return updated > 0
+
+
+class EngagementRepo:
+    """Persist the Engagement aggregate (spec §1). Best-effort like the others.
+
+    The full authorization spec is stored as JSONB in ``spec`` so the domain
+    model can round-trip without a wide, brittle column set. ``status`` is
+    denormalized for cheap listing/filtering.
+    """
+
+    @staticmethod
+    def create(engagement_id: str, name: str, status: str, spec: Dict):
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO engagements (engagement_id, name, status, spec)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (engagement_id) DO UPDATE
+                    SET name = EXCLUDED.name, status = EXCLUDED.status,
+                        spec = EXCLUDED.spec, updated_at = NOW()
+                """, (engagement_id, name, status, _dumps(spec, default=str)))
+                conn.commit()
+        return engagement_id
+
+    @staticmethod
+    def update_status(engagement_id: str, status: str):
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE engagements SET status = %s, updated_at = NOW() "
+                    "WHERE engagement_id = %s", (status, engagement_id))
+                conn.commit()
+
+    @staticmethod
+    def get(engagement_id: str) -> Optional[Dict]:
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SELECT * FROM engagements WHERE engagement_id = %s",
+                            (engagement_id,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    @staticmethod
+    def list_all(limit: int = 200, offset: int = 0) -> List[Dict]:
+        limit = max(1, min(int(limit or 200), 2000))
+        offset = max(0, int(offset or 0))
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT * FROM engagements ORDER BY created_at DESC "
+                    "LIMIT %s OFFSET %s", (limit, offset))
+                return [dict(r) for r in cur.fetchall()]
+
+
+class EngagementRunRepo:
+    """Runs launched under an engagement (spec §1: Engagement → Run)."""
+
+    @staticmethod
+    def create(run_id: str, engagement_id: str, target: str = "",
+               tier: str = "POC", status: str = "pending", reason: str = ""):
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO engagement_runs
+                        (run_id, engagement_id, target, tier, status, reason)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (run_id) DO NOTHING
+                """, (run_id, engagement_id, target, tier, status, reason))
+                conn.commit()
+        return run_id
+
+    @staticmethod
+    def update(run_id: str, **fields):
+        cols = {k: v for k, v in fields.items()
+                if k in ("status", "scan_id", "target", "reason")}
+        if not cols:
+            return
+        sets = ["updated_at = NOW()"]
+        vals = []
+        for k, v in cols.items():
+            sets.append(f"{k} = %s")
+            vals.append(v)
+        vals.append(run_id)
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE engagement_runs SET {', '.join(sets)} "
+                    f"WHERE run_id = %s", vals)
+                conn.commit()
+
+    @staticmethod
+    def list_by_engagement(engagement_id: str, limit: int = 500) -> List[Dict]:
+        limit = max(1, min(int(limit or 500), 2000))
+        with DatabaseManager.get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT * FROM engagement_runs WHERE engagement_id = %s "
+                    "ORDER BY created_at DESC LIMIT %s", (engagement_id, limit))
+                return [dict(r) for r in cur.fetchall()]
 
 
 class CampaignRepo:
@@ -2763,6 +2944,21 @@ class AuthBypassRepo:
                           role, severity, dk))
                     row = cur.fetchone()
                     conn.commit()
+                    if row:
+                        # Broadcast the access-gained event to the shared blackboard
+                        # so other agents know they can now test authenticated /
+                        # pivot. Secrets (password/token) are NEVER posted.
+                        try:
+                            from core.orchestration import blackboard as _bb
+                            _bb.post(scan_id, technique or "auth", "pivot",
+                                     f"Access gained: {technique} as {role or username or 'user'} on {host}",
+                                     data={"login_url": login_url, "method": method,
+                                           "username": username, "role": role,
+                                           "status": response_status,
+                                           "has_token": bool(token)},
+                                     ref=f"authbypass:{dk}")
+                        except Exception:
+                            pass
                     return row[0] if row else None
         except Exception:
             return None
@@ -3029,3 +3225,44 @@ class AnalysisJobRepo:
         except Exception as e:
             logger.debug("AnalysisJobRepo.get skipped: %s", e)
             return None
+
+
+class RewardPolicyRepo:
+    """Cross-scan RL reward policy (replaces data/learning/reward_policy.json).
+    Single global row keyed by `name`. All methods fail-open so a missing/
+    unreachable DB degrades to an empty policy instead of raising."""
+    _KEY = "global"
+
+    @staticmethod
+    def load() -> Dict[str, Any]:
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("SELECT policy, total_pulls FROM learned_reward_policy WHERE name=%s",
+                                (RewardPolicyRepo._KEY,))
+                    row = cur.fetchone()
+                    if row:
+                        return {"policy": row["policy"] or {},
+                                "total_pulls": int(row["total_pulls"] or 0)}
+        except Exception as e:
+            logger.debug("RewardPolicyRepo.load skipped: %s", e)
+        return {"policy": {}, "total_pulls": 0}
+
+    @staticmethod
+    def save(policy: Dict[str, Any], total_pulls: int) -> bool:
+        try:
+            with DatabaseManager.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO learned_reward_policy (name, policy, total_pulls, updated_at)
+                        VALUES (%s, %s, %s, NOW())
+                        ON CONFLICT (name) DO UPDATE SET
+                          policy = EXCLUDED.policy,
+                          total_pulls = EXCLUDED.total_pulls,
+                          updated_at = NOW()
+                    """, (RewardPolicyRepo._KEY, _dumps(policy or {}, default=str), int(total_pulls)))
+                    conn.commit()
+            return True
+        except Exception as e:
+            logger.debug("RewardPolicyRepo.save skipped: %s", e)
+            return False

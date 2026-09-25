@@ -167,17 +167,84 @@ class APISchemaImporter:
                 # Try GET with query param
                 get_url = f"{url}?query=%7B%20__schema%20%7B%20types%20%7B%20name%20kind%20%7D%20%7D%20%7D"
                 status, body = self._fetch(get_url)
-                if status != 200 or not body.strip():
-                    continue
-            try:
-                result = json.loads(body)
-                if "data" in result and "__schema" in result.get("data", {}):
-                    logger.info(f"[APIImporter] GraphQL introspection found at {url}")
-                    self.schema_source = url
-                    return result
-            except json.JSONDecodeError:
-                pass
+            if status == 200 and body.strip():
+                try:
+                    result = json.loads(body)
+                    if "data" in result and "__schema" in result.get("data", {}):
+                        logger.info(f"[APIImporter] GraphQL introspection found at {url}")
+                        self.schema_source = url
+                        return result
+                except json.JSONDecodeError:
+                    pass
+            # P1-E2: introspection disabled (the prod norm) — fall back to
+            # field-suggestion harvesting to reconstruct a partial schema, so a
+            # GraphQL endpoint still yields attack surface instead of zero.
+            partial = self._graphql_fallback_probe(url)
+            if partial:
+                logger.info(f"[APIImporter] GraphQL detected (introspection off) at {url}; "
+                            f"reconstructed {len(partial.get('data',{}).get('__schema',{}).get('types',[{}])[0].get('fields',[]))} field(s)")
+                self.schema_source = url
+                return partial
         return None
+
+    def _graphql_fallback_probe(self, url: str) -> Optional[Dict]:
+        """Introspection-off schema reconstruction. Confirms the endpoint is
+        GraphQL via `{__typename}`, then harvests field names from the server's
+        own 'Did you mean' validation errors. Generic — no target assumptions."""
+        import re as _re
+        # 1) Confirm GraphQL: __typename resolves on a real GraphQL server.
+        status, body = self._fetch_post(url, '{"query":"{ __typename }"}')
+        is_graphql = False
+        if status and body:
+            try:
+                j = json.loads(body)
+            except json.JSONDecodeError:
+                return None
+            if isinstance(j, dict):
+                # Strongest signal: __typename actually resolved.
+                if isinstance(j.get("data"), dict) and j["data"].get("__typename"):
+                    is_graphql = True
+                # A GraphQL error envelope carries BOTH `data` and `errors` keys
+                # together AND uses query-validation vocabulary. Requiring both
+                # avoids misreading generic REST error envelopes
+                # ({"errors":[{"message": "..."}]}) as GraphQL.
+                elif "data" in j and isinstance(j.get("errors"), list) and j["errors"]:
+                    msgs = " ".join(str((e or {}).get("message", "")) for e in j["errors"]
+                                    if isinstance(e, dict)).lower()
+                    if any(tok in msgs for tok in (
+                            "cannot query field", "syntax error", "unknown argument",
+                            "did you mean", "must have a selection", "graphql",
+                            "expected name")):
+                        is_graphql = True
+        if not is_graphql:
+            return None
+        # 2) Harvest field suggestions from validation errors on both roots.
+        fields: Dict[str, set] = {"Query": set(), "Mutation": set()}
+        probes = [
+            ("Query", '{"query":"{ zzqueryprobe }"}'),
+            ("Mutation", '{"query":"mutation { zzmutationprobe }"}'),
+        ]
+        sugg_re = _re.compile(r'Did you mean ([^?]+)\?', _re.IGNORECASE)
+        name_re = _re.compile(r'"([A-Za-z_][A-Za-z0-9_]*)"')
+        for root, q in probes:
+            st, bd = self._fetch_post(url, q)
+            if not bd:
+                continue
+            for m in sugg_re.finditer(bd):
+                for fn in name_re.findall(m.group(1)):
+                    fields[root].add(fn)
+        # 3) Build a parse_graphql-compatible partial introspection result.
+        types = []
+        for root in ("Query", "Mutation"):
+            if fields[root]:
+                types.append({
+                    "name": root, "kind": "OBJECT",
+                    "fields": [{"name": fn, "args": []} for fn in sorted(fields[root])],
+                })
+        if not types:
+            # GraphQL confirmed but no fields harvested — still record the endpoint.
+            types.append({"name": "Query", "kind": "OBJECT", "fields": []})
+        return {"data": {"__schema": {"types": types}}, "_partial_introspection": True}
 
     def parse_openapi(self, spec: Dict) -> List[Dict]:
 
@@ -309,7 +376,10 @@ class APISchemaImporter:
                             })
 
                     entry = {
-                        "url": self.schema_source or f"{self.target}/graphql",
+                        # Do NOT synthesize "/graphql": use the introspection
+                        # source if known, else leave the URL empty rather than
+                        # guessing a path that may not exist on the target.
+                        "url": self.schema_source or "",
                         "path": f"/graphql#{name}.{field_name}",
                         "method": "POST",
                         "parameters": params,

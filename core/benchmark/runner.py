@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -280,6 +281,33 @@ def _identity_count(ctx) -> int:
         return 0
 
 
+def _name_anchor_match(name: str, findings: List[Dict]) -> Optional[Dict]:
+    """For a name/generic-only challenge (no canonical vuln class), find a CONFIRMED
+    discovery finding whose route/location/title contains the challenge-name slug.
+    Generic and evidence-bound: requires a real finding, so it can't fabricate a
+    solve. Specificity-gated (slug >= 7 chars) to avoid short/generic false hits."""
+    slug = re.sub(r"[^a-z0-9]", "", str(name or "").lower())
+    tokens = [t for t in re.split(r"[^a-z0-9]+", str(name or "").lower()) if len(t) >= 5]
+    if len(slug) < 7:
+        return None
+    for f in findings:
+        if not (f.get("confirmed") or str(f.get("status", "")).upper() == "CONFIRMED"):
+            continue
+        # Name-anchor credits ONLY dedicated discovery findings (route/policy
+        # enumeration). An unrelated CONFIRMED exploit finding can never token- or
+        # slug-collide its way to a false "solved" on a class-less challenge.
+        if f.get("source") != "route_disclosure_probe":
+            continue
+        hay = re.sub(r"[^a-z0-9]", "",
+                     f"{f.get('location','')}{f.get('target','')}{f.get('title','')}".lower())
+        # (a) full name slug present (slug≥7 is specific), or (b) all multi-char name
+        #     tokens present (≥2 tokens, each ≥5) — handles a page whose route/title
+        #     spells the name apart (e.g. "Privacy Policy" ↔ /privacy-policy).
+        if slug in hay or (len(tokens) >= 2 and all(t in hay for t in tokens)):
+            return f
+    return None
+
+
 def score_corpus(scan_id: str, corpus: BenchmarkCorpus, findings: List[Dict],
                  ctx=None, run_meta: Optional[Dict] = None) -> Dict[str, Any]:
     """Score each challenge independently → BenchmarkResult, persist to DB, and
@@ -354,6 +382,19 @@ def score_corpus(scan_id: str, corpus: BenchmarkCorpus, findings: List[Dict],
                 res.status = CONFIRMED if confirmed else PARTIAL
             elif matches:
                 res.status, res.reason = PARTIAL, "technique found on another endpoint, not this one"
+            elif not ch_classes:
+                # Name/generic-only challenge (no canonical vuln class, e.g. "find the
+                # hidden X page" / "publish a Y policy"): class matching can't apply, so
+                # fall back to a NAME-ANCHORED match — a CONFIRMED finding whose route/
+                # location/title contains the challenge-name slug. Generic (any app);
+                # requires a real discovery finding, so it can't fabricate a solve.
+                nm = _name_anchor_match(ch.name, findings)
+                if nm:
+                    res.status, res.confidence = CONFIRMED, 0.6
+                    res.evidence = [str(nm.get("location") or nm.get("target") or nm.get("title") or "")[:200]]
+                    res.reason = "name-anchored discovery finding"
+                else:
+                    res.status, res.reason = NOT_FOUND, "no matching confirmed finding"
             else:
                 res.status, res.reason = NOT_FOUND, "no matching confirmed finding"
         res.duration_ms = int((time.time() - t0) * 1000)

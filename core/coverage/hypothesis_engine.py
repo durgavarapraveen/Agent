@@ -4,11 +4,20 @@ import logging
 import uuid
 from typing import Any, Dict, List, TYPE_CHECKING
 
+from core.common import target_shape as ts
+
 if TYPE_CHECKING:
     from core.attack_surface.attack_surface_state import AttackSurfaceState
     from core.coverage.security_test_catalog import SecurityTestCatalog
 
 logger = logging.getLogger(__name__)
+
+# Attack set proposed for any endpoint/technology with no explicit mapping, so an
+# unrecognized stack still gets exercised instead of silently skipped.
+DEFAULT_ATTACK_SET = [
+    "sqli_basic_01", "xss_reflected_01", "cmdi_basic_01",
+    "ssti_basic_01", "path_traversal_01",
+]
 
 TECH_ATTACK_MAP = {
     "php": ["cmdi_basic_01", "deser_php_01", "ssti_basic_01", "path_lfi_01"],
@@ -125,7 +134,8 @@ class HypothesisEngine:
         results = []
         for tech_name, tech_data in surface.technologies.items():
             key = tech_name.lower().split("/")[0].split(" ")[0]
-            test_ids = TECH_ATTACK_MAP.get(key, [])
+            # Unrecognized tech -> baseline attack set instead of nothing.
+            test_ids = TECH_ATTACK_MAP.get(key) or DEFAULT_ATTACK_SET
             for test_id in test_ids:
                 test = self._catalog.get(test_id)
                 if not test:
@@ -146,24 +156,40 @@ class HypothesisEngine:
         results = []
         for param_key, param_data in surface.parameters.items():
             name = param_data.get("name", param_key.split(":")[-1]).lower()
+            value = str(param_data.get("value", "") or "")
+
+            # Base: explicit name-substring map (first match wins).
+            proposed: List[str] = []
             for hint, test_ids in PARAM_TYPE_TESTS.items():
                 if hint in name:
-                    for test_id in test_ids:
-                        test = self._catalog.get(test_id)
-                        if not test:
-                            continue
-                        results.append({
-                            "id": str(uuid.uuid4()),
-                            "title": f"{test.name} on param '{name}'",
-                            "rationale": f"Parameter name '{name}' suggests {test.attack_type}",
-                            "test_id": test_id,
-                            "attack_type": test.attack_type,
-                            "endpoint_id": param_data.get("endpoint_id"),
-                            "parameter_name": name,
-                            "priority": 0.6,
-                            "generation_method": "parameter_naming",
-                        })
+                    proposed.extend(test_ids)
                     break
+
+            # Widen: shared target-shape covers far more names + value shapes.
+            if ts.is_redirect_param(name, value):
+                proposed.extend(PARAM_TYPE_TESTS["redirect"])
+                proposed.extend(PARAM_TYPE_TESTS["url"])
+            if ts.is_file_param(name, value):
+                proposed.extend(PARAM_TYPE_TESTS["file"])
+                proposed.extend(PARAM_TYPE_TESTS["path"])
+            if ts.is_search_param(name, value):
+                proposed.extend(PARAM_TYPE_TESTS["search"])
+
+            for test_id in dict.fromkeys(proposed):  # dedupe, preserve order
+                test = self._catalog.get(test_id)
+                if not test:
+                    continue
+                results.append({
+                    "id": str(uuid.uuid4()),
+                    "title": f"{test.name} on param '{name}'",
+                    "rationale": f"Parameter name '{name}' suggests {test.attack_type}",
+                    "test_id": test_id,
+                    "attack_type": test.attack_type,
+                    "endpoint_id": param_data.get("endpoint_id"),
+                    "parameter_name": name,
+                    "priority": 0.6,
+                    "generation_method": "parameter_naming",
+                })
         return results
 
     @staticmethod
@@ -195,7 +221,7 @@ class HypothesisEngine:
                     "generation_method": "endpoint_method",
                 })
 
-            if "/api/" in path or "/rest/" in path or "/v1/" in path:
+            if ts.is_api_endpoint(path):
                 for tid in ["api_excessive_data_01", "api_rate_limit_01",
                             "authz_mass_assignment_01"]:
                     test = self._catalog.get(tid)

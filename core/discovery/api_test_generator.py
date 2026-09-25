@@ -20,6 +20,8 @@ import re
 from typing import Any, Dict, List
 from urllib.parse import urlparse
 
+from core.common import target_shape as ts
+
 logger = logging.getLogger(__name__)
 
 # Fields attackers try to smuggle via mass assignment.
@@ -109,7 +111,11 @@ def _param_names(ep: Dict[str, Any]) -> List[str]:
 
 def _is_privileged(ep: Dict[str, Any]) -> bool:
     u = (ep.get("url", "") + " " + ep.get("path", "")).lower()
-    return any(h in u for h in _PRIVILEGED_HINTS)
+    # Union: local hints (delete/users/...) + shared classifier (backoffice,
+    # console, staff, ops, internal, superuser, ...).
+    if any(h in u for h in _PRIVILEGED_HINTS):
+        return True
+    return ts.is_privileged_path(ep.get("url", "") or ep.get("path", ""))
 
 
 def _has_body(ep: Dict[str, Any]) -> bool:

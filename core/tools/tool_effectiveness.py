@@ -332,7 +332,7 @@ class ToolEffectivenessEngine:
             "nikto": "-Tuning 1 2 3 4 5 6 7 8 9 0",
             "httpx": "-tech-detect -cdn -follow-redirects -json",
             "wpscan": "--enumerate vp,vt,u" if profile.has_wordpress else "",
-            "dalfox": "--mining-dom --mining-dict",
+            "dalfox": "",  # mining/DOM-AST are default-on in current dalfox; old --mining-* flags removed
             "arjun": "-m GET,POST --stable",
             "wafw00f": "",
         }

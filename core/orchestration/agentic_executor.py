@@ -8,6 +8,28 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
+# Retain fire-and-forget background tasks: asyncio holds only a weak reference to
+# tasks, so an un-kept one can be GC'd mid-run (silently dropping the DB write /
+# blackboard broadcast it was doing). Keep a strong ref until the task completes.
+_BG_TASKS: "set" = set()
+
+
+def _spawn_bg(coro) -> None:
+    """Schedule a best-effort background coroutine, retaining a strong reference."""
+    import asyncio as _a
+    try:
+        loop = _a.get_running_loop()
+    except RuntimeError:
+        logger.debug("[bg] no running loop; skipping background task")
+        try:
+            coro.close()
+        except Exception:
+            pass
+        return
+    t = loop.create_task(coro)
+    _BG_TASKS.add(t)
+    t.add_done_callback(_BG_TASKS.discard)
+
 
 # ── Helpers used by the reasoning-row writer ──────────────────────────────
 
@@ -123,7 +145,7 @@ from core.intel.tool_authoring import (
 # Memory-as-tool (opt-in via NEO_AGENT_MEMORY): agent recalls scan state on
 # demand instead of us re-pasting it every turn. See project_agent_memory_plan.
 from core.memory.memory_manager import (
-    AgentMemory, MEMORY_TOOL_SCHEMAS, memory_enabled,
+    AgentMemory, MEMORY_TOOL_SCHEMAS, memory_enabled, ContextMode, resolve_memory_on,
 )
 
 PENTESTING_TOOLS = _CUSTOM_TOOLS + _SKILL_TOOLS + [_KB_TOOL, _AUTHOR_TOOL, _RUN_AUTHORED_TOOL] + [
@@ -313,11 +335,15 @@ class AgenticExecutor:
         "curl": 900,
     }
 
-    def __init__(self, llm_harness, tool_invocation_engine, shared_context, auth_context):
+    def __init__(self, llm_harness, tool_invocation_engine, shared_context, auth_context,
+                 context_mode: str = ContextMode.AUTO):
         self.llm = llm_harness
         self.tool_engine = tool_invocation_engine
         self.ctx = shared_context
         self.auth_context = auth_context
+        # Per-role context policy (isolated verifier / memory-carrying worker /
+        # AUTO = honour the global flag). Default AUTO → behaviour unchanged.
+        self.context_mode = context_mode or ContextMode.AUTO
         self.result = AgenticResult()
         self._available_tools = None
         # Per-host captured JWTs, auto-injected on subsequent same-host requests
@@ -342,6 +368,21 @@ class AgenticExecutor:
         context_hint: str = "",
     ) -> AgenticResult:
         self._phase = phase or ""
+
+        # Phase 12: steer the LLM toward the highest information-gain next
+        # actions (untested params/classes not already tried), computed
+        # deterministically from state. Appended to context_hint so it flows
+        # through the existing prompt path. Opt-in, non-fatal.
+        try:
+            from core.common.config import get_config as _cfg_ig
+            if _cfg_ig().get_bool("INFO_GAIN_HINTS_ENABLED", True):
+                from core.orchestration.info_gain import priority_actions_hint
+                _ig = priority_actions_hint(self.ctx, str(self.scan_id or ""), top=5)
+                if _ig:
+                    context_hint = (context_hint + "\n\n" + _ig) if context_hint else _ig
+        except Exception as _ig_err:
+            logger.debug(f"info-gain hint skipped: {_ig_err}")
+
         self._available_tools = self._probe_tool_availability()
         available_tools_str = ", ".join(sorted(self._available_tools)) if self._available_tools else "none (use http_request for all testing)"
 
@@ -394,7 +435,7 @@ class AgenticExecutor:
         # Memory-as-tool: when enabled AND state is large enough, replace the
         # full knowledge dump with a compact index + on-demand memory tools.
         # Otherwise fall back to the exact prior full-dump build (zero change).
-        mem_on = memory_enabled()
+        mem_on = resolve_memory_on(self.context_mode)
         self._memory = AgentMemory(self.scan_id, self.ctx) if mem_on else None
         self._active_tools = (PENTESTING_TOOLS + MEMORY_TOOL_SCHEMAS) if mem_on else PENTESTING_TOOLS
 
@@ -612,6 +653,44 @@ class AgenticExecutor:
             pass
         return self.result
 
+    async def _jev_tool_risk_gate(self, fn_name: str, fn_args: Dict[str, Any]):
+        """Opt-in Jev noul gate. Returns a refusal string to BLOCK the action, or
+        None to allow. Fail-open: no key / gate off / any error / low confidence →
+        None (proceed). Complements, never replaces, the egress firewall."""
+        try:
+            from core.llm.jev_config import jev_tool_gate_enabled
+            if not jev_tool_gate_enabled():
+                return None
+            from agents.providers.jev_classifier import get_jev
+            jev = get_jev(scan_id=getattr(self, "_scan_id", "")
+                          or getattr(self.ctx, "scan_id", ""))
+            if jev is None:
+                return None
+            action = {
+                "tool": fn_name,
+                "tool_id": fn_args.get("tool_id") or fn_args.get("tool") or "",
+                "target": fn_args.get("target") or fn_args.get("url") or "",
+                "operation": (fn_args.get("operation") or fn_args.get("command")
+                              or fn_args.get("hypothesis") or "")[:400],
+                "authorized_target": getattr(self.ctx, "target", ""),
+            }
+            danger, prob = await jev.noul(
+                action,
+                "This is a security-scan tool action. Is it clearly UNSAFE for an "
+                "authorized pentest — i.e. it targets a host outside the authorized "
+                "target, attempts data exfiltration to a third party, or is "
+                "destructive (deletes/defaces/DoS)? Answer yes only when clearly so.",
+                site="tool_gate")
+            if danger and prob >= 0.8:
+                logger.warning("[Jev] tool gate BLOCKED %s (p=%.2f) target=%s",
+                               fn_name, prob, action["target"])
+                return (f"[Jev risk gate] Action blocked: '{fn_name}' judged "
+                        f"out-of-scope/destructive (confidence {prob:.0%}). "
+                        f"Choose an in-scope, non-destructive action.")
+        except Exception as e:
+            logger.debug("[Jev] tool risk gate skipped: %s", e)
+        return None
+
     async def _execute_tool_call(self, fn_name: str, fn_args: Dict[str, Any]) -> str:
         self.result.steps_taken += 1
         # P1.7: record a distinct action signature so the re-prompt loop can
@@ -656,6 +735,15 @@ class AgenticExecutor:
             _thought = f"call {fn_name} on {fn_args.get('target') or fn_args.get('url') or ''}"
         _tool_planned = str(fn_args.get("tool_id") or fn_args.get("tool") or fn_name)[:60]
         _t_start = _time.monotonic()
+
+        # Jev risk gate (opt-in, fail-open). A fast noul second opinion on whether
+        # this action is out-of-scope or destructive — a semantic layer ABOVE the
+        # hard egress_firewall (which stays the authoritative control). Only blocks
+        # on a high-confidence 'yes'; any Jev failure/uncertainty lets the action
+        # proceed so coverage is never silently skipped.
+        _blocked = await self._jev_tool_risk_gate(fn_name, fn_args)
+        if _blocked:
+            return _blocked
 
         if fn_name == "run_tool":
             _result = await self._run_security_tool(fn_args)
@@ -727,8 +815,7 @@ class AgenticExecutor:
                         """, (sid, aid, 0, clean_text(thg)[:4000],
                               "(reasoning — no tool call)", "{}", "", 0, 0))
                         conn.commit()
-            _aio.get_event_loop().create_task(
-                _aio.to_thread(_write, self.scan_id, self._tracker.agent_id, text))
+            _spawn_bg(_aio.to_thread(_write, self.scan_id, self._tracker.agent_id, text))
         except Exception:
             pass
 
@@ -760,7 +847,7 @@ class AgenticExecutor:
                             conn.commit()
 
                 import asyncio as _aio
-                _aio.get_event_loop().create_task(
+                _spawn_bg(
                     _aio.to_thread(_write_reasoning_row,
                                     self.scan_id, self._tracker.agent_id,
                                     self.result.steps_taken, str(_thought)[:800],
@@ -771,7 +858,7 @@ class AgenticExecutor:
                 # (and the live UI) see what this agent just ran.
                 try:
                     from core.orchestration import blackboard as _bb
-                    _aio.get_event_loop().create_task(
+                    _spawn_bg(
                         _aio.to_thread(
                             _bb.post, self.scan_id, self._tracker.agent_id, "tool",
                             str(_tool_planned)[:120],
@@ -779,10 +866,10 @@ class AgenticExecutor:
                              "result_preview": str(_preview)[:400],
                              "duration_ms": _duration_ms},
                             f"tool:{self._tracker.agent_id}:{self.result.steps_taken}"))
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception as e:
+                    logger.debug("[bg] blackboard broadcast skipped: %s", e)
+        except Exception as e:
+            logger.debug("[reasoning] async write skipped: %s", e)
         return _cap_tool_result(_result)
 
     TOOL_TO_OPERATION = {
@@ -842,24 +929,36 @@ class AgenticExecutor:
         logger.info(f"[AgenticExecutor] Available tools: {sorted(available)}")
         return available
 
+    # Flags every scanner needs to name its TARGET. Stripping these silently
+    # neutered nuclei/sqlmap/ffuf/katana in scan c12701a6 (see implemented.md
+    # §9.2): the tool ran with no target and produced nothing. These are safe —
+    # the target is scope-validated upstream; the allowlist's job is to block
+    # dangerous flags (arbitrary file write / shell / script), not the target.
+    _TARGET_FLAGS = {"-u", "--url", "-l", "--list", "-target", "--target", "-host", "--host"}
+
     TOOL_ARG_ALLOWLIST: Dict[str, set] = {
         "nmap": {"-p", "-sV", "-sC", "-sS", "-sT", "-sU", "-A", "-O", "-T0", "-T1", "-T2", "-T3", "-T4", "-T5",
                  "--top-ports", "--script", "--open", "-Pn", "-n", "--min-rate", "--max-rate", "-oN", "-oX", "-oG"},
-        "sqlmap": {"--batch", "--level", "--risk", "--dbs", "--tables", "--dump", "--forms", "--crawl",
-                   "--random-agent", "--technique", "--tamper", "-p", "--data", "--cookie", "--headers",
-                   "--method", "--threads", "--timeout", "--retries", "--dbms", "--os"},
-        "nuclei": {"-t", "--tags", "-s", "--severity", "-as", "--automatic-scan", "-rl", "--rate-limit",
-                   "-c", "--concurrency", "-H", "--header", "--follow-redirects", "-j", "--jsonl"},
-        "dalfox": {"--blind", "--cookie", "--header", "--data", "--method", "--mining-dict",
-                   "--follow-redirects", "--timeout", "--delay", "--only-discovery", "-p"},
-        "ffuf": {"-w", "-mc", "-fc", "-fs", "-fw", "-fl", "-t", "-p", "-H", "-X", "-d", "-r",
-                 "-recursion", "-recursion-depth", "-e", "-ac", "-timeout"},
-        "gobuster": {"-w", "-t", "-x", "-s", "-b", "-r", "--timeout", "--delay", "-k", "-a"},
-        "nikto": {"-C", "-T", "-p", "-ssl", "-timeout", "-Plugins", "-maxtime"},
-        "wpscan": {"--enumerate", "--plugins-detection", "--force", "--disable-tls-checks",
+        "sqlmap": {"-u", "--url", "-r", "-g", "--batch", "--level", "--risk", "--dbs", "--tables", "--dump",
+                   "--forms", "--crawl", "--flush-session", "--random-agent", "--technique", "--tamper", "-p",
+                   "--data", "--cookie", "--headers", "--method", "--threads", "--timeout", "--retries",
+                   "--dbms", "--os"},
+        "nuclei": {"-u", "-l", "-t", "-tags", "--tags", "-s", "-severity", "--severity", "-as", "--automatic-scan",
+                   "-rl", "--rate-limit", "-c", "--concurrency", "-H", "--header", "-fr", "--follow-redirects",
+                   "-j", "-jsonl", "--jsonl", "-silent", "-nc", "-duc", "-timeout", "-retries"},
+        "dalfox": {"url", "--url", "--blind", "--cookie", "--header", "--data", "--method", "--mining-dict",
+                   "--follow-redirects", "--timeout", "--delay", "--only-discovery", "-p", "--silence",
+                   "--no-color", "--user-agent"},
+        "ffuf": {"-u", "-w", "-mc", "-fc", "-fs", "-fw", "-fl", "-t", "-p", "-H", "-X", "-d", "-r",
+                 "-recursion", "-recursion-depth", "-e", "-ac", "-s", "-c", "-timeout", "-maxtime", "-rate"},
+        "gobuster": {"-u", "-w", "-t", "-x", "-s", "-b", "-r", "--timeout", "--delay", "-k", "-a", "-q", "-e", "-n"},
+        "nikto": {"-h", "-host", "-url", "-C", "-T", "-p", "-ssl", "-timeout", "-Plugins", "-maxtime",
+                  "-nointeractive"},
+        "wpscan": {"--url", "--enumerate", "--plugins-detection", "--force", "--disable-tls-checks",
                    "--random-user-agent", "--stealthy"},
         "hydra": {"-l", "-L", "-p", "-P", "-t", "-w", "-f", "-s", "-V"},
-        "katana": {"-d", "-jc", "-kf", "-ef", "-ct", "-rl", "-timeout", "-H", "-xhr"},
+        "katana": {"-u", "-list", "-d", "-depth", "-jc", "-kf", "-ef", "-ct", "-rl", "-c", "-aff", "-timeout",
+                   "-H", "-xhr", "-silent", "-nc", "-fx"},
     }
 
     @staticmethod
@@ -877,6 +976,7 @@ class AgenticExecutor:
         if not allowlist:
             return raw_args
 
+        allowlist = allowlist | AgenticExecutor._TARGET_FLAGS
         sanitized = []
         i = 0
         while i < len(tokens):
@@ -897,6 +997,14 @@ class AgenticExecutor:
         raw_args = args.get("args", "")
         extra_args = self._sanitize_tool_args(tool_id, raw_args)
 
+        # nikto runs to the hard container timeout and is KILLED with zero output
+        # (a slow, thorough scanner). Give it an internal -maxtime just under our
+        # timeout so it stops itself gracefully and returns PARTIAL results instead
+        # of nothing. Injected after sanitize (trusted), only if not already set.
+        _timeout = self.TOOL_TIMEOUTS.get(tool_id, 900)
+        if tool_id == "nikto" and "-maxtime" not in extra_args:
+            extra_args = (extra_args + f" -maxtime {max(60, _timeout - 60)}s").strip()
+
         if self._available_tools and tool_id not in self._available_tools:
             self.result.errors_encountered.append(f"{tool_id}: not available")
             return f"[FAILED] {tool_id} is not available in Docker. Use http_request instead."
@@ -909,7 +1017,7 @@ class AgenticExecutor:
         params = {}
         if extra_args:
             params["extra_args"] = extra_args
-        params["timeout"] = self.TOOL_TIMEOUTS.get(tool_id, 900)
+        params["timeout"] = _timeout
 
         operation = self.TOOL_TO_OPERATION.get(tool_id, tool_id)
 
@@ -1455,9 +1563,20 @@ RULES:
 - JSON only, no explanations"""
 
         try:
-            data = await self.llm.generate_json(prompt, max_tokens=2048)
+            # Mechanical extraction — skip the RAG "analysis/recommendations"
+            # prefix (irrelevant here; it wastes tokens and makes weaker gateway
+            # models echo the instructions instead of returning JSON).
+            from agents.universal_llm_harness import rag_disabled
+            with rag_disabled():
+                data = await self.llm.generate_json(prompt, max_tokens=2048)
             if not data or not isinstance(data, dict):
-                logger.warning("[AgenticExecutor] LLM recon extraction returned empty")
+                # generate_json SWALLOWS parse failures and returns {} (that's the
+                # "[JSON] unparseable content -> {}" harness log) — it never raises,
+                # so the except-JSONDecodeError branch below does NOT catch this.
+                # Fall back to regex here too, else this tool's recon data is lost.
+                logger.warning("[AgenticExecutor] LLM recon extraction returned empty "
+                               "for %s — falling back to regex extraction", tool_id)
+                self._regex_extract_recon(tool_id, stdout, target_base, _re)
                 return
 
             llm_techs = data.get("technologies", {})
@@ -1623,6 +1742,18 @@ RULES:
                 except Exception:
                     pass
 
+                # Record the full request/response (deduped, payload + response)
+                # so the Requests tab shows exactly what was sent and returned.
+                try:
+                    from core.economics.http_log import record_exchange
+                    record_exchange(
+                        getattr(self, "scan_id", "") or "", method, url,
+                        req_headers=headers, req_body=body,
+                        status=resp.status_code, resp_headers=dict(resp.headers),
+                        resp_body=resp.text)
+                except Exception:
+                    pass
+
                 self._auto_detect_vulns(method, url, body, resp.status_code, resp.text)
                 self._capture_auth_from_response(url, resp, req_method=method, req_body=body)
                 self._harvest_emails_and_hashes(url, resp.text)
@@ -1683,16 +1814,28 @@ RULES:
                                      for p in ("/login", "/api/login", "/signin",
                                                 "/oauth/token", "/session")]
             import httpx as _httpx
+            # Try the target's ACTUAL login body shape (from captured traffic)
+            # first, then generic fallbacks — instead of assuming email/password.
+            from core.common import request_schema as _rs
+            _bodies = _rs.login_body_variants(self.ctx, email, password)
             async with _httpx.AsyncClient(follow_redirects=True, timeout=20, verify=False) as client:
+                _done = False
                 for login_url in login_candidates:
-                    r = await client.post(login_url, json={"email": email, "password": password})
-                    if r.status_code in (200, 201) and "token" in (r.text or "").lower():
+                    for _body in _bodies:
+                        try:
+                            r = await client.post(login_url, json=_body)
+                        except Exception:
+                            continue
+                        if r.status_code in (200, 201):
+                            logger.info(f"[AgenticExecutor] Chain-login as new admin {email} "
+                                        f"-> HTTP {r.status_code} ({login_url})")
+                            self._capture_auth_from_response(
+                                login_url, r, req_method="POST", req_body=_json.dumps(_body))
+                            if "token" in (r.text or "").lower() or r.status_code == 200:
+                                _done = True
+                                break
+                    if _done:
                         break
-                logger.info(f"[AgenticExecutor] Chain-login as new admin {email} -> HTTP {r.status_code}")
-                if r.status_code == 200:
-                    self._capture_auth_from_response(
-                        login_url, r, req_method="POST",
-                        req_body=_json.dumps({"email": email, "password": password}))
         except Exception as _e:
             logger.debug(f"[AgenticExecutor] chain-login failed: {_e}")
 
@@ -1780,36 +1923,41 @@ RULES:
             netloc = _up(url).netloc.lower()
             if netloc in self._captured_tokens:
                 return  # already have one
-            token = None
-            # Response body JSON
+            # Token/session-shape agnostic capture: accept a JWT, an opaque
+            # bearer token, OR a session cookie — not just eyJ-prefixed JWTs.
+            # Non-JWT sessions were previously dropped, silently logging out the
+            # whole authenticated battery (see core/common/auth_shape).
+            import json as _json
+            from core.common import auth_shape as _ash
             try:
-                import json as _json
-                data = _json.loads(resp.text or "")
-                if isinstance(data, dict):
-                    auth = data.get("authentication") or {}
-                    token = (auth.get("token") if isinstance(auth, dict) else None) \
-                        or data.get("access_token") or data.get("token") or data.get("id_token")
+                _resp_json = _json.loads(resp.text or "")
             except Exception:
-                pass
-            # Set-Cookie: token=<jwt>
-            if not token:
-                import re as _re
-                for _c in resp.headers.get_list("set-cookie") if hasattr(resp.headers, "get_list") else [resp.headers.get("set-cookie", "")]:
-                    m = _re.search(r'(?:token|jwt|access_token|session|auth)=([A-Za-z0-9._\-]+)', _c or "")
-                    if m and m.group(1).startswith("eyJ"):
-                        token = m.group(1)
-                        break
-            if token and isinstance(token, str) and token.count(".") >= 2 and token.startswith("eyJ"):
+                _resp_json = None
+            _sess = _ash.extract_session(_resp_json, getattr(resp, "headers", None))
+            token = _sess.get("token")
+            _transport = _sess.get("transport", "bearer")
+            _cookie_name = _sess.get("cookie_name", "")
+            if token:
                 self._captured_tokens[netloc] = token
-                logger.info(f"[AgenticExecutor] Captured JWT for {netloc} (len={len(token)}) — will auto-inject on future requests")
+                logger.info(f"[AgenticExecutor] Captured {_transport} session for {netloc} "
+                            f"(jwt={_sess.get('is_jwt')}, len={len(token)}) — will auto-inject on future requests")
                 # Also expose to the shared context so downstream scanners
                 # (IDOR/access-control/JWT-forge/Tier-4-8) that read
                 # ctx.auth_headers reuse this session automatically.
                 try:
                     hdrs = dict(getattr(self.ctx, "auth_headers", {}) or {})
-                    if "Authorization" not in hdrs:
+                    cookies = dict(getattr(self.ctx, "auth_cookies", {}) or {})
+                    _changed = False
+                    if _transport == "cookie" and _cookie_name:
+                        if _cookie_name not in cookies:
+                            cookies[_cookie_name] = token
+                            self.ctx.auth_cookies = cookies
+                            _changed = True
+                    elif "Authorization" not in hdrs:
                         hdrs["Authorization"] = f"Bearer {token}"
                         self.ctx.auth_headers = hdrs
+                        _changed = True
+                    if _changed:
                         # Push to the executor auth registry so downstream
                         # V2 executors (generic.py, authz, IDOR, JWT, mass-assign)
                         # pick up the new session immediately.
@@ -1817,7 +1965,7 @@ RULES:
                             from core.execution.executors.auth_registry import set_active_auth
                             set_active_auth(
                                 headers=hdrs,
-                                cookies=getattr(self.ctx, "auth_cookies", {}) or {},
+                                cookies=cookies,
                                 sessions=getattr(self.ctx, "auth_sessions", {}) or {},
                             )
                         except Exception:
@@ -1829,7 +1977,11 @@ RULES:
                         "source": "agentic_capture",
                         "netloc": netloc,
                         "token": token,
-                        "type": "jwt_bearer",
+                        "type": ("jwt_bearer" if _sess.get("is_jwt")
+                                 else ("session_cookie" if _transport == "cookie"
+                                       else "opaque_bearer")),
+                        "transport": _transport,
+                        "cookie_name": _cookie_name,
                         "acquired_via": "http_response",
                     })
                     self.ctx.harvested_creds = hc[-100:]
@@ -1850,16 +2002,17 @@ RULES:
                         technique = "self_register"
                     elif "/login" in url.lower() or "/signin" in url.lower() or "/token" in url.lower():
                         technique = "credential_replay"
-                    # Decode username/role from JWT payload
+                    # Decode username/role from a JWT (if the token is one) across
+                    # modern role-claim shapes (roles[], scope, realm_access.roles,
+                    # cognito:groups, namespaced). Opaque/cookie sessions simply
+                    # yield empty claims and fall through to the body below.
                     username, role = "", ""
                     try:
-                        payload_b64 = token.split(".")[1]
-                        payload_b64 += "=" * (-len(payload_b64) % 4)
-                        jwt_payload = _json.loads(_b64.urlsafe_b64decode(payload_b64).decode("utf-8", "ignore"))
-                        data = jwt_payload.get("data") or jwt_payload
-                        if isinstance(data, dict):
-                            username = data.get("email") or data.get("username") or data.get("sub") or ""
-                            role = data.get("role") or ""
+                        _claims = _ash.decode_jwt_claims(token)
+                        _data = _claims.get("data") if isinstance(_claims.get("data"), dict) else _claims
+                        if isinstance(_data, dict):
+                            username = _data.get("email") or _data.get("username") or _data.get("sub") or ""
+                        role = _ash.primary_role(_claims)
                     except Exception:
                         pass
                     # Pull username/password from body if we didn't get it from JWT
@@ -2070,7 +2223,6 @@ RULES:
 
         # ── 12. SENSITIVE PATHS / INFORMATION DISCLOSURE ──
         sensitive_paths = {
-            "/encryptionkeys": ("Encryption keys exposed", "critical"),
             "/.git/config": ("Git config exposed", "high"),
             "/.git/head": ("Git HEAD exposed", "high"),
             "/.git/": ("Git directory exposed", "high"),
@@ -2163,9 +2315,37 @@ RULES:
             "/version": ("Version endpoint exposed", "low"),
             "/info": ("Info endpoint exposed", "low"),
         }
+        # Raw (non-HTML) file paths: a 200 alone is NOT disclosure. SPA/Next.js
+        # catch-alls serve index.html (200) for ANY path, so /.env, /.git/config
+        # etc. return the app shell, not the file. Reject an HTML-document body,
+        # and where a signature is known require it. UI/panel paths (/admin,
+        # /wp-login.php, swagger-ui.html, phpinfo) legitimately return HTML → not gated.
+        _RAW_FILE_HINTS = (
+            ".env", ".git", ".svn", ".hg", ".aws", ".docker", ".ssh", ".htpasswd", ".htaccess",
+            ".npmrc", ".bash_history", "id_rsa", ".key", "credentials", "config.php", "config.yml",
+            "config.json", "database.yml", "application.yml", "application.properties", "actuator/env",
+            "heapdump", "wp-config", "error_log", "access.log", "/logs", "/log", "web.config",
+            "package.json", "composer.json", "gemfile", "dockerfile", "docker-compose", ".dockerignore",
+            "vagrantfile", "procfile", ".travis", "jenkinsfile", ".circleci", "swagger.json", "api-docs",
+        )
+        _RAW_FILE_SIGNATURES = {
+            "/.git/config": ("[core]", "[remote"), "/.git/head": ("ref:",),
+            "/.aws/credentials": ("aws_access_key_id", "aws_secret"),
+            "/id_rsa": ("private key",), "/server.key": ("private key",), "/private.key": ("private key",),
+        }
+        _looks_html = resp_lower.lstrip().startswith(("<!doctype html", "<html")) or "<head" in resp_lower[:400]
         if _ok and len(resp_text) > 20:
             for sens_path, (title, sev) in sensitive_paths.items():
                 if path_lower.rstrip("/") == sens_path.rstrip("/") or path_lower.startswith(sens_path):
+                    _sp = sens_path.lower()
+                    if any(h in _sp for h in _RAW_FILE_HINTS):
+                        if _looks_html:
+                            logger.debug(f"[AutoDetect] Skipped {sens_path} on {netloc}: HTML shell (SPA catch-all), not the file")
+                            break
+                        _sig = _RAW_FILE_SIGNATURES.get(_sp)
+                        if _sig and not any(s in resp_lower for s in _sig):
+                            logger.debug(f"[AutoDetect] Skipped {sens_path} on {netloc}: body lacks expected signature")
+                            break
                     _record("information_disclosure", f"{title} — {netloc}", sev,
                             f"Path {parsed.path} returned HTTP {status} ({len(resp_text)} bytes). URL: {url[:200]}")
                     logger.info(f"[AutoDetect] Sensitive path: {parsed.path} on {netloc} → HTTP {status}")
@@ -2631,8 +2811,12 @@ RULES:
 
         # ── 50. CHATBOT / AI COMMAND INJECTION ──
         if method == "POST" and status == 200:
-            chat_endpoints = ["/api/chat", "/rest/chatbot", "/api/chatbot", "/chat"]
-            if any(ep in path_lower for ep in chat_endpoints):
+            # Detect chat/LLM endpoints by shape, not a fixed app-specific path.
+            import re as _re
+            _is_chat = bool(_re.search(
+                r'/(chat|chatbot|messages?|conversation|assistant|llm|ai|bot|'
+                r'completions?|prompt|ask|copilot|agent)\b', path_lower))
+            if _is_chat:
                 if "function" in resp_lower or "command" in resp_lower or "execute" in resp_lower or "system" in resp_lower:
                     _record("vulnerability", f"Chatbot Command Injection — {netloc}", "medium",
                             f"Chatbot returned function/command data. URL: {url[:200]}")

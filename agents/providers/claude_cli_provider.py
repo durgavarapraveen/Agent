@@ -35,19 +35,11 @@ logger = logging.getLogger(__name__)
 
 # Nominal per-1M-token pricing (USD) — Haiku 4.5 / Sonnet 4 published rates.
 # Used for accounting only; a Max-plan CLI call has no marginal API cost.
-_PRICING = {
-    "haiku": (0.80, 4.0),
-    "sonnet": (3.0, 15.0),
-    "opus": (15.0, 75.0),
-}
-
-
 def _price_for(model: str) -> tuple:
-    m = (model or "").lower()
-    for key, price in _PRICING.items():
-        if key in m:
-            return price
-    return (0.80, 4.0)  # default to haiku rate
+    # Authoritative per-model rates (env-overridable); unknown → (0, 0) + warn,
+    # never a fabricated default (spec Phase 29).
+    from core.economics.pricing import price_for as _pf
+    return _pf(model)
 
 
 class ClaudeCLIProvider(LLMProvider):
@@ -234,8 +226,15 @@ class ClaudeCLIProvider(LLMProvider):
         max_rounds: int = 10,
     ) -> LLMResponse:
         # The CLI runs its own agent/tool loop; external tool schemas + executors
-        # can't be injected. Best-effort degradation: flatten the conversation to
-        # a single prompt and return a normal completion (no external tool calls).
+        # can't be injected. P1-I3: when the caller actually wired a tool_executor
+        # (i.e. it expects real native tool-calling), do NOT silently degrade to a
+        # toolless completion — surface a typed error so the caller deterministically
+        # falls back to the JSON-planner path instead of losing tool calls unnoticed.
+        if tools and tool_executor is not None:
+            logger.warning("[claude_cli] native tool-calling unsupported; signaling caller to use JSON-planner")
+            return LLMResponse(content="", provider="claude_cli", model="",
+                               error="native_tools_unsupported")
+        # No executor wired → a plain completion is the intended best-effort.
         logger.warning("[claude_cli] generate_with_tools: external tools ignored "
                        "(CLI provider); returning plain completion")
         sys_parts = [m.get("content", "") for m in messages if m.get("role") == "system"]

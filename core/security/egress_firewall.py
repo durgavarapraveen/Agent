@@ -79,6 +79,8 @@ _INFRA_ALLOWLIST = {
     "api.anthropic.com", "api.together.xyz", "api.mistral.ai",
     "api.cohere.ai", "generativelanguage.googleapis.com",
     "openrouter.ai", "api.openrouter.ai",
+    # Jev (TypeSafe AI System-One classifier) — routing/gating decisions
+    "api.typesafe.ai",
     # Embedding providers (RAG)
     "api.voyageai.com",
     # OSINT / threat-intel feeds

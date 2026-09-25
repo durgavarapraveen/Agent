@@ -77,6 +77,64 @@ def _repair(text: str) -> str:
     return s
 
 
+def _salvage_truncated_array(text: str) -> Optional[Any]:
+    """Recover the COMPLETE objects from a truncated array — the common
+    `{"payloads":[{...},{...},{..CUT` shape produced when a response hits
+    max_tokens mid-object. Returns {key:[objs]} (or [objs]) with the finished
+    entries, dropping the incomplete trailing one. None if nothing salvageable."""
+    s = strip_fences(text or "")
+    lb = s.find("[")
+    if lb < 0:
+        return None
+    key_m = re.search(r'\{\s*"([^"]+)"\s*:\s*\[', s)
+    key = key_m.group(1) if (key_m and key_m.end() - 1 == lb) else None
+    objs: list = []
+    i, n = lb + 1, len(s)
+    while i < n:
+        while i < n and s[i] in " \t\r\n,":
+            i += 1
+        if i >= n or s[i] == "]":
+            break
+        if s[i] != "{":
+            break
+        depth = 0
+        j = i
+        instr = esc = False
+        closed = False
+        while j < n:
+            c = s[j]
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                instr = not instr
+            elif not instr:
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        j += 1
+                        closed = True
+                        break
+            j += 1
+        if not closed:
+            break  # incomplete trailing object -> stop here
+        frag = s[i:j]
+        try:
+            objs.append(json.loads(frag))
+        except (ValueError, TypeError):
+            try:
+                objs.append(json.loads(_repair(frag)))
+            except (ValueError, TypeError):
+                pass
+        i = j
+    if not objs:
+        return None
+    return {key: objs} if key else objs
+
+
 def parse_with_repair(text: str) -> Tuple[Optional[Any], str]:
     """Try increasingly aggressive strategies. Returns (parsed, method)."""
     if not text:
@@ -104,6 +162,11 @@ def parse_with_repair(text: str) -> Tuple[Optional[Any], str]:
             return json.loads(_repair(extracted)), "repair"
         except (ValueError, TypeError):
             pass
+    # 4.5 Salvage complete objects from a truncated array (response cut at
+    # max_tokens mid-object) — return the entries that fully serialized.
+    salv = _salvage_truncated_array(text)
+    if salv:
+        return salv, "salvage_truncated_array"
     # 5. Repair the whole thing (single quotes as last resort).
     try:
         return json.loads(_repair(text).replace("'", '"')), "repair_quotes"

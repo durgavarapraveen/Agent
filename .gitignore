@@ -85,3 +85,4 @@ deepseek_v4_tokenizer/
 node_modules/
 ui/web/dist/
 ui/web/build/
+.ruff_cache/

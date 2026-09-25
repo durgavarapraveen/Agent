@@ -107,7 +107,10 @@ class LLMRouter:
             if not harness:
                 raise RuntimeError("LLM harness not initialized")
             data = self._run_async(
-                harness.generate_json(prompt, system=system, max_tokens=2048,
+                # 4096: 2048 truncated multi-payload JSON mid-object → unparseable
+                # {} → heuristic fallback. Larger budget + array salvage in
+                # json_enforcer keep real LLM payloads instead of falling back.
+                harness.generate_json(prompt, system=system, max_tokens=4096,
                                        tier=TaskTier.LARGE)
             )
             if not isinstance(data, dict) or not data:

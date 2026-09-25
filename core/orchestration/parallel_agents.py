@@ -96,12 +96,37 @@ async def run_parallel_agents(items: Iterable[Any],
     logger.info(f"[{label}] Fanning out {len(items)} agents (concurrency={concurrency})")
     sem = asyncio.Semaphore(concurrency)
 
+    # Soft-deadline preemption: a huge fan-out is ONE long `gather()` that the
+    # phase-loop watchdog cannot interrupt — that's how a scan runs hours past
+    # max_runtime. Consult the global watchdog as each agent is about to start and
+    # STOP launching new ones once the runtime soft-fraction is hit, so the fan-out
+    # drains quickly and the orchestrator can wind down to reporting.
+    try:
+        import os as _os
+        from core.security.watchdog import get_watchdog
+        _wd = get_watchdog()
+        _soft = float(_os.getenv("BUDGET_SOFT_EXIT_FRAC", "0.85"))
+    except Exception:
+        _wd, _soft = None, 1.0
+    _skipped = {"n": 0}
+
     async def _run(item):
         async with sem:
+            if _wd is not None:
+                try:
+                    if _wd.elapsed_fraction() >= _soft:
+                        _skipped["n"] += 1
+                        return None
+                except Exception:
+                    pass
             try:
                 return await worker(item)
             except Exception as e:
                 logger.warning(f"[{label}] agent for {item!r} failed: {e}", exc_info=False)
                 return None
 
-    return await asyncio.gather(*(_run(i) for i in items))
+    results = await asyncio.gather(*(_run(i) for i in items))
+    if _skipped["n"]:
+        logger.warning("[%s] soft deadline reached — skipped %d/%d agents (winding down to reporting)",
+                       label, _skipped["n"], len(items))
+    return results

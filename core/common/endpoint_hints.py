@@ -9,13 +9,12 @@ _ROLE_KEYWORDS: Dict[str, List[str]] = {
         "/login", "/signin", "/sign-in", "/logon", "/log-in",
         "/user/login", "/users/login", "/account/login", "/session",
         "/auth/login", "/authenticate", "/oauth/token", "/oauth2/token",
-        "/token", "/api/login", "/rest/login", "/rest/user/login",
+        "/token", "/api/login", "/rest/login",
         "/api/auth", "/api/authenticate", "/api/session",
     ],
     "register": [
         "/register", "/signup", "/sign-up", "/create-account", "/users/new",
         "/api/register", "/api/signup", "/api/users", "/users/create",
-        "/rest/user/register",
     ],
     "logout": [
         "/logout", "/signout", "/sign-out", "/api/logout",
@@ -26,15 +25,15 @@ _ROLE_KEYWORDS: Dict[str, List[str]] = {
     ],
     "user_profile": [
         "/me", "/whoami", "/profile", "/account", "/user", "/users/",
-        "/api/me", "/api/user", "/api/users", "/api/account", "/rest/user",
+        "/api/me", "/api/user", "/api/users", "/api/account",
     ],
     "admin": [
         "/admin", "/administration", "/administrator", "/api/admin",
-        "/rest/admin", "/manage", "/dashboard/admin", "/backend",
-        "/api/v1/admin", "/console",
+        "/manage", "/dashboard/admin", "/backend",
+        "/console",
     ],
     "captcha": [
-        "/captcha", "/rest/captcha", "/api/captcha", "/challenge",
+        "/captcha", "/api/captcha", "/challenge",
         "/verify-captcha", "/turnstile", "/recaptcha", "/hcaptcha",
     ],
     "upload": [

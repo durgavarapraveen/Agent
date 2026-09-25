@@ -1,5 +1,6 @@
 from core.domain.endpoint import Endpoint
 from core.coverage.test_definition import ApplicabilityRule
+from core.common import target_shape as ts
 from typing import Callable, Dict
 import re
 
@@ -22,8 +23,8 @@ class ApplicabilityEngine:
         return evaluator(endpoint, rule)
         
     def _check_login_endpoint(self, endpoint: Endpoint, rule: ApplicabilityRule) -> bool:
-        path = endpoint.path.lower()
-        return "login" in path or "auth" in path or "signin" in path
+        # Shared classifier covers /session, /oauth/token, sign_in, credential body.
+        return ts.is_login_endpoint(endpoint.path)
         
     def _check_object_id(self, endpoint: Endpoint, rule: ApplicabilityRule) -> bool:
         # Check if the path ends with an ID or has ID parameters

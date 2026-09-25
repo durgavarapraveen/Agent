@@ -9,9 +9,14 @@ import LiveAgentsPanel from "../components/LiveAgentsPanel";
 import BlackboardPanel from "../components/BlackboardPanel";
 import AttackGraphPanel from "../components/AttackGraphPanel";
 import LlmCallsPanel from "../components/LlmCallsPanel";
+import JevDecisionsPanel from "../components/JevDecisionsPanel";
 import HumanAssistPanel from "../components/HumanAssistPanel";
 import ScanChatPanel from "../components/ScanChatPanel";
 import ArtifactsPanel from "../components/ArtifactsPanel";
+import CostRiskPanel from "../components/CostRiskPanel";
+import CoveragePanel from "../components/CoveragePanel";
+import AttackChainsPanel from "../components/AttackChainsPanel";
+import SastPanel from "../components/SastPanel";
 import { methodColor, fmtDate, parseTs, asText } from "../components/utils";
 
 const PHASES = ["BUSINESS_UNDERSTANDING", "RECON", "ACTIVE_SCANNING", "EXPLOITATION", "REPORTING"];
@@ -21,9 +26,18 @@ export default function LiveScan() {
   const [jobs, setJobs] = useState([]);
   const [selected, setSelected] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [recentScans, setRecentScans] = useState([]);
   const navigate = useNavigate();
 
   const autoSelected = useRef(false);
+
+  // Fallback so the page is never blank when nothing is actively running:
+  // show the most recent scans (click to open their detail).
+  useEffect(() => {
+    api.getScans()
+      .then((list) => setRecentScans(Array.isArray(list) ? list.slice(0, 12) : []))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     const p = createPoller(
@@ -60,10 +74,36 @@ export default function LiveScan() {
       </div>
 
       {jobs.length === 0 ? (
-        <div className="empty">
-          <div className="empty-icon">&#9881;</div>
-          No active or recent scans. Start a scan from the Targets page.
-        </div>
+        recentScans.length === 0 ? (
+          <div className="empty">
+            <div className="empty-icon">&#9881;</div>
+            No active or recent scans. Start a scan from the Targets page.
+          </div>
+        ) : (
+          <div>
+            <div className="empty" style={{ padding: 16, marginBottom: 12 }}>
+              No scan is running right now. Recent scans below — click to open, or start a new one.
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Target</th><th>Status</th><th>Started</th><th>Scan ID</th></tr></thead>
+                <tbody>
+                  {recentScans.map((s) => {
+                    const id = s.scan_id || s.job_id;
+                    return (
+                      <tr key={id} style={{ cursor: "pointer" }} onClick={() => navigate(`/scans/${id}`)}>
+                        <td style={{ color: "var(--text-h)" }}>{s.target}</td>
+                        <td><span className={`badge ${(s.status || "").toLowerCase()}`}>{(s.status || "").toUpperCase()}</span></td>
+                        <td style={{ fontSize: 12, color: "var(--text-dim)" }}>{s.started_at ? new Date(s.started_at).toLocaleString() : "—"}</td>
+                        <td style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{id}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )
       ) : (
         <>
           {running.length > 0 && (
@@ -231,13 +271,17 @@ function LiveScanDetail({ jobId }) {
     { id: "vulns", label: `Vulnerabilities (${vulns.length})` },
     { id: "access", label: "Access Gained" },
     { id: "exploits", label: `Exploits (${exploits.length})` },
+    { id: "chains", label: "Attack Chains" },
+    { id: "coverage", label: "Coverage" },
+    { id: "sast", label: "SAST" },
     { id: "artifacts", label: "Artifacts / PoC" },
     { id: "agents", label: "Parallel Agents" },
     { id: "blackboard", label: "Blackboard" },
     { id: "attackgraph", label: "Attack Graph" },
     { id: "llmio", label: "LLM I/O" },
+    { id: "cost-risk", label: "Cost & Models" },
+    { id: "jev", label: "Jev Decisions" },
     { id: "human", label: "Human Assist" },
-    { id: "activity", label: "Agent Activity" },
     { id: "requests", label: `Requests (${requests.length})` },
     { id: "logs", label: `Logs (${logs.total})` },
   ];
@@ -305,14 +349,19 @@ function LiveScanDetail({ jobId }) {
       {tab === "vulns" && <VulnsSection vulns={vulns} />}
       {tab === "access" && <AccessGainedPanel scanId={jobId} poll />}
       {tab === "exploits" && <ExploitsSection exploits={exploits} />}
+      {tab === "chains" && <AttackChainsPanel scanId={jobId} />}
+      {tab === "coverage" && <CoveragePanel scanId={jobId} />}
+      {tab === "sast" && <SastPanel scanId={jobId} />}
+      {tab === "cost-risk" && <CostRiskPanel scanId={jobId} />}
       {tab === "activity" && <ActivityLog scanId={jobId} poll />}
       {tab === "agents" && <LiveAgentsPanel scanId={jobId} poll />}
       {tab === "blackboard" && <BlackboardPanel scanId={jobId} poll={isRunning} />}
       {tab === "attackgraph" && <AttackGraphPanel scanId={jobId} poll={isRunning} />}
       {tab === "llmio" && <LlmCallsPanel scanId={jobId} poll={isRunning} />}
+      {tab === "jev" && <JevDecisionsPanel scanId={jobId} poll={isRunning} />}
       {tab === "human" && <HumanAssistPanel scanId={jobId} poll={isRunning} />}
       {tab === "artifacts" && <ArtifactsPanel scanId={jobId} poll />}
-      {tab === "requests" && <RequestsSection requests={requests} />}
+      {tab === "requests" && <RequestsSection requests={requests} jobId={jobId} />}
       {tab === "logs" && <LogsSection logRef={logRef} jobId={jobId} />}
     </div>
   );
@@ -581,8 +630,6 @@ function VulnsSection({ vulns }) {
   const [sevFilter, setSevFilter] = useState("ALL");
   const [expanded, setExpanded] = useState(null);
 
-  const sevOrder = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, INFO: 4 };
-
   let filtered = vulns.filter(v => {
     if (sevFilter !== "ALL" && (v.severity || "").toUpperCase() !== sevFilter) return false;
     if (search) {
@@ -594,7 +641,9 @@ function VulnsSection({ vulns }) {
     return true;
   });
 
-  filtered.sort((a, b) => (sevOrder[(a.severity || "INFO").toUpperCase()] || 4) - (sevOrder[(b.severity || "INFO").toUpperCase()] || 4));
+  // Newest-first: findings arrive in discovery order, so the most recent is last;
+  // reverse so the latest finding shows at the top during a live scan.
+  filtered = filtered.slice().reverse();
 
   if (vulns.length === 0) return <div className="empty">No vulnerabilities discovered yet</div>;
 
@@ -638,13 +687,26 @@ function VulnsSection({ vulns }) {
                   <tr><td colSpan={6} style={{ padding: 0 }}>
                     <div style={{ padding: "14px 20px", background: "var(--bg)", borderTop: "1px solid var(--border)" }}>
                       <div className="vuln-detail-grid">
-                        {asText(v.details || v.description) && <><span className="lbl">Details</span><span>{asText(v.details || v.description)}</span></>}
-                        {asText(v.proof || v.evidence) && <><span className="lbl">Proof</span><span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{asText(v.proof || v.evidence)}</span></>}
+                        {(v.location || v.target || v.url) && <><span className="lbl">Location</span><span style={{ fontFamily: "var(--mono)", fontSize: 12, wordBreak: "break-all" }}>{v.location || v.target || v.url}</span></>}
+                        {(v.parameter || v.param || v.injection_point) && <><span className="lbl">Parameter</span><span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{v.parameter || v.param || v.injection_point}</span></>}
+                        {(v.lifecycle || v.status) && <><span className="lbl">State</span><span>{v.lifecycle || v.status}</span></>}
+                        {v.impact_level && <><span className="lbl">Impact</span><span>{v.impact_level}</span></>}
+                        {asText(v.details || v.description) && <><span className="lbl">Details</span><span style={{ whiteSpace: "pre-wrap" }}>{asText(v.details || v.description)}</span></>}
+                        {asText(v.proof || v.evidence) && <><span className="lbl">Proof</span><span style={{ fontFamily: "var(--mono)", fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{asText(v.proof || v.evidence)}</span></>}
+                        {(v.payload) && <><span className="lbl">Payload</span><span style={{ fontFamily: "var(--mono)", fontSize: 12, wordBreak: "break-all" }}>{asText(v.payload)}</span></>}
+                        {asText(v.request) && <><span className="lbl">Request</span><pre style={{ margin: 0, fontFamily: "var(--mono)", fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 200, overflow: "auto" }}>{asText(v.request)}</pre></>}
+                        {asText(v.response_snippet || v.response) && <><span className="lbl">Response</span><pre style={{ margin: 0, fontFamily: "var(--mono)", fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 200, overflow: "auto" }}>{asText(v.response_snippet || v.response)}</pre></>}
+                        {asText(v.curl) && <><span className="lbl">cURL</span><pre style={{ margin: 0, fontFamily: "var(--mono)", fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{asText(v.curl)}</pre></>}
                         {asText(v.tool || v.source) && <><span className="lbl">Tool</span><span>{asText(v.tool || v.source)}</span></>}
-                        {asText(v.remediation) && <><span className="lbl">Remediation</span><span>{asText(v.remediation)}</span></>}
+                        {asText(v.remediation) && <><span className="lbl">Remediation</span><span style={{ whiteSpace: "pre-wrap" }}>{asText(v.remediation)}</span></>}
                         {v.cve_id && <><span className="lbl">CVE</span><span>{asText(v.cve_id)}</span></>}
                         {v.cwe_id && <><span className="lbl">CWE</span><span>{asText(v.cwe_id)}</span></>}
                       </div>
+                      {!asText(v.details || v.description) && !asText(v.proof || v.evidence) && !asText(v.request) && (
+                        <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 8 }}>
+                          This finding recorded no detail/proof/request. Open it in Scan History after the scan for the full record.
+                        </div>
+                      )}
                     </div>
                   </td></tr>
                 )}
@@ -735,9 +797,66 @@ function ExploitsSection({ exploits }) {
 }
 
 
-function RequestsSection({ requests }) {
+function RequestsSection({ requests, jobId }) {
   const [expanded, setExpanded] = useState(null);
-  if (requests.length === 0) return <div className="empty">No captured requests yet</div>;
+  const [exchanges, setExchanges] = useState(null);
+  const [totalSent, setTotalSent] = useState(0);
+
+  useEffect(() => {
+    if (!jobId) { setExchanges([]); return; }
+    let alive = true;
+    const load = () => api.getHttpExchanges(jobId).then((r) => {
+      if (!alive) return;
+      setExchanges(Array.isArray(r.exchanges) ? r.exchanges : []);
+      setTotalSent(r.total_sent || 0);
+    }).catch(() => alive && setExchanges([]));
+    load();
+    const t = setInterval(load, 5000);  // refresh live during the scan
+    return () => { alive = false; clearInterval(t); };
+  }, [jobId]);
+
+  const jstr = (h) => { try { return Object.entries(h || {}).map(([k, v]) => `${k}: ${v}`).join("\n"); } catch { return ""; } };
+  const preBox = { background: "var(--bg-2, #11151c)", color: "var(--text-h)", border: "1px solid var(--border)", padding: 10, borderRadius: 6, fontSize: 12, lineHeight: 1.5, maxHeight: 200, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all", margin: 0 };
+
+  if (exchanges && exchanges.length > 0) {
+    return (
+      <div>
+        <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 10 }}>
+          {exchanges.length} unique requests · {totalSent} total sent (duplicates collapsed) · payload + response captured
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Method</th><th>URL</th><th>Status</th><th>Payload</th><th>×</th></tr></thead>
+            <tbody>
+              {exchanges.map((r, i) => (
+                <React.Fragment key={i}>
+                  <tr className="click-row" onClick={() => setExpanded(expanded === i ? null : i)}>
+                    <td><span className="badge" style={{ background: methodColor(r.method) + "22", color: methodColor(r.method) }}>{r.method}</span></td>
+                    <td style={{ fontFamily: "var(--mono)", fontSize: 11, maxWidth: 460, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.url}</td>
+                    <td><span style={{ color: r.status >= 200 && r.status < 300 ? "var(--green)" : r.status >= 400 ? "var(--red)" : "var(--text-dim)" }}>{r.status || "-"}</span></td>
+                    <td style={{ fontFamily: "var(--mono)", fontSize: 11, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)" }}>{r.req_body ? String(r.req_body).slice(0, 70) : "-"}</td>
+                    <td style={{ fontSize: 11, color: "var(--text-dim)" }}>{r.hits > 1 ? `${r.hits}×` : ""}</td>
+                  </tr>
+                  {expanded === i && (
+                    <tr><td colSpan={5} style={{ padding: 0 }}>
+                      <div style={{ padding: 14, background: "var(--bg)", display: "grid", gap: 10 }}>
+                        <div><div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", marginBottom: 3 }}>REQUEST HEADERS</div><pre style={preBox}>{jstr(r.req_headers) || "(none)"}</pre></div>
+                        {r.req_body && <div><div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", marginBottom: 3 }}>PAYLOAD (body sent)</div><pre style={preBox}>{r.req_body}</pre></div>}
+                        <div><div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", marginBottom: 3 }}>RESPONSE {r.status} BODY</div><pre style={preBox}>{r.resp_body || "(empty)"}</pre></div>
+                        <div style={{ fontSize: 11, color: "var(--text-dim)" }}>Sent {r.hits}× · last {r.last_seen}</div>
+                      </div>
+                    </td></tr>
+                  )}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
+
+  if ((requests || []).length === 0) return <div className="empty">No requests captured yet. Attack requests appear here (with payload + response) as the agent sends them.</div>;
 
   return (
     <div className="table-wrap">
@@ -755,20 +874,8 @@ function RequestsSection({ requests }) {
               {expanded === i && (
                 <tr><td colSpan={4} style={{ padding: 0 }}>
                   <div style={{ padding: 14, background: "var(--bg)" }}>
-                    {r.headers && (
-                      <>
-                        <h3>Headers</h3>
-                        <div className="code-block" style={{ maxHeight: 150 }}>
-                          {typeof r.headers === "object" ? Object.entries(r.headers).map(([k, v]) => `${k}: ${v}`).join("\n") : r.headers}
-                        </div>
-                      </>
-                    )}
-                    {r.post_data && (
-                      <>
-                        <h3 style={{ marginTop: 10 }}>Body</h3>
-                        <div className="code-block" style={{ maxHeight: 150 }}>{r.post_data}</div>
-                      </>
-                    )}
+                    {r.headers && (<><h3>Headers</h3><div className="code-block" style={{ maxHeight: 150 }}>{typeof r.headers === "object" ? Object.entries(r.headers).map(([k, v]) => `${k}: ${v}`).join("\n") : r.headers}</div></>)}
+                    {r.post_data && (<><h3 style={{ marginTop: 10 }}>Body</h3><div className="code-block" style={{ maxHeight: 150 }}>{r.post_data}</div></>)}
                   </div>
                 </td></tr>
               )}

@@ -44,6 +44,18 @@ def _in_scope(url: str) -> bool:
         return True  # no validator configured → don't over-block a local lab
 
 
+def _auth_blob(ctx) -> dict:
+    """P1-E1: authenticated-crawl blob (headers/cookies/localStorage-JWT) derived
+    generically from the scan context via the shared BrowserActuator helper, so
+    post-login SPA routes / dashboards / admin panels are crawled too. Empty when
+    unauthenticated — the crawl then runs anonymously exactly as before."""
+    try:
+        from core.actuation.browser_actuator import BrowserActuator
+        return BrowserActuator.auth_from_ctx(ctx) or {}
+    except Exception:
+        return {}
+
+
 async def crawl_into_context(ctx, base_url: str, max_pages: int = 40) -> int:
     """Populate ctx.captured_requests / endpoints from a crawl. Returns #requests.
 
@@ -52,27 +64,38 @@ async def crawl_into_context(ctx, base_url: str, max_pages: int = 40) -> int:
          installs Chromium (Tier-8 convention). Real JS/XHR/forms/DOM sinks.
       2. Playwright in the agent-host process (if installed here).
       3. Scoped-httpx fallback (no JS).
+
+    When ctx carries auth (ctx.auth_sessions/auth_headers/auth_cookies), the
+    browser backends inject it so the authenticated surface is crawled.
     """
+    auth = _auth_blob(ctx)
+    if auth:
+        logger.info("Crawler: authenticated crawl (headers=%d cookies=%d ls=%d)",
+                    len(auth.get("headers", {})), len(auth.get("cookies", [])),
+                    len(auth.get("local_storage", {})))
     # 1. container-backed Playwright (preferred — matches the project's setup)
     if os.getenv("CRAWLER_USE_KALI", "true").lower() in ("true", "1", "yes", "on"):
         try:
-            n = await _crawl_kali_container(ctx, base_url, max_pages)
+            n = await _crawl_kali_container(ctx, base_url, max_pages, auth)
             if n:
                 logger.info("Crawler(kali-playwright): captured %d requests", n)
+                await _harvest_spa_routes(ctx, base_url)
                 return n
         except Exception as e:
             logger.info("Crawler: kali-container path unavailable (%s)", e)
     # 2. host Playwright
     try:
-        n = await _crawl_playwright(ctx, base_url, max_pages)
+        n = await _crawl_playwright(ctx, base_url, max_pages, auth)
         if n:
             logger.info("Crawler(host-playwright): captured %d requests", n)
+            await _harvest_spa_routes(ctx, base_url)
             return n
     except Exception as e:
         logger.info("Crawler: host playwright unavailable (%s); using httpx fallback", e)
     # 3. httpx fallback
     n = await _crawl_httpx(ctx, base_url, max_pages)
     logger.info("Crawler(httpx): captured %d requests", n)
+    await _harvest_spa_routes(ctx, base_url)
     return n
 
 
@@ -84,6 +107,7 @@ from playwright.sync_api import sync_playwright
 
 BASE = __BASE__
 MAX_PAGES = __MAXPAGES__
+AUTH = __AUTH__
 DOM_SINKS = ["innerHTML","document.write","eval(","setTimeout(","location.href",
              "insertAdjacentHTML","dangerouslySetInnerHTML","postMessage"]
 
@@ -98,6 +122,18 @@ visited, queue = set(), [BASE]
 with sync_playwright() as pw:
     browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
     ctx = browser.new_context(ignore_https_errors=True)
+    # P1-E1: authenticated crawl — inject headers/cookies/localStorage JWT so
+    # post-login routes are reachable. No-op when AUTH is empty.
+    try:
+        if AUTH.get("headers"):
+            ctx.set_extra_http_headers(AUTH["headers"])
+        if AUTH.get("cookies"):
+            ctx.add_cookies(AUTH["cookies"])
+        if AUTH.get("local_storage"):
+            ctx.add_init_script("(() => { const d = " + json.dumps(AUTH["local_storage"]) +
+                                "; for (const k in d) { try { localStorage.setItem(k, d[k]); } catch(e){} } })()")
+    except Exception:
+        pass
     page = ctx.new_page()
     def on_req(req):
         try:
@@ -142,7 +178,7 @@ print("__CRAWL_JSON__" + json.dumps({"requests": requests_out, "forms": forms_ou
 '''
 
 
-async def _crawl_kali_container(ctx, base_url: str, max_pages: int) -> int:
+async def _crawl_kali_container(ctx, base_url: str, max_pages: int, auth: Optional[dict] = None) -> int:
     import asyncio
     import json as _json
     from core.execution.executors.generic import _run_in_kali
@@ -154,7 +190,8 @@ async def _crawl_kali_container(ctx, base_url: str, max_pages: int) -> int:
         raise RuntimeError("playwright not importable in kali container")
     script = (_KALI_CRAWL_SCRIPT
               .replace("__BASE__", _json.dumps(base_url))
-              .replace("__MAXPAGES__", str(int(max_pages))))
+              .replace("__MAXPAGES__", str(int(max_pages)))
+              .replace("__AUTH__", _json.dumps(auth or {})))
     timeout = int(os.getenv("CRAWLER_TIMEOUT_S", "120"))
     rc, out, err = await asyncio.to_thread(_run_in_kali, script, timeout)
     if rc != 0:
@@ -191,16 +228,30 @@ def _ingest_crawl_data(ctx, data: dict) -> int:
 
 
 # ── Playwright backend ──────────────────────────────────────────────────
-async def _crawl_playwright(ctx, base_url: str, max_pages: int) -> int:
+async def _crawl_playwright(ctx, base_url: str, max_pages: int, auth: Optional[dict] = None) -> int:
     from playwright.async_api import async_playwright  # ImportError → fallback
+    import json as _json
 
     captured = 0
     visited: Set[str] = set()
     queue: List[str] = [base_url]
+    auth = auth or {}
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
         context = await browser.new_context(ignore_https_errors=True)
+        # P1-E1: authenticated crawl — inject headers/cookies/localStorage JWT.
+        try:
+            if auth.get("headers"):
+                await context.set_extra_http_headers(auth["headers"])
+            if auth.get("cookies"):
+                await context.add_cookies(auth["cookies"])
+            if auth.get("local_storage"):
+                await context.add_init_script(
+                    "(() => { const d = " + _json.dumps(auth["local_storage"]) +
+                    "; for (const k in d) { try { localStorage.setItem(k, d[k]); } catch(e){} } })()")
+        except Exception:
+            pass
         page = await context.new_page()
 
         def _on_request(req):
@@ -321,6 +372,72 @@ async def _crawl_httpx(ctx, base_url: str, max_pages: int) -> int:
                 if _same_origin(base_url, nxt) and nxt not in visited and len(queue) < max_pages:
                     queue.append(nxt)
     return captured
+
+
+# ── F-X1: SPA client-side route harvesting ───────────────────────────────
+# SPA XSS (DOM/reflected) lives on client-side router routes (e.g. #/search?q=),
+# not on the JSON API endpoints. The router table ships inside the JS bundles, so
+# we fetch every same-origin script and mine route paths. Framework-agnostic:
+# Angular/Vue `{ path: 'x' }`, React-Router `<Route path="x">` / `path:"x"`.
+_ROUTE_PATTERNS = (
+    re.compile(r"""\bpath\s*:\s*['"]([^'"]{0,120})['"]"""),      # Angular/Vue/React config
+    re.compile(r"""<Route[^>]*\bpath\s*=\s*['"]([^'"]{0,120})['"]"""),  # JSX
+)
+# Never treat these as navigable content routes.
+_ROUTE_SKIP = re.compile(r"^(?:\*\*?$|https?:|//|\.|#$)")
+
+
+def _mine_routes(js_text: str) -> Set[str]:
+    out: Set[str] = set()
+    for pat in _ROUTE_PATTERNS:
+        for m in pat.findall(js_text or ""):
+            r = m.strip().lstrip("/")
+            if not r or _ROUTE_SKIP.match(r) or len(r) > 80:
+                continue
+            # keep route-shaped tokens (segments, optional :params); drop globs/urls
+            # and file-path-ish tokens (a "." → asset path, not a router route).
+            if "." not in r and re.fullmatch(r"[A-Za-z0-9_\-:/]+", r):
+                out.add(r)
+    return out
+
+
+async def _harvest_spa_routes(ctx, base_url: str, cap: int = 80) -> None:
+    """Fetch same-origin JS bundles referenced by the base page, mine router
+    paths, and store them on ctx.spa_routes (idempotent, best-effort)."""
+    if getattr(ctx, "_spa_routes_done", False):
+        return
+    setattr(ctx, "_spa_routes_done", True)
+    from core.security.scoped_http import get_scoped_client
+    routes: Set[str] = set()
+    try:
+        async with get_scoped_client(follow_redirects=True, timeout=10, verify=False) as client:
+            r = await client.get(base_url)
+            html = getattr(r, "text", "") or ""
+            srcs = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE)
+            # de-dup, resolve, keep in-scope only, cap the number of bundles fetched
+            seen: Set[str] = set()
+            js_urls: List[str] = []
+            for s in srcs:
+                ju = urljoin(base_url, s)
+                if ju not in seen and _same_origin(base_url, ju) and ju.split("?")[0].endswith(".js"):
+                    seen.add(ju); js_urls.append(ju)
+            for ju in js_urls[:12]:
+                try:
+                    jr = await client.get(ju)
+                    routes |= _mine_routes(getattr(jr, "text", "") or "")
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.debug("[Crawler] SPA route harvest failed: %s", e)
+        return
+    if routes:
+        try:
+            existing = set(getattr(ctx, "spa_routes", None) or [])
+            merged = sorted(existing | routes)[:cap]
+            setattr(ctx, "spa_routes", merged)
+            logger.info("[Crawler] harvested %d SPA route(s) from JS bundles", len(merged))
+        except Exception:
+            pass
 
 
 def _parse_forms_html(page_url: str, html: str) -> List[dict]:

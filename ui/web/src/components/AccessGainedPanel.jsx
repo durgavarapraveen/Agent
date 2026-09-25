@@ -124,7 +124,7 @@ function RowMulti({ label, value }) {
     <div style={{ marginBottom: 6 }}>
       <div style={{ color: "var(--text-dim)", fontSize: 12, marginBottom: 3 }}>{label}</div>
       <pre style={{
-        margin: 0, padding: "8px 10px", background: "var(--bg-code, #0b0e10)",
+        margin: 0, padding: "8px 10px", background: "var(--bg-2)",
         border: "1px solid var(--border)", borderRadius: 4,
         fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-h)",
         whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 160, overflow: "auto",

@@ -186,10 +186,10 @@ class IntelligentDecisionEngine:
             ]
         }
 
-    def analyze_target(self, target: str) -> TargetProfile:
+    def analyze_target(self, target: str, ctx=None) -> TargetProfile:
         profile = TargetProfile(target=target)
         profile.target_type = self._determine_target_type(target)
-        
+
         if profile.target_type in [TargetType.WEB_APPLICATION, TargetType.API_ENDPOINT]:
             try:
                 hostname = urllib.parse.urlparse(target).hostname or target
@@ -197,7 +197,20 @@ class IntelligentDecisionEngine:
             except Exception:
                 pass
 
-        if 'wordpress' in target.lower() or 'wp-' in target.lower():
+        # Prefer fingerprinted tech evidence (profile/ctx.technologies) over
+        # sniffing the target URL string. Only fall back to URL-string sniffing
+        # when no fingerprint data is available.
+        fp_tech = list(profile.technologies) or list(getattr(ctx, "technologies", []) or [])
+        if fp_tech:
+            for t in fp_tech:
+                tv = getattr(t, "value", t)
+                tv = str(tv).lower()
+                if "wordpress" in tv and TechnologyStack.WORDPRESS not in profile.technologies:
+                    profile.technologies.append(TechnologyStack.WORDPRESS)
+                    profile.cms_type = "WordPress"
+                elif "php" in tv and TechnologyStack.PHP not in profile.technologies:
+                    profile.technologies.append(TechnologyStack.PHP)
+        elif 'wordpress' in target.lower() or 'wp-' in target.lower():
             profile.technologies.append(TechnologyStack.WORDPRESS)
             profile.cms_type = "WordPress"
         elif any(ext in target.lower() for ext in ['.php', 'php']):

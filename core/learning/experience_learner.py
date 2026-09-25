@@ -23,9 +23,48 @@ class InMemoryStorage:
         return self._data.get(key, [])
 
 
+class JSONFileStorage:
+    """P1-I5: default PERSISTENT backend so cross-run learning survives process
+    restarts (the old InMemoryStorage default silently lost every lesson on
+    exit). Stores under the hidden runtime dir; degrades to in-memory semantics
+    if the path isn't writable. Generic — no target-specific state."""
+
+    def __init__(self, path: Optional[str] = None):
+        import os
+        from pathlib import Path
+        base = path or os.getenv("EXPERIENCE_STORE_PATH") or str(
+            Path(".antigravity") / "experience.json")
+        self._path = Path(base)
+        self._data: Dict[str, List[Dict[str, Any]]] = {}
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            if self._path.exists():
+                import json
+                self._data = json.loads(self._path.read_text(encoding="utf-8")) or {}
+        except Exception as e:
+            logger.debug("JSONFileStorage load skipped: %s", e)
+
+    def save(self, key: str, records: List[Dict[str, Any]]) -> None:
+        self._data[key] = records
+        try:
+            import json
+            self._path.write_text(json.dumps(self._data, default=str), encoding="utf-8")
+        except Exception as e:
+            logger.debug("JSONFileStorage save skipped: %s", e)
+
+    def load(self, key: str) -> List[Dict[str, Any]]:
+        return self._data.get(key, [])
+
+
 class ExperienceLearner:
     def __init__(self, storage_backend: Optional[Any] = None):
-        self.storage = storage_backend or InMemoryStorage()
+        # P1-I5: persistent by default (was InMemoryStorage → lost on restart).
+        if storage_backend is None:
+            try:
+                storage_backend = JSONFileStorage()
+            except Exception:
+                storage_backend = InMemoryStorage()
+        self.storage = storage_backend
         self._failures: List[Dict[str, Any]] = []
         self._successes: List[Dict[str, Any]] = []
         self._load()

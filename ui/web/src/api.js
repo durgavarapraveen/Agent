@@ -287,14 +287,24 @@ export const api = {
     request(`/api/scans/${id}/blackboard?since=${since}&limit=${limit}`).catch(() => ({
       scan_id: id, summary: {}, count: 0, since, entries: [],
     })),
+  getFinding: (id, findingId) =>
+    request(`/api/scans/${id}/findings/${encodeURIComponent(findingId)}`),
+  getScanMemory: (id) =>
+    request(`/api/scans/${id}/memory`).catch(() => ({ phase_memory: [], fact_index: {}, counts: {} })),
   getLlmCalls: (id, since = 0, limit = 200) =>
     request(`/api/scans/${id}/llm-calls?since=${since}&limit=${limit}`).catch(() => ({
+      scan_id: id, summary: {}, count: 0, since, entries: [],
+    })),
+  getJevDecisions: (id, since = 0, limit = 200) =>
+    request(`/api/scans/${id}/jev-decisions?since=${since}&limit=${limit}`).catch(() => ({
       scan_id: id, summary: {}, count: 0, since, entries: [],
     })),
   getAttackGraph: (id) => request(`/api/scans/${id}/attack-graph`).catch(() => ({
     scan_id: id, nodes: [], edges: [], node_count: 0, edge_count: 0, exploited_count: 0,
   })),
-  getToolOutputs: (id) => request(`/api/scans/${id}/tool-outputs`),
+  getToolOutputs: (id, grouped = false) =>
+    request(`/api/scans/${id}/tool-outputs${grouped ? "?grouped=true" : ""}`)
+      .catch(() => []),
   getActivity: (id) => request(`/api/scans/${id}/activity`),
   getUnderstanding: (id) => request(`/api/scans/${id}/understanding`).catch(() => ({})),
   getLlmProvider: () => request(`/api/settings/llm-provider`).catch(() => ({ provider: "claude_cli", options: ["claude_cli", "bedrock", "deepseek"] })),
@@ -360,6 +370,12 @@ export const api = {
   getScanRisk: (scanId) =>
     request(`/api/scans/${scanId}/risk`)
       .catch(() => ({ scan_id: scanId, total_risk_usd: 0, by_severity: {}, top_findings: [], trend: {} })),
+  getModelRoles: () =>
+    request(`/api/llm/model-roles`)
+      .catch(() => ({ roles: [], pricing: {} })),
+  getHttpExchanges: (id) =>
+    request(`/api/scans/${id}/http-exchanges`)
+      .catch(() => ({ exchanges: [], count: 0, total_sent: 0 })),
   getChainAnalysis: (scanId) =>
     request(`/api/scans/${scanId}/chain-analysis`)
       .catch(() => ({ chain_count: 0, rescore: { upgraded_count: 0, upgrades: [] }, narratives: [] })),

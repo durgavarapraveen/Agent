@@ -617,12 +617,32 @@ class NetworkBroker:
         try:
             current_url = url
             for hop in range(self._max_redirects + 1):
-                # Create client fresh for each hop so telemetry captures the updated chain
-                client = self.create_client(redirect_chain=list(redirect_chain))
-                try:
-                    resp = await client.request(method, current_url, **kwargs)
-                finally:
-                    await client.aclose()
+                # P2: bounded retry/backoff for TRANSIENT transport errors
+                # (connect/read timeouts, connection resets) so a flaky hop isn't
+                # a hard single-attempt failure. Non-transport errors (scope,
+                # watchdog) are raised as-is and never retried.
+                import asyncio as _asyncio
+                import httpx as _httpx_mod
+                _transient = (_httpx_mod.ConnectError, _httpx_mod.ConnectTimeout,
+                              _httpx_mod.ReadTimeout, _httpx_mod.PoolTimeout,
+                              _httpx_mod.ReadError, _httpx_mod.RemoteProtocolError)
+                resp = None
+                _last_exc = None
+                for _attempt in range(3):
+                    # Create client fresh per attempt so telemetry captures the chain
+                    client = self.create_client(redirect_chain=list(redirect_chain))
+                    try:
+                        resp = await client.request(method, current_url, **kwargs)
+                        break
+                    except _transient as _te:
+                        _last_exc = _te
+                        if _attempt < 2:
+                            await _asyncio.sleep(0.5 * (2 ** _attempt))  # 0.5s, 1.5s
+                    finally:
+                        await client.aclose()
+                if resp is None:
+                    raise _last_exc if _last_exc is not None else RuntimeError(
+                        f"NetworkBroker: request failed for {current_url}")
 
                 if _wd is not None:
                     try:

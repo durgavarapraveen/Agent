@@ -182,6 +182,12 @@ class KaliDockerExecutor:
     @classmethod
     def ensure_tool(cls, tool: str) -> bool:
         if cls.is_tool_installed(tool):
+            # P0-D3: the apt package `python3-playwright` provides the Python
+            # module but NOT a browser binary, so chromium.launch() fails
+            # "Executable doesn't exist" on a fresh/auto-created container. Ensure
+            # the Chromium browser is present whenever playwright is requested.
+            if tool == "playwright":
+                cls._ensure_playwright_chromium(cls.get_container())
             return True
 
         package = cls.TOOL_PACKAGES.get(tool, tool)
@@ -199,6 +205,9 @@ class KaliDockerExecutor:
             if r.returncode == 0 and cls.is_tool_installed(tool, bypass_cache=True):
                 logger.info(f"[KaliDockerExecutor] Successfully installed '{tool}'")
                 cls._installed_tools.add(tool)
+                # P0-D3: apt gives the module, not the browser — pull Chromium too.
+                if tool == "playwright":
+                    cls._ensure_playwright_chromium(container)
                 return True
             else:
                 logger.warning(f"[KaliDockerExecutor] Failed to install '{tool}': {r.stderr}")
@@ -206,6 +215,39 @@ class KaliDockerExecutor:
         except Exception as e:
             logger.error(f"[KaliDockerExecutor] Exception installing '{tool}': {e}")
             return False
+
+    @classmethod
+    def _ensure_playwright_chromium(cls, container: Optional[str]) -> bool:
+        """P0-D3: install the Chromium browser binary Playwright drives.
+
+        `python3-playwright` (apt) ships only the Python bindings; without the
+        browser, chromium.launch() fails "Executable doesn't exist". Idempotent
+        and best-effort — runs `playwright install --with-deps chromium` (falling
+        back to the module form and a no-deps variant) once per container.
+        """
+        if not container:
+            return False
+        if container in getattr(cls, "_playwright_ready", set()):
+            return True
+        cmds = [
+            ["docker", "exec", container, "playwright", "install", "--with-deps", "chromium"],
+            ["docker", "exec", container, "python3", "-m", "playwright", "install", "--with-deps", "chromium"],
+            ["docker", "exec", container, "python3", "-m", "playwright", "install", "chromium"],
+        ]
+        for cmd in cmds:
+            try:
+                r = subprocess.run(cmd, shell=False, capture_output=True,
+                                   encoding="utf-8", errors="replace", timeout=600)
+                if r.returncode == 0:
+                    if not hasattr(cls, "_playwright_ready"):
+                        cls._playwright_ready = set()
+                    cls._playwright_ready.add(container)
+                    logger.info(f"[KaliDockerExecutor] Chromium ready in {container}")
+                    return True
+            except Exception as e:
+                logger.debug(f"[KaliDockerExecutor] chromium install attempt failed: {e}")
+        logger.warning(f"[KaliDockerExecutor] could not install Chromium in {container} (SPA actuation may fail)")
+        return False
 
     @classmethod
     def install_all_tools(cls) -> Dict[str, bool]:
@@ -281,6 +323,33 @@ class KaliDockerExecutor:
                 command = " ".join(new_parts)
                 parts = new_parts
                 logger.info(f"[Kali] stripped SPA fragment -> {command}")
+
+        # Canonicalise stacked-scheme URL tokens ("https://GET:get://https://host",
+        # "GET:get://https://host") before any tool sees them — this is the single
+        # choke point for dalfox/nuclei/sqlmap/nikto, which were being fed the
+        # corrupted target (rc=2, and XSS/SQLi silently missed). Repairs each
+        # http(s) token in place; leaves clean URLs and non-URL args untouched.
+        try:
+            from core.common.url_hygiene import canonical_http_url
+            if "://" in command:
+                fixed_parts = []
+                changed = False
+                for p in parts:
+                    q = p[:1] if p[:1] in "'\"" else ""
+                    core = p[len(q):len(p) - len(q)] if q and p[-1:] == q else p[len(q):]
+                    low = core.lower()
+                    if low.startswith(("http://", "https://")) or "://" in low:
+                        cu = canonical_http_url(core)
+                        if cu and cu != core:
+                            p = f"{q}{cu}{q}"
+                            changed = True
+                    fixed_parts.append(p)
+                if changed:
+                    command = " ".join(fixed_parts)
+                    parts = fixed_parts
+                    logger.info(f"[Kali] canonicalised URL token(s) -> {command}")
+        except Exception as _e:
+            logger.debug(f"[Kali] url canonicalise skipped: {_e}")
 
         if parts and parts[0] == "amass" and "enum" not in parts:
             domain = ""

@@ -5,7 +5,14 @@ logger = logging.getLogger(__name__)
 
 class SessionValidator:
     
-    def __init__(self, session_manager, validation_endpoint: str = "/api/me"):
+    def __init__(self, session_manager, validation_endpoint: str = ""):
+        # validation_endpoint is now caller-supplied (no silent "/api/me" default,
+        # which is wrong on any target that names its authed endpoint differently).
+        # Callers should discover one, e.g.:
+        #   from core.common.endpoint_hints import discover_endpoints
+        #   eps = discover_endpoints(ctx, "user_profile")
+        # When left empty, is_valid() skips the live re-request and relies on the
+        # session's own cached validity.
         self.session_manager = session_manager
         self.validation_endpoint = validation_endpoint
         
@@ -15,10 +22,13 @@ class SessionValidator:
             logger.info(f"SESSION_EXPIRED identity={session.identity_id if session else 'unknown'}")
             return False
 
-        if base_url:
+        if base_url and self.validation_endpoint:
             try:
                 import httpx
-                url = base_url.rstrip("/") + self.validation_endpoint
+                ep = self.validation_endpoint
+                if not ep.startswith("/"):
+                    ep = "/" + ep
+                url = base_url.rstrip("/") + ep
                 headers = dict(session.headers or {})
                 if session.cookies:
                     headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in session.cookies.items())

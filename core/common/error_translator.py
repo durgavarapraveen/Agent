@@ -52,6 +52,31 @@ class ErrorTranslator:
         (r"unable to connect to the target url", ErrorCategory.TRANSIENT, "Target URL inaccessible", "Target unreachable during exploit attempt. Check network connectivity or URL path.", "curl", True),
     ]
 
+    @staticmethod
+    def clean_stderr(text: str) -> str:
+        """Strip curl/wget transfer progress-meter noise so the real error line
+        — which these tools print LAST — survives truncation and pattern
+        matching. Without this, a large download's progress meter fills the first
+        N chars and the actual '... could not resolve host' tail is cut off, so
+        the error is misclassified as a generic PERMANENT failure."""
+        if not text:
+            return text
+        keep = []
+        for ln in text.splitlines():
+            s = ln.strip()
+            if not s:
+                continue
+            low = s.lower()
+            # curl progress-meter header rows
+            if "% total" in low or "% received" in low or "dload" in low:
+                continue
+            # a pure progress row: only numbers / spaces / units / punctuation
+            if re.fullmatch(r"[0-9.\s:%kmg+\-]+", low):
+                continue
+            keep.append(s)
+        cleaned = "\n".join(keep).strip()
+        return cleaned or text.strip()
+
     @classmethod
     def translate(
         cls,
@@ -61,7 +86,9 @@ class ErrorTranslator:
         target: str = ""
     ) -> Dict[str, Any]:
         tool_clean = (tool_name or "").lower().strip()
-        stderr_clean = (stderr or "").strip()
+        # Drop progress-meter noise first so the real error line is classified
+        # (and shown in Cause), not the download meter that precedes it.
+        stderr_clean = cls.clean_stderr((stderr or "").strip())
         raw_text = stderr_clean.lower()
 
         matched_category = ErrorCategory.PERMANENT

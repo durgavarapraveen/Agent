@@ -36,8 +36,9 @@ class CloudEnum:
         t = getattr(self.ctx, "target", "") or ""
         host = urlparse(t if "://" in t else f"//{t}").hostname or t
         parts = re.split(r"[.\-]", host)
-        # drop TLD + common infra labels
-        drop = {"com", "net", "org", "io", "co", "www", "app", "api", "dev"}
+        # drop TLD + common infra labels (incl. modern eTLDs)
+        drop = {"com", "net", "org", "io", "co", "www", "app", "api", "dev",
+                "ai", "xyz", "cloud", "tech", "sh", "gg", "online", "site"}
         return [p for p in parts if p and p.lower() not in drop][:3]
 
     def _candidates(self) -> List[str]:

@@ -31,6 +31,17 @@ class FindingStore:
     def store(self, finding: Finding) -> None:
         d = finding.to_dict()
         extra = {k: v for k, v in d.items() if k not in _DIRECT_COLS}
+        # affected_endpoint is a text column and evidence_ids a scalar array —
+        # some probes hand us a dict endpoint or dict evidence entries, which
+        # psycopg2 can't adapt ("can't adapt type 'dict'") and the whole insert
+        # is lost. Coerce non-scalars to strings so the finding still persists.
+        ep = d.get("affected_endpoint", "")
+        if isinstance(ep, (dict, list)):
+            ep = json.dumps(ep, default=str)
+        elif ep is not None and not isinstance(ep, str):
+            ep = str(ep)
+        ev = d.get("evidence_ids", []) or []
+        ev = [e if isinstance(e, (str, int)) else json.dumps(e, default=str) for e in ev]
         with DatabaseManager.get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -53,9 +64,9 @@ class FindingStore:
                         d["title"],
                         d["description"],
                         d["severity"],
-                        d.get("affected_endpoint", ""),
+                        ep,
                         d["state"],
-                        d.get("evidence_ids", []),
+                        ev,
                         json.dumps(extra),
                     ),
                 )

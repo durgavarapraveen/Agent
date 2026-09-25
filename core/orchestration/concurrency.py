@@ -33,8 +33,15 @@ def _cap(env: str, default: int, health=None) -> int:
 
 
 def probe_concurrency(health=None) -> int:
-    """Bound for HTTP-bound probe fan-out. Default 4."""
-    return _cap("PROBE_CONCURRENCY", 4, health)
+    """Bound for probe fan-out. Default 8.
+
+    Exploitation fans out ~endpoints×families agents (hundreds) and each is now
+    largely LLM-bound (per-probe synthesis/decisions on the Bedrock gateway, which
+    uses a fresh async client per call — no provider-side lock), so a wider bound
+    translates into real parallel throughput. Still env-tunable (PROBE_CONCURRENCY)
+    and narrowed by target health (WAF/throttle) via `_cap`. Raise further with
+    PROBE_CONCURRENCY=12/16 if the target and Bedrock rate limits tolerate it."""
+    return _cap("PROBE_CONCURRENCY", 8, health)
 
 
 def kali_concurrency(health=None) -> int:

@@ -29,6 +29,14 @@ GENESIS_HASH = "0" * 64
 AUDIT_SALT = "ANTIGRAVITY_EXEC_AUDIT_2026"
 
 
+def _file_audit_enabled() -> bool:
+    """The tamper-evident audit trail lives in the DB (execution_audit table)
+    by default. Set NEO_FILE_AUDIT=1 to ALSO mirror it to
+    data/execution_audit.log (off by default — no on-disk audit file)."""
+    import os
+    return os.getenv("NEO_FILE_AUDIT", "0").lower() in ("1", "true", "yes", "on")
+
+
 def _redact_value(value: Any) -> Any:
     if isinstance(value, str):
         for pattern in SECRET_PATTERNS:
@@ -45,9 +53,11 @@ def _redact_value(value: Any) -> Any:
 class ExecutionAuditor:
     def __init__(self, audit_log_path: str = "data/execution_audit.log"):
         self._path = Path(audit_log_path)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        if not self._path.exists():
-            self._path.touch()
+        self._file = _file_audit_enabled()
+        if self._file:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            if not self._path.exists():
+                self._path.touch()
         self._last_hash = self._read_last_hash()
 
     def log_action(self, action: str, params: Dict[str, Any], result: Any = None) -> Dict[str, Any]:
@@ -68,8 +78,20 @@ class ExecutionAuditor:
             "current_hash": current_hash,
         }
 
-        with open(self._path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(full_entry) + "\n")
+        # Primary sink: DB hash-chained execution_audit table.
+        try:
+            from core.database.pg_store import AuditRepo
+            AuditRepo.log_execution(action, safe_params,
+                                    {"result": safe_result, "timestamp": entry_body["timestamp"],
+                                     "previous_hash": self._last_hash},
+                                    hash_val=current_hash)
+        except Exception as e:
+            logger.debug("execution audit DB write skipped: %s", e)
+
+        # Optional on-disk mirror (NEO_FILE_AUDIT=1).
+        if self._file:
+            with open(self._path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(full_entry) + "\n")
 
         self._last_hash = current_hash
         return full_entry
@@ -110,6 +132,14 @@ class ExecutionAuditor:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def _read_last_hash(self) -> str:
+        # Chain head comes from the DB when the file mirror is off.
+        if not self._file:
+            try:
+                from core.database.pg_store import AuditRepo
+                h = AuditRepo.last_execution_hash()
+                return h or GENESIS_HASH
+            except Exception:
+                return GENESIS_HASH
         if not self._path.exists() or self._path.stat().st_size == 0:
             return GENESIS_HASH
         lines = self._path.read_text(encoding="utf-8").strip().split("\n")

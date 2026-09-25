@@ -1,5 +1,7 @@
 
 import asyncio
+import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -11,6 +13,26 @@ from enum import Enum
 from typing import Dict, Optional, List, Any
 
 import httpx
+
+# When set on the current async task, RAG knowledge injection is skipped for LLM
+# calls made within the region. Use it for MECHANICAL calls — recon/JSON
+# extraction, parsing — where the RAG "use this knowledge for analysis and
+# recommendations" prefix does not belong: it wastes tokens, adds a retrieve()
+# embedding call, and (on weaker gateway models) makes the model echo the
+# instructions instead of emitting JSON. Analysis/planning calls leave it unset.
+_RAG_DISABLED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "llm_rag_disabled", default=False)
+
+
+@contextlib.contextmanager
+def rag_disabled():
+    """Skip RAG knowledge injection for LLM calls made inside this block."""
+    token = _RAG_DISABLED.set(True)
+    try:
+        yield
+    finally:
+        _RAG_DISABLED.reset(token)
+
 
 _claude_tokenizer = None
 
@@ -29,6 +51,25 @@ def _get_claude_tokenizer():
     return _claude_tokenizer
 
 logger = logging.getLogger(__name__)
+
+# P1-I2: typed marker prefixed on the LLMResponse.error when the budget governor
+# hard-stops a request. Callers should check `(_resp.error or "").startswith(
+# BUDGET_HARD_STOP)` to tell budget exhaustion apart from an empty model reply.
+BUDGET_HARD_STOP = "BUDGET_HARD_STOP"
+
+
+def _is_deterministic_task(task_class) -> bool:
+    """P1-I1: True when a task class must be decided by non-LLM code (per
+    core.llm.model_routing.DETERMINISTIC_TASK_CLASSES). Accepts an enum or a raw
+    string; defensive — unknown/None never blocks a call."""
+    if task_class is None:
+        return False
+    try:
+        from core.llm.model_routing import DETERMINISTIC_TASK_CLASSES
+        want = str(getattr(task_class, "value", task_class)).lower()
+        return any(str(getattr(t, "value", t)).lower() == want for t in DETERMINISTIC_TASK_CLASSES)
+    except Exception:
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -445,8 +486,14 @@ class UniversalLLMHarness:
         if self.governor is not None:
             model_hint = self.active_provider.get_model_for_tier(tier) if self.active_provider else ""
             if not self.governor.allow_request(max_tokens, self.primary_provider.value, model_hint):
+                # P1-I2: typed sentinel so callers can distinguish "budget
+                # exhausted" from "empty payload / model returned nothing" and
+                # fall back to a template instead of silently treating the empty
+                # content as a real (negative) result. Substring "hard stop" is
+                # preserved for backward-compatible checks.
                 return LLMResponse(content="", provider=self.primary_provider.value,
-                                   model=model_hint, error="Budget governor: hard stop reached")
+                                   model=model_hint,
+                                   error=f"{BUDGET_HARD_STOP}: Budget governor hard stop reached")
             tier = self.governor.adjust_tier(tier)
 
         _model_hint = self.active_provider.get_model_for_tier(tier) if self.active_provider else ""
@@ -486,8 +533,10 @@ class UniversalLLMHarness:
                     input_tokens=int(_u.get("input_tokens", 0) or 0),
                     output_tokens=int(_u.get("output_tokens", 0) or 0),
                     cost_usd=float(resp.cost_usd or 0.0))
-        except Exception:
-            pass
+        except Exception as _e:
+            # P2: don't silently go dark on accounting failures — surface at debug
+            # so a broken cost log is observable rather than an invisible no-op.
+            logger.debug("[cost_log] record failed: %s", _e)
 
         # LLM I/O log: record every request→response in order for the UI tab.
         try:
@@ -506,8 +555,8 @@ class UniversalLLMHarness:
                 cost_usd=float(getattr(resp, "cost_usd", 0.0) or 0.0),
                 duration_ms=_dur_ms,
                 error=(getattr(resp, "error", "") or ""))
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("[llm_log] record failed: %s", _e)  # P2: observable, not silent
 
         if _cache is not None and resp is not None and not resp.error:
             try:
@@ -568,8 +617,19 @@ class UniversalLLMHarness:
         system: Optional[str] = None,
         max_tokens: int = 4096,  # 2048 truncated large synth/verify JSON -> unparseable {} (fenced but cut mid-object)
         mandatory_fields: Optional[List[str]] = None,
-        tier: TaskTier = TaskTier.SMALL
+        tier: TaskTier = TaskTier.SMALL,
+        task_class: Optional[str] = None,
     ) -> Dict[str, Any]:
+        # P1-I1: enforce deterministic task classes. Decisions that must never be
+        # made by an LLM (authorization, safety checks, parsing, finding
+        # confirmation) are refused here so a caller that tags its call can't
+        # silently route a should-be-deterministic decision through the model.
+        # Additive: callers opt in by passing `task_class`; untagged calls are
+        # unchanged.
+        if task_class is not None and _is_deterministic_task(task_class):
+            logger.error("[JSON] refusing LLM call for deterministic task_class=%s "
+                         "(must be decided by non-LLM code)", task_class)
+            return {}
         # `mandatory_fields`: callers may name keys that must appear in the JSON.
         # We nudge the model with a one-line hint; callers still validate the
         # result themselves, so this is advisory (kept for signature parity).
@@ -672,6 +732,8 @@ class UniversalLLMHarness:
         return self.budget.stats()
 
     async def _inject_rag_context(self, prompt: str, system: Optional[str]) -> Optional[str]:
+        if _RAG_DISABLED.get():
+            return system  # mechanical call (extraction/parse) — no RAG, no retrieve
         try:
             from core.rag.pipeline import get_rag
             rag = get_rag()

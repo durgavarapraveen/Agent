@@ -118,8 +118,12 @@ class OSINTOrchestrator:
         # Analyze domain
         dns_intel = await self.osint_engine.dns_intel.analyze_domain(domain)
         
-        # Save to shared context
-        self.ctx.update('domain_intelligence', dns_intel)
+        # Save to shared context as a plain dict (not the dataclass instance —
+        # a raw dataclass JSON-serializes via str() → "DomainIntelligence(...)"
+        # which the UI renders character-by-character).
+        from dataclasses import asdict as _asdict, is_dataclass as _is_dc
+        self.ctx.update('domain_intelligence',
+                        _asdict(dns_intel) if _is_dc(dns_intel) else dns_intel)
         
         return {
             'spec': spec.to_dict(),
@@ -239,9 +243,21 @@ class OSINTOrchestrator:
                                   tool=name)
                 try:
                     r = await coro
+                    # OSINT produces INTEL (subdomains/repos/emails/records), not
+                    # vuln findings — count intel items recursively so the card
+                    # reflects work done instead of showing 0/0.
+                    def _items(x, d=0):
+                        if d > 4:
+                            return 0
+                        if isinstance(x, list):
+                            return len(x) + sum(_items(i, d + 1) for i in x if isinstance(i, (list, dict)))
+                        if isinstance(x, dict):
+                            return sum(_items(v, d + 1) for v in x.values())
+                        return 0
+                    n = _items(r)
+                    t.heartbeat(steps_taken=1, findings_count=n)
                     t.finish(status="completed")
                     if _reason:
-                        n = len(r) if isinstance(r, (list, dict)) else 0
                         await _reason(scan_id, aid, 2,
                                       f"→ {name}: completed ({n} item(s)).",
                                       tool=name, status=1 if n else 0)

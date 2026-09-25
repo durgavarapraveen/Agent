@@ -33,20 +33,46 @@ from agents.universal_llm_harness import (
 logger = logging.getLogger(__name__)
 
 # Approx Bedrock pricing (USD per 1M tokens) for cost estimation.
-_PRICING = {
-    "haiku": (0.80, 4.0),
-    "sonnet": (3.0, 15.0),
-    "opus": (15.0, 75.0),
-    "deepseek": (0.28, 0.42),
-}
+# Pricing now lives in core.economics.pricing (authoritative + env-overridable).
+
+
+def _sanitize_tool_call_args(msg: dict) -> dict:
+    """Ensure every tool_call's `function.arguments` is VALID JSON. The OpenAI-style
+    gateway re-parses that JSON-encoded string, so a malformed one (emitted by a
+    model or built by a caller) 400s the request. Re-serialise from the parsed dict;
+    fall back to '{}' when unparseable. Returns a shallow-copied, safe message."""
+    if not isinstance(msg, dict) or not msg.get("tool_calls"):
+        return msg
+    out = dict(msg)
+    fixed = []
+    for tc in msg.get("tool_calls") or []:
+        try:
+            fn = dict(tc.get("function") or {})
+            raw = fn.get("arguments", "{}")
+            if isinstance(raw, str):
+                try:
+                    parsed = json.loads(raw or "{}")
+                    if not isinstance(parsed, (dict, list)):
+                        parsed = {}
+                except Exception:
+                    parsed = {}
+                fn["arguments"] = json.dumps(parsed)
+            else:
+                fn["arguments"] = json.dumps(raw if isinstance(raw, (dict, list)) else {})
+            tc2 = dict(tc); tc2["function"] = fn
+            fixed.append(tc2)
+        except Exception:
+            fixed.append(tc)
+    out["tool_calls"] = fixed
+    return out
 
 
 def _price_for(model: str) -> tuple:
-    m = (model or "").lower()
-    for key, price in _PRICING.items():
-        if key in m:
-            return price
-    return (1.0, 3.0)
+    # Authoritative per-model rates (env-overridable). Unknown models return
+    # (0, 0) + a one-time warning instead of a fabricated default, so cost is
+    # never a made-up number (spec Phase 29).
+    from core.economics.pricing import price_for as _pf
+    return _pf(model)
 
 
 class BedrockProvider(LLMProvider):
@@ -78,6 +104,27 @@ class BedrockProvider(LLMProvider):
         if u.endswith("/chat/completions"):
             u = u[: -len("/chat/completions")]
         return u
+
+    def _extra_body(self) -> dict:
+        """Mantle gateway request extras. Under ZDR (default) this sends
+        ``data_retention: "none"`` so prompts/completions are not retained or
+        shared by the provider. Empty only when ZDR is disabled AND no explicit
+        AWS_BEDROCK_DATA_RETENTION is set (direct-Bedrock/other gateways then
+        receive nothing)."""
+        try:
+            from core.llm.zdr import data_retention_value
+            dr = data_retention_value()
+        except Exception:
+            import os
+            dr = os.getenv("AWS_BEDROCK_DATA_RETENTION", "").strip()
+        return {"data_retention": dr} if dr else {}
+
+    def _zdr_headers(self) -> dict:
+        try:
+            from core.llm.zdr import zdr_headers
+            return zdr_headers()
+        except Exception:
+            return {}
 
     def _mint_token(self) -> str:
         """Fresh short-term gateway token from the AWS credential chain; falls
@@ -125,6 +172,17 @@ class BedrockProvider(LLMProvider):
     def get_large_model(self) -> str:
         return self.large_model
 
+    def get_model_for_role(self, role) -> str:
+        """Resolve a task role (fast/reasoning/planner/coding/vision/embedding)
+        to a concrete model id, falling back to this provider's small/large."""
+        try:
+            from core.llm.model_roles import ModelRole, model_for_role, _FAST_ROLES
+            r = role if isinstance(role, ModelRole) else ModelRole(str(role).lower())
+            m = model_for_role(r)
+            return m or (self.small_model if r in _FAST_ROLES else self.large_model)
+        except Exception:
+            return self.large_model
+
     def supports_native_tools(self) -> bool:
         # generate_with_tools speaks the Anthropic Messages tool schema
         # (anthropic_version + input_schema) for Claude on Bedrock, AND — via the
@@ -155,8 +213,15 @@ class BedrockProvider(LLMProvider):
         temperature: float = 0.3,
         response_format: Optional[str] = None,
         tier: TaskTier = TaskTier.SMALL,
+        model: str = "",
+        role: Any = None,
     ) -> LLMResponse:
-        model = self.get_model_for_tier(tier)
+        # Model selection precedence: explicit model > role > tier. Role routing
+        # (spec Phase 28/32) sends cheap tasks to a fast model and hard reasoning
+        # to a strong one; resp.model carries the actual id so cost_log accounts
+        # tokens per model correctly.
+        model = model or (self.get_model_for_role(role) if role is not None
+                          else self.get_model_for_tier(tier))
         if self._use_gateway():
             return await self._gateway_chat(prompt, system, max_tokens, temperature,
                                             response_format, model)
@@ -234,10 +299,12 @@ class BedrockProvider(LLMProvider):
             # which stalled the planner and starved the phase no-progress guard).
             client = AsyncOpenAI(base_url=self._sdk_base_url(),
                                  api_key=self._mint_token(),
+                                 default_headers=self._zdr_headers() or None,
                                  timeout=90.0, max_retries=2)
             resp = await client.chat.completions.create(
                 model=model, messages=messages,
-                max_tokens=max_tokens, temperature=temperature)
+                max_tokens=max_tokens, temperature=temperature,
+                extra_body=self._extra_body())
         except Exception as e:
             logger.warning("Bedrock gateway request failed: %s", e)
             return LLMResponse(content="", provider="bedrock", model=model, error=str(e),
@@ -390,7 +457,10 @@ class BedrockProvider(LLMProvider):
         # PENTESTING_TOOLS are already OpenAI-shaped; normalize any bare fn dicts.
         oai_tools = [t if t.get("type") == "function"
                      else {"type": "function", "function": t} for t in (tools or [])]
-        conv = list(messages)
+        # Sanitize any inbound assistant tool_calls: `function.arguments` is a
+        # JSON-encoded string the gateway re-parses — a malformed one (from a prior
+        # turn / caller) 400s the whole request. Re-serialise each to valid JSON.
+        conv = [_sanitize_tool_call_args(m) for m in messages]
         total_in = total_out = 0
         start = time.monotonic()
         last_text = ""
@@ -399,11 +469,13 @@ class BedrockProvider(LLMProvider):
             from openai import AsyncOpenAI
             client = AsyncOpenAI(base_url=self._sdk_base_url(),
                                  api_key=self._mint_token(),
+                                 default_headers=self._zdr_headers() or None,
                                  timeout=90.0, max_retries=2)
             for _round in range(max(1, max_rounds)):
                 resp = await client.chat.completions.create(
                     model=model, messages=conv, tools=oai_tools,
-                    tool_choice="auto", max_tokens=max_tokens)
+                    tool_choice="auto", max_tokens=max_tokens,
+                    extra_body=self._extra_body())
                 u = getattr(resp, "usage", None)
                 if u:
                     total_in += int(getattr(u, "prompt_tokens", 0) or 0)
@@ -414,6 +486,22 @@ class BedrockProvider(LLMProvider):
                     last_text = msg.content
                 if not tool_calls or not tool_executor:
                     break
+                # Parse each tool_call's arguments ONCE. The gateway re-parses the
+                # `function.arguments` string on the NEXT request, so echoing the
+                # model's raw (sometimes malformed) JSON caused a 400
+                # "Expecting ',' delimiter". Re-serialise from the parsed dict so the
+                # echoed turn always carries VALID JSON; fall back to {} if unparseable.
+                parsed_args = []
+                for tc in tool_calls:
+                    try:
+                        a = json.loads(tc.function.arguments or "{}")
+                        if not isinstance(a, dict):
+                            a = {}
+                    except Exception:
+                        logger.debug("[Bedrock/gateway-tools] repaired malformed tool args for %s",
+                                     getattr(tc.function, "name", "?"))
+                        a = {}
+                    parsed_args.append(a)
                 # Echo the assistant turn (with tool_calls) then each tool result.
                 conv.append({
                     "role": "assistant",
@@ -421,14 +509,11 @@ class BedrockProvider(LLMProvider):
                     "tool_calls": [{
                         "id": tc.id, "type": "function",
                         "function": {"name": tc.function.name,
-                                     "arguments": tc.function.arguments},
-                    } for tc in tool_calls],
+                                     "arguments": json.dumps(parsed_args[i])},
+                    } for i, tc in enumerate(tool_calls)],
                 })
-                for tc in tool_calls:
-                    try:
-                        args = json.loads(tc.function.arguments or "{}")
-                    except Exception:
-                        args = {}
+                for i, tc in enumerate(tool_calls):
+                    args = parsed_args[i]
                     try:
                         result = tool_executor(tc.function.name, args)
                         if _aio.iscoroutine(result):

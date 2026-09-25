@@ -129,7 +129,14 @@ class BrowserActuator:
         authz = headers.get("Authorization", "")
         if authz.startswith("Bearer "):
             jwt = authz[len("Bearer "):]
-            for k in ("token", "access_token", "authToken", "jwt"):
+            # Broadened key set so the JWT lands under whatever key the SPA reads.
+            keys = ["token", "access_token", "authToken", "jwt",
+                    "id_token", "session_token", "accessToken", "auth"]
+            # Prefer the observed/captured storage key when known.
+            observed = getattr(ctx, "auth_storage_key", None) or getattr(ctx, "token_storage_key", None)
+            if observed and observed not in keys:
+                keys.insert(0, observed)
+            for k in keys:
                 local_storage[k] = jwt
         cookies = []
         for name, val in cookies_map.items():

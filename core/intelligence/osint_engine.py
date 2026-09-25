@@ -402,9 +402,25 @@ class EmployeeEnumerator:
 
 class GitHubScanner:
 
+    def _default_branch(self, org_or_user: str, repo: str) -> List[str]:
+        # Resolve the repo's real default branch via the GitHub API; fall back to
+        # trying main then master when it can't be determined (avoids hardcoding).
+        try:
+            url = f"https://api.github.com/repos/{urllib.parse.quote(org_or_user)}/{urllib.parse.quote(repo)}"
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            resp = urllib.request.urlopen(req, timeout=10)
+            data = json.loads(resp.read().decode())
+            db = data.get("default_branch") if isinstance(data, dict) else None
+            if db:
+                return [db]
+        except Exception as e:
+            logger.debug(f"[GitHubScanner] default_branch lookup failed for {org_or_user}/{repo}: {e}")
+        return ["main", "master"]
+
     async def scan_repository(self, org_or_user: str, repo: str) -> List[LeakedCredential]:
         credentials = []
         logger.info(f"[GitHubScanner] Scanning {org_or_user}/{repo}...")
+        branches = self._default_branch(org_or_user, repo)
         
         # Patterns to search for
         secret_patterns = {
@@ -425,34 +441,39 @@ class GitHubScanner:
         ]
         
         for file_path in search_files:
-            try:
-                # Construct GitHub API raw content URL
-                url = f"https://raw.githubusercontent.com/{org_or_user}/{repo}/main/{file_path}"
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                resp = urllib.request.urlopen(req, timeout=5)
-                content = resp.read().decode('utf-8', errors='ignore')
-                
-                # Search for secrets
-                for secret_type, pattern in secret_patterns.items():
-                    matches = re.findall(pattern, content)
-                    for match in matches:
-                        secret_value = match[1] if isinstance(match, tuple) else match
-                        
-                        cred = LeakedCredential(
-                            username=secret_type,
-                            email=None,
-                            password=secret_value[:20] + "...",
-                            service="github",
-                            found_in_repo=f"{org_or_user}/{repo}:{file_path}",
-                            severity="critical",
-                            url=f"https://github.com/{org_or_user}/{repo}/blob/main/{file_path}",
-                            discovered_date=datetime.now().isoformat()
-                        )
-                        credentials.append(cred)
-                        logger.warning(f"[GitHubScanner] Found {secret_type} in {file_path}")
-                        
-            except Exception as e:
-                logger.debug(f"[GitHubScanner] Could not scan {file_path}: {e}")
+            content = None
+            branch = branches[0]
+            for br in branches:
+                try:
+                    # Construct GitHub API raw content URL (real default branch)
+                    url = f"https://raw.githubusercontent.com/{org_or_user}/{repo}/{br}/{file_path}"
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                    resp = urllib.request.urlopen(req, timeout=5)
+                    content = resp.read().decode('utf-8', errors='ignore')
+                    branch = br
+                    break
+                except Exception as e:
+                    logger.debug(f"[GitHubScanner] Could not scan {file_path}@{br}: {e}")
+            if content is None:
+                continue
+            # Search for secrets
+            for secret_type, pattern in secret_patterns.items():
+                matches = re.findall(pattern, content)
+                for match in matches:
+                    secret_value = match[1] if isinstance(match, tuple) else match
+
+                    cred = LeakedCredential(
+                        username=secret_type,
+                        email=None,
+                        password=secret_value[:20] + "...",
+                        service="github",
+                        found_in_repo=f"{org_or_user}/{repo}:{file_path}",
+                        severity="critical",
+                        url=f"https://github.com/{org_or_user}/{repo}/blob/{branch}/{file_path}",
+                        discovered_date=datetime.now().isoformat()
+                    )
+                    credentials.append(cred)
+                    logger.warning(f"[GitHubScanner] Found {secret_type} in {file_path}")
         
         return credentials
 
@@ -606,7 +627,11 @@ class OSINTEngine:
         # 3. DNS/Mail intelligence
         logger.info("[OSINTEngine] Phase 3: DNS/Mail Intelligence")
         dns_intel = await self.dns_intel.analyze_domain(domain)
-        results['domain_intelligence'] = dns_intel
+        # Store as a plain dict, not the dataclass instance — otherwise JSON
+        # serialization falls back to str() → "DomainIntelligence(...)" and the
+        # UI iterates the string character-by-character.
+        from dataclasses import asdict as _asdict, is_dataclass as _is_dc
+        results['domain_intelligence'] = _asdict(dns_intel) if _is_dc(dns_intel) else dns_intel
         
         logger.info(f"[OSINTEngine] OSINT complete: {len(employees)} employees, "
                    f"{len(all_credentials)} credentials, DNS analysis done")

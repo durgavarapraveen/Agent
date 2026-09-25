@@ -57,10 +57,22 @@ class VulnGraph:
 
     def add_vulnerability(self, vuln: Dict) -> VulnNode:
         vid = vuln.get("id", f"VULN-{len(self.nodes)+1:03d}")
+        # Un-stack "METHOD:scheme://" / "/#/"-embedded corruption so node
+        # locations are clean URLs (e.g. "GET:https://…" -> "https://…").
+        raw_loc = (vuln.get("location") or vuln.get("url") or "")
+        loc = raw_loc
+        try:
+            from core.common.url_hygiene import canonical_http_url
+            probe = raw_loc[1:] if (isinstance(raw_loc, str) and raw_loc.startswith("/") and "://" in raw_loc) else raw_loc
+            clean = canonical_http_url(str(probe))
+            if clean:
+                loc = clean
+        except Exception:
+            pass
         node = VulnNode(
             id=vid,
             vuln_type=vuln.get("type", vuln.get("vuln_type", "unknown")),
-            location=vuln.get("location", vuln.get("url", "")),
+            location=loc,
             severity=vuln.get("severity", "medium"),
             details=vuln,
             confirmed=vuln.get("confirmed", False),
