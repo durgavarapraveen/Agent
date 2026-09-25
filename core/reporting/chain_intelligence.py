@@ -97,8 +97,10 @@ async def synthesize_chains(scan_id: str) -> List[Dict]:
     prompt = guarded_prompt(CHAIN_INSTRUCTIONS, [("scan_artefacts", artefacts_json)])
     try:
         from agents.universal_llm_harness import TaskTier
+        # Chain synthesis is a reasoning task (compose dependent multi-step paths);
+        # the large tier yields far more reliable JSON + real chains than SMALL.
         resp = await llm.generate_response(
-            prompt=prompt, max_tokens=2000, temperature=0.2, tier=TaskTier.SMALL)
+            prompt=prompt, max_tokens=2000, temperature=0.2, tier=TaskTier.LARGE)
         text = (getattr(resp, "content", "") or "").strip()
         import re
         m = re.search(r"\[[\s\S]*\]", text)
@@ -113,18 +115,48 @@ async def synthesize_chains(scan_id: str) -> List[Dict]:
         return []
     # Enrich each chain with the actual vuln titles/locations
     for ch in chains:
-        for step in ch.get("steps", []):
+        if not isinstance(ch, dict):
+            continue
+        for step in ch.get("steps", []) or []:
+            if not isinstance(step, dict):
+                continue
             vi = step.get("vuln_id")
             if isinstance(vi, int) and 0 <= vi < len(inputs["vulnerabilities"]):
                 v = inputs["vulnerabilities"][vi]
                 step["vuln_title"] = v["title"]
                 step["vuln_location"] = v["location"]
                 step["vuln_severity"] = v["severity"]
-    # Persist
+    # Persist — MAP the LLM chain shape {name,severity,steps,business_impact,
+    # narrative} onto the columns AttackChainRepo reads {chain_id,description,
+    # score,status,impact}. Previously these keys didn't match, so every rich LLM
+    # chain persisted with an EMPTY description / 0.0 score / empty impact and
+    # rendered as a useless stub (#2). Give each a stable id, a readable
+    # description, a severity-derived score, and a distinguishing status.
+    _SEV_SCORE = {"CRITICAL": 9.5, "HIGH": 8.0, "MEDIUM": 5.0, "LOW": 2.0, "INFO": 1.0}
+    rows = []
+    for i, ch in enumerate(chains):
+        if not isinstance(ch, dict):
+            continue
+        sev = str(ch.get("severity", "")).upper()
+        steps = ch.get("steps", []) or []
+        arrow = " → ".join(
+            str(s.get("vuln_title") or s.get("action") or s.get("leads_to") or "step")
+            for s in steps if isinstance(s, dict))
+        desc = (ch.get("narrative")
+                or (f"{ch.get('name', 'Attack chain')}: {arrow}" if arrow else ch.get("name", "")))
+        rows.append({
+            "chain_id": ch.get("chain_id") or f"llm-{str(scan_id)[:12]}-{i}",
+            "description": str(desc)[:500],
+            "score": _SEV_SCORE.get(sev, 0.0),
+            "status": "llm_synthesized",
+            "steps": steps,
+            "impact": ch.get("business_impact") or ch.get("impact") or sev,
+        })
     try:
         from core.database.pg_store import AttackChainRepo
-        AttackChainRepo.bulk_upsert(scan_id, chains)
+        AttackChainRepo.bulk_upsert(scan_id, rows)
     except Exception as e:
         logger.warning(f"[ChainIntel] persist failed: {e}")
-    logger.info(f"[ChainIntel] Synthesised {len(chains)} attack chain(s)")
+    logger.info("[ChainIntel] Synthesised %d attack chain(s) (%d persisted)",
+                len(chains), len(rows))
     return chains
