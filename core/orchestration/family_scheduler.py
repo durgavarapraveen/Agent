@@ -745,6 +745,16 @@ def family_for_signal(text: str):
 # that surfaces as a logged coverage gap (below) rather than a silent skip.
 _JEV_FAMILY_OPTIONS = {f.value: f for f in TestFamily}
 
+# Families that have NO probe in REGISTRY on purpose because they are covered
+# OUTSIDE the injection battery — SSL/TLS by the recon sslscan ingest, CLOUD by
+# the infra/cloud agents (INFRA_AGENTS_ENABLED). Jev routing to one of these is
+# NOT a novel-surface gap; it is already-covered work, so we must not log it as a
+# gap (P2-1). Defensive getattr so a renamed enum member never raises here.
+_RECON_COVERED_FAMILIES = {
+    _f for _name in ("SSL_TLS", "SSL", "TLS", "CLOUD")
+    for _f in (getattr(TestFamily, _name, None),) if _f is not None
+}
+
 
 async def classify_family_jev(text: str, *, scan_id: str = "", cost_log=None):
     """Opt-in Jev fallback: recover a TestFamily from a surface signal the cheap
@@ -770,6 +780,13 @@ async def classify_family_jev(text: str, *, scan_id: str = "", cost_log=None):
             fam = _JEV_FAMILY_OPTIONS.get(val)
             if fam is not None and any(s.family is fam for s in REGISTRY):
                 return fam
+            # P2-1: a family covered outside the battery (SSL/TLS via recon,
+            # CLOUD via infra agents) is NOT a novel gap — acknowledge it as
+            # recon/infra-covered and move on, without the novel-surface warning.
+            if fam is not None and fam in _RECON_COVERED_FAMILIES:
+                logger.debug("[Jev] %s has no battery probe by design — covered by "
+                             "recon/infra; not a novel gap.", getattr(fam, "value", fam))
+                return None
             # Known family but NO probe registered (or unknown label): it cannot be
             # fast-routed — spawn_family_team would no-op AND, since it never claims
             # the family, re-fire every recon cycle wasting a spawn slot. Treat it

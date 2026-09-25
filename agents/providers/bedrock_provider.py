@@ -148,6 +148,12 @@ class BedrockProvider(LLMProvider):
             return False
 
     def _use_gateway(self) -> bool:
+        # An explicitly injected client is a boto3-style invoke_model client — honor
+        # it (the module docstring's "testable with no AWS" contract) instead of the
+        # OpenAI gateway. Production never injects a client, so gateway selection is
+        # unchanged there.
+        if self._client is not None:
+            return False
         return bool(self.base_url and self._can_auth())
 
     def _get_client(self):

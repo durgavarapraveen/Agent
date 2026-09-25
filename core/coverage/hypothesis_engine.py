@@ -70,6 +70,11 @@ PARAM_TYPE_TESTS = {
 
 
 class HypothesisEngine:
+    """Coverage/surface-driven hypothesis engine (`generate_from_surface(...)`),
+    used by CentralBrain as `self.hypothesis_engine_v2` (imported as
+    HypothesisEngineV2). P2-3: distinct from the same-named classes in
+    `core.reasoning.hypothesis_engine` (catalog-gap) and
+    `core.hypothesis.hypothesis_engine` (ledger singleton). Import by module path."""
 
     def __init__(self, catalog: SecurityTestCatalog):
         self._catalog = catalog

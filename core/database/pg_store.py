@@ -1100,6 +1100,23 @@ _MIGRATIONS: List[tuple] = [
      "engagement_id TEXT PRIMARY KEY, name TEXT NOT NULL, "
      "status TEXT DEFAULT 'draft', spec JSONB NOT NULL DEFAULT '{}'::jsonb, "
      "created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());"),
+    # P2-6: keep entries in ascending id order so a future migration that depends
+    # on a lower-numbered one is guaranteed to run after it (all current entries
+    # are independent + IF NOT EXISTS, so this reorder is behavior-preserving).
+    ("0004_engagement_runs",
+     "CREATE TABLE IF NOT EXISTS engagement_runs ("
+     "run_id TEXT PRIMARY KEY, engagement_id TEXT NOT NULL, "
+     "target TEXT DEFAULT '', scan_id TEXT DEFAULT '', "
+     "status TEXT DEFAULT 'pending', tier TEXT DEFAULT 'POC', reason TEXT DEFAULT '', "
+     "created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());"
+     "CREATE INDEX IF NOT EXISTS idx_engagement_runs_eng "
+     "ON engagement_runs (engagement_id);"),
+    ("0005_llm_cost_log",
+     "CREATE TABLE IF NOT EXISTS llm_cost_log ("
+     "id BIGSERIAL PRIMARY KEY, scan_id TEXT, provider TEXT, model TEXT, "
+     "input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, "
+     "cost_usd DOUBLE PRECISION DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW());"
+     "CREATE INDEX IF NOT EXISTS idx_llm_cost_log_scan ON llm_cost_log (scan_id);"),
     ("0006_http_exchanges",
      "CREATE TABLE IF NOT EXISTS http_exchanges ("
      "id BIGSERIAL PRIMARY KEY, scan_id TEXT, fingerprint TEXT, "
@@ -1109,20 +1126,6 @@ _MIGRATIONS: List[tuple] = [
      "last_seen TIMESTAMPTZ DEFAULT NOW());"
      "CREATE UNIQUE INDEX IF NOT EXISTS ux_http_exchanges_scan_fp "
      "ON http_exchanges (scan_id, fingerprint);"),
-    ("0005_llm_cost_log",
-     "CREATE TABLE IF NOT EXISTS llm_cost_log ("
-     "id BIGSERIAL PRIMARY KEY, scan_id TEXT, provider TEXT, model TEXT, "
-     "input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, "
-     "cost_usd DOUBLE PRECISION DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW());"
-     "CREATE INDEX IF NOT EXISTS idx_llm_cost_log_scan ON llm_cost_log (scan_id);"),
-    ("0004_engagement_runs",
-     "CREATE TABLE IF NOT EXISTS engagement_runs ("
-     "run_id TEXT PRIMARY KEY, engagement_id TEXT NOT NULL, "
-     "target TEXT DEFAULT '', scan_id TEXT DEFAULT '', "
-     "status TEXT DEFAULT 'pending', tier TEXT DEFAULT 'POC', reason TEXT DEFAULT '', "
-     "created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());"
-     "CREATE INDEX IF NOT EXISTS idx_engagement_runs_eng "
-     "ON engagement_runs (engagement_id);"),
 ]
 
 

@@ -336,6 +336,17 @@ class PersistenceMixin:
                 logger.debug("No vulnerabilities to persist")
                 return
 
+            # P0-3: _post_scan_chain_analysis rescored ctx.vulnerabilities in
+            # place AFTER the last mid-scan _flush_partial, and this method's own
+            # writes go to persistent_knowledge_store (NOT the pg `vulnerabilities`
+            # table the UI reads). Re-flush to pg here (idempotent upsert) so
+            # chain-upgraded severities and any sweep-recovered findings land in
+            # the table the dashboard reads.
+            try:
+                await self._flush_partial("final (post-rescore)")
+            except Exception as e:
+                logger.warning(f"[persist] final pg re-flush failed (non-fatal): {e}")
+
             logger.info("Persisting vulnerability findings...")
             for vuln in self.ctx.vulnerabilities:
                 finding_id = self.persistent_knowledge_store.add_finding(

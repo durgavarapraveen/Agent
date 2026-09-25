@@ -218,6 +218,7 @@ class UniversalProbeEngine:
 
         findings: List[Dict[str, Any]] = []
         any_blocked = False
+        _obs_cand = None  # P1-2: best suspicious-but-unconfirmed response for the sweep
         try:
             # 1. baseline (for differential / boolean-blind detection)
             baseline = await self._baseline(surface, point)
@@ -256,6 +257,15 @@ class UniversalProbeEngine:
                     if scan_mode.stop_after_first():
                         break  # FAST: one confirmation per (point, class)
                     # COVERAGE/BENCHMARK: keep going for distinct bugs/challenges
+                elif _obs_cand is None and not waf_blocked:
+                    # P1-2: capture a suspicious-but-unconfirmed response (server
+                    # error, or verbatim payload reflection the oracle didn't
+                    # confirm) so the persist-time LLM sweep can recover a
+                    # missed finding. One candidate per point keeps volume bounded.
+                    _body = ev.get("response_body", "") or ""
+                    _refl = bool(p.payload_text) and p.payload_text in _body
+                    if int(ev.get("status_code", 0) or 0) >= 500 or _refl:
+                        _obs_cand = (int(ev.get("status_code", 0) or 0), _body)
             # 3. boolean-blind SQLi (differential TRUE/FALSE pair) when error/
             #    time-based in-band probes found nothing.
             if not findings and vuln_class.upper() == "SQLI":
@@ -278,6 +288,13 @@ class UniversalProbeEngine:
                 ledger.blocked(surface.url, pkey, vuln_class, "WAF/policy blocked payloads")
             else:
                 ledger.tested(surface.url, pkey, vuln_class, confirmed=False)
+        # P1-2: no confirmed finding but a suspicious response was seen — hand it
+        # to the persist-time LLM sweep so an ambiguous-but-real bug isn't lost.
+        if not findings and _obs_cand is not None:
+            rec = getattr(ctx, "record_probe_observation", None)
+            if callable(rec):
+                rec(getattr(surface, "method", "GET"), surface.url, _obs_cand[0],
+                    hypothesis=f"{vuln_class} @ {pkey}", body=_obs_cand[1])
         return findings
 
     async def _boolean_blind_sqli(self, surface, point, ctx, baseline) -> Optional[Dict[str, Any]]:

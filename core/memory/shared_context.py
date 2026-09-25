@@ -174,6 +174,38 @@ class SharedContextV2:
         except Exception:
             return str(loc).lower()
 
+    def record_probe_observation(self, method: str, url: str, status: int,
+                                 hypothesis: str = "", body: str = "",
+                                 cap: int = 400) -> None:
+        """Shared sink for raw exploit-probe observations reviewed by the
+        persist-time LLM sweep (_llm_probe_finding_sweep). Previously only
+        custom_probe fed that sweep, so ambiguous-but-real findings from every
+        other probe were never recovered (P1-2). Deduped by (method,path,status),
+        capped, best-effort — never raises into a probe."""
+        try:
+            led = getattr(self, "probe_observations", None)
+            if led is None:
+                led = []
+                setattr(self, "probe_observations", led)
+            if len(led) >= cap:
+                return
+            path = str(url or "").split("?")[0].lower()
+            sig = f"{str(method).upper()}|{path}|{int(status or 0)}"
+            seen = getattr(self, "_probe_obs_sigs", None)
+            if seen is None:
+                seen = set()
+                setattr(self, "_probe_obs_sigs", seen)
+            if sig in seen:
+                return
+            seen.add(sig)
+            led.append({
+                "method": str(method).upper(), "url": url,
+                "status": int(status or 0), "hypothesis": hypothesis,
+                "body_snippet": (body or "")[:600],
+            })
+        except Exception:
+            pass
+
     def add_vulnerability(self, vuln: Dict):
         # E2: never store a blank type — derive one from the finding's own fields
         # so it can't land as an untyped row. Generic; no fixed vocabulary.
@@ -181,6 +213,18 @@ class SharedContextV2:
             derived = (vuln.get("category") or vuln.get("attack_type")
                        or vuln.get("vuln_type") or vuln.get("sub_type") or "").strip()
             vuln["type"] = derived or "UNCATEGORIZED"
+        # P0-1: universal confirmation choke. Probes and the Dispatcher/UPE call
+        # this sink directly, bypassing _stamp_and_add_vuln, so run the shared
+        # ingestion gate here (URL hygiene, scope drop, oracle re-verify,
+        # observation/reproduction/confirmation/takeover). Idempotent: a finding
+        # already gated on the _stamp path is skipped via its `_gated` marker.
+        # Returns True only for an out-of-scope drop.
+        try:
+            from core.evidence.confirmation_gate import apply_ingestion_gates
+            if apply_ingestion_gates(vuln, getattr(self, "target", "") or ""):
+                return
+        except Exception:
+            pass
         title = (vuln.get("title") or "").lower()
         vtype = (vuln.get("type") or "UNCATEGORIZED").upper()
         location = (vuln.get("location") or vuln.get("target") or "").lower()

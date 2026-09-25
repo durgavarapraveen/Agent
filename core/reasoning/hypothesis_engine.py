@@ -38,6 +38,14 @@ CATEGORY_PRIORITY = {
 
 
 class HypothesisEngine:
+    """Rule-based, catalog-gap hypothesis engine (`generate(gaps)` + `rank()`),
+    used by CentralBrain as `self.hypothesis_engine`. P2-3: NOT the same class as
+    `core.coverage.hypothesis_engine.HypothesisEngine` (surface-driven, imported as
+    HypothesisEngineV2) or `core.hypothesis.hypothesis_engine.HypothesisEngine`
+    (the ledger singleton via `get_engine()`). Import the right one by module path.
+    `llm_client` is a RESERVED optional hook — this engine is deterministic and does
+    NOT call the LLM; LLM-driven hypotheses come from
+    `core.intelligence.dynamic_hypothesis.DynamicHypothesisEngine`."""
 
     def __init__(self, test_catalog: SecurityTestCatalog, attack_surface: Any = None, llm_client: Any = None) -> None:
         self.catalog = test_catalog

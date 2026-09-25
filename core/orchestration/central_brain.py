@@ -96,7 +96,6 @@ from core.access_control.matrix_engine import MatrixEngine
 from core.security.security_context import SecurityContext as SecurityContextV2
 from core.security.capability_registry import CapabilityRegistry, CapabilityDefinition
 from core.security.authorization_service import AuthorizationService, AuthorizationPolicy
-from core.reasoning.reasoning_engine import ReasoningEngine
 
 # P1a — Experiment Model
 from core.domain.experiment import SecurityExperiment
@@ -786,11 +785,19 @@ class CentralBrain(
                 except ValueError:
                     _entry_cap = 3
                 _reentry = _entries >= _entry_cap
-                if _done or _stall or _reentry:
+                # P1-1: honor the no-progress giveup on the DAG (happy) path too.
+                # A phase that gave up via the no-progress guard (_should_exit_phase
+                # populates _no_progress_phases) must not be re-selected by the
+                # scheduler while its completion predicate is unmet — mark it
+                # completed so the DAG advances. Previously this force-advance only
+                # fired in the legacy except-fallback, which the DAG path bypasses.
+                _no_prog = cur_name in (getattr(self, "_no_progress_phases", None) or set())
+                if _done or _stall or _reentry or _no_prog:
                     completed.add(cur_name)
-                    if not _done and (_stall or _reentry):
+                    if not _done and (_stall or _reentry or _no_prog):
                         logger.info("PHASE_STALL_ADVANCE: %s completion predicate unmet "
                                     "but %s; advancing", cur_name,
+                                    "no-progress giveup" if _no_prog else
                                     "stall cap hit" if _stall else
                                     f"re-entry cap ({_entries}/{_entry_cap}) hit")
             # P0.6: controlled re-entry — a completed phase may be re-run ONLY
@@ -850,6 +857,21 @@ class CentralBrain(
             reasons = sched.blocked_reasons(self.ctx, completed)
             if reasons:
                 logger.info(f"PHASE_DAG_BLOCKED: {reasons}")
+            # P1-5: never terminate without REPORTING having run at least once —
+            # the REPORTING phase hosts CriticAgent FP-validation + the LLM finding
+            # validator + report generation. If the DAG has nothing ready but
+            # REPORTING never executed (and it's allowed), force it once so the
+            # critic isn't skipped on an early/blocked exit. Bounded: once we are
+            # in REPORTING (or it's completed) this no longer fires, so the loop
+            # still terminates.
+            _rep = ExecutionPhase.REPORTING.value
+            _rep_allowed = (not self._allowed_phases) or (_rep in self._allowed_phases)
+            if (_rep not in completed and _rep_allowed and self.current_phase
+                    and self.current_phase.value != _rep):
+                logger.info("PHASE_DAG_FINALIZE: no phase ready and REPORTING not run "
+                            "— forcing REPORTING once (critic + report).")
+                self.transition_phase(ExecutionPhase.REPORTING)
+                return
             self.current_phase = None
             return
         except Exception as _e:
@@ -884,7 +906,13 @@ class CentralBrain(
         from core.orchestration.checkpointer import Checkpointer
 
         self._stop_requested = False
-        self._stop_file = Path(f".antigravity/stop_{target.replace('://', '_').replace('/', '_')}.signal")
+        # Slug MUST match the server's stop-file slug exactly (ui/api/server.py:
+        # stop_scan / cleanup), which also strips ':'. Without the ':' replace a
+        # target like "host:8080" produced a different filename here, so the UI
+        # "stop" wrote a file this brain never polled and the scan ran until the
+        # watchdog (P0-4).
+        _stop_slug = target.replace("://", "_").replace("/", "_").replace(":", "_")
+        self._stop_file = Path(f".antigravity/stop_{_stop_slug}.signal")
 
         self.llm = LLMClient.get()
         self.ctx = SharedContext(target, scope)
@@ -1135,7 +1163,10 @@ class CentralBrain(
             allowed_actions=["scan", "fuzz", "enumerate", "exploit"],
             blocked_patterns=[],
         ))
-        self.reasoning_engine = ReasoningEngine(llm_client=None)
+        # (Removed dead self.reasoning_engine = ReasoningEngine(llm_client=None):
+        #  it was constructed but none of its methods were ever called, and its
+        #  llm_client was always None — P2-4/P2-5. LLM-driven hypotheses come from
+        #  DynamicHypothesisEngine (_run_dynamic_hypothesis_cycle).)
 
         # ── Phase 2.1: Unified Authorization Authority ──
         self.auth_authority = AuthorizationAuthority.get()
@@ -7973,7 +8004,10 @@ class CentralBrain(
     async def _run_dynamic_hypothesis_cycle(self, cycle_name: str = "first_order") -> None:
         """Pα: Run a dynamic hypothesis engine cycle to discover novel attack surfaces."""
         from core.intelligence.dynamic_hypothesis import DynamicHypothesisEngine
-        engine = DynamicHypothesisEngine(ctx=self.ctx)
+        # D-2: hand the LLM-driven Pα engine the SAME routed, cost-logged harness
+        # the rest of the brain uses (it would otherwise self-fetch a separate
+        # client, escaping role-routing + per-scan cost accounting).
+        engine = DynamicHypothesisEngine(ctx=self.ctx, llm_client=getattr(self, "llm", None))
         findings = await engine.run_cycle(cycle_name=cycle_name)
         for f in findings:
             self.ctx.add_vulnerability(f)
@@ -9379,6 +9413,22 @@ CRITICAL RULES:
                 "dedup": dedup_summary}
 
     async def _generate_report(self):
+        # D-1: attach a concrete remediation plan (root cause, fix, optional code
+        # patch, verification, references) to every confirmed/high finding BEFORE
+        # the report is assembled and persisted, so each reported vuln ships with
+        # an actionable fix — the brief's "then fix them". Runs after the critic
+        # so only surviving findings are planned. Bounded LLM spend with a
+        # deterministic per-class fallback; non-destructive (guidance only, never
+        # applies a patch).
+        try:
+            from core.remediation import get_fix_planner
+            _src = os.getenv("ANTIGRAVITY_SOURCE_SNIPPET", "") or ""
+            await get_fix_planner(self.llm).enrich(
+                list(getattr(self.ctx, "vulnerabilities", []) or []),
+                ctx=self.ctx, source_snippet=_src)
+        except Exception as _e:
+            logger.warning(f"[FixPlanner] remediation enrichment skipped (non-fatal): {_e}")
+
         # Attack-chain intelligence: compose distinct exploitation paths from
         # the scan artefacts (SQLi→dump→crack→login→IDOR chains, etc.)
         try:

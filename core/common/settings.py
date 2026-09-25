@@ -106,7 +106,9 @@ class Settings:
 
     @property
     def api_port(self) -> int:
-        return self.int("API_PORT", 8000)
+        # Default aligned with docker-compose/Dockerfile.web and the server's
+        # __main__ launch (8900) so all launch paths agree (P2-7).
+        return self.int("API_PORT", 8900)
 
     @property
     def api_key(self) -> str:

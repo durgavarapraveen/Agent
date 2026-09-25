@@ -4,9 +4,14 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
-_spec = importlib.util.spec_from_file_location("setup_local_models",
-                                               ROOT / "scripts" / "setup_local_models.py")
+_SCRIPT = ROOT / "scripts" / "setup_local_models.py"
+if not _SCRIPT.exists():
+    # Orphaned target (no non-test reference) — skip rather than abort collection.
+    pytest.skip("scripts/setup_local_models.py not present", allow_module_level=True)
+_spec = importlib.util.spec_from_file_location("setup_local_models", _SCRIPT)
 slm = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(slm)
 

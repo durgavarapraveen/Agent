@@ -124,12 +124,91 @@ class SurfaceClassifier:
                     seen.add(dk)
                     surfaces.append(s)
 
+        # 3. SPA routes mined from JS bundles (crawler F-X1 → ctx.spa_routes).
+        # These never enter captured_requests or the endpoint inventory, so
+        # without this step the whole server-side injection battery
+        # (SQLI/SSTI/SSRF/IDOR/...) never reaches JS-only routes — they'd get
+        # DOM-XSS + route-disclosure only (P0-2 chaining gap). Each route is
+        # concretised into a requestable URL and classified like any surface.
+        spa_routes = getattr(ctx, "spa_routes", None) or []
+        base = getattr(ctx, "target", "") or ""
+        n_spa = 0
+        for route in spa_routes:
+            try:
+                s = self._surface_from_spa_route(str(route), base)
+            except Exception as e:
+                logger.debug("surface from spa route failed: %s", e)
+                continue
+            if s and s.url:
+                dk = f"{s.method} {s.url}"
+                if dk not in seen:
+                    seen.add(dk)
+                    surfaces.append(s)
+                    n_spa += 1
+
+        # 4. Globally-discovered parameter NAMES (arjun/recon mining → ctx
+        # "parameters"). These are names with no captured request and no endpoint
+        # association, so they never became injection points — starving the whole
+        # injection battery (SSRF from url-named params like redirect_uri/callback,
+        # NoSQLi/SQLi from generic text params) whenever the browser captured no
+        # live API traffic. Attach them as query injection points to param-less
+        # endpoint/SPA surfaces so the battery actually runs on them.
+        disc = self._discovered_params(ctx)
+        n_param_pts = 0
+        if disc:
+            _INJECTABLE = (LOC_QUERY, LOC_JSON, LOC_FORM, LOC_MULTIPART)
+            enriched = 0
+            for s in surfaces:
+                if enriched >= 40:
+                    break  # bound the injection matrix on param-rich targets
+                # ONLY synthetic endpoint/SPA surfaces — never captured requests
+                # (whose raw is the request dict and may carry an "endpoint" key).
+                if not (s.raw.get("endpoint") is True or "spa_route" in s.raw):
+                    continue
+                if any(p.location in _INJECTABLE for p in s.injection_points):
+                    continue  # already has its own injectable points
+                for name in disc:
+                    s.injection_points.append(self._point(LOC_QUERY, name, ""))
+                    n_param_pts += 1
+                s.injection_points = self._dedup_points(s.injection_points)
+                enriched += 1
+
         tech = self._tech(ctx)
         for s in surfaces:
             self._assign_classes(s, tech)
-        logger.info("SurfaceClassifier: %d surfaces (%d captured, %d endpoints)",
-                    len(surfaces), len(getattr(ctx, "captured_requests", []) or []), len(endpoints))
+        logger.info("SurfaceClassifier: %d surfaces (%d captured, %d endpoints, %d spa-routes, "
+                    "%d discovered-param points)",
+                    len(surfaces), len(getattr(ctx, "captured_requests", []) or []),
+                    len(endpoints), n_spa, n_param_pts)
         return surfaces
+
+    @staticmethod
+    def _discovered_params(ctx, cap: int = 30) -> List[str]:
+        """Flat list of discovered parameter NAMES (ctx 'parameters'), filtered to
+        plausible param names (drops HTTP verbs / junk tokens), deduped, capped."""
+        raw = None
+        try:
+            raw = ctx.get("parameters") if hasattr(ctx, "get") else None
+        except Exception:
+            raw = None
+        if raw is None:
+            raw = getattr(ctx, "parameters", None)
+        out: List[str] = []
+        seen: Set[str] = set()
+        _VERBS = {"get", "post", "put", "patch", "delete", "head", "options"}
+        for item in (raw or []):
+            name = item.get("name") if isinstance(item, dict) else item
+            name = str(name or "").strip()
+            # Allow single-char params (e.g. Juice Shop search `q`); cap length.
+            if not re.match(r"^[A-Za-z_][A-Za-z0-9_.\-]{0,39}$", name):
+                continue
+            if name.lower() in _VERBS or name.lower() in seen:
+                continue
+            seen.add(name.lower())
+            out.append(name)
+            if len(out) >= cap:
+                break
+        return out
 
     # ── request → surface ──────────────────────────────────────────────
     def _surface_from_request(self, req: Dict[str, Any]) -> Optional[Surface]:
@@ -220,6 +299,49 @@ class SurfaceClassifier:
         if "/graphql" in url.lower():
             s.kind = "graphql"; s.signals.add("graphql")
         s.injection_points = self._dedup_points(pts)
+        return s
+
+    # ── spa route → surface (JS-bundle-mined client routes) ────────────
+    def _surface_from_spa_route(self, route: str, base: str) -> Optional[Surface]:
+        r = (route or "").strip().lstrip("#")
+        if not r:
+            return None
+        absolute = r.startswith(("http://", "https://"))
+        if not absolute and not r.startswith("/"):
+            r = "/" + r
+        path_part, _, query = r.partition("?")
+        if absolute:
+            full = path_part
+        else:
+            # Concretise route templates (:id, {id}, <id>, *) so the path is a
+            # real, requestable URL and the templated segment is picked up as an
+            # id-shaped injection point by _points_from_path.
+            segs = [seg for seg in path_part.split("/") if seg != ""]
+            concrete = [
+                "1" if (seg.startswith((":", "{", "<")) or seg == "*") else seg
+                for seg in segs
+            ]
+            path = "/" + "/".join(concrete) if concrete else "/"
+            full = urllib.parse.urljoin((base or "").rstrip("/") + "/", path.lstrip("/"))
+        if query:
+            full = f"{full}?{query}"
+        if not full.startswith(("http://", "https://")):
+            return None
+        # Scope guard: an absolute route to a DIFFERENT registrable domain (e.g. a
+        # CDN) must never mint an on-target surface — the probe layer would
+        # otherwise be handed an off-scope host. Same-domain (incl. subdomains) OK.
+        if absolute and base:
+            def _reg(h: str) -> str:
+                parts = (h or "").lower().strip(".").split(".")
+                return ".".join(parts[-2:]) if len(parts) >= 2 else (h or "").lower()
+            _bh = urllib.parse.urlparse(base if "://" in base else "http://" + base).hostname or ""
+            _fh = urllib.parse.urlparse(full).hostname or ""
+            if _bh and _fh and _reg(_fh) != _reg(_bh):
+                return None
+        s = Surface(url=full, method="GET", raw={"spa_route": route})
+        s.injection_points = self._dedup_points(
+            self._points_from_query(full) + self._points_from_path(full)
+        )
         return s
 
     # ── point builders ─────────────────────────────────────────────────

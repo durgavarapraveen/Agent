@@ -936,16 +936,34 @@ class AgenticExecutor:
     # dangerous flags (arbitrary file write / shell / script), not the target.
     _TARGET_FLAGS = {"-u", "--url", "-l", "--list", "-target", "--target", "-host", "--host"}
 
+    # Code-exec / arbitrary-file-write flag fragments. An UNLISTED tool (one with
+    # no explicit allowlist below) has these stripped; everything else is kept so
+    # legit recon flags survive. Downstream defence is shell=False + scope, but a
+    # tool must never be handed --os-shell / --file-write from an LLM plan.
+    _UNLISTED_BLOCK_SUBSTR = (
+        "os-shell", "os-pwn", "os-cmd", "os-smbrelay", "sql-shell",
+        "file-write", "file-dest", "file-upload", "eval", "tamper-script",
+    )
+
     TOOL_ARG_ALLOWLIST: Dict[str, set] = {
         "nmap": {"-p", "-sV", "-sC", "-sS", "-sT", "-sU", "-A", "-O", "-T0", "-T1", "-T2", "-T3", "-T4", "-T5",
                  "--top-ports", "--script", "--open", "-Pn", "-n", "--min-rate", "--max-rate", "-oN", "-oX", "-oG"},
         "sqlmap": {"-u", "--url", "-r", "-g", "--batch", "--level", "--risk", "--dbs", "--tables", "--dump",
                    "--forms", "--crawl", "--flush-session", "--random-agent", "--technique", "--tamper", "-p",
                    "--data", "--cookie", "--headers", "--method", "--threads", "--timeout", "--retries",
-                   "--dbms", "--os"},
+                   "--dbms", "--os",
+                   # extraction depth: without these sqlmap could only confirm,
+                   # never actually dump the evidence that proves impact.
+                   "-D", "-T", "-C", "--dump-all", "--columns", "--schema", "--count",
+                   "--current-db", "--current-user", "--is-dba", "--passwords",
+                   "--search", "--where", "--start", "--stop"},
         "nuclei": {"-u", "-l", "-t", "-tags", "--tags", "-s", "-severity", "--severity", "-as", "--automatic-scan",
                    "-rl", "--rate-limit", "-c", "--concurrency", "-H", "--header", "-fr", "--follow-redirects",
-                   "-j", "-jsonl", "--jsonl", "-silent", "-nc", "-duc", "-timeout", "-retries"},
+                   "-j", "-jsonl", "--jsonl", "-silent", "-nc", "-duc", "-timeout", "-retries",
+                   # template include/exclude selectors + progress; legit scoping
+                   # flags an LLM plan commonly uses that were being stripped.
+                   "-id", "-eid", "-exclude-id", "-itags", "-etags", "-exclude-tags",
+                   "-es", "-exclude-severity", "-et", "-exclude-templates", "-stats", "-vv"},
         "dalfox": {"url", "--url", "--blind", "--cookie", "--header", "--data", "--method", "--mining-dict",
                    "--follow-redirects", "--timeout", "--delay", "--only-discovery", "-p", "--silence",
                    "--no-color", "--user-agent"},
@@ -974,7 +992,25 @@ class AgenticExecutor:
 
         allowlist = AgenticExecutor.TOOL_ARG_ALLOWLIST.get(tool_id)
         if not allowlist:
-            return raw_args
+            # Unlisted tool (subfinder/httpx/whatweb/sslscan/arjun/feroxbuster/…):
+            # we can't allowlist every recon tool's flags without breaking them,
+            # but must not pass code-exec / arbitrary-file-write flags unchecked.
+            # Strip only the explicit danger blocklist; keep every other flag.
+            out = []
+            for tok in tokens:
+                base = (tok.split("=")[0] if "=" in tok else tok).lower().lstrip("-")
+                # Token-boundary match (exact base, or base starts with the token
+                # followed by a separator) so a dangerous fragment can't strip a
+                # benign flag that merely contains it (e.g. "eval" vs "--evaluate").
+                dangerous = tok.startswith("-") and any(
+                    base == b or base.startswith(b + "-") or base.startswith(b + "_")
+                    for b in AgenticExecutor._UNLISTED_BLOCK_SUBSTR
+                )
+                if dangerous:
+                    logger.warning(f"[ToolSanitize] Stripped dangerous arg {tok!r} for unlisted tool {tool_id}")
+                    continue
+                out.append(tok)
+            return " ".join(out)
 
         allowlist = allowlist | AgenticExecutor._TARGET_FLAGS
         sanitized = []

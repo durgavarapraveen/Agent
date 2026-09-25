@@ -37,6 +37,12 @@ class Hypothesis:
 
 
 class HypothesisEngine:
+    """Hypothesis LEDGER singleton (obtained via `get_engine()`): stores hypotheses
+    and serves `next_best_action()` / `summary()`. P2-3: distinct from the
+    same-named classes in `core.reasoning.hypothesis_engine` (catalog-gap generator)
+    and `core.coverage.hypothesis_engine` (surface-driven, HypothesisEngineV2).
+    Import by module path to avoid confusion."""
+
     def __init__(self):
         self._store: Dict[str, Hypothesis] = {}
         self._lock = Lock()
