@@ -37,6 +37,43 @@ LOC_GRAPHQL = "graphql_arg"
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 _NUM_RE = re.compile(r"^\d+$")
+# A path segment following one of these (or any plural-looking segment) is treated
+# as a resource id even when it's a slug/username, not just numeric/UUID — so
+# /users/jdoe and /orders/ab-99 become IDOR/injection points.
+_COLLECTION_RE = re.compile(r"^[a-z][a-z0-9_-]*s$", re.I)
+_KNOWN_COLLECTIONS = {
+    "user", "users", "account", "accounts", "order", "orders", "post", "posts",
+    "item", "items", "product", "products", "file", "files", "project", "projects",
+    "invoice", "invoices", "profile", "profiles", "doc", "docs", "document",
+    "documents", "group", "groups", "team", "teams", "org", "orgs", "customer",
+    "customers", "ticket", "tickets", "message", "messages", "comment", "comments",
+}
+_PATH_STATIC_EXT = (".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico",
+                    ".woff", ".woff2", ".map", ".json", ".xml", ".webp", ".txt")
+_PATH_ACTION_WORDS = {"new", "edit", "create", "update", "delete", "list", "search",
+                      "login", "logout", "register", "index", "home", "about", "api"}
+# Non-actionable URLs that must NEVER become attack surfaces: JS build internals
+# and source-parse artifacts crawlers mine from bundles. They carry no server-side
+# injection surface, but each one still multiplies the coverage matrix
+# (endpoints × classes) and burns probe budget — the coverage-denominator
+# explosion. High-precision only: framework internals + obvious code fragments,
+# NOT every static asset (a real handler ending in .js is left alone).
+_NON_ACTIONABLE_MARKERS = (
+    "/node_modules/", ".routeConfig", "route.js", "$1", "this.",
+    "rolldown-", "/webpack/", "runtime.js", "polyfills",
+)
+
+
+def _is_non_actionable_url(url: str) -> bool:
+    try:
+        low = str(url).lower()
+    except Exception:
+        return False
+    if low.endswith(".map"):
+        return True
+    return any(m.lower() in low for m in _NON_ACTIONABLE_MARKERS)
+
+
 _URL_VALUE_RE = re.compile(r"^(https?|ftp|gopher|file)://|^//|%2f%2f", re.I)
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _JWT_RE = re.compile(r"^ey[A-Za-z0-9_-]+\.ey[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
@@ -146,6 +183,16 @@ class SurfaceClassifier:
                     surfaces.append(s)
                     n_spa += 1
 
+        # Drop non-actionable surfaces (JS build internals, source-parse artifacts)
+        # BEFORE enrichment/coverage so they neither inflate the coverage matrix
+        # (endpoints × classes → denominator explosion) nor waste probe budget.
+        _before = len(surfaces)
+        surfaces = [s for s in surfaces if not _is_non_actionable_url(s.url)]
+        _dropped = _before - len(surfaces)
+        if _dropped:
+            logger.info("[SurfaceClassifier] dropped %d non-actionable surface(s) "
+                        "(JS internals / source-parse artifacts)", _dropped)
+
         # 4. Globally-discovered parameter NAMES (arjun/recon mining → ctx
         # "parameters"). These are names with no captured request and no endpoint
         # association, so they never became injection points — starving the whole
@@ -240,10 +287,22 @@ class SurfaceClassifier:
             for name, val in self._parse_cookie(cookie):
                 pts.append(self._point(LOC_COOKIE, name, val))
         # injectable headers (host / forwarded / referer / origin / ua)
-        for hname in ("host", "x-forwarded-for", "x-forwarded-host", "referer",
-                      "origin", "user-agent", "x-original-url", "x-rewrite-url"):
+        _std_hdrs = ("host", "x-forwarded-for", "x-forwarded-host", "referer",
+                     "origin", "user-agent", "x-original-url", "x-rewrite-url")
+        for hname in _std_hdrs:
             if hname in headers:
                 pts.append(self._point(LOC_HEADER, hname, str(headers[hname])))
+        # custom headers actually seen on this request (X-Tenant-Id, X-Api-Version,
+        # X-User-Id, …) — derive the fuzz-list from real traffic, not a fixed
+        # allowlist. Skips standard/noise x- headers already covered or irrelevant.
+        _skip = set(_std_hdrs) | {"x-requested-with", "x-csrf-token", "x-xsrf-token",
+                                  "x-content-type-options", "x-frame-options"}
+        _added = 0
+        for hname in list(headers.keys()):
+            hl = str(hname).lower()
+            if hl.startswith("x-") and hl not in _skip and _added < 8:
+                pts.append(self._point(LOC_HEADER, hl, str(headers[hname])))
+                _added += 1
 
         # multipart / file upload (may be carried as files/fields, not a raw body)
         is_multipart = "multipart" in ctype or self._has_file_field(req)
@@ -389,9 +448,21 @@ class SurfaceClassifier:
         out: List[InjectionPoint] = []
         try:
             path = urllib.parse.urlparse(url).path
-            for i, seg in enumerate(seg for seg in path.split("/") if seg):
+            segs = [seg for seg in path.split("/") if seg]
+            for i, seg in enumerate(segs):
                 if _NUM_RE.match(seg) or _UUID_RE.match(seg):  # id-shaped path segment
                     out.append(self._point(LOC_PATH, str(i), seg))
+                    continue
+                low = seg.lower()
+                if any(low.endswith(ext) for ext in _PATH_STATIC_EXT) or low in _PATH_ACTION_WORDS:
+                    continue
+                # slug/username id: a non-numeric segment right after a collection
+                # noun (users/<slug>, orders/<code>) — a real IDOR/injection point.
+                prev = segs[i - 1].lower() if i > 0 else ""
+                if prev and (prev in _KNOWN_COLLECTIONS or _COLLECTION_RE.match(prev)):
+                    p = self._point(LOC_PATH, str(i), seg)
+                    p.signals.add("id_like")
+                    out.append(p)
         except Exception:
             pass
         return out

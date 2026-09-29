@@ -288,6 +288,51 @@ from core.orchestration.central_brain_mixins.osint_bridge import OsintBridgeMixi
 from core.orchestration.central_brain_mixins.recon_context import ReconContextMixin
 
 
+def _auth_is_spa_shell(r) -> bool:
+    """A 200 that is really the SPA/static index.html served for an unknown route —
+    not a real API response. Client-side-routed apps answer 200 with HTML for ANY
+    path, so status alone is a false positive: an auth probe 'succeeds' on a decoy
+    route and the real JSON API is never reached."""
+    ctype = (r.headers.get("content-type") or "").lower()
+    if "text/html" in ctype or "application/xhtml" in ctype:
+        return True
+    try:
+        head = r.text.lstrip()[:200].lower()
+    except Exception:
+        head = ""
+    return head.startswith(("<!doctype html", "<html")) or "<app-root" in head
+
+
+def _auth_find_token(obj, _depth=0):
+    """Target-agnostic recursive scan for a token-like value + its dotted path.
+    A JWT (eyJ…) anywhere, or a long string under a token/jwt/access key. Lets login
+    resolve even when a configured token path doesn't match the response shape."""
+    if _depth > 6:
+        return None
+    if isinstance(obj, str):
+        s = obj
+        if s.startswith("eyJ") and s.count(".") >= 2 and len(s) > 20:
+            return ("", s)
+        return None
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            kl = str(k).lower()
+            if isinstance(v, str) and len(v) > 20 and (
+                    v.startswith("eyJ")
+                    or any(t in kl for t in ("token", "jwt", "access", "id_token", "bearer"))):
+                return (str(k), v)
+        for k, v in obj.items():
+            sub = _auth_find_token(v, _depth + 1)
+            if sub:
+                return ((str(k) + "." + sub[0]).strip("."), sub[1])
+    elif isinstance(obj, list):
+        for v in obj:
+            sub = _auth_find_token(v, _depth + 1)
+            if sub:
+                return sub
+    return None
+
+
 class CentralBrain(
     ReconContextMixin,
     OsintBridgeMixin,
@@ -412,8 +457,8 @@ class CentralBrain(
         # (query/body/header) and confirm via the Oracle. Non-injection classes
         # (idor, jwt, file_upload, race, graphql) are handled by specialized
         # probes. Override with UPE_CLASSES="sqli,xss,...".
-        default_classes = ["sqli", "nosqli", "xss", "ssti", "ssrf", "lfi", "rce",
-                           "xxe", "open_redirect", "prototype_pollution",
+        default_classes = ["sqli", "nosqli", "xss", "ssti", "ssrf", "lfi", "rfi",
+                           "rce", "xxe", "open_redirect", "prototype_pollution",
                            "cors_misconfiguration", "host_header_injection",
                            "email_injection", "cache_poisoning"]
         env_classes = os.getenv("UPE_CLASSES", "").strip()
@@ -1967,6 +2012,20 @@ class CentralBrain(
 
     def _build_coverage_matrix_from_surface(self):
         endpoints = self.endpoint_inventory.list_endpoints()
+        # Drop non-actionable URLs (JS build internals / source-parse artifacts)
+        # before they enter the coverage matrix — each junk endpoint multiplies the
+        # ep×test denominator (coverage-denominator explosion) and wastes probe
+        # budget. Same high-precision filter the surface classifier uses.
+        try:
+            from core.recon.surface_classifier import _is_non_actionable_url
+            _before = len(endpoints)
+            endpoints = [ep for ep in endpoints
+                         if not _is_non_actionable_url(ep.get("url", "") or ep.get("endpoint_id", ""))]
+            if len(endpoints) != _before:
+                logger.info("[CoverageMatrix] excluded %d non-actionable endpoint(s) "
+                            "from the coverage surface", _before - len(endpoints))
+        except Exception:
+            pass
         ep_ids = [ep.get("endpoint_id", ep.get("url", "")) for ep in endpoints]
 
         applicable_pairs = []
@@ -2629,7 +2688,12 @@ class CentralBrain(
                 action = self.recovery_policy.get_action(ft)
                 if action == RetryAction.BLOCK:
                     self.coverage_matrix.update_state(exp.endpoint_id, exp.capability, CoverageState.BLOCKED)
-                logger.info(f"[V2Recovery] {ft.value} → {action.value} for {exp.capability}@{exp.endpoint_id}")
+                # Include the underlying error (truncated) so classified failures
+                # are diagnosable — otherwise a burst of identical "tool_execution_error"
+                # lines hides WHY experiments failed.
+                _err = str(result.error).replace("\n", " ")[:160]
+                logger.info(f"[V2Recovery] {ft.value} → {action.value} for "
+                            f"{exp.capability}@{exp.endpoint_id}: {_err}")
 
         conv = self.convergence_engine.calculate_convergence()
         logger.info(f"[V2Cycle] Executed {executed} experiments, coverage={conv:.1%}, gaps={len(self.coverage_matrix.get_gaps())}")
@@ -3971,6 +4035,12 @@ class CentralBrain(
                     logger.warning(f"Compliance check failed: {check.reason}. Skipping EXPLOIT phase.")
                     return
 
+            # Auth self-heal: if self-registration seeded creds but no login URL
+            # resolved at Phase 0 (real endpoint not yet crawled), re-resolve it now
+            # from discovered content and authenticate — so the authenticated
+            # battery (IDOR/JWT/business-logic) runs instead of skipping.
+            await self._reresolve_login_and_auth()
+
             # RESILIENCE: run the LLM-independent expert-probe battery FIRST, so
             # EXPLOITATION always produces agents + findings even if the LLM
             # planner returns nothing and the fuzzer loop below stalls (that is
@@ -4321,7 +4391,16 @@ class CentralBrain(
                                 f"{len(osint_users)} usernames, {len(osint_pw)} leaked passwords")
                 endpoints = getattr(self.ctx, 'endpoints', []) or []
                 captured = getattr(self.ctx, 'captured_requests', []) or []
-                spray_results = await spray.spray(endpoints, captured)
+                # HITL: credential spraying makes real authentication attempts —
+                # require human approval (auto-approved only under opted-in autonomy).
+                from core.escalation.hitl import require_human_approval
+                if not await require_human_approval(
+                        "credential_spray", kind="credential_spray",
+                        target=self.ctx.target, ctx=self.ctx):
+                    logger.warning("[CredSpray] DENIED by human-in-the-loop — skipped")
+                    spray_results = []
+                else:
+                    spray_results = await spray.spray(endpoints, captured)
                 spray_findings = spray.get_findings()
                 for sf in spray_findings:
                     self.ctx.add_vulnerability(sf)
@@ -4466,6 +4545,7 @@ class CentralBrain(
             try:
                 from core.exploitation.cross_role_replay import run_cross_role_replay
                 await run_cross_role_replay(self.ctx)
+                self._coverage_ran.add("exploitation:cross_role_replay")
             except Exception as _e:
                 logger.warning(f"[CrossRoleReplay] failed (non-fatal): {_e}")
 
@@ -4489,6 +4569,7 @@ class CentralBrain(
             try:
                 from core.exploitation.graphql_ws_probe import run_graphql_and_ws
                 await run_graphql_and_ws(self.ctx)
+                self._coverage_ran.add("exploitation:graphql_ws")
             except Exception as _e:
                 logger.warning(f"[GraphQLWSProbe] failed (non-fatal): {_e}")
 
@@ -4694,6 +4775,53 @@ class CentralBrain(
                 logger.warning(f"[Chaining] failed (non-fatal): {e}")
 
         elif phase == ExecutionPhase.REPORTING.value:
+            # Finalize safety-net: critical EXPLOITATION probes live only at
+            # single call-sites in that phase — if the scan short-circuited to
+            # REPORTING (soft deadline / watchdog / phase-DAG finalize) they may
+            # never have run. Run any that didn't, exactly once, so high-value
+            # classes (BOLA cross-role, GraphQL/WS, expert sweep) can't be
+            # silently skipped. Each is guarded by its _coverage_ran key.
+            _critical = [
+                ("exploitation:cross_role_replay",
+                 "core.exploitation.cross_role_replay", "run_cross_role_replay"),
+                ("exploitation:graphql_ws",
+                 "core.exploitation.graphql_ws_probe", "run_graphql_and_ws"),
+                ("exploitation:expert_probes",
+                 "core.exploitation.expert_probes", "run_all_expert_probes"),
+            ]
+            for _key, _mod, _fn in _critical:
+                if _key in self._coverage_ran:
+                    continue
+                try:
+                    _m = __import__(_mod, fromlist=[_fn])
+                    await getattr(_m, _fn)(self.ctx)
+                    self._coverage_ran.add(_key)
+                    logger.info(f"[FinalizeSafetyNet] ran {_fn} (was skipped pre-REPORTING)")
+                except Exception as _e:
+                    logger.warning(f"[FinalizeSafetyNet] {_fn} failed (non-fatal): {_e}")
+
+            # Coverage ledger — enumerable (surface × vuln_class) verdicts so a
+            # scan can't silently skip a class. Built once here, after all probe
+            # phases have stamped self._coverage_ran; NOT_RUN cells are logged
+            # loud and surfaced in the report.
+            try:
+                from core.orchestration.coverage_ledger import build_and_log
+                _cov = build_and_log(self.ctx, getattr(self, "_coverage_ran", set()))
+                if _cov:
+                    self.ctx.update('coverage_ledger', _cov)
+            except Exception as e:
+                logger.warning(f"[CoverageLedger] non-fatal: {e}")
+
+            # Red-team narrative & purple-team debrief (documentation only) —
+            # ATT&CK-tag findings, track objectives, order the kill-chain, and
+            # list detection gaps for the blue-team debrief. No offensive
+            # execution; read-only over the confirmed findings.
+            try:
+                from core.reporting.redteam_narrative import build_redteam_narrative
+                build_redteam_narrative(self.ctx)
+            except Exception as e:
+                logger.warning(f"[RedTeamNarrative] non-fatal: {e}")
+
             # Convergence validation before reporting
             try:
                 is_complete, issues = self.completion_validator.validate_completion()
@@ -5245,7 +5373,17 @@ class CentralBrain(
         logger.info("\n>>> PHASE 1b: HTTP REQUEST INTERCEPTION")
         try:
             capturer = RequestCapturer(max_pages=12, max_depth=2)
-            result = await asyncio.to_thread(capturer.capture, target)
+            # Authenticated capture: feed the live auth blob (JWT/cookies/headers)
+            # so the crawl intercepts logged-in XHR/fetch traffic, not just the
+            # anonymous surface. Empty blob → anonymous crawl (unchanged).
+            try:
+                from core.actuation.browser_actuator import BrowserActuator
+                auth = BrowserActuator.auth_from_ctx(self.ctx) or {}
+            except Exception:
+                auth = {}
+            if auth:
+                logger.info(f"[capture] authenticated crawl (auth: {sorted(auth.keys())})")
+            result = await asyncio.to_thread(capturer.capture, target, auth)
             if result.error and not result.requests:
                 # P1.9: distinguish a BROWSER-UNAVAILABLE failure (no Chromium /
                 # playwright) from a page that genuinely made no client-side
@@ -7378,11 +7516,18 @@ class CentralBrain(
     async def _probe_web_privilege_escalation(self):
         from agents.kali_executor import KaliDockerExecutor
         target = self.ctx.target.rstrip("/")
-        admin_paths = [
-            "/admin", "/administration", "/api/admin",
-            "/admin/dashboard", "/panel", "/manage", "/console",
-            "/api/v1/admin", "/admin/users", "/api/admin/users",
-        ]
+        # Discovery-driven admin paths (same source as the authenticated branch
+        # below) — canonical shapes live in endpoint_hints, not hardcoded here.
+        try:
+            from core.common import endpoint_hints
+            from urllib.parse import urlparse as _urlparse
+            admin_paths = []
+            for full in endpoint_hints.discover_endpoints(self.ctx, "admin", include_fallback=True):
+                pp = _urlparse(full).path or ""
+                if pp and pp not in admin_paths:
+                    admin_paths.append(pp)
+        except Exception:
+            admin_paths = ["/admin", "/administration", "/api/admin"]
         # Add admin/sensitive paths from discovered endpoints
         for ep in (getattr(self.ctx, "endpoints", []) or []):
             ep_url = ep if isinstance(ep, str) else (ep.get("url", "") if isinstance(ep, dict) else "")
@@ -8464,12 +8609,12 @@ class CentralBrain(
         # Operator override next (used when discovery found nothing).
         if cfg.get("AUTH_REGISTER_URL", ""):
             candidates.append(cfg.get("AUTH_REGISTER_URL", ""))
-        # Generic app-agnostic guesses LAST, only as a fallback when discovery
-        # found nothing. No target-specific paths — real routes come from the
-        # discovered list above.
-        for p in ("api/auth/register", "api/register", "api/v1/auth/register",
-                  "auth/register", "register", "signup", "users"):
-            candidates.append(urljoin(base, p))
+        # Generic fallback LAST, only when discovery/config found nothing. Path
+        # shapes come from the single canonical source (endpoint_hints), not literals
+        # duplicated here; discover_endpoints returns discovered matches first and
+        # falls back to that keyword set. Real routes still lead via the call above.
+        candidates.extend(endpoint_hints.discover_endpoints(
+            self.ctx, "register", include_fallback=True))
         candidates = list(dict.fromkeys(candidates))
         # Login URL: explicit config → discovered login endpoint → generic
         # fallback (not an app-specific "/rest/user/login" default).
@@ -8495,6 +8640,8 @@ class CentralBrain(
         # decide whether authentication is POSSIBLE, regardless of outcome.
         auth_signals: list = []
 
+        _is_spa_shell = _auth_is_spa_shell  # module-level; shared with re-resolver
+
         async def _register_one(client, role: str):
             email = f"scan_{secrets.token_hex(5)}@example.com"
             pw = "Sc@n_" + secrets.token_hex(6)
@@ -8514,6 +8661,10 @@ class CentralBrain(
                         continue
                     auth_signals.append(("register", url, r.status_code))
                     if r.status_code in (200, 201):
+                        if _is_spa_shell(r):
+                            # Decoy 200 (SPA/static shell) — not a real signup. Keep
+                            # trying so the loop reaches the JSON API endpoint.
+                            continue
                         logger.info(f"[Auth] self-registered throwaway account "
                                     f"'{role}' at {url} ({r.status_code})")
                         return _cred_result(role, url)
@@ -8543,7 +8694,7 @@ class CentralBrain(
                         body["passwordRepeat"] = pw
                     try:
                         r = await client.post(url, json=body)
-                        if r.status_code in (200, 201):
+                        if r.status_code in (200, 201) and not _is_spa_shell(r):
                             logger.info(f"[Auth] self-registered '{role}' at {url} "
                                         f"via LLM-synthesized body ({r.status_code})")
                             return _cred_result(role, url)
@@ -8560,10 +8711,10 @@ class CentralBrain(
         # captured — so the discovered/generic single guess (e.g. "/login", an SPA
         # route that returns index.html, no token) silently yields 0 identities and
         # every authenticated test is skipped. Resolve the real one by trying each.
-        # Fully target-agnostic: config → discovered login endpoints → generic
-        # login leaves tried as SIBLINGS of each register endpoint (login usually
-        # shares the register API root) and relative to the base. No app-specific
-        # paths.
+        # Fully target-agnostic, ordered: config → discovered login endpoints →
+        # login tried as a SIBLING of each register endpoint that the app actually
+        # exposed (login usually shares the register API root — a structural, not
+        # app-specific, relation) → the centralized content-driven fallback below.
         _login_leaves = ("login", "signin", "sign-in", "authenticate",
                          "sessions", "session", "token")
         login_candidates = []
@@ -8571,15 +8722,21 @@ class CentralBrain(
         login_candidates.extend(_disc_login)
         if cfg.get("AUTH_LOGIN_URL", ""):
             login_candidates.append(cfg.get("AUTH_LOGIN_URL", ""))
+        # Sibling-of-register: parent path is derived from a live register route,
+        # so this adapts to whatever API root the target uses.
         for reg in candidates:
             parent = reg.rsplit("/", 1)[0] if "/" in reg.split("://", 1)[-1] else reg
             for leaf in _login_leaves:
                 login_candidates.append(parent + "/" + leaf)
-        for leaf in _login_leaves:
-            login_candidates.append(urljoin(base, leaf))
-            login_candidates.append(urljoin(base, "api/" + leaf))
-            login_candidates.append(urljoin(base, "auth/" + leaf))
-        login_candidates = list(dict.fromkeys([u for u in login_candidates if u]))[:32]
+        # Content-driven fallback: endpoint_hints matches login-role endpoints
+        # against paths ACTUALLY discovered/captured this scan, and only if none
+        # matched returns its canonical keyword shapes. The path shapes live in one
+        # place (endpoint_hints._ROLE_KEYWORDS["login"]) — no app-specific literals
+        # duplicated here. Substring matching there also catches collection-scoped
+        # routes (e.g. a discovered ".../rest/user/login" matches "/user/login").
+        login_candidates.extend(
+            endpoint_hints.discover_endpoints(self.ctx, "login", include_fallback=True))
+        login_candidates = list(dict.fromkeys([u for u in login_candidates if u]))[:48]
 
         def _dig(obj, path):
             cur = obj
@@ -8590,8 +8747,12 @@ class CentralBrain(
                     return None
             return cur
 
+        _find_token = _auth_find_token  # module-level; shared with re-resolver
+
         async def _resolve_login_url(client, email, pw):
-            """First candidate URL that returns an auth token for the creds."""
+            """First candidate URL that returns an auth token for the creds.
+            Returns (url, token_json_path). Tries the configured path first, then a
+            recursive token scan so an unexpected response shape still resolves."""
             body = {uname_field: email, pw_field: pw}
             for url in login_candidates:
                 try:
@@ -8599,15 +8760,33 @@ class CentralBrain(
                 except Exception:
                     continue
                 auth_signals.append(("login", url, r.status_code))
-                if r.status_code not in (200, 201):
+                if r.status_code not in (200, 201) or _is_spa_shell(r):
                     continue
                 try:
-                    tok = _dig(r.json(), tok_path)
+                    data = r.json()
                 except Exception:
-                    tok = None
-                if tok and isinstance(tok, str) and len(tok) > 20:
-                    return url
-            return ""
+                    continue
+                tok = _dig(data, tok_path)
+                if isinstance(tok, str) and len(tok) > 20:
+                    return url, tok_path
+                found = _find_token(data)
+                if found:
+                    return url, found[0]
+            return "", ""
+
+        # HITL: creating accounts is an outward, state-changing action — require
+        # human approval (auto-approved only if the operator opted into autonomy).
+        try:
+            from core.escalation.hitl import require_human_approval
+            if not await require_human_approval(
+                    "self_register_accounts", kind="account_creation",
+                    target=base, details={"identities": ["user_a", "user_b"]},
+                    ctx=self.ctx):
+                logger.warning("[Auth] self-registration DENIED by human-in-the-loop — skipped")
+                return
+        except Exception as _he:
+            logger.warning(f"[Auth] HITL gate error — skipping self-registration: {_he}")
+            return
 
         creds = []
         async with get_scoped_client(timeout=20, follow_redirects=True) as client:
@@ -8618,12 +8797,15 @@ class CentralBrain(
             # Point creds at a login URL that actually mints a token (best-effort;
             # keeps the original guess if none resolves so nothing regresses).
             if creds:
-                real_login = await _resolve_login_url(
+                real_login, real_tok_path = await _resolve_login_url(
                     client, creds[0]["username"], creds[0]["password"])
                 if real_login:
                     for c in creds:
                         c["login_url"] = real_login
-                    logger.info(f"[Auth] resolved login endpoint for self-reg identities: {real_login}")
+                        if real_tok_path:
+                            c["token_json_path"] = real_tok_path
+                    logger.info(f"[Auth] resolved login endpoint for self-reg identities: "
+                                f"{real_login} (token path: {real_tok_path or tok_path})")
                 else:
                     logger.warning("[Auth] self-reg: no login URL returned a token — "
                                    "authenticated tests may be skipped")
@@ -8766,6 +8948,84 @@ class CentralBrain(
             return out[:limit]
         except Exception:
             return []
+
+    async def _reresolve_login_and_auth(self) -> None:
+        """Post-discovery login re-resolution + re-auth.
+
+        Bootstrap self-registration runs at Phase 0, before the app's real login
+        endpoint is crawled — so self-seeded credentials can carry an unresolved
+        login_url and produce 0 authenticated identities (every authenticated test
+        then skips). Once discovery has populated ctx (RECON/ACTIVE_SCANNING), the
+        real login endpoint is discoverable content: re-resolve it and re-auth.
+        No-op when already authenticated or when there are no seeded creds.
+        Best-effort, non-fatal."""
+        try:
+            creds = getattr(self.ctx, "auth_credentials", None) or []
+            if not creds:
+                return  # nothing seeded
+            # Skip only if a session is genuinely AUTHENTICATED. sessions_map()
+            # returns an entry per role with an "authenticated" flag, so the dict
+            # is non-empty even when Phase-0 login failed — testing truthiness of
+            # the dict alone would wrongly skip re-resolution.
+            sess = getattr(self.ctx, "auth_sessions", None) or {}
+            if any(isinstance(s, dict) and s.get("authenticated") for s in sess.values()):
+                return  # already authenticated
+            email = creds[0].get("username")
+            pw = creds[0].get("password")
+            if not (email and pw):
+                return
+            from core.common import endpoint_hints
+            from core.security.scoped_http import get_scoped_client
+            # Content-driven: discovered login endpoints (now populated) + whatever
+            # login_url the creds already carry. No app-specific literals.
+            cand = list(dict.fromkeys(
+                [c.get("login_url") for c in creds if c.get("login_url")]
+                + endpoint_hints.discover_endpoints(self.ctx, "login", include_fallback=True)))
+            if not cand:
+                return
+            uname_field = creds[0].get("username_field", "email") or "email"
+            pw_field = creds[0].get("password_field", "password") or "password"
+            tok_cfg = creds[0].get("token_json_path", "") or ""
+
+            def _dig(o, path):
+                cur = o
+                for part in (path or "").split("."):
+                    cur = cur.get(part) if isinstance(cur, dict) else None
+                return cur
+
+            resolved_url = resolved_path = ""
+            async with get_scoped_client(timeout=20, follow_redirects=True) as client:
+                for url in cand:
+                    try:
+                        r = await client.post(url, json={uname_field: email, pw_field: pw})
+                    except Exception:
+                        continue
+                    if r.status_code not in (200, 201) or _auth_is_spa_shell(r):
+                        continue
+                    try:
+                        data = r.json()
+                    except Exception:
+                        continue
+                    tok = _dig(data, tok_cfg) if tok_cfg else None
+                    if isinstance(tok, str) and len(tok) > 20:
+                        resolved_url, resolved_path = url, tok_cfg
+                        break
+                    found = _auth_find_token(data)
+                    if found:
+                        resolved_url, resolved_path = url, found[0]
+                        break
+            if not resolved_url:
+                return
+            for c in creds:
+                c["login_url"] = resolved_url
+                if resolved_path:
+                    c["token_json_path"] = resolved_path
+            self.ctx.auth_credentials = creds
+            logger.info(f"[Auth] post-discovery re-resolved login endpoint: {resolved_url} "
+                        f"(token path: {resolved_path or tok_cfg or 'auto'}) — re-authenticating")
+            await self._setup_auth_session()
+        except Exception as e:
+            logger.warning(f"[Auth] post-discovery login re-resolution failed (non-fatal): {e}")
 
     async def _setup_auth_session(self) -> None:
         self.auth_session = None

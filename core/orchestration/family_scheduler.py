@@ -239,10 +239,43 @@ def get_registry() -> List[ProbeSpec]:
     return _REGISTRY_CACHE
 
 
+# Probes whose ACTION is genuinely critical — they change target state, affect
+# OTHER users, or stress availability (not read-only detection). Each must clear
+# the human-in-the-loop gate before it runs. Name -> HITL kind. Read-only probes
+# (sqli/xss/idor/ssrf/lfi/cors/jwt/... detection) are intentionally NOT here.
+CRITICAL_PROBES: Dict[str, str] = {
+    "business_logic_probe": "state_change",   # price/coupon/transaction manipulation
+    "workflow": "state_change",               # replays/violates multi-step workflows
+    "race_probe": "state_change",             # concurrent bursts (TOCTOU / double-spend)
+    "mass_assign_probe": "active_write",       # overwrites protected attrs (role/isAdmin)
+    "cache_poison_probe": "shared_side_effect",  # poisons a shared cache (other users)
+    "smuggling_probe": "shared_side_effect",     # desyncs front/back-end (other users)
+    "graphql_dos_probe": "denial_of_service",    # amplification / DoS probing
+    "file_upload_probe": "file_upload",          # writes a file to the target
+}
+
+
 async def _run_one(brain, spec: ProbeSpec, browser_lock=None) -> int:
     """Import + run one probe against ctx; add findings; log. Never raises.
-    Browser-lane probes are serialized on `browser_lock` (shared browser)."""
+    Browser-lane probes are serialized on `browser_lock` (shared browser).
+    Critical (state-changing/destructive) probes must clear the HITL gate first."""
     ctx = brain.ctx
+    _kind = CRITICAL_PROBES.get(spec.name)
+    if _kind:
+        try:
+            from core.escalation.hitl import require_human_approval
+            approved = await require_human_approval(
+                f"probe:{spec.name}", kind=_kind,
+                target=getattr(ctx, "target", "") or "", ctx=ctx)
+        except Exception:
+            approved = False  # fail-closed for critical actions
+        if not approved:
+            logger.warning("[%s] SKIPPED — denied by human-in-the-loop (%s)", spec.name, _kind)
+            try:
+                brain._log_activity(spec.name, f"{spec.name}: skipped (HITL denied)", tool=spec.name)
+            except Exception:
+                pass
+            return 0
     try:
         mod = __import__(spec.module, fromlist=[spec.func])
         fn = getattr(mod, spec.func)
@@ -451,6 +484,20 @@ async def run_authenticated_battery(brain) -> Dict[str, Any]:
         return {"identities": 0, "skipped": "already_ran"}
     idents = _identity_headers(brain)
     if not idents:
+        # Post-discovery auth self-heal. Credentials are seeded at Phase-0, before
+        # the app's real login endpoint is crawled — so a login_url that didn't
+        # resolve then leaves 0 authenticated identities. By the time the battery
+        # runs (end of ACTIVE_SCANNING, or the watchdog-graceful finalize that never
+        # enters the EXPLOITATION phase body), discovery has populated the endpoints,
+        # so re-resolve + re-auth here. Without this the battery silently skips on
+        # every deadline-truncated scan. Best-effort, idempotent.
+        try:
+            if hasattr(brain, "_reresolve_login_and_auth"):
+                await brain._reresolve_login_and_auth()
+                idents = _identity_headers(brain)
+        except Exception as _e:
+            logger.debug("[AuthedBattery] post-discovery re-resolve failed: %s", _e)
+    if not idents:
         logger.info("[AuthedBattery] no authenticated identities — skipped")
         return {"identities": 0}
     brain._authed_battery_ran = True
@@ -603,6 +650,19 @@ async def run_recon_teams(brain) -> Dict[str, Any]:
         await _reason(scan_id, aid, 2,
                       f"Extracted routes from JS bundles + source maps and observed DOM sinks. "
                       f"Attack surface now: {eps} endpoint(s).", tool="js_analyzer")
+        # Active discovery (deterministic): JS-aware crawl (katana) + content/param
+        # brute (ffuf/arjun) via the Kali container. No-op if Kali/tool absent.
+        if _os.getenv("ENABLE_ACTIVE_DISCOVERY", "true").lower() in ("true", "1", "yes", "on"):
+            try:
+                from core.recon.active_discovery import run_js_crawl, run_content_discovery
+                await run_js_crawl(ctx)
+                await run_content_discovery(ctx)
+                eps2 = len(getattr(ctx, "endpoints", []) or [])
+                await _reason(scan_id, aid, 3,
+                              f"Active discovery (katana + ffuf + arjun) complete. "
+                              f"Attack surface now: {eps2} endpoint(s).", tool="active_discovery")
+            except Exception as e:
+                logger.warning("[ReconTeams:web] active discovery failed: %s", e)
         return n
 
     async def _infra(aid) -> int:
@@ -636,6 +696,21 @@ async def run_recon_teams(brain) -> Dict[str, Any]:
         await _reason(scan_id, aid, 2,
                       f"Cloud / CDN / public-bucket enumeration complete. "
                       f"Exposed cloud asset(s): {len(ce)}.", tool="cloud_enum")
+        # Virtual-host bruteforce + CDN origin unmasking (Kali/HTTP; no-op if absent).
+        if _os.getenv("ENABLE_ACTIVE_DISCOVERY", "true").lower() in ("true", "1", "yes", "on"):
+            try:
+                from core.recon.active_discovery import run_vhost_discovery
+                await run_vhost_discovery(ctx)
+            except Exception as e:
+                logger.warning("[ReconTeams:infra] vhost discovery failed: %s", e)
+            try:
+                from core.recon.cdn_origin import run_cdn_origin_unmask
+                origin_findings = await run_cdn_origin_unmask(ctx) or []
+                for f in origin_findings:
+                    ctx.add_vulnerability(f)
+                    added += 1
+            except Exception as e:
+                logger.warning("[ReconTeams:infra] cdn origin unmask failed: %s", e)
         if added == 0:
             await _reason(scan_id, aid, 3,
                           "No exposed databases, admin services, or public cloud assets found — "

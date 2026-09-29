@@ -1881,8 +1881,15 @@ RULES:
         try:
             import re as _re
             text = resp_text[:200_000]  # cap for perf
-            # Emails
-            email_re = _re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b')
+            # Emails. ReDoS-SAFE: bounded local part + explicit DNS labels (each
+            # label has no '.', so it never overlaps the literal '.' between labels).
+            # The old r'...@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' had a '.'-in-class adjacent
+            # to a literal '\.', causing catastrophic backtracking on long dotted
+            # runs (a 200KB /api/Challenges body once hung the scan for ~54 min).
+            email_re = _re.compile(
+                r'\b[A-Za-z0-9._%+-]{1,64}@'
+                r'(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?\.){1,8}'
+                r'[A-Za-z]{2,24}\b')
             emails = set()
             for m in email_re.finditer(text):
                 e = m.group(0).lower()

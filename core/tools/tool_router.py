@@ -5,6 +5,25 @@ from core.common.schemas import ToolInvocation, ToolResult
 logger = logging.getLogger(__name__)
 
 
+def _normalize_curl_headers(cmd: str) -> str:
+    """Quote unquoted curl `-H NAME: VALUE` headers whose value contains a space or
+    a `/` (User-Agent, Content-Type, Accept, ...). An LLM often emits
+    `-H User-Agent: Mozilla/5.0` unquoted; the shell then splits it and curl reads
+    the second word (`Mozilla`, `application`) as a positional URL → curl (6)
+    'Could not resolve host'. Quoting the header restores the intended request.
+    Only rewrites already-UNquoted headers (skips `-H "X: y"`), and stops the value
+    at the next flag / URL / query so nothing unrelated is absorbed. Safe, curl-only."""
+    import re as _re
+    if not cmd or "curl" not in cmd.split(" ", 1)[0]:
+        return cmd
+    # -H NAME: value...  (NAME unquoted; capture value up to next -flag, http(s)://,
+    # a detached ?query/&param, or end).
+    pat = _re.compile(
+        r'(-H\s+)(?!["\'])([A-Za-z][A-Za-z0-9-]*:\s*\S+(?:\s+[^\s"\'-][^\s]*)*?)'
+        r'(?=\s+-[A-Za-z]|\s+https?://|\s+[?&]|\s*$)')
+    return pat.sub(lambda m: f'{m.group(1)}"{m.group(2).strip()}"', cmd)
+
+
 def _dalfox_oob_callback():
     """Return an active OOB collaborator HTTP callback URL for dalfox --blind, or
     None when no collaborator is configured (then --blind is dropped)."""
@@ -318,12 +337,15 @@ class ToolRouter:
                         r'-o\s+/dev/stdout',       # duplicate output redirection
                         r'-x\s+php,json,bak,txt,html',  # comma-list rejected; use -x per ext
                     ],
-                    # wafw00f only accepts -v (verbose); -silent/-s/-o etc all invalid
+                    # wafw00f only accepts -v (verbose); -silent/-s/-o etc all invalid.
+                    # LLMs also hallucinate --aggressive (nmap-ism) which wafw00f
+                    # rejects with "no such option" (rc=2 → TOOL_FAILED).
                     "wafw00f": [
                         r'-silent\b',
                         r'-s\b(?!\S)',             # bare -s (short for something else)
                         r'-o\s+[^\s]+',
                         r'--silent\b',
+                        r'--?aggressive\b',        # not a wafw00f option
                     ],
                     # gobuster dir: -q and --no-error are valid but LLM sometimes adds -mc
                     "gobuster": [
@@ -351,6 +373,18 @@ class ToolRouter:
                         # collapse double spaces
                         clean_args = _re.sub(r'\s+', ' ', clean_args).strip()
                         break
+
+                # gobuster: aborts rc=1 when the target returns a matching status
+                # for non-existent URLs ("the server returns a status code that
+                # matches ... for non existing urls") — a soft-404 / wildcard.
+                # `--wildcard` forces it to continue instead of bailing. Add it
+                # for the modes that accept it when the LLM omitted it.
+                if base_bin.endswith("gobuster") or base_bin == "gobuster":
+                    _mode = (base_cmd_l[1].lower() if len(base_cmd_l) > 1 else "")
+                    if _mode in ("dir", "dns", "vhost", "fuzz") and \
+                            not _re.search(r'(?<!\S)--wildcard\b', clean_args):
+                        clean_args = (clean_args + " --wildcard").strip()
+                        logger.info("Added gobuster --wildcard (soft-404/wildcard target)")
 
                 # dalfox: flags that REQUIRE a value fail rc=2 when an LLM/planner
                 # passes them bare (observed: `--blind` with no callback URL →
@@ -437,11 +471,51 @@ class ToolRouter:
                 else:
                     logger.info(f"Skipped duplicate extra_args for: {base_cmd}")
 
+            # Quote unquoted curl -H headers (User-Agent/Content-Type/… with spaces
+            # or slashes) so the shell doesn't split the value into a bogus URL
+            # (curl (6) "Could not resolve host: Mozilla/application"). Curl-only,
+            # runs for both LLM-provided and auto-built commands.
+            _cmd = invocation.params.get("command")
+            if isinstance(_cmd, str) and _cmd.lstrip().startswith("curl"):
+                _fixed = _normalize_curl_headers(_cmd)
+                if _fixed != _cmd:
+                    invocation.params["command"] = _fixed
+                    logger.info("Quoted unquoted curl -H header(s) in command")
+
             if inspect.iscoroutinefunction(best_tool.run):
                 raw_result = await best_tool.run(**invocation.params)
             else:
                 raw_result = best_tool.run(**invocation.params)
-                
+
+            # Error-feedback self-repair: if a Kali/CLI command failed, ask a cheap
+            # LLM to correct the command from its OWN stderr and retry ONCE. This is
+            # the general form of the static per-tool flag fixes above — it handles
+            # unseen bad flags/args without a hardcoded rule. Server-independent
+            # (reasons over the tool error, not the target); scope- and shell-safe
+            # (see core.tools.command_repair). Cached per error-signature so it
+            # never loops.
+            if (not getattr(raw_result, "success", True)
+                    and best_tool.__class__.__name__ == "KaliTool"
+                    and isinstance(invocation.params.get("command"), str)):
+                try:
+                    from core.tools.command_repair import repair_command
+                    _orig_cmd = invocation.params["command"]
+                    _fixed = await repair_command(
+                        best_tool.name, _orig_cmd,
+                        getattr(raw_result, "error", "") or "",
+                        target=invocation.target)
+                    if _fixed:  # non-empty → a safe corrected command to retry
+                        logger.info("[CmdRepair] retrying %s with LLM-corrected command",
+                                    best_tool.name)
+                        invocation.params["command"] = _fixed
+                        if inspect.iscoroutinefunction(best_tool.run):
+                            raw_result = await best_tool.run(**invocation.params)
+                        else:
+                            raw_result = best_tool.run(**invocation.params)
+                except Exception as _cre:
+                    logger.debug("[CmdRepair] repair skipped for %s: %s",
+                                 best_tool.name, _cre)
+
             from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus
             
             result = SchemaToolResult(

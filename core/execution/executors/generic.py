@@ -1113,16 +1113,34 @@ class IDORExecutor(GenericHTTPExecutor):
                     findings.append({"test": f"idor_{method.lower()}", "path": swapped_path,
                                      "status": status})
 
-        # If our numeric matcher found no ID endpoints, only guess the generic
-        # /api/users/{i} pattern when discovery shows the target actually exposes
-        # id-bearing paths (UUID/ObjectId/etc. the numeric matcher missed).
+        # Numeric matcher found nothing, but the target may expose id-bearing paths
+        # the matcher missed (UUID/ObjectId/etc). Probe the ACTUAL discovered
+        # id-bearing endpoints with a small numeric substitution in the id segment —
+        # the path comes from the target, never a hardcoded route like /api/users.
         if not id_endpoints:
-            if any(ts.id_path_segments(ep) for ep in self._discovered_endpoints(experiment)):
+            from urllib.parse import urlsplit
+            seen: set = set()
+            for ep in self._discovered_endpoints(experiment):
+                seg_ids = ts.id_path_segments(ep)
+                if not seg_ids:
+                    continue
+                parts = [s for s in urlsplit(ep).path.split("/") if s]
+                idx = seg_ids[0][0]
+                if idx >= len(parts):
+                    continue
                 for i in range(1, 4):
-                    status, body, _ = self._probe(f"{base}/api/users/{i}")
+                    np = list(parts)
+                    np[idx] = str(i)
+                    probe_path = "/" + "/".join(np)
+                    if probe_path in seen:
+                        continue
+                    seen.add(probe_path)
+                    status, body, _ = self._probe(f"{base}{probe_path}")
                     if status == 200 and len(body) > 10:
-                        findings.append({"test": "idor_generic", "path": f"/api/users/{i}",
+                        findings.append({"test": "idor_generic", "path": probe_path,
                                          "status": status, "body_snippet": body[:256]})
+                if len(seen) >= 12:
+                    break
 
         evidence = self.collect_evidence({
             "idor_findings": findings, "findings_count": len(findings),

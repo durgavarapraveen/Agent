@@ -9,11 +9,16 @@ AI-driven, multi-agent autonomous penetration testing and external attack-surfac
 ## Highlights
 
 - **Autonomous 4-phase pipeline** — `RECON → ACTIVE_SCANNING → EXPLOITATION → REPORTING`, driven by `CentralBrain` with a coverage gate that enforces required lanes.
+- **Coverage ledger** — an enumerable `(surface × vuln-class) → CONFIRMED / REFUTED / NOT_RUN / ERROR` matrix built at REPORTING, so a scan can't *silently* skip a class; `NOT_RUN` cells and degraded-confidence (no-OOB, missing-identity authz) are logged loud and put on the report. A **finalize safety-net** re-runs any critical probe that never executed before the report is written.
+- **60+ vulnerability classes** — the OWASP/API Top-10 plus subdomain takeover, OAuth/OIDC flow abuse, web-cache deception, shadow/undocumented API versions, GraphQL argument injection, CSTI, gRPC (reflection + unauth-reachability), RFI, and more.
+- **Redundant confirmation (≥2 signals)** — SQLi via error **+** boolean-blind **+** time-based *differential*; SSRF/RCE/XXE/SSTI/RFI via out-of-band callback; IDOR/BOLA via a cross-user *content* oracle (attacker sees the owner's data, not just a same-size 200); reflected XSS confirmed by real DOM *execution*; weak field-keyed classes (CORS/CSRF/JWT/auth) need a 2nd corroboration or ship as `NEEDS_REVIEW`, never a bare CONFIRMED.
 - **Parallel specialist agents** — OSINT / web / infra / API recon lanes and probe families run concurrently, with a live per-agent activity + reasoning ("thoughts") stream.
 - **Real tool arsenal** — 30+ Kali tools (nuclei, nmap, sqlmap, ffuf, katana, dalfox, subfinder, nikto, …) plus a read-only **Metasploit** auxiliary lane, all run inside an isolated Kali container.
+- **Deterministic active discovery** — a JS-aware crawl (katana), content + parameter brute (ffuf + arjun), virtual-host bruteforce, and CDN-origin unmasking run every scan (not only when the LLM schedules them), feeding real routes/params to the probe battery. Gated by `ENABLE_ACTIVE_DISCOVERY` (default on); safe no-op without the Kali container.
 - **Dynamic payload synthesis** — LLM proposes context-aware payloads (SSTI, XXE, deserialization, mass-assignment, GraphQL, WAF bypass, polyglots) that are verified against a live oracle before any finding is claimed.
-- **Out-of-band verification** — blind XXE/SSRF/deserialization confirmed via a built-in local collaborator + free cloudflared tunnel (zero cost), or interactsh.
+- **Out-of-band verification** — blind SSRF/RCE/XXE/SSTI/RFI/deserialization confirmed via a built-in local collaborator + free cloudflared tunnel (zero cost), or interactsh.
 - **Attack-chain reasoning** — findings are chained, re-scored by chain membership, and bundled into reproducible PoCs.
+- **Red-team / purple-team reporting** — findings are ATT&CK-tagged and assembled into a kill-chain narrative, tracked against operator objectives (`REDTEAM_OBJECTIVES`), with a purple-team detection-gap checklist and a timestamped deconfliction summary. Documentation only — the platform performs no C2, detection evasion, phishing, or lateral movement (those stay human-operated).
 - **Target-agnostic classification** — auth/API/param/role detection by shape + discovery (never app-specific literals), with an optional **Jev** typed classifier at decision gates.
 - **Multi-provider LLM** — **DeepSeek** (default) / AWS **Bedrock** / Ollama; switchable from the UI Settings page.
 - **Multi-identity authz testing** — IDOR/BOLA/BFLA across roles.
@@ -215,8 +220,11 @@ All variables are documented in [`.env.example`](.env.example). Common ones:
 - **Database**: `DATABASE_URL` or `POSTGRES_{HOST,PORT,DB,USER,PASSWORD}` (optional — degrades to no-DB).
 - **API**: `API_HOST`, `API_PORT`, `API_KEY`, `CORS_ORIGINS`.
 - **Tools**: `KALI_CONTAINER` (Kali container name), `NEO_ENABLE_MSF` (Metasploit aux lane), `PROBE_CONCURRENCY`, `DISPATCH_BUDGET`.
+- **Discovery**: `ENABLE_ACTIVE_DISCOVERY` (katana/ffuf/arjun/vhost recon; default on), `RECON_DIR_WORDLIST`, `RECON_VHOST_WORDLIST`, `RECON_KATANA_DEPTH`.
+- **Authz coverage**: `AUTH_SELF_REGISTER` (create two low-priv identities for horizontal IDOR/BOLA); when <2 identities are available the scan logs `AUTHZ_COVERAGE_UNKNOWN` and flags it on the coverage ledger instead of silently passing.
+- **Probes**: `NEO_SQLI_SLEEP` (time-based SQLi delay, default 5s), `NEO_FULL_BATTERY` / `NEO_SCAN_PROFILE=lab` (run every family).
 - **Secrets**: `ENCRYPTION_KEY` (dev: `ANTIGRAVITY_ENV=development` + `ENCRYPTION_KEY_DEV_UNSAFE=1`).
-- **OOB**: `OOB_DOMAIN` (+ run cloudflared to `localhost:8899`).
+- **OOB**: `OOB_COLLABORATOR_URL` + `OOB_DOMAIN` (+ run cloudflared to `localhost:8899`) — without an active collaborator, blind classes fall back to body-signal only and the ledger marks them degraded.
 - **OSINT/intel** (all optional): `SHODAN_API_KEY`, `CENSYS_PAT`, `GITHUB_TOKEN`, `NVD_API_KEY`, `ABUSEIPDB_API_KEY`.
 
 ---
@@ -238,6 +246,7 @@ docker compose -f docker-compose.benchmark.yml up --abort-on-container-exit
 
 - **Authorization enforced** on every request (`TargetScopeValidator`); egress firewall installed at startup.
 - **Non-destructive by default** (`POC` tier); escalation is explicit; active exploitation needs consent unless `--auto-approve`.
+- **Human-in-the-loop on every critical task** — outward / state-changing / irreversible actions (account creation, file upload, credential spray, exploit detonation, deep-tier exploits, post-exploitation, Metasploit) pass a single approval choke (`core/escalation/hitl.py::require_human_approval` over the `EscalationGate`). Anything ≥ `AUTO_APPROVE_MAX_RISK` (default `MEDIUM`, so HIGH/CRITICAL) prompts when attended or queues + waits when unattended (deny-on-timeout, fail-closed); the operator opts into autonomy with `--auto-approve` / `AUTO_APPROVE_EXPLOITS=1`. Approve/deny decisions are recorded for the deconfliction log.
 - **Metasploit is read-only aux** (allowlist + scope + `NEO_ENABLE_MSF`); no exploit modules in auto-dispatch.
 - **No secret logging** — passwords/keys/tokens/secrets are redacted; credentials passed via unlinked temp files, never argv.
 - **Full audit trail** — hash-chained, tamper-evident, in the DB `audit_log` / `execution_audit` tables (on-disk `data/*.log` mirrors are opt-in via `NEO_FILE_AUDIT`); plus the operational `pentest.log`.

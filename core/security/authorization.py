@@ -164,6 +164,12 @@ class TargetScopeValidator:
                          target, re.IGNORECASE)
             if m:
                 target = target[m.end():]
+        # Strip fragment then query BEFORE the path. A query/fragment value can
+        # itself contain '/', '@' or ':' (e.g. an XSS test URL
+        # "host?search=<script>...</script>"), so parsing path first would leave
+        # the query glued to the host and wrongly DENY an in-scope target.
+        target = target.split("#", 1)[0]
+        target = target.split("?", 1)[0]
         # Strip path
         if "/" in target:
             target = target.split("/", 1)[0]

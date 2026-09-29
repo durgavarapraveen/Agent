@@ -49,6 +49,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Python deps
 COPY requirements.txt ./
 COPY ui/api/requirements.txt ./requirements-api.txt
+# Install the CPU-only torch build FIRST so sentence-transformers (pulled by
+# requirements.txt) reuses it instead of dragging in the ~2GB CUDA wheels
+# (nvidia-cudnn/cuda-toolkit) that are dead weight in a CPU-only container.
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir -r requirements.txt -r requirements-api.txt psutil slowapi
 
 # Copy source. `.dockerignore` MUST exclude:

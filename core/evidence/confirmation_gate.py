@@ -106,6 +106,42 @@ def oracle_reverify(v: dict) -> None:
         pass
 
 
+# Weak single-signal, field-keyed classes: their probes confirm on one composite
+# boolean flag. We don't DOWNGRADE (P1-4 — absent evidence != not vulnerable), but
+# we require a SECOND corroboration before CONFIRMED ships; without one the finding
+# is routed to NEEDS_REVIEW (kept, flagged) rather than trusted outright.
+_CORROBORATION_REQUIRED = {"CORS", "CSRF", "JWT", "AUTH_BYPASS"}
+
+
+def corroboration_gate(v: dict) -> None:
+    """For weak field-keyed classes, demand a 2nd signal before CONFIRMED.
+    Corroboration = attached proof, a reproduction/corroboration count, a DOM or
+    OOB signal, or a trusted external confirmer. Missing → NEEDS_REVIEW (never
+    dropped, never silently trusted). Never upgrades."""
+    try:
+        if str(v.get("status") or "").upper() != "CONFIRMED":
+            return
+        cls = (v.get("type") or v.get("attack_type") or "").upper().replace(" ", "_").replace("-", "_")
+        if cls not in _CORROBORATION_REQUIRED:
+            return
+        if (v.get("tool") or v.get("source") or "").lower() in _TRUSTED_CONFIRMERS:
+            return
+        corroborated = bool(
+            v.get("proof")
+            or int(v.get("corroborations", 0) or 0) >= 1
+            or int(v.get("reproduction_count", 0) or 0) >= 2
+            or v.get("dom_events")
+            or v.get("oob_interactions") or v.get("oob_interaction")
+        )
+        if not corroborated:
+            v["status"] = "NEEDS_REVIEW"
+            v.setdefault("_downgraded_by", "corroboration_gate")
+            v.setdefault("_corroboration_reason",
+                         f"{cls} confirmed on a single signal; second corroboration required")
+    except Exception:
+        pass
+
+
 def apply_ingestion_gates(vuln: dict, target: str = "", source: str = "", parser: str = "regex") -> bool:
     """Run every purely-vuln-scoped ingestion gate. Returns True to DROP.
 
@@ -211,6 +247,10 @@ def apply_ingestion_gates(vuln: dict, target: str = "", source: str = "", parser
     # self-reported CONFIRMED response-derivable finding can't reach the DB unless
     # a real oracle agrees; field-keyed classes are never downgraded here.
     oracle_reverify(v)
+
+    # --- Corroboration gate: weak field-keyed classes (CORS/CSRF/JWT/auth) need
+    # a 2nd signal to stay CONFIRMED, else → NEEDS_REVIEW (kept, not trusted).
+    corroboration_gate(v)
 
     # --- Reproduction + confirmation gates (ReproductionGate P0.8 +
     # FindingConfirmationGate P0.6). A CONFIRMED finding that fails is DOWNGRADED

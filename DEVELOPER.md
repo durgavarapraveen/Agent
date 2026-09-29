@@ -93,7 +93,7 @@ outputs/
 ### Orchestration & brain
 | pkg | responsibility |
 |---|---|
-| `orchestration` | central brain, agent spawner/scheduler, phase DAG, blackboard, dispatcher, campaigns |
+| `orchestration` | central brain, agent spawner/scheduler, phase DAG, blackboard, dispatcher, campaigns, `coverage_ledger` (enumerable surface×class verdicts) |
 | `workflow` | records, learns, and violation-tests multi-step business workflows |
 | `workflows` | concurrency engine + state machine + workflow generator |
 | `scheduling` | experiment scheduler + duplicate-work detector |
@@ -109,7 +109,7 @@ outputs/
 ### Recon & discovery
 | pkg | responsibility |
 |---|---|
-| `recon` | surface classifier, network/cloud enum, **request-surface miner** |
+| `recon` | surface classifier (query/json/form/multipart/header/cookie/**path-slug**/ws/graphql injection points), network enum (**+ service banner/version grab**), cloud enum, **request-surface miner**, `active_discovery` (katana JS-crawl + ffuf/arjun content&param brute + vhost bruteforce), `cdn_origin` (CDN-origin unmasking) |
 | `discovery` | coverage-driven multi-channel discovery; JS/mobile/IPA analyzers; workflow crawler |
 | `attack_surface` | endpoint/param/object/request inventories, SPA detector, route graph |
 | `browser` | Playwright browser worker + JS-aware crawler with observability |
@@ -120,7 +120,7 @@ outputs/
 ### Exploitation & probes
 | pkg | responsibility |
 |---|---|
-| `exploitation` | **largest pkg** — ~90 probes (ssti/xxe/cors/race/smuggling/deserial/graphql/web3), chain builder/reasoner/executor, PoC generator, WAF evasion, `payload_synth.py`, `format_probes/` (parquet/yaml-pickle/hdf5) |
+| `exploitation` | **largest pkg** — ~95 probes (ssti/xxe/cors/race/smuggling/deserial/graphql/web3 + **subdomain_takeover / oauth_abuse / web_cache_deception / api_shadow / csti / grpc**), chain builder/reasoner/executor, PoC generator, WAF evasion, `payload_synth.py`, `format_probes/` (parquet/yaml-pickle/hdf5) |
 | `injection` | injection models + reporter + eligibility gate |
 | `payloads` | payload catalog, mutation, seeds, `probe_engine.py`, git `updater.py` |
 | `fuzzing` | grammar engine, multi-parser, fuzzing models, tool adapters |
@@ -145,7 +145,7 @@ outputs/
 |---|---|
 | `identity` | credential store, identity/session managers, differential tester, login detector |
 | `authentication` | auth session, OAuth flows, identity bridge |
-| `access_control` | horizontal/vertical/IDOR/matrix models |
+| `access_control` | horizontal/vertical/IDOR/matrix models; IDOR uses a cross-user content oracle; the matrix engine emits `AUTHZ_COVERAGE_UNKNOWN` (loud + on the coverage ledger) when <2 identities are available instead of a silent skip |
 | `replay` | HTTP proxy, replay engine, cross-role identity store |
 
 ### Intelligence & OSINT
@@ -177,7 +177,7 @@ outputs/
 ### Reporting & scoring
 | pkg | responsibility |
 |---|---|
-| `reporting` | report builder, canonical/compliance/SARIF/MITRE exporters, remediation & fix generators, risk prioritizer, quality gates, retest engine, repro bundle |
+| `reporting` | report builder, canonical/compliance/SARIF/MITRE exporters, remediation & fix generators, risk prioritizer, quality gates, retest engine, repro bundle, `redteam_narrative` (ATT&CK tagging + objective tracking + kill-chain narrative + purple-team detection-gap checklist + deconfliction summary — documentation only, no offensive execution) |
 | `scoring` | confidence scorer |
 
 ### Infra & utils
@@ -290,6 +290,23 @@ Probes live in `core/exploitation/*_probe.py`; each is a self-contained detector
 
 **Adding a probe:** (1) `core/exploitation/<name>_probe.py` reusing the probe base; (2) if detection is payload-shape-dependent, call `payload_synth.synthesize(kind=…)` and verify each candidate; (3) register with the family scheduler; (4) return finding dicts; (5) add a regression test.
 
+**Family-scheduler auto-discovery** (`core/orchestration/family_scheduler.py`): a module in `core/exploitation/` is auto-registered if it exposes an async `run_*_probe(ctx)` / `run_*_fuzz(ctx)` taking exactly one required arg, **or** declares `PROBE_SPEC = {"name","func","family","tier"}`. Names not matching that signature (`run_all_expert_probes`, `run_graphql_and_ws`, `run_cross_role_replay`) are **not** discovered — they run only from hardcoded `central_brain` call-sites and are covered by the finalize safety-net (below). Prefer a `PROBE_SPEC` for any new probe with a non-standard entrypoint.
+
+### Confirmation redundancy (≥2 independent signals)
+
+Every class aims for two independent oracles so a single patched/absent signal doesn't cause a miss or a false positive:
+- **SQLi** — error-string, boolean-blind differential (`_boolean_blind_sqli`), and a **time-based differential** (`probe_engine._time_blind_sqli`: benign baseline vs `SLEEP(N)`, confirmed by a repeat, delta not an absolute threshold; skips already-slow endpoints; `NEO_SQLI_SLEEP`).
+- **SSRF / RCE / XXE / SSTI / RFI** — out-of-band callback (`_OOB_CLASSES` in `probe_engine.py`). Without an active collaborator these degrade to body-signal only; the coverage ledger flags `oob_degraded_classes`.
+- **IDOR / BOLA** — cross-user *content* oracle (`AuthorizationOracle.compare(..., peer_body=…)`, `access_control/idor.py`): CONFIRMED only when the attacker's response ≈ the object-owner's own view **and** ≠ the attacker's own; otherwise REJECTED. Falls back to the size heuristic when no peer body.
+- **Reflected XSS** — `XSSProbe._dom_execute_confirm` renders the exact injected URL headlessly; CONFIRMED only on real execution (dialog / `document.title` canary), else `requires_manual_confirmation`.
+- **Field-keyed classes** (CORS/CSRF/JWT/auth) — `confirmation_gate.corroboration_gate` demands a 2nd signal (proof / reproduction≥2 / DOM / OOB / trusted tool) before CONFIRMED, else routes to `NEEDS_REVIEW`. They are **never** auto-downgraded (P1-4: absent evidence ≠ not vulnerable).
+
+`confirmation_gate.apply_ingestion_gates()` remains the single ingestion choke every finding passes (URL hygiene, scope drop, oracle re-verify, observation, corroboration, takeover).
+
+### Coverage ledger (`core/orchestration/coverage_ledger.py`)
+
+Built once at REPORTING from `SurfaceClassifier` (`applicable_classes`) reconciled against `ctx.vulnerabilities` (status) and the family run-ledger (`brain._coverage_ran`). Emits one verdict per `(surface, vuln_class)` — `CONFIRMED / REFUTED / NOT_RUN / ERROR` — plus `oob_active`/`oob_degraded_classes` and `authz_coverage_unknown`. `NOT_RUN` cells and degraded coverage are logged loud and attached to the report (`ctx.coverage_ledger`). A **finalize safety-net** in the REPORTING branch of `central_brain` runs any critical EXPLOITATION probe (`cross_role_replay`, `graphql_ws`, `expert_probes`) not yet in `_coverage_ran`, so a short-circuited scan still tests them before the ledger is built.
+
 ---
 
 ## 10. External tool arsenal & Kali execution
@@ -369,10 +386,10 @@ Also expose async `jev_is_api/jev_is_login/jev_is_privileged` for Jev-assisted c
 
 ## 14. Out-of-band (OOB) verification
 
-`core/oob/collaborator.py` gives blind vulns (XXE/SSRF/deserialization) a callback channel at zero cost.
+`core/oob/collaborator.py` gives blind vulns a callback channel at zero cost. `probe_engine._OOB_CLASSES` = `{SSRF, RCE, XXE, DNS_REBINDING, SSTI, RFI}` (plus deserialization via its own probe) — a callback proves the blind hit.
 - `LocalHTTPCollaborator` — local listener (default `:8899`), path-token based, exposed via a **cloudflared** tunnel. Default free path.
 - `InteractshCollaborator` — real interactsh (RSA register + AES-CFB) if you run a server.
-- `NullCollaborator` — no-op when OOB is disabled.
+- `NullCollaborator` — no-op when OOB is disabled; the coverage ledger then reports the affected classes as `oob_degraded_classes` (body-signal only) so reduced confidence is never silent.
 
 Helpers: `prepare_oob()`, `confirm_oob()`, `token_marker()`, `OOB_PLACEHOLDER`. `get_collaborator()` is initialized eagerly in `main.py` so the listener is up for the whole scan. Setup: `OOB_DOMAIN` in `.env`, run cloudflared to `localhost:8899`. A 502 on the tunnel = nothing bound (scan not running).
 
@@ -407,7 +424,7 @@ Adding a scan-detail panel: `components/<X>Panel.jsx`, fetch via `api.js`, use t
 1. **Authorization first.** `TargetScopeValidator.is_authorized()` gates every request; out-of-scope hosts blocked even if injected via mobile/SAST enrichment.
 2. **Egress guard.** `core/security/egress_firewall.install_httpx_guard()` installs at import in `main.py`. Only allowlisted hosts (target + `api.typesafe.ai` + configured intel APIs) leave the process.
 3. **Non-destructive default.** `POC` tier only demonstrates; escalation is explicit.
-4. **Consent.** Active exploitation needs consent unless `--auto-approve`.
+4. **Consent / human-in-the-loop.** Active exploitation needs consent unless `--auto-approve`. Every *critical* task passes the single choke `core/escalation/hitl.require_human_approval(kind=…)` → `EscalationGate`. **Criterion for "critical" (what gets gated):** the action changes target state, affects OTHER users, is irreversible, touches real accounts/credentials, executes code, or stresses availability — **not** read-only detection (SQLi/XSS/IDOR/SSRF/LFI/CORS/JWT/… probing reads responses; it is NOT gated, or the scan would stall for no risk reduction). Enforcement points: the family scheduler's `_run_one` gates a declared `CRITICAL_PROBES` set (`business_logic`, `workflow`, `race`, `mass_assign`, `cache_poison`, `smuggling`, `graphql_dos`, `file_upload`); central_brain gates `account_creation` (self-register) and `credential_spray`; the exploitation-plan, deep-tier exploit, detonation, post-exploit and MSF gates predate this. Auto-approve only at/below `AUTO_APPROVE_MAX_RISK` (default MEDIUM); HIGH/CRITICAL prompt (attended) or queue + wait (unattended, **deny on timeout — fail-closed**). New critical actions MUST call this gate — do not add an autonomous outward action. Decisions are recorded on `ctx.hitl_decisions` for the deconfliction log.
 5. **Metasploit read-only.** Allowlist + scope + `NEO_ENABLE_MSF`; no exploit modules auto-run.
 6. **No secret logging.** `llm_redact.py` redacts LLM I/O; server.py strips `password`/`api_key`/`token`/`secret`.
 7. **Credentials via file, unlinked** — never argv.
@@ -446,13 +463,20 @@ Copy `.env.example` → `.env`. Most-used keys:
 | `API_HOST` / `API_PORT` / `API_KEY` / `CORS_ORIGINS` | API server |
 | `KALI_CONTAINER` | Kali container name (compose: `kali-pentesting`) |
 | `NEO_ENABLE_MSF` | Metasploit aux lane on/off |
+| `AUTO_APPROVE_MAX_RISK` / `UNATTENDED_MODE` / `AUTO_APPROVE_EXPLOITS` | human-in-the-loop gate: auto-approve threshold (default MEDIUM → HIGH/CRITICAL need a human), unattended queue mode, and the opt-in-to-autonomy override |
+| `ESCALATION_TIMEOUT_SECONDS` / `ESCALATION_DEFAULT_ON_TIMEOUT` / `ESCALATION_POLL_SECONDS` / `ESCALATION_WEBHOOK_URL` | approval-queue timeout (default 1800s), safe default on timeout (default `deny`), poll interval, and notify webhook |
 | `NEO_FILE_AUDIT` | also mirror the hash-chained audit to `data/{audit,execution_audit}.log` (default off — DB is the audit store) |
 | `NEO_ASM_MONITORING` | post-scan ASM baseline + regression (default off; writes `data/{baselines,regression,asm}`) |
 | `NEO_JEV_*` / `NEO_JEV_PRIORITIZE` | Jev wiring sites (§6) |
 | `PROBE_CONCURRENCY` / `DISPATCH_BUDGET` / `BUDGET_SOFT_EXIT_FRAC` | concurrency + watchdog |
+| `ENABLE_ACTIVE_DISCOVERY` | katana / ffuf / arjun / vhost recon in the web+infra lanes (default on; no-op without Kali) |
+| `RECON_DIR_WORDLIST` / `RECON_VHOST_WORDLIST` / `RECON_KATANA_DEPTH` | active-discovery wordlists + crawl depth |
+| `AUTH_SELF_REGISTER` (+ `AUTH_REGISTER_URL` / `AUTH_LOGIN_URL` / `AUTH_USERNAME_FIELD` / `AUTH_PASSWORD_FIELD`) | create two low-priv identities for horizontal IDOR/BOLA |
+| `NEO_SQLI_SLEEP` | time-based SQLi delay seconds (default 5) |
+| `NEO_FULL_BATTERY` / `NEO_SCAN_PROFILE=lab` | run every probe family regardless of surface relevance |
 | `NEO_PAYLOAD_SYNC` | opt-in payload-catalog git sync (default off) |
 | `ENCRYPTION_KEY` (+ `_CURRENT`/`_PREVIOUS`) | secret encryption; dev: `ANTIGRAVITY_ENV=development` + `ENCRYPTION_KEY_DEV_UNSAFE=1` |
-| `OOB_DOMAIN` | cloudflared/OOB callback host |
+| `OOB_COLLABORATOR_URL` / `OOB_DOMAIN` | OOB callback endpoint/host (cloudflared or interactsh); without an active collaborator, blind classes fall back to body-signal only and the ledger marks `oob_degraded_classes` |
 | `SHODAN_API_KEY`, `CENSYS_PAT`, `GITHUB_TOKEN`, `NVD_API_KEY`, `ABUSEIPDB_API_KEY` | OSINT/intel (optional) |
 | `REPORTS_ENABLED` / `REPORTS_DIR` | opt-in report file output |
 

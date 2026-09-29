@@ -57,19 +57,51 @@ class NetworkDiscovery:
                 ports.add(int(tok))
         return sorted(ports)
 
-    async def _scan_port(self, host: str, port: int) -> Optional[int]:
+    _HTTP_PORTS = {80, 3000, 8000, 8080, 8888, 5601, 9200, 5984}
+
+    async def _scan_port(self, host: str, port: int):
+        """Connect and best-effort grab a service banner/version. Returns
+        (port, banner) or None. Banner: HTTP `Server:` header for plaintext HTTP
+        ports, else a greeting read (ftp/ssh/smtp/redis/etc). TLS ports are left
+        unbannered (would need a TLS handshake)."""
         async with self._sem:
+            reader = writer = None
             try:
                 fut = asyncio.open_connection(host, port)
                 reader, writer = await asyncio.wait_for(fut, timeout=self.timeout)
-                writer.close()
+                banner = ""
                 try:
-                    await writer.wait_closed()
+                    if port in self._HTTP_PORTS:
+                        writer.write(f"HEAD / HTTP/1.0\r\nHost: {host}\r\n\r\n".encode())
+                        await writer.drain()
+                        data = await asyncio.wait_for(reader.read(1024), timeout=self.timeout)
+                        banner = self._parse_server_header(data)
+                    elif port not in (443, 993, 995, 8443):
+                        # Services that greet on connect (ftp/ssh/smtp/redis...).
+                        data = await asyncio.wait_for(reader.read(256), timeout=min(1.5, self.timeout))
+                        banner = data.decode("latin-1", "replace").strip().splitlines()[0][:120] if data else ""
                 except Exception:
-                    pass
-                return port
+                    banner = ""
+                return (port, banner)
             except Exception:
                 return None
+            finally:
+                if writer is not None:
+                    try:
+                        writer.close()
+                        await writer.wait_closed()
+                    except Exception:
+                        pass
+
+    @staticmethod
+    def _parse_server_header(data: bytes) -> str:
+        try:
+            for line in data.decode("latin-1", "replace").splitlines():
+                if line.lower().startswith("server:"):
+                    return line.split(":", 1)[1].strip()[:120]
+        except Exception:
+            pass
+        return ""
 
     async def scan(self) -> List[Dict[str, Any]]:
         host = self._host()
@@ -92,24 +124,28 @@ class NetworkDiscovery:
         scan_ports = self._scan_ports()
         logger.info("[NetworkDiscovery] scanning %d ports on %s", len(scan_ports), host)
         results = await asyncio.gather(*[self._scan_port(host, p) for p in scan_ports])
-        open_ports = sorted(p for p in results if p)
+        banners: Dict[int, str] = {r[0]: r[1] for r in results if r}
+        open_ports = sorted(banners)
 
         findings: List[Dict[str, Any]] = []
         # record open ports as assets on the knowledge graph if present
         for port in open_ports:
             svc = _COMMON_PORTS.get(port, "unknown")
-            self._record_asset(host, port, svc)
+            banner = banners.get(port, "")
+            self._record_asset(host, port, svc, banner)
             if port in _RISKY:
+                _ver = f" — {banner}" if banner else ""
                 findings.append({
                     "id": f"NETSVC_{host}_{port}",
                     "type": "MISCONFIGURATION", "sub_type": "exposed_service",
-                    "title": f"Exposed {svc} service on {host}:{port}",
+                    "title": f"Exposed {svc} service on {host}:{port}{_ver}",
                     "severity": "HIGH" if port in (2375, 6379, 9200, 11211, 27017) else "MEDIUM",
                     "target": f"{host}:{port}", "location": f"{host}:{port}",
                     "tool": "network_discovery",
-                    "proof": f"TCP {port} ({svc}) open on {host}",
-                    "details": f"Sensitive service {svc} reachable on port {port}.",
+                    "proof": f"TCP {port} ({svc}) open on {host}" + (f"; banner: {banner}" if banner else ""),
+                    "details": f"Sensitive service {svc} reachable on port {port}." + (f" Version/banner: {banner}" if banner else ""),
                     "confirmed": True, "status": "CONFIRMED", "cwe": "CWE-284",
+                    "service_banner": banner,
                 })
         if self.ctx is not None:
             try:
@@ -119,13 +155,13 @@ class NetworkDiscovery:
         logger.info("[NetworkDiscovery] %s open ports: %s", host, open_ports)
         return findings
 
-    def _record_asset(self, host: str, port: int, svc: str) -> None:
+    def _record_asset(self, host: str, port: int, svc: str, banner: str = "") -> None:
         kg = getattr(self.ctx, "knowledge_graph", None) if self.ctx else None
         if kg is None:
             return
         try:
             kg.add_asset(f"{host}:{port}", {"host": host, "port": port, "service": svc,
-                                            "source": "network_discovery"})
+                                            "banner": banner, "source": "network_discovery"})
         except Exception:
             pass
 

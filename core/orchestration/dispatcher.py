@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # response via the OracleEngine. Response-detectable per-category classes live
 # here; PATT payloads for each are already in the catalog (§6/§7).
 ENGINE_CLASSES = {
-    "SQLI", "NOSQLI", "XSS", "SSTI", "RCE", "LFI", "XXE", "SSRF",
+    "SQLI", "NOSQLI", "XSS", "SSTI", "RCE", "LFI", "RFI", "XXE", "SSRF",
     "OPEN_REDIRECT", "MASS_ASSIGNMENT", "PROTOTYPE_POLLUTION",
     "HOST_HEADER_INJECTION", "CACHE_POISONING", "EMAIL_INJECTION",
     "CORS_MISCONFIGURATION", "INFORMATION_DISCLOSURE",
