@@ -47,6 +47,11 @@ _ROLE_KEYWORDS: Dict[str, List[str]] = {
         "/redirect", "/redir", "/goto", "/link", "/url", "/out",
         "/api/redirect",
     ],
+    "sse": [
+        "/events", "/event-stream", "/stream", "/sse", "/subscribe",
+        "/notifications", "/feed", "/live", "/updates", "/api/events",
+        "/api/stream", "/api/notifications",
+    ],
 }
 
 
