@@ -193,6 +193,25 @@ class GenericHTTPExecutor(ExecutorBase):
         discovered = self._discovered_endpoints(experiment)
         return [ep for ep in discovered if any(k in ep.lower() for k in keywords)]
 
+    def _endpoints_by_keywords(self, experiment: SecurityExperiment,
+                               keywords, fallback=()) -> List[str]:
+        """Content-driven endpoint selection: return DISCOVERED endpoints (from
+        captured traffic / JS-mined routes / crawl, via ``_discovered_endpoints``)
+        whose URL contains any of ``keywords`` — the app's real path whatever it
+        is named. Only when observed content matches nothing do we fall back to
+        the hardcoded ``fallback`` paths (resolved against the target base), so a
+        modern app is never reduced to guessing. Returns full/absolute URLs."""
+        kws = [k.lower() for k in keywords]
+        hits, seen = [], set()
+        for ep in self._discovered_endpoints(experiment):
+            if any(k in ep.lower() for k in kws) and ep not in seen:
+                seen.add(ep)
+                hits.append(ep)
+        if hits:
+            return hits
+        base = self._base(experiment).rstrip("/")
+        return [p if p.startswith("http") else base + ("/" + p.lstrip("/")) for p in fallback]
+
     def _credential_endpoints(self, experiment: SecurityExperiment) -> List[str]:
         """Credential-accepting endpoints discovered from captured traffic — any
         request whose body carries a password-shaped field. Finds the REAL login
@@ -425,22 +444,19 @@ class GraphQLExecutor(GenericHTTPExecutor):
         start = time.monotonic()
         base = self._base(experiment)
 
-        # Check discovered endpoints for graphql-like paths, plus common ones
-        gql_paths = self._to_paths(
-            self._endpoints_by_role(experiment, "data"), base)
-        common = ["/graphql", "/api/graphql", "/gql", "/query", "/v1/graphql"]
-        seen = set(gql_paths)
-        for c in common:
-            if c not in seen:
-                gql_paths.append(c)
+        # Content-driven: the app's real GraphQL endpoint (from traffic/JS, whatever
+        # its path), fixed common paths only when none were observed.
+        gql_targets = self._endpoints_by_keywords(
+            experiment, ("graphql", "gql", "/query"),
+            ["/graphql", "/api/graphql", "/gql", "/query", "/v1/graphql"])
 
         query = '{"query": "{ __schema { types { name } } }"}'
         headers = {"Content-Type": "application/json", "User-Agent": "AntiGravity-V2/1.0"}
         introspection = False
         best_body = ""
         best_status = 0
-        for gp in gql_paths[:10]:
-            status, body, _ = self._probe(f"{base}{gp}", method="POST",
+        for gp in gql_targets[:10]:
+            status, body, _ = self._probe(gp, method="POST",
                                            headers=headers, data=query.encode())
             if "__schema" in body or '"types"' in body:
                 introspection = True
@@ -1718,9 +1734,13 @@ class LogInjectionExecutor(GenericHTTPExecutor):
                                  "path": path, "status": status,
                                  "body_snippet": body[:256]})
 
-        # 2) Probe standard log paths for exposure
-        for lp in self.LOG_PATHS:
-            status, body, _ = self._probe(base + lp, headers=headers)
+        # 2) Probe for exposed log endpoints — discovered log/audit routes first,
+        # fixed log paths only when none were observed.
+        for url in self._endpoints_by_keywords(
+                experiment, ("/logs", "/logging", "access.log", "error.log", ".log", "/audit"),
+                self.LOG_PATHS):
+            lp = urlparse(url).path or url
+            status, body, _ = self._probe(url, headers=headers)
             if status == 200 and len(body) > 50 and not body.strip().startswith(("<!DOCTYPE", "<html")):
                 findings.append({"test": "log_file_exposed",
                                  "path": lp, "status": status,
@@ -3774,15 +3794,17 @@ class BlockchainWeb3Detector(GenericHTTPExecutor):
         headers = self._auth_headers(experiment)
         findings = []
 
-        # (a) Probe common RPC paths — JSON-RPC accepts POST {"jsonrpc":"2.0","method":"eth_blockNumber"}
+        # (a) Probe JSON-RPC endpoints — discovered RPC/web3 routes first, fixed
+        # paths only when none were observed. JSON-RPC accepts POST eth_blockNumber.
         hdrs = {**headers, "Content-Type": "application/json"}
-        for rp in self.RPC_PATHS:
+        for url in self._endpoints_by_keywords(
+                experiment, ("rpc", "web3", "jsonrpc", "json-rpc", "/eth", "ethereum"),
+                self.RPC_PATHS):
             payload = json.dumps({"jsonrpc": "2.0", "method": "eth_blockNumber",
                                   "params": [], "id": 1}).encode()
-            status, body, _ = self._probe(base + rp, method="POST",
-                                          headers=hdrs, data=payload)
+            status, body, _ = self._probe(url, method="POST", headers=hdrs, data=payload)
             if status == 200 and '"result"' in body and "0x" in body:
-                findings.append({"test": "web3_rpc_exposed", "path": rp,
+                findings.append({"test": "web3_rpc_exposed", "path": urlparse(url).path or url,
                                  "status": status, "body_snippet": body[:256]})
 
         # (b) Scan discovered assets for private keys / mnemonic / ABI
@@ -3935,10 +3957,21 @@ class GDPRAbuseDetector(GenericHTTPExecutor):
         start = time.monotonic()
         findings = []
 
-        # (a) Try each GDPR path WITHOUT auth
+        # Content-driven: probe the app's REAL privacy/export/erasure endpoints
+        # (discovered from traffic/JS), not a fixed guess. Keyword fallback only
+        # when nothing matching was observed.
+        targets = self._endpoints_by_keywords(
+            experiment,
+            ("gdpr", "dsar", "export", "data-export", "data-portability", "portability",
+             "privacy", "rtbf", "right-to-be-forgotten", "download-data", "erase",
+             "forget", "account/delete", "user/delete", "delete-account"),
+            self.GDPR_PATHS)[:25]
+
+        # (a) Try each target WITHOUT auth
         no_auth_hdrs = {"User-Agent": "AntiGravity-V2/1.0"}
-        for p in self.GDPR_PATHS:
-            status, body, _ = self._probe(base + p, headers=no_auth_hdrs)
+        for url in targets:
+            p = urlparse(url).path or url
+            status, body, _ = self._probe(url, headers=no_auth_hdrs)
             if status == 200 and len(body) > 60 and not body.strip().startswith(("<!DOCTYPE", "<html")):
                 findings.append({"test": "gdpr_endpoint_no_auth",
                                  "path": p, "status": status,
@@ -3947,9 +3980,10 @@ class GDPRAbuseDetector(GenericHTTPExecutor):
         # (b) Try cross-user access with any auth token we have
         auth_headers = self._auth_headers(experiment)
         if "Authorization" in auth_headers or "Cookie" in auth_headers:
-            for p in self.GDPR_PATHS:
+            for url0 in targets:
+                p = urlparse(url0).path or url0
                 for other_id in ("1", "2", "admin", "0"):
-                    url = base + p + ("&" if "?" in p else "?") + f"user_id={other_id}"
+                    url = url0 + ("&" if "?" in url0 else "?") + f"user_id={other_id}"
                     status, body, _ = self._probe(url, headers=auth_headers)
                     if status == 200 and len(body) > 60:
                         low = body.lower()
@@ -4767,12 +4801,13 @@ class PromptInjectionTester(GenericHTTPExecutor):
         headers = self._auth_headers(experiment)
         findings = []
 
-        # Discover LLM endpoints via well-known paths + role-based hits
-        eps = list(self.LLM_HINTS)
-        for p in self._all_endpoints_as_paths(experiment):
-            low = p.lower()
-            if any(k in low for k in ("chat", "completion", "assistant", "llm", "/ai")):
-                eps.append(p)
+        # Discovery-first: the app's REAL chat/LLM endpoints (from traffic/JS),
+        # fixed hints only when none were observed.
+        eps = self._endpoints_by_keywords(
+            experiment,
+            ("chat", "completion", "assistant", "llm", "/ai", "/gpt", "prompt",
+             "conversation", "message", "generate", "ask", "copilot"),
+            self.LLM_HINTS)
         eps = list(dict.fromkeys(eps))[:10]
 
         hdrs = {**headers, "Content-Type": "application/json"}
@@ -4780,7 +4815,7 @@ class PromptInjectionTester(GenericHTTPExecutor):
             hit_any = False
             for pl in self.INJECTIONS[:3]:
                 body = json.dumps({f: pl for f in self.FIELDS}).encode()
-                s, resp, _ = self._probe(base + ep, method="POST", headers=hdrs, data=body)
+                s, resp, _ = self._probe(ep, method="POST", headers=hdrs, data=body)
                 if not s:
                     continue
                 if self.MARKER in resp:
