@@ -260,6 +260,17 @@ async def _run_one(brain, spec: ProbeSpec, browser_lock=None) -> int:
     Browser-lane probes are serialized on `browser_lock` (shared browser).
     Critical (state-changing/destructive) probes must clear the HITL gate first."""
     ctx = brain.ctx
+    # Mid-phase target-down short-circuit: once the target is unreachable, stop
+    # issuing more probes at it instead of grinding the whole battery against a dead
+    # host. The main loop handles recovery/finalize at the boundary; this just avoids
+    # wasting effort within the phase. Fail-open (errors → run normally).
+    try:
+        from core.adaptation.target_health import get_target_health
+        if get_target_health().is_down:
+            logger.info("[%s] SKIPPED — target DOWN (mid-phase short-circuit)", spec.name)
+            return 0
+    except Exception:
+        pass
     _kind = CRITICAL_PROBES.get(spec.name)
     if _kind:
         try:

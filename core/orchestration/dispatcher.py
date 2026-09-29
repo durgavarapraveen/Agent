@@ -128,6 +128,16 @@ class Dispatcher:
             return surfaces
 
     async def run(self, ctx) -> List[Dict[str, Any]]:
+        # Mid-phase target-down short-circuit: don't launch the injection battery at
+        # an unreachable host. The main loop handles recovery/finalize. Fail-open.
+        try:
+            from core.adaptation.target_health import get_target_health
+            if get_target_health().is_down:
+                logger.info("[Dispatcher] target DOWN — skipping injection dispatch "
+                            "(mid-phase short-circuit)")
+                return []
+        except Exception:
+            pass
         budget = self._int_env("DISPATCH_BUDGET", 0)          # 0 = all payloads
         max_surfaces = self._int_env("DISPATCH_MAX_SURFACES", 40)
         max_points = self._int_env("DISPATCH_MAX_POINTS", 30)
