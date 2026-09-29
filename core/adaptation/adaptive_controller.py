@@ -84,7 +84,7 @@ class AdaptiveController:
         let the normal logic run. Can move BACKWARD (re-recon) — the free-form part.
         Bounded by `_MAX_REPLANS`. Never raises."""
         try:
-            from core.common.schemas import ExecutionPhase
+            from core.orchestration.central_brain import ExecutionPhase
         except Exception:
             return None
         try:

@@ -365,6 +365,18 @@ class CentralBrain(
         except Exception:
             pass
 
+        # Adaptive re-plan: let the controller override the fixed sequence — e.g.
+        # jump BACK to ACTIVE_SCANNING to test surface discovered after scanning
+        # (free-form re-planning, bounded so it cannot loop). Fail-open: None ⇒ the
+        # normal logic below runs unchanged.
+        try:
+            from core.adaptation.adaptive_controller import get_controller
+            _rp = get_controller(self).replan_phase(self)
+            if _rp is not None:
+                return _rp
+        except Exception as _ae:
+            logger.debug(f"[Adaptive] replan hook skipped: {_ae}")
+
         # Anti-loop: if the current phase gave up via the no-progress guard, force
         # advance along the canonical sequence instead of letting the planner
         # re-enter the same stalled phase (root cause of the ~2h EXPLOITATION loop).
@@ -2754,11 +2766,25 @@ class CentralBrain(
                 pending = self.task_manager.get_pending_tasks() if hasattr(self, 'task_manager') else []
                 pending_count = len(pending) if pending else 0
                 
+                # Self-diagnosis: one runtime-health snapshot per beat (target
+                # reachability, coverage gaps, tool cooldowns, momentum) so the
+                # controller — and the operator reading logs — can see WHY the agent
+                # adapts. Appended to the heartbeat; never raises.
+                _diag = ""
+                try:
+                    from core.adaptation.adaptive_controller import get_controller
+                    _d = get_controller(self).diagnose(self)
+                    _t = _d.get("target", {}) or {}
+                    _diag = (f" | Target: {_t.get('state', '?')} "
+                             f"(hard {_t.get('hard_rate', 0)}) | Gaps: {_d.get('coverage_gaps', 0)}")
+                except Exception:
+                    pass
                 logger.info(
                     f"[HEARTBEAT] {datetime.now().isoformat(timespec='seconds')} | "
                     f"Phase: {self.current_phase.value} | "
                     f"Pending Tasks: {pending_count} | "
                     f"Failure Streak: {self.phase_state.consecutive_failures}"
+                    f"{_diag}"
                 )
                 self._write_progress({"phase": self.current_phase.value, "status": "running"})
             except asyncio.CancelledError:
@@ -2968,6 +2994,47 @@ class CentralBrain(
                     self.checkpointer.save_checkpoint(self)
                     stopped = True
                     break
+
+                # Adaptive target-health re-plan: if the target is DOWN (sustained
+                # 5xx/timeouts), don't keep attacking a dead host. Back off and probe
+                # for recovery; resume if it comes back, else finalize with the
+                # results so far. This is the "target is down → abandon the plan"
+                # behaviour, not a fixed step. Fail-open.
+                try:
+                    from core.adaptation.target_health import get_target_health, wait_for_recovery
+                    _th = get_target_health()
+                    if _th.is_down and self.current_phase != ExecutionPhase.REPORTING \
+                            and not getattr(self, "_forced_report", False):
+                        _bo = int(getattr(self, "_target_backoffs", 0)) + 1
+                        self._target_backoffs = _bo
+                        logger.warning("[Adaptive] target DOWN %s — backing off (attempt %d/3)",
+                                       _th.summary(), _bo)
+
+                        async def _probe_target():
+                            try:
+                                from core.security.scoped_http import get_scoped_client
+                                _u = self.ctx.target
+                                if not _u.startswith(("http://", "https://")):
+                                    _u = "https://" + _u
+                                async with get_scoped_client(timeout=10, follow_redirects=True) as _c:
+                                    _r = await _c.get(_u)
+                                    return _r.status_code < 500
+                            except Exception:
+                                return False
+
+                        if await wait_for_recovery(_probe_target, max_wait=120, interval=20):
+                            logger.info("[Adaptive] target recovered — resuming scan")
+                            _th.reset()
+                        elif _bo >= 3:
+                            logger.critical("[Adaptive] target still DOWN after %d back-offs "
+                                            "— finalizing with current results", _bo)
+                            self._soft_deadline_hit = True
+                            self._forced_report = True
+                            await self._flush_partial("target-down")
+                            self.current_phase = ExecutionPhase.REPORTING
+                            continue
+                except Exception as _te:
+                    logger.debug("[Adaptive] target-health backoff skipped: %s", _te)
 
                 # §26/§46: external watchdog / kill switch — stop the scan on a
                 # budget breach or out-of-band kill, independent of the LLM.
@@ -3864,6 +3931,13 @@ class CentralBrain(
                 logger.debug(f"[AdvancedSync] Recon sync failed (non-fatal): {_sync_err}")
 
         elif phase == ExecutionPhase.ACTIVE_SCANNING.value:
+            # Adaptive: snapshot the surface size so a later jump-back to re-scan can
+            # detect meaningful growth (endpoints discovered after this pass).
+            try:
+                from core.adaptation.adaptive_controller import get_controller
+                get_controller(self).note_active_scanning(self)
+            except Exception:
+                pass
             # Kick the systematic specialist sweep off NOW (recon is complete, so
             # probes are already well-targeted) to run CONCURRENTLY with the
             # scanners below, instead of waiting for phase end. It is idempotent

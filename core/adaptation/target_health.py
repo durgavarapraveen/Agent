@@ -54,6 +54,13 @@ class TargetHealth:
         elif st != DOWN:
             self._down_since = None
 
+    def reset(self) -> None:
+        """Clear the window (e.g. after a confirmed recovery) so stale failures
+        don't keep the state pinned DOWN once the target answers again."""
+        self._w.clear()
+        self._streak = 0
+        self._down_since = None
+
     @property
     def state(self) -> str:
         if self._streak >= _DOWN_STREAK:
@@ -80,25 +87,25 @@ class TargetHealth:
                 "total": self._total, "down_seconds": round(self.down_seconds(), 1)}
 
 
-def get_target_health(ctx) -> TargetHealth:
-    """Per-scan singleton stored on ctx (best-effort; a detached instance if ctx is
-    unavailable so callers never crash)."""
-    if ctx is None:
-        return TargetHealth()
-    th = getattr(ctx, "_target_health", None)
-    if not isinstance(th, TargetHealth):
-        th = TargetHealth()
-        try:
-            setattr(ctx, "_target_health", th)
-        except Exception:
-            pass
-    return th
+# Process-global singleton. Each scan runs in its own process (main.py), so a
+# module-global is naturally per-scan and lets producers without a ctx handle (the
+# network broker) share the exact same view the controller reads.
+_GLOBAL: Optional[TargetHealth] = None
 
 
-def record_response(ctx, status: Optional[int] = None, *, transport_error: bool = False) -> None:
+def get_target_health(ctx=None) -> TargetHealth:
+    """The scan's shared TargetHealth. `ctx` is accepted for call-site convenience
+    but the instance is process-global so broker (no ctx) and controller (ctx) agree."""
+    global _GLOBAL
+    if _GLOBAL is None:
+        _GLOBAL = TargetHealth()
+    return _GLOBAL
+
+
+def record_response(ctx=None, status: Optional[int] = None, *, transport_error: bool = False) -> None:
     """Convenience hook for producers (the network broker) — never raises."""
     try:
-        get_target_health(ctx).record(status=status, transport_error=transport_error)
+        get_target_health().record(status=status, transport_error=transport_error)
     except Exception:
         pass
 
