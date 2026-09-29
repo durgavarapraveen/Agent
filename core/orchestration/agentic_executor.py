@@ -2735,8 +2735,15 @@ RULES:
                     logger.info(f"[AutoDetect] Negative value: {method} {url[:120]}")
 
         # ── 41. AUTHENTICATION BYPASS INDICATORS ──
-        auth_bypass_paths = ["/admin", "/api/admin", "/rest/admin", "/dashboard",
-                             "/management", "/internal", "/panel"]
+        # Admin-path substrings come from the single canonical source
+        # (endpoint_hints._ROLE_KEYWORDS["admin"]) so no one app's route shape
+        # (e.g. "/rest/admin") is baked in here; fail open to a generic set.
+        try:
+            from core.common.endpoint_hints import _ROLE_KEYWORDS as _RK
+            auth_bypass_paths = list(_RK.get("admin", [])) + ["/management", "/internal", "/panel"]
+        except Exception:
+            auth_bypass_paths = ["/admin", "/api/admin", "/dashboard",
+                                 "/management", "/internal", "/panel"]
         if status == 200 and len(resp_text) > 100:
             if any(bp in path_lower for bp in auth_bypass_paths):
                 auth_indicators = ["admin", "dashboard", "management", "configuration",

@@ -8796,7 +8796,12 @@ class CentralBrain(
                      or urljoin(base, "login"))
         uname_field = cfg.get("AUTH_USERNAME_FIELD", "email") or "email"
         pw_field = cfg.get("AUTH_PASSWORD_FIELD", "password") or "password"
-        tok_path = cfg.get("AUTH_TOKEN_JSON_PATH", "authentication.token") or "authentication.token"
+        # Generic, non-app-specific default. The real path is resolved from the
+        # captured login response (_resolve_login_url → _auth_find_token walk); this
+        # seed only matters if that never runs, so it must not bake in one app's
+        # envelope. Downstream token extraction (auth_session._find_token) also
+        # walks for a JWT-shaped value when this path misses.
+        tok_path = cfg.get("AUTH_TOKEN_JSON_PATH", "token") or "token"
 
         def _cred_result(role, url):
             return {
