@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-VALID_KINDS = ("finding", "cred", "tool", "pivot", "note")
+VALID_KINDS = ("finding", "cred", "tool", "pivot", "note", "adaptive")
 
 _SECRET_KEYS = ("password", "passwd", "secret", "token", "api_key", "apikey",
                 "authorization", "auth", "cookie", "session", "private_key",

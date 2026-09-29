@@ -8,11 +8,12 @@ import { fmtDate } from "./utils";
 // in real time, so you can watch agents compounding each other's discoveries.
 
 const KIND_META = {
-  finding: { color: "var(--orange)", label: "FINDING" },
-  cred:    { color: "var(--red)",    label: "CRED" },
-  tool:    { color: "var(--blue)",   label: "TOOL" },
-  pivot:   { color: "var(--purple)", label: "PIVOT" },
-  note:    { color: "var(--text-dim)", label: "NOTE" },
+  finding:  { color: "var(--orange)", label: "FINDING" },
+  cred:     { color: "var(--red)",    label: "CRED" },
+  tool:     { color: "var(--blue)",   label: "TOOL" },
+  pivot:    { color: "var(--purple)", label: "PIVOT" },
+  note:     { color: "var(--text-dim)", label: "NOTE" },
+  adaptive: { color: "var(--green, #3fb950)", label: "ADAPT" },
 };
 
 function Chip({ label, value, color }) {
@@ -88,7 +89,7 @@ export default function BlackboardPanel({ scanId, poll = false }) {
     return () => { stop = true; if (iv) clearInterval(iv); };
   }, [scanId, poll]);
 
-  const kinds = ["finding", "cred", "tool", "pivot", "note"];
+  const kinds = ["finding", "cred", "tool", "pivot", "note", "adaptive"];
 
   return (
     <div className="card" style={{ margin: 0 }}>

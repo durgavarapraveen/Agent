@@ -473,6 +473,23 @@ class ToolGateway:
         from core.common.error_translator import ErrorTranslator
         translation = ErrorTranslator.translate(tool_id, error_msg, exit_code=1, target=invocation.target)
         logger.error(f"Translated Error: {translation['formatted_report']}")
+
+        # Feed the adaptive target-health signal on TOOL-level reachability failures
+        # (port offline / DNS / host unreachable / URL inaccessible). Tools don't go
+        # through the network broker, so without this a target that is down for tools
+        # would never trip the DOWN state. Excludes WAF/missing-binary/5xx (target is
+        # up in those). Never raises.
+        try:
+            _cause = str(translation.get("cause", ""))
+            _REACH_DOWN = ("Port not responding / Service offline",
+                           "DNS resolution failure",
+                           "Host unreachable or ICMP blocked",
+                           "Target URL inaccessible")
+            if _cause in _REACH_DOWN:
+                from core.adaptation.target_health import record_response
+                record_response(transport_error=True)
+        except Exception:
+            pass
         
         tool_def = self.registry.get(tool_id)
         fallback_tools = list(getattr(tool_def, "fallback_tools", [])) if tool_def else []

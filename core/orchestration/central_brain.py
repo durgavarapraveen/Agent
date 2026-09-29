@@ -353,6 +353,16 @@ class CentralBrain(
         self.current_phase = new_phase
         logger.info(f"BRAIN_PHASE_TRANSITION: old_phase='{old_phase}' -> new_phase='{new_phase}'")
 
+    def _post_adaptive(self, title: str, data: Optional[dict] = None) -> None:
+        """Publish an adaptive-controller event to the shared blackboard so it shows
+        live in the UI (Blackboard feed, `adaptive` kind). Never raises."""
+        try:
+            from core.orchestration import blackboard as _bb
+            _bb.post(getattr(self, "_scan_id", "") or "", "adaptive-controller",
+                     "adaptive", str(title)[:280], data or {})
+        except Exception:
+            pass
+
     def _evaluate_phase_transition(self) -> Optional[ExecutionPhase]:
         # Soft deadline: once the runtime budget is nearly spent, jump straight to
         # REPORTING so the scan finalizes with the results it has instead of being
@@ -375,6 +385,9 @@ class CentralBrain(
             if _ov is not None:
                 self._adaptive_override = None
                 logger.info(f"[Adaptive] honoring LLM re-plan override -> {_ov.value}")
+                self._post_adaptive(f"LLM re-plan → {_ov.value}",
+                                    {"from": getattr(self.current_phase, "value", None),
+                                     "to": _ov.value, "source": "llm"})
                 return _ov
         except Exception:
             pass
@@ -3018,6 +3031,8 @@ class CentralBrain(
                         self._target_backoffs = _bo
                         logger.warning("[Adaptive] target DOWN %s — backing off (attempt %d/3)",
                                        _th.summary(), _bo)
+                        self._post_adaptive(f"Target DOWN — backing off ({_bo}/3)",
+                                            _th.summary())
 
                         async def _probe_target():
                             try:
@@ -3033,10 +3048,13 @@ class CentralBrain(
 
                         if await wait_for_recovery(_probe_target, max_wait=120, interval=20):
                             logger.info("[Adaptive] target recovered — resuming scan")
+                            self._post_adaptive("Target recovered — resuming scan")
                             _th.reset()
                         elif _bo >= 3:
                             logger.critical("[Adaptive] target still DOWN after %d back-offs "
                                             "— finalizing with current results", _bo)
+                            self._post_adaptive("Target still DOWN after 3 back-offs — "
+                                                "finalizing with current results")
                             self._soft_deadline_hit = True
                             self._forced_report = True
                             await self._flush_partial("target-down")

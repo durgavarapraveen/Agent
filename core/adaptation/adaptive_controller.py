@@ -110,6 +110,16 @@ class AdaptiveController:
                         "[Adaptive] surface grew %d→%d endpoints since scanning — "
                         "re-planning: jump back to ACTIVE_SCANNING (re-recon #%d)",
                         base, now_eps, replans + 1)
+                    try:
+                        if hasattr(brain, "_post_adaptive"):
+                            brain._post_adaptive(
+                                f"Re-recon: surface grew {base}→{now_eps} endpoints "
+                                f"→ jump back to ACTIVE_SCANNING",
+                                {"from": "EXPLOITATION", "to": "ACTIVE_SCANNING",
+                                 "source": "rule", "endpoints_before": base,
+                                 "endpoints_now": now_eps})
+                    except Exception:
+                        pass
                     return ExecutionPhase.ACTIVE_SCANNING
             return None
         except Exception as e:
