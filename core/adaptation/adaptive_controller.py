@@ -167,6 +167,11 @@ class AdaptiveController:
                 "- jump_to: go to a named phase (e.g. back to ACTIVE_SCANNING to test "
                 "surface discovered late; forward to skip low-value work).\n"
                 "- finalize: stop testing and go to REPORTING now.\n"
+                "- fan_out: spawn parallel agents to CHASE SPECIFIC LEADS in depth "
+                "(e.g. chain two findings into privesc, fully exploit a confirmed bug, "
+                "deep-dive a newly-found admin surface). Use ONLY for concrete follow-up "
+                "on things already found — NOT to decide coverage (every vuln class is "
+                "already tested by the battery). Provide 1-4 independent 'tasks'.\n"
                 "Only deviate from 'continue' when the state clearly justifies it; never "
                 "loop; choose finalize when marginal value is low or the target is "
                 "unhealthy.\n\n"
@@ -176,11 +181,12 @@ class AdaptiveController:
                 f"ENDPOINTS: {diag.get('endpoints')} | COVERAGE GAPS: {diag.get('coverage_gaps')}\n"
                 f"CONFIRMED VULN CLASSES: {vuln_classes}\n"
                 f"FAILURE STREAK: {diag.get('failure_streak')} | RE-PLANS USED: {diag.get('replans')}\n\n"
-                'Return JSON only: {"action":"continue|repeat|jump_to|finalize",'
+                'Return JSON only: {"action":"continue|repeat|jump_to|finalize|fan_out",'
                 '"phase":"RECON|ACTIVE_SCANNING|EXPLOITATION|REPORTING or empty",'
+                '"tasks":[{"objective":"<lead to chase>"}],'
                 '"why":"<short reason>"}'
             )
-            data = await get_llm().generate_json(prompt, tier=TaskTier.SMALL, max_tokens=200)
+            data = await get_llm().generate_json(prompt, tier=TaskTier.SMALL, max_tokens=350)
         except Exception as e:
             logger.debug("[Adaptive] llm_replan unavailable: %s", e)
             return
@@ -189,6 +195,18 @@ class AdaptiveController:
             return
         action = str(data.get("action", "")).strip().lower()
         why = str(data.get("why", ""))[:120]
+        # fan_out: chase specific leads in parallel (additive depth; does NOT change
+        # phase or touch the coverage floor). Runs now; leaves the default sequence
+        # to continue afterwards with the merged findings.
+        if action == "fan_out":
+            tasks = data.get("tasks")
+            if isinstance(tasks, list) and tasks and hasattr(brain, "_run_lead_agents"):
+                logger.info("[Adaptive] LLM chose fan_out (%s)", why)
+                try:
+                    await brain._run_lead_agents(tasks)
+                except Exception as _fe:
+                    logger.debug("[Adaptive] fan_out failed: %s", _fe)
+            return
         if action not in {"repeat", "jump_to", "finalize"}:
             return  # 'continue' / unknown → default sequence
         cur = getattr(brain, "current_phase", None)

@@ -363,6 +363,66 @@ class CentralBrain(
         except Exception:
             pass
 
+    async def _run_lead_agents(self, tasks: list) -> int:
+        """Dynamic parallel fan-out for specific LEADS (depth-chasing) — ON TOP OF,
+        never instead of, the deterministic coverage battery. Each task is an
+        independent agentic objective (e.g. "chain the IDOR + mass-assign into
+        privesc"); the executors run concurrently and their findings merge into ctx +
+        blackboard like any other agent. This never decides whether a vuln CLASS gets
+        tested (the static battery already guarantees that) — it only chases leads.
+
+        Bounded (≤4 tasks/call, ≤2 fan-outs/scan) and scope-safe (every request is
+        scope-gated in the executor). Best-effort; returns findings added; never raises.
+        """
+        try:
+            from core.orchestration.parallel_agents import run_parallel_agents
+            from agents.llm_harness_adapter import get_llm
+            from core.security.authorization import AuthContext
+        except Exception:
+            return 0
+        used = int(getattr(self, "_fanouts_used", 0) or 0)
+        if used >= 2:
+            logger.info("[Adaptive] fan-out budget exhausted (2/scan) — skipping")
+            return 0
+        clean = [t for t in (tasks or [])
+                 if isinstance(t, dict) and str(t.get("objective", "")).strip()][:4]
+        if not clean:
+            return 0
+        self._fanouts_used = used + 1
+        try:
+            allowed = list(self.tools.tools.keys()) if hasattr(self, "tools") \
+                and hasattr(self.tools, "tools") else []
+            auth_context = AuthContext(allowed_tools=allowed, has_elevated_privilege=True,
+                                       target_profile=getattr(self, "target_profile", None))
+        except Exception:
+            auth_context = None
+        phase = getattr(self.current_phase, "value", "EXPLOITATION")
+
+        async def _worker(task):
+            try:
+                ex = AgenticExecutor(
+                    llm_harness=get_llm(),
+                    tool_invocation_engine=self.tool_invocation_engine,
+                    shared_context=self.ctx, auth_context=auth_context)
+                r = await ex.execute(objective=str(task["objective"])[:500],
+                                     phase=phase, max_rounds=8)
+                return len(getattr(r, "findings", []) or [])
+            except Exception as e:
+                logger.warning("[Adaptive] lead agent failed: %s", e)
+                return 0
+
+        self._post_adaptive(f"Fan-out: {len(clean)} parallel lead agent(s)",
+                            {"objectives": [str(t["objective"])[:80] for t in clean]})
+        logger.warning("[Adaptive] fan-out: %d parallel lead agent(s)", len(clean))
+        results = await run_parallel_agents(clean, _worker, concurrency=3,
+                                            label="adaptive_fanout")
+        n = sum(x for x in results if isinstance(x, int))
+        logger.info("[Adaptive] fan-out complete: %d finding(s) from %d lead agent(s)",
+                    n, len(clean))
+        self._post_adaptive(f"Fan-out complete: {n} finding(s) merged from "
+                            f"{len(clean)} lead agent(s)")
+        return n
+
     def _evaluate_phase_transition(self) -> Optional[ExecutionPhase]:
         # Soft deadline: once the runtime budget is nearly spent, jump straight to
         # REPORTING so the scan finalizes with the results it has instead of being
