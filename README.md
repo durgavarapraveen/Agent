@@ -19,7 +19,7 @@ AI-driven, multi-agent autonomous penetration testing and external attack-surfac
 - **Out-of-band verification** — blind SSRF/RCE/XXE/SSTI/RFI/deserialization confirmed via a built-in local collaborator + free cloudflared tunnel (zero cost), or interactsh.
 - **Attack-chain reasoning** — findings are chained, re-scored by chain membership, and bundled into reproducible PoCs.
 - **Red-team / purple-team reporting** — findings are ATT&CK-tagged and assembled into a kill-chain narrative, tracked against operator objectives (`REDTEAM_OBJECTIVES`), with a purple-team detection-gap checklist and a timestamped deconfliction summary. Documentation only — the platform performs no C2, detection evasion, phishing, or lateral movement (those stay human-operated).
-- **Target-agnostic classification** — auth/API/param/role detection by shape + discovery (never app-specific literals), with an optional **Jev** typed classifier at decision gates.
+- **Target-agnostic classification** — auth/API/param/role detection by shape + discovery (never app-specific literals), with an optional **Jev** typed classifier at decision gates. Authenticated-session setup extracts the login token from any response shape (recursive JWT/token-key walk), so authenticated coverage isn't tied to one app's envelope.
 - **Multi-provider LLM** — **DeepSeek** (default) / AWS **Bedrock** / Ollama; switchable from the UI Settings page.
 - **Multi-identity authz testing** — IDOR/BOLA/BFLA across roles.
 - **Grey-box add-ons** — Android APK / iOS IPA endpoint extraction and Semgrep SAST correlated with runtime (DAST) findings.

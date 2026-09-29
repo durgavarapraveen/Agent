@@ -371,6 +371,8 @@ Three shared helpers in `core/common/` de-hardcode ~40 target assumptions so tes
 
 Also expose async `jev_is_api/jev_is_login/jev_is_privileged` for Jev-assisted classification. Prefer these helpers over any literal target string in probe/recon code.
 
+**Auth token extraction is shape-agnostic (two layers).** The login-response token path is never assumed to be one app's envelope. `central_brain` resolves it from the captured login response (`_resolve_login_url` → `_auth_find_token` recursive walk) and seeds only the generic default `token` (override `AUTH_TOKEN_JSON_PATH`). As a second layer, the actual consumer `core/authentication/auth_session.py` (`AuthSessionManager.authenticate`) falls back to `_find_token` — a recursive scan preferring a JWT (`eyJ…`) anywhere, else a long value under a token-named key (`token`/`jwt`/`access`/`auth`/`session`/`bearer`) — so a differently-shaped login response still yields a session even if the configured path misses. Login/enum probes (`expert_probes.py`) build bodies via `request_schema.credential_fields(ctx)`, and the unauthenticated admin-exposure detector (`agentic_executor.py`) draws admin path substrings from `endpoint_hints._ROLE_KEYWORDS["admin"]` — no app-specific route literals.
+
 ---
 
 ## 13. Persistence rules
