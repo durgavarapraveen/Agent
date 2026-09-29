@@ -365,10 +365,19 @@ class CentralBrain(
         except Exception:
             pass
 
-        # Adaptive re-plan: let the controller override the fixed sequence — e.g.
-        # jump BACK to ACTIVE_SCANNING to test surface discovered after scanning
-        # (free-form re-planning, bounded so it cannot loop). Fail-open: None ⇒ the
-        # normal logic below runs unchanged.
+        # Adaptive re-plan. Two sources, both bounded + fail-open:
+        #  (a) an LLM free-form decision stashed on _adaptive_override by llm_replan()
+        #      (opt-in NEO_ADAPTIVE_LLM) — consumed once here;
+        #  (b) the deterministic rule (jump BACK to ACTIVE_SCANNING when surface grew).
+        # None ⇒ the normal sequence below runs unchanged.
+        try:
+            _ov = getattr(self, "_adaptive_override", None)
+            if _ov is not None:
+                self._adaptive_override = None
+                logger.info(f"[Adaptive] honoring LLM re-plan override -> {_ov.value}")
+                return _ov
+        except Exception:
+            pass
         try:
             from core.adaptation.adaptive_controller import get_controller
             _rp = get_controller(self).replan_phase(self)
@@ -3124,6 +3133,16 @@ class CentralBrain(
                 # Record state
                 if hasattr(self, 'phase_state'):
                     self.phase_history.append(self.phase_state)
+
+                # Adaptive free-form re-plan (opt-in NEO_ADAPTIVE_LLM): let the LLM
+                # choose the next action from live state; it stashes an override the
+                # transition below honors. No-op when disabled. Async — must run here,
+                # not in the sync _transition_to_next_phase.
+                try:
+                    from core.adaptation.adaptive_controller import get_controller
+                    await get_controller(self).llm_replan(self)
+                except Exception as _lre:
+                    logger.debug(f"[Adaptive] llm_replan skipped: {_lre}")
 
                 self._transition_to_next_phase()
                 self.checkpointer.save_checkpoint(self)

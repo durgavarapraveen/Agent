@@ -116,6 +116,98 @@ class AdaptiveController:
             logger.debug("[Adaptive] replan skipped: %s", e)
             return None
 
+    async def llm_replan(self, brain) -> None:
+        """Opt-in (env NEO_ADAPTIVE_LLM=true): let the LLM choose the next action from
+        the current runtime state — the free-form counterpart to the rule in
+        ``replan_phase``. Sets ``brain._adaptive_override`` to an ExecutionPhase the
+        transition logic will honor, or leaves it unset.
+
+        The LLM decides WHAT; the deterministic pipeline does it and still enforces
+        scope + coverage. Bounded by ``_MAX_REPLANS`` (backward/repeat only — a plain
+        forward 'continue' is free), and fully fail-open: any error leaves the default
+        sequence untouched. Reproducibility note: enabling this makes runs
+        non-deterministic, so it is OFF by default.
+        """
+        import os
+        if os.getenv("NEO_ADAPTIVE_LLM", "").lower() not in ("1", "true", "yes"):
+            return
+        try:
+            from core.orchestration.central_brain import ExecutionPhase
+        except Exception:
+            return
+        try:
+            if int(getattr(brain, "_adaptive_replans", 0) or 0) >= _MAX_REPLANS:
+                return
+            diag = self.diagnose(brain)
+            ctx = getattr(brain, "ctx", None)
+            vuln_classes: Dict[str, int] = {}
+            for v in (getattr(ctx, "vulnerabilities", None) or [])[:200]:
+                t = (v.get("type") or v.get("category") or "?") if isinstance(v, dict) else "?"
+                vuln_classes[t] = vuln_classes.get(t, 0) + 1
+            done = sorted(getattr(brain, "_completed_phases", set()) or [])
+            from agents.llm_harness_adapter import get_llm
+            from core.common.schemas import TaskTier
+            prompt = (
+                "You are the controller of an autonomous web-app penetration test. "
+                "Choose the SINGLE best next action from the current state. Phases run "
+                "RECON -> ACTIVE_SCANNING -> EXPLOITATION -> REPORTING by default.\n"
+                "Actions:\n"
+                "- continue: proceed to the default next phase (prefer this).\n"
+                "- repeat: run the CURRENT phase again for more depth.\n"
+                "- jump_to: go to a named phase (e.g. back to ACTIVE_SCANNING to test "
+                "surface discovered late; forward to skip low-value work).\n"
+                "- finalize: stop testing and go to REPORTING now.\n"
+                "Only deviate from 'continue' when the state clearly justifies it; never "
+                "loop; choose finalize when marginal value is low or the target is "
+                "unhealthy.\n\n"
+                f"CURRENT PHASE: {diag.get('phase')}\n"
+                f"COMPLETED PHASES: {done}\n"
+                f"TARGET HEALTH: {diag.get('target')}\n"
+                f"ENDPOINTS: {diag.get('endpoints')} | COVERAGE GAPS: {diag.get('coverage_gaps')}\n"
+                f"CONFIRMED VULN CLASSES: {vuln_classes}\n"
+                f"FAILURE STREAK: {diag.get('failure_streak')} | RE-PLANS USED: {diag.get('replans')}\n\n"
+                'Return JSON only: {"action":"continue|repeat|jump_to|finalize",'
+                '"phase":"RECON|ACTIVE_SCANNING|EXPLOITATION|REPORTING or empty",'
+                '"why":"<short reason>"}'
+            )
+            data = await get_llm().generate_json(prompt, tier=TaskTier.SMALL, max_tokens=200)
+        except Exception as e:
+            logger.debug("[Adaptive] llm_replan unavailable: %s", e)
+            return
+
+        if not isinstance(data, dict):
+            return
+        action = str(data.get("action", "")).strip().lower()
+        why = str(data.get("why", ""))[:120]
+        if action not in {"repeat", "jump_to", "finalize"}:
+            return  # 'continue' / unknown → default sequence
+        cur = getattr(brain, "current_phase", None)
+        override = None
+        if action == "finalize":
+            override = ExecutionPhase.REPORTING
+        elif action == "repeat":
+            override = cur
+        elif action == "jump_to":
+            try:
+                override = ExecutionPhase(str(data.get("phase", "")).strip().upper())
+            except Exception:
+                override = None
+        if override is None or cur is None:
+            return
+        # Count backward/repeat re-plans against the bound (forward moves are free);
+        # REPORTING/finalize never counts so the agent can always choose to stop.
+        _order = ["BUSINESS_UNDERSTANDING", "RECON", "ACTIVE_SCANNING",
+                  "EXPLOITATION", "REPORTING"]
+        try:
+            if (override.value != "REPORTING"
+                    and _order.index(override.value) <= _order.index(cur.value)):
+                brain._adaptive_replans = int(getattr(brain, "_adaptive_replans", 0) or 0) + 1
+        except Exception:
+            pass
+        brain._adaptive_override = override
+        logger.warning("[Adaptive] LLM re-plan: %s -> %s (%s)",
+                       getattr(cur, "value", None), override.value, why)
+
     def note_active_scanning(self, brain) -> None:
         """Snapshot endpoint count when ACTIVE_SCANNING runs, so replan_phase can
         detect later surface growth."""
