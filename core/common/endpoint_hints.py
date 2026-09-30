@@ -102,7 +102,7 @@ def _lower_paths_from_ctx(ctx) -> Set[str]:
                 if u_full.startswith(("http://", "https://")):
                     out.add(u_full.split("?")[0].lower())
     # 4. Endpoint discoveries stored inside tool_results by tool name
-    for tool_name, res in (getattr(ctx, "tool_results", {}) or {}).items():
+    for _tool_name, res in (getattr(ctx, "tool_results", {}) or {}).items():
         if not isinstance(res, dict):
             continue
         for key in ("endpoints", "paths", "urls", "found"):

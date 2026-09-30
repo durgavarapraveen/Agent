@@ -149,7 +149,7 @@ def _track_objectives(ctx, vulns: List[Dict]) -> List[Dict[str, Any]]:
 
     # No operator objectives declared → derive impact objectives from what was
     # actually achieved (so the narrative still has goals to report against).
-    for kws, needed, label in _OBJECTIVE_RULES:
+    for _kws, needed, label in _OBJECTIVE_RULES:
         hit = classes & set(needed)
         if hit:
             out.append({"objective": f"(derived) {label}", "achieved": True,
@@ -239,7 +239,7 @@ def build_redteam_narrative(ctx) -> Dict[str, Any]:
         logger.warning("[RedTeamNarrative] build failed (non-fatal): %s", e)
         return {}
     try:
-        setattr(ctx, "redteam_narrative", narrative)
+        ctx.redteam_narrative = narrative
         if hasattr(ctx, "update"):
             ctx.update("redteam_narrative", narrative)
     except Exception:

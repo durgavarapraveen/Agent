@@ -101,7 +101,7 @@ class CoverageReport:
 
     def _compute_category_stats(self, matrix: Dict) -> Dict[str, Dict[str, int]]:
         stats: Dict[str, Dict[str, int]] = {}
-        for ep_id, tests in matrix.items():
+        for _ep_id, tests in matrix.items():
             for test_id, state in tests.items():
                 cat = self.cat_map.get(test_id, "other")
                 if cat not in stats:

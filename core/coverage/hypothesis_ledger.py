@@ -126,7 +126,7 @@ def get_ledger(ctx) -> Optional[HypothesisLedger]:
     if led is None:
         led = HypothesisLedger()
         try:
-            setattr(ctx, "hypothesis_ledger", led)
+            ctx.hypothesis_ledger = led
         except Exception:
             return None
     return led

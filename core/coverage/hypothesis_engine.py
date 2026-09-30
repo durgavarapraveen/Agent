@@ -137,7 +137,7 @@ class HypothesisEngine:
 
     def _from_technologies(self, surface: AttackSurfaceState) -> List[Dict[str, Any]]:
         results = []
-        for tech_name, tech_data in surface.technologies.items():
+        for tech_name, _tech_data in surface.technologies.items():
             key = tech_name.lower().split("/")[0].split(" ")[0]
             # Unrecognized tech -> baseline attack set instead of nothing.
             test_ids = TECH_ATTACK_MAP.get(key) or DEFAULT_ATTACK_SET

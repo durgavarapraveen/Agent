@@ -242,7 +242,7 @@ class PersistenceMixin:
         seen = getattr(self.ctx, "_probe_sweep_seen", None)
         if seen is None:
             seen = set()
-            setattr(self.ctx, "_probe_sweep_seen", seen)
+            self.ctx._probe_sweep_seen = seen
         known = {(v.get("location") or v.get("target") or "").split("?")[0].lower()
                  for v in self.ctx.vulnerabilities}
         _blocked = {400, 401, 403, 404, 405, 429}

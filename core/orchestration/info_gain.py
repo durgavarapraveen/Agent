@@ -171,7 +171,7 @@ def build_state_from_ctx(ctx: Any) -> Dict[str, Any]:
     def _g(name, default=None):
         try:
             return getattr(ctx, name, default) if not hasattr(ctx, "get") \
-                else (ctx.get(name, default) if callable(getattr(ctx, "get")) else getattr(ctx, name, default))
+                else (ctx.get(name, default) if callable(ctx.get) else getattr(ctx, name, default))
         except Exception:
             return default
 

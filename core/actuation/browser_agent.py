@@ -213,7 +213,7 @@ class BrowserAgent:
 
         history = []
 
-        for step_num in range(goal.max_steps):
+        for _step_num in range(goal.max_steps):
             # Get current DOM state
             try:
                 dom_result = await actuator.run_actions([

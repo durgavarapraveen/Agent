@@ -186,7 +186,7 @@ class SharedContextV2:
             led = getattr(self, "probe_observations", None)
             if led is None:
                 led = []
-                setattr(self, "probe_observations", led)
+                self.probe_observations = led
             if len(led) >= cap:
                 return
             path = str(url or "").split("?")[0].lower()
@@ -194,7 +194,7 @@ class SharedContextV2:
             seen = getattr(self, "_probe_obs_sigs", None)
             if seen is None:
                 seen = set()
-                setattr(self, "_probe_obs_sigs", seen)
+                self._probe_obs_sigs = seen
             if sig in seen:
                 return
             seen.add(sig)
@@ -607,7 +607,7 @@ class SharedContextV2:
             store = getattr(self, "response_baselines", None)
             if store is None:
                 store = {}
-                setattr(self, "response_baselines", store)
+                self.response_baselines = store
             if key not in store:
                 store[key] = {"status": int(status or 0), "length": int(length or 0),
                               "content_type": content_type}

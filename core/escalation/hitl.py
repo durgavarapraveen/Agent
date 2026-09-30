@@ -99,6 +99,6 @@ def _record(ctx, action, kind, target, approved, status) -> None:
             store = []
         store.append({"action": action, "kind": kind, "target": target,
                       "approved": bool(approved), "status": str(status)})
-        setattr(ctx, "hitl_decisions", store)
+        ctx.hitl_decisions = store
     except Exception:
         pass

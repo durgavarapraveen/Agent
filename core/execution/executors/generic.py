@@ -1191,7 +1191,7 @@ class IDORExecutor(GenericHTTPExecutor):
 
         # Auto-generate IDOR tests from ALL endpoints containing numeric IDs
         id_endpoints = self._endpoints_with_ids(experiment)
-        for orig_path, orig_id, swapped_path in id_endpoints[:20]:
+        for orig_path, _orig_id, swapped_path in id_endpoints[:20]:
             status, body, _ = self._probe(f"{base}{swapped_path}",
                                            headers=self._auth_headers(experiment))
             if status == 200 and len(body) > 10:
@@ -1204,7 +1204,7 @@ class IDORExecutor(GenericHTTPExecutor):
                     })
 
         # PUT/DELETE method tests on first few ID endpoints
-        for orig_path, orig_id, swapped_path in id_endpoints[:5]:
+        for _orig_path, _orig_id, swapped_path in id_endpoints[:5]:
             for method in ["PUT", "DELETE"]:
                 status, body, _ = self._probe(
                     f"{base}{swapped_path}", method=method,
@@ -1781,7 +1781,7 @@ class RateLimitExecutor(GenericHTTPExecutor):
             hdrs = {**headers, "Content-Type": "application/json"}
             body = json.dumps(rs.build_login_body(
                 self._rs_ctx(experiment), "ratetest@example.com", "wrong")).encode()
-            for i in range(self.BURST):
+            for _i in range(self.BURST):
                 status, _, _ = self._probe(full, method="POST", headers=hdrs, data=body)
                 statuses.append(status)
                 if status == 429:
@@ -5095,7 +5095,7 @@ class HeaderRateLimitBypassExecutor(GenericHTTPExecutor):
         for ep in auth_eps[:2]:
             # Drive to 429
             hit429 = False
-            for i in range(25):
+            for _i in range(25):
                 s, _, _ = self._probe(base + ep, method="POST", headers=hdrs, data=body)
                 if s == 429:
                     hit429 = True

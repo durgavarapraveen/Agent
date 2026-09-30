@@ -74,8 +74,8 @@ class CoverageMatrix:
     def get_coverage(self) -> float:
         applicable = 0
         resolved = 0
-        for ep_id, tests in self._matrix.items():
-            for test_id, cell in tests.items():
+        for _ep_id, tests in self._matrix.items():
+            for _test_id, cell in tests.items():
                 s = cell["state"]
                 if s in (CoverageState.NOT_APPLICABLE, CoverageState.NOT_DISCOVERED):
                     continue
@@ -87,7 +87,7 @@ class CoverageMatrix:
     def get_coverage_by_category(self, test_category_map: Dict[str, str]) -> Dict[str, float]:
         cat_totals: Dict[str, int] = {}
         cat_resolved: Dict[str, int] = {}
-        for ep_id, tests in self._matrix.items():
+        for _ep_id, tests in self._matrix.items():
             for test_id, cell in tests.items():
                 s = cell["state"]
                 if s in (CoverageState.NOT_APPLICABLE, CoverageState.NOT_DISCOVERED):

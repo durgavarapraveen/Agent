@@ -208,7 +208,7 @@ class Dispatcher:
         logger.info("Dispatcher: %d surfaces → %d findings; coverage %.0f%% (%s); delegated=%s",
                     len(surfaces), len(findings), rep["completeness"] * 100, rep["counts"], delegated_seen)
         try:
-            setattr(ctx, "coverage_ledger", rep)
+            ctx.coverage_ledger = rep
         except Exception:
             pass
         try:
@@ -245,7 +245,7 @@ class Dispatcher:
         for s in surfaces:
             summary["kinds"][s.kind] = summary["kinds"].get(s.kind, 0) + 1
         try:
-            setattr(ctx, "surface_coverage", summary)
+            ctx.surface_coverage = summary
         except Exception:
             pass
 

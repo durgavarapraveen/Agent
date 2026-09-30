@@ -134,7 +134,7 @@ class CoverageLedger:
                 continue
             confirmed = str(v.get("status") or "").upper() == "CONFIRMED"
             # Match any applicable cell whose surface shares the finding's path.
-            for k, cell in self.cells.items():
+            for _k, cell in self.cells.items():
                 if cell.vuln_class != vclass:
                     continue
                 cpath = cell.surface.split("|", 1)[0]
@@ -227,7 +227,7 @@ def build_and_log(ctx, coverage_ran: Optional[Set[str]] = None) -> Dict[str, Any
                        "(missing identities) — enable AUTH_SELF_REGISTER or supply >=2 "
                        "identities: %s", len(eps), ", ".join(eps[:10]))
     try:
-        setattr(ctx, "coverage_ledger", report)
+        ctx.coverage_ledger = report
     except Exception:
         pass
     s = report.get("summary", {})

@@ -780,7 +780,7 @@ async def _on_shutdown():
     # sweep can pick them up. Never terminate the subprocess here — supervisor
     # restart may want to hand off to the same PID.
     try:
-        for job_id, job in list(_active_scans.items()):
+        for _job_id, job in list(_active_scans.items()):
             if job.get("status") in ("running", "starting"):
                 job["status"] = "stopping"
         _persist_scan_state()

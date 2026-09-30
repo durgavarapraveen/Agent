@@ -25,7 +25,7 @@ class ParameterExtractor:
         # 2. Header Parameters
         # Usually we only care about custom or important headers (X-*, Authorization, etc)
         # We will extract all for comprehensiveness and let downstream logic filter.
-        for key, val in request.full_headers.items():
+        for key, _val in request.full_headers.items():
             params.append(Parameter(
                 name=key,
                 parameter_type=ParameterType.HEADER,
@@ -34,7 +34,7 @@ class ParameterExtractor:
             ))
             
         # 3. Cookie Parameters
-        for key, val in request.cookies.items():
+        for key, _val in request.cookies.items():
             params.append(Parameter(
                 name=key,
                 parameter_type=ParameterType.COOKIE,

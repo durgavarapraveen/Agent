@@ -99,7 +99,7 @@ class AttackPathEngine:
             by_host.setdefault(_host(f), []).append(f)
 
         # 1) Same-host chains: an initial-access step → each higher-stage step.
-        for host, group in by_host.items():
+        for _h, group in by_host.items():
             group = sorted(group, key=lambda x: _STAGE[_stage(x)])
             starts = [f for f in group if _STAGE[_stage(f)] <= _STAGE["execution"]]
             targets = [f for f in group

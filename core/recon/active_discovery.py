@@ -164,7 +164,7 @@ async def run_content_discovery(ctx) -> List[Dict[str, Any]]:
                 if not isinstance(store, dict):
                     store = {}
                 store[u] = sorted(set(params))
-                setattr(ctx, "discovered_params", store)
+                ctx.discovered_params = store
                 # also register the endpoint-with-params so probes exercise them
                 _add_endpoints(ctx, [u + "?" + "=1&".join(sorted(set(params))) + "=1"],
                                "arjun_param_mining")

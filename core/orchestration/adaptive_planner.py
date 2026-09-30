@@ -125,7 +125,7 @@ class AdaptivePlanner:
         if hist is None:
             hist = {}
             try:
-                setattr(brain.ctx, "_planner_rates", hist)
+                brain.ctx._planner_rates = hist
             except Exception:
                 return 1.0
         prev = hist.get(key, 0)

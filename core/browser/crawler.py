@@ -241,7 +241,7 @@ def _record_websocket(ctx, ws_url: str, frames=None) -> None:
         if not isinstance(store, list):
             store = []
         store.append({"url": ws_url, "frames": list(frames or [])})
-        setattr(ctx, "websockets", store)
+        ctx.websockets = store
     except Exception:
         pass
 
@@ -265,7 +265,7 @@ def _ingest_crawl_data(ctx, data: dict) -> int:
         try:
             store = getattr(ctx, "dom_sinks", None) or {}
             store[url] = sinks
-            setattr(ctx, "dom_sinks", store)
+            ctx.dom_sinks = store
         except Exception:
             pass
     return captured
@@ -396,7 +396,7 @@ def _flag_dom_sinks(ctx, url: str, html: str) -> None:
             store = getattr(ctx, "dom_sinks", None)
             if store is None:
                 store = {}
-                setattr(ctx, "dom_sinks", store)
+                ctx.dom_sinks = store
             store[url] = present
         except Exception:
             pass
@@ -468,7 +468,7 @@ async def _harvest_spa_routes(ctx, base_url: str, cap: int = 80) -> None:
     paths, and store them on ctx.spa_routes (idempotent, best-effort)."""
     if getattr(ctx, "_spa_routes_done", False):
         return
-    setattr(ctx, "_spa_routes_done", True)
+    ctx._spa_routes_done = True
     from core.security.scoped_http import get_scoped_client
     routes: Set[str] = set()
     try:
@@ -496,7 +496,7 @@ async def _harvest_spa_routes(ctx, base_url: str, cap: int = 80) -> None:
         try:
             existing = set(getattr(ctx, "spa_routes", None) or [])
             merged = sorted(existing | routes)[:cap]
-            setattr(ctx, "spa_routes", merged)
+            ctx.spa_routes = merged
             logger.info("[Crawler] harvested %d SPA route(s) from JS bundles", len(merged))
         except Exception:
             pass

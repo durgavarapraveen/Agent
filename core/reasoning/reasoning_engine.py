@@ -32,7 +32,7 @@ class ReasoningEngine:
             )
             hypotheses.append(h)
 
-        for name, ep in endpoints.items():
+        for name, _ep in endpoints.items():
             if any(p in name.lower() for p in ("admin", "auth", "login", "api")):
                 h = Hypothesis(
                     id=f"hyp-ep-{name}",

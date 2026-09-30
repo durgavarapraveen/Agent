@@ -418,7 +418,7 @@ class EnterpriseReporter:
         if not summary.get("frameworks"):
             return "<p class='muted'>No frameworks selected.</p>"
         blocks = []
-        for fw, data in summary["frameworks"].items():
+        for _fw, data in summary["frameworks"].items():
             rows = "".join(
                 f"<tr><td>{html.escape(c['control_id'])}</td>"
                 f"<td>{html.escape(c['control_title'])}</td>"

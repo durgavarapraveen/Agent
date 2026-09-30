@@ -63,7 +63,7 @@ def record_scan_intel(target: str, ctx, scan_id: str) -> None:
                      for e in (getattr(ctx, "endpoints", []) or [])})[:500]
         techs = getattr(ctx, "technologies", {}) or {}
         waf = ""
-        for host, tech_list in (techs or {}).items():
+        for _host, tech_list in (techs or {}).items():
             for t in (tech_list if isinstance(tech_list, list) else [tech_list]):
                 if isinstance(t, str) and "waf" in t.lower():
                     waf = t; break

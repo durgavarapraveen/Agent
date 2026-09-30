@@ -310,7 +310,7 @@ class APISchemaImporter:
                 req_body = operation.get("requestBody", {})
                 if isinstance(req_body, dict):
                     content = req_body.get("content", {})
-                    for media_type, media_spec in content.items():
+                    for _media_type, media_spec in content.items():
                         if not isinstance(media_spec, dict):
                             continue
                         schema = media_spec.get("schema", {})

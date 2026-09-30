@@ -195,7 +195,7 @@ class DNSResolver:
             infos = socket.getaddrinfo(canonical, None, socket.AF_UNSPEC,
                                        socket.SOCK_STREAM)
             seen: Set[str] = set()
-            for family, _, _, _, sockaddr in infos:
+            for _family, _, _, _, sockaddr in infos:
                 ip = sockaddr[0]
                 if ip not in seen:
                     seen.add(ip)

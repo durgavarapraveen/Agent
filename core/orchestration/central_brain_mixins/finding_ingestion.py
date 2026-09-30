@@ -387,7 +387,7 @@ class FindingIngestionMixin:
                 try:
                     self.ctx.update("asset_classes", asset_map)
                 except Exception:
-                    setattr(self.ctx, "asset_classes", asset_map)
+                    self.ctx.asset_classes = asset_map
             except Exception:
                 pass
         

@@ -35,7 +35,7 @@ class MatrixEngine:
                 if not isinstance(store, list):
                     store = []
                 store.append({"endpoint": path, "reason": reason, "partial": partial})
-                setattr(self.shared_context, "authz_coverage_unknown", store)
+                self.shared_context.authz_coverage_unknown = store
             except Exception:
                 pass
 
@@ -80,12 +80,12 @@ class MatrixEngine:
                 matrix_results["anonymous"] = anon_resp["status"] if anon_resp else 0
                 
             elif isinstance(test, HorizontalTest):
-                for peer_id, result in results.items():
+                for peer_id, _result in results.items():
                     peer_resp = self.replayer.replay(request_node, identity_id=peer_id)
                     matrix_results[peer_id] = peer_resp["status"] if peer_resp else 0
                     
             elif isinstance(test, VerticalTest):
-                for admin_id, result in results.items():
+                for _admin_id, _result in results.items():
                     # For vertical, we might need to know the admin's actual response status
                     admins = [uid for uid, iden in self.identities.items() if ts.is_admin_role(iden.role)]
                     if admins:

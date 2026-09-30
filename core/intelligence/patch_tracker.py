@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 def parse_date_str(date_str: str) -> datetime:
     if not date_str:
         return datetime.now()
-    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+    for _fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
         try:
             return datetime.strptime(date_str[:10], "%Y-%m-%d")
         except ValueError:

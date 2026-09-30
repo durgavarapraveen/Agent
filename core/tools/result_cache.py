@@ -64,7 +64,7 @@ class ResultCache:
                 self._store.clear()
                 return n
             n = 0
-            for k in list(self._store.keys()):
+            for _k in list(self._store.keys()):
                 # keys are hashes so we can't filter by content; clients
                 # should invalidate by exact target+operation+args.
                 pass

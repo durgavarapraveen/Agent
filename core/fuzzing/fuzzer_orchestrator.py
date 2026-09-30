@@ -49,7 +49,7 @@ class FuzzerOrchestrator:
             logger.warning(f"No tools registered for test type: {test_type}")
             return ToolResult(tool_name="none", status=ToolStatus.ERROR, evidence="No tools registered")
 
-        for i, tool_name in enumerate(tools):
+        for _i, tool_name in enumerate(tools):
             # Known unsupported mock tools like "custom" or "manual" are treated as exhausted fallback chain
             if tool_name in ["custom", "manual"]:
                 logger.warning(f"Fallback reached manual/custom phase for {test_type}")

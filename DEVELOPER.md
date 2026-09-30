@@ -503,12 +503,16 @@ Full Docker stack + Metasploit run instructions: **[README.md](README.md)** §A/
 
 ```bash
 python -m pytest tests/ -q          # runs without Postgres (SQLite/mocked)
-python -m ruff check .              # lint (ruff.toml)
+python -m ruff check .              # bug checks + bugbear (ruff.toml)
+python scripts/lint_ratchet.py      # no new blind-except / raise-without-from
+python scripts/mypy_gate.py         # type errors may not grow (mypy.ini)
 cd ui/web && npm run lint           # oxlint
 docker compose -f docker-compose.benchmark.yml up --abort-on-container-exit   # live scoring
 ```
 
 Add a regression test for every planner/normalizer shape and every probe. Never edit a test to hide a broken change.
+
+**Debt ratchets.** `BLE001`/`B904` (lint) and per-package mypy error counts are frozen at a baseline; CI fails if they grow. Burn debt down in a PR, then re-baseline with `python scripts/lint_ratchet.py --update` / `python scripts/mypy_gate.py --update`. Extend type coverage by adding packages to `scripts/mypy_baseline.json`.
 
 ### Gotchas
 
