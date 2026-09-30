@@ -286,6 +286,7 @@ from core.orchestration.central_brain_mixins.finding_ingestion import FindingIng
 from core.orchestration.central_brain_mixins.persistence import PersistenceMixin
 from core.orchestration.central_brain_mixins.osint_bridge import OsintBridgeMixin
 from core.orchestration.central_brain_mixins.recon_context import ReconContextMixin
+from core.orchestration.central_brain_mixins.exploitation_runners import ExploitationRunnersMixin
 from core.orchestration.central_brain_mixins.agent_execution import AgentExecutionMixin
 from core.orchestration.central_brain_mixins.analysis_pipelines import AnalysisPipelinesMixin
 from core.orchestration.central_brain_mixins.authz import AuthzMixin
@@ -311,6 +312,7 @@ class CentralBrain(
     OsintBridgeMixin,
     PersistenceMixin,
     FindingIngestionMixin,
+    ExploitationRunnersMixin,
     AgentExecutionMixin,
     AnalysisPipelinesMixin,
     AuthzMixin,
@@ -2791,42 +2793,6 @@ class CentralBrain(
         except Exception:
             pass
 
-    async def _run_attack_chaining(self) -> None:
-        """Combine confirmed findings into scored end-to-end attack chains (graph
-        detector + LLM-proposed), rescore findings by chain membership, persist, and
-        stash the report-ready result on ctx. Non-fatal."""
-        try:
-            from core.exploitation.chain_builder import ChainBuilder
-        except Exception:
-            return
-        vulns = list(getattr(self.ctx, "vulnerabilities", []) or [])
-        if len(vulns) < 2:
-            return
-        cb = ChainBuilder()
-        result = cb.synthesize(vulns)  # graph chains + rescore + narratives
-        try:
-            llm_chains = await cb.llm_propose_chains(vulns)
-        except Exception:
-            llm_chains = []
-        if llm_chains:
-            result.setdefault("narratives", []).extend(llm_chains)
-            result["llm_chain_count"] = len(llm_chains)
-        self.ctx.attack_chains = result
-        try:
-            from core.database.pg_store import AttackChainRepo
-            scan_id = getattr(self, "_scan_id", "") or getattr(self.ctx, "scan_id", "") or ""
-            rows = [{"chain_id": n.get("chain_id"),
-                     "description": " → ".join(n.get("steps", []))[:500],
-                     "score": n.get("cvss", 0), "status": "detected",
-                     "steps": n.get("steps", []), "impact": n.get("severity", "")}
-                    for n in result.get("narratives", [])]
-            AttackChainRepo.bulk_upsert(scan_id, rows)
-        except Exception as e:
-            logger.debug(f"[Chaining] persist skipped: {e}")
-        logger.info("[Chaining] %d graph + %d llm chain(s); %d finding(s) upgraded by chain",
-                    result.get("chain_count", 0), result.get("llm_chain_count", 0),
-                    result.get("rescore", {}).get("upgraded_count", 0))
-
     async def _assert_phase_coverage(self, phase: str) -> None:
         """Coverage-gate: a phase is not done until every REQUIRED coverage unit
         for it has actually run. Derives required units from the app model /
@@ -4755,54 +4721,6 @@ class CentralBrain(
                         f"requests across {len(self.ctx.crawled_pages)} pages")
         except Exception as e:      # noqa: BLE001
             logger.error(f"[capture] request interception failed: {e}")
-
-    async def _run_post_exploitation(self):
-        logger.info("\n>>> PHASE 6: POST-EXPLOITATION (privesc / lateral / persistence)")
-
-        def should_skip_postex():
-            has_rce = self.ctx.has_shell_access
-            has_creds = len(self.ctx.harvested_creds) > 0
-            has_exploitable_logic = any(
-                v.get("type", "").lower() in ("business_logic", "idor", "auth_bypass") 
-                for v in self.ctx.vulnerabilities
-            )
-            
-            # Skip ONLY if truly nothing to work with
-            if has_rce or has_creds or has_exploitable_logic:
-                return False
-            return True
-
-        if should_skip_postex():
-            logger.info("No shell/RCE foothold, credentials, or logic vulnerabilities established — skipping post-exploitation")
-            return
-
-        # Runner stays None (plan-only) unless a confirmed foothold session is
-        # wired in AND the operator has explicitly enabled post-ex execution.
-        # Persistence install additionally requires DEEP + authorize.
-        runner = self._build_postex_runner()
-        authorize_persistence = False  # never auto-install; operator opt-in only
-
-        self.post_exploit = PostExploitManager(
-            self.ctx, tier=self.tier,
-            runner=runner, authorize_persistence=authorize_persistence,
-        )
-        try:
-            result = await self.post_exploit.run()
-            if result.get("status") == "completed":
-                pv = result["privesc"]; lat = result["lateral"]
-                logger.info(
-                    f"Post-exploitation: {pv['count']} privesc paths, "
-                    f"{lat['pivots']} pivots, {lat['credentials']} creds, "
-                    f"{len(result['persistence']['installed'])} persistence installed "
-                    f"(plan-only={self.tier != 'DEEP'}), "
-                    f"{result['mitre']['techniques']} ATT&CK techniques"
-                )
-                rec = pv.get("recommended")
-                if rec:
-                    logger.info(f"Recommended escalation: {rec.get('technique')} — "
-                                f"{rec.get('path','')}")
-        except Exception as e:      # noqa: BLE001
-            logger.error(f"Post-exploitation phase failed: {e}")
 
     async def _run_phase(self, phase: str):
         # Special phases have dedicated DETERMINISTIC handlers (the real OSINT
@@ -7268,79 +7186,6 @@ class CentralBrain(
         if detonated:
             logger.info(f"[Sandbox] detonated {detonated} synthesized exploits")
 
-    async def _run_agent_exploitation(self) -> None:
-        from core.actuation import ObjectiveAgentLoop
-        from core.common.config import get_config as _cfg
-        from agents.llm_harness_adapter import get_llm, initialize_llm
-
-        harness = get_llm()
-        if harness is None:
-            await initialize_llm()
-            harness = get_llm()
-        if harness is None:
-            logger.warning("[AgentExploit] no LLM harness available — skipping")
-            return
-
-        # Brief context from what recon/scanning already found.
-        known = "; ".join(
-            f"[{v.get('severity','?')}] {v.get('title', v.get('type','?'))}"
-            for v in (self.ctx.vulnerabilities or [])[:8]
-        )
-        catalog = getattr(self.ctx, "endpoint_catalog", []) or []
-        api_eps = [e["path"] for e in catalog if e.get("kind") in ("api", "sensitive")][:12]
-        context = (f"Findings: {known or 'none yet'}. "
-                   f"API/sensitive endpoints: {', '.join(api_eps) or 'none'}.")
-
-        # Register leaked identities for authenticated IDOR/access-control testing.
-        try:
-            await self._augment_auth_with_osint()
-        except Exception:
-            pass
-
-        # Feed OSINT into auth attacks, JWT forgery, and IDOR.
-        try:
-            idents = self._osint_identities()
-            o_users = idents.get("usernames", [])
-            o_creds = idents.get("leaked_pairs", [])
-            emails = idents.get("emails", [])
-            admin_emails = idents.get("admin_emails", [])
-            o_pw = self._osint_spray_material()[2]
-            if o_users or o_creds or emails:
-                cred_hint = "; ".join(f"{u}:{p}" for u, p in o_creds[:8])
-                admin_hint = ', '.join((admin_emails or emails)[:3]) or 'admin email'
-                context += (
-                    f"\nOSINT intel:\n"
-                    f"Users: {', '.join(o_users[:15])}\n"
-                    + (f"Emails: {', '.join(emails[:10])}\n" if emails else "")
-                    + (f"Leaked creds: {cred_hint}\n" if cred_hint else "")
-                    + (f"Passwords: {', '.join(o_pw[:8])}\n" if o_pw else "")
-                    + "USE: 1) Credential stuff login endpoints. "
-                    f"2) jwt_forge: sub/email={admin_hint}, role=admin, alg=none then HS256. "
-                    "3) IDOR: access other users' objects via /api /rest endpoints.\n"
-                )
-        except Exception:
-            pass
-
-        objective = (
-            f"Actively exploit the authorized target {self.ctx.target}. Confirm and "
-            "demonstrate real vulnerabilities — authentication bypass, JWT flaws, IDOR / "
-            "broken access control, injection, business-logic abuse, and client-side "
-            "(DOM/CSP) issues via the browser. Chain requests and identities as needed. "
-            "Call report_finding for each vulnerability you concretely demonstrate."
-        )
-        loop = ObjectiveAgentLoop(
-            target=self.ctx.target, harness=harness,
-            auth_headers=getattr(self.ctx, "auth_headers", None),
-            max_steps=_cfg().get_int("AGENT_EXPLOIT_STEPS", 16),
-            verifier=None,  # general targets have no benchmark oracle — evidence-driven
-        )
-        result = await loop.run(objective, context=context, category="exploitation",
-                                scan_id=self._scan_id)
-        for f in result.get("findings", []):
-            self.ctx.add_vulnerability(f)
-        logger.info(f"[AgentExploit] loop finished: {result.get('steps')} steps, "
-                    f"{len(result.get('findings', []))} findings reported")
-
     def _analyze_cloud_privesc(self) -> None:
         from core.cloud.iam_privesc import CloudPrivescScanner
         from core.common.config import get_config as _cfg
@@ -7362,33 +7207,6 @@ class CentralBrain(
             self.ctx.add_vulnerability(f)
         if findings:
             logger.info(f"[CloudPrivesc] added {len(findings)} cloud privilege-escalation findings")
-
-    def _run_attack_path_engine(self) -> None:
-        """Construct ranked forward attack paths over ctx.vulnerabilities and
-        merge them into ctx.attack_chains (the report's source) + persist to the
-        attack graph. Deterministic; transparent factors; non-fatal."""
-        from core.attack_surface.attack_path_engine import AttackPathEngine
-        from core.orchestration.infra_agents import to_attack_chains
-
-        paths = AttackPathEngine(list(self.ctx.vulnerabilities or []),
-                                 identities=list(getattr(self.ctx, "identities", []) or [])
-                                 ).generate()
-        if not paths:
-            return
-        chains = to_attack_chains(paths)
-        cur = self.ctx.get("attack_chains", []) or []
-        if isinstance(cur, dict):
-            cur = list(cur.values())
-        if not isinstance(cur, list):
-            cur = []
-        self.ctx.update("attack_chains", cur + chains)
-        try:
-            from core.database.pg_store import AttackGraphRepo
-            AttackGraphRepo.bulk_upsert(getattr(self, "_scan_id", "") or "", chains)
-        except Exception as e:
-            logger.debug("[AttackPathEngine] persist skipped: %s", e)
-        logger.info("[AttackPathEngine] %d ranked attack paths (top score=%.3f)",
-                    len(paths), paths[0].get("score", 0))
 
     def _analyze_infra_agents(self) -> None:
         """Run the Kubernetes / cloud / dependency-SCA agents (opt-in) and merge
