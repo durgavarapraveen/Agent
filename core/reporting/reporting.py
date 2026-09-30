@@ -76,6 +76,12 @@ def mask_sensitive_data(text: str, enabled: bool = True) -> str:
         octs = val.split(".")
         if len(octs) == 4 and all(o.isdigit() and 0 <= int(o) <= 255 for o in octs):
             return val
+        # Require a real dial format: a leading + or an internal separator. A bare
+        # contiguous digit run is an ID / timestamp / port / count / URL query
+        # value, not a phone — masking those corrupted URLs, correlation IDs and
+        # tool stats (nuclei rps/percent) throughout the logs.
+        if not val.startswith("+") and not any(c in val for c in " .-()"):
+            return val
         return "[MASKED_PHONE]"
 
     s = re.sub(r'\+?\d{1,3}[\s.-]?\(?\d{2,4}\)?[\s.-]?\d{3,4}[\s.-]?\d{3,4}', _mask_phone, s)

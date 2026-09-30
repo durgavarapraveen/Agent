@@ -45,6 +45,22 @@ class PIIRedactionFilter(logging.Filter):
         return True
 
 
+class _AsyncioProactorNoiseFilter(logging.Filter):
+    """Drop the benign Windows ProactorEventLoop teardown error asyncio logs at
+    ERROR level when a subprocess pipe is closed/GC'd
+    (``_ProactorBasePipeTransport._call_connection_lost`` -> ConnectionResetError).
+    It is a known CPython/Windows artifact, not a scan fault, but it pollutes
+    ERROR-level monitoring after every tool subprocess exits.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        return "_ProactorBasePipeTransport._call_connection_lost" not in msg
+
+
 class JSONFormatter(logging.Formatter):
 
     _STANDARD_KEYS = frozenset({
@@ -106,3 +122,7 @@ def configure_root(json: bool | None = None, level: str = "INFO") -> None:
 
     handler.addFilter(PIIRedactionFilter())
     root.addHandler(handler)
+
+    # Silence the benign Windows ProactorEventLoop pipe-teardown ERROR that fires
+    # after every tool subprocess exits (see _AsyncioProactorNoiseFilter).
+    logging.getLogger("asyncio").addFilter(_AsyncioProactorNoiseFilter())

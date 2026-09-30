@@ -32,3 +32,14 @@ def test_real_phones_still_masked(phone):
 def test_invalid_quad_is_masked():
     # 999.999.999.999 is not a valid IPv4 (octets > 255) -> treat as phone-ish PII
     assert "[MASKED_PHONE]" in mask("bad 999.999.999.999")
+
+
+@pytest.mark.parametrize("s", [
+    "GET /rest/products?sleep=5000000 HTTP/1.1",   # URL query value
+    "id=beb1759231625808",                          # correlation id
+    "nuclei rps=125808 percent=100",                # tool stats
+    "order 1234567890 shipped",                     # bare 10-digit id
+])
+def test_contiguous_digit_runs_not_masked(s):
+    # No + and no separator -> an id/timestamp/count/query value, not a phone.
+    assert "[MASKED_PHONE]" not in mask(s), mask(s)

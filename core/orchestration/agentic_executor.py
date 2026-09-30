@@ -1018,6 +1018,16 @@ class AgenticExecutor:
         while i < len(tokens):
             tok = tokens[i]
             flag_base = tok.split("=")[0] if "=" in tok else tok
+            # nuclei -t expects template FILE/DIR paths. LLM plans pass tag names
+            # ("-t cve,misconfig,exposure") -> "[FTL] no templates provided for
+            # scan" rc=1, killing the whole run. Tags already ride on -tags, so
+            # drop a -t whose value is a bare tag list (no path separator/.yaml).
+            if tool_id == "nuclei" and flag_base in ("-t", "-templates", "--templates"):
+                val = tok.split("=", 1)[1] if "=" in tok else (tokens[i + 1] if i + 1 < len(tokens) else "")
+                if val and not any(c in val for c in ("/", "\\")) and not val.endswith((".yaml", ".yml")):
+                    logger.warning(f"[ToolSanitize] Dropped nuclei -t tag-as-path {val!r} (use -tags)")
+                    i += 1 if "=" in tok else 2
+                    continue
             if flag_base in allowlist:
                 sanitized.append(tokens[i])
             elif not tok.startswith("-"):
