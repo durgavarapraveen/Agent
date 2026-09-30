@@ -373,6 +373,9 @@ class ToolRouter:
                     "gobuster": [
                         r'-mc\s+[^\s]+',
                         r'-fs\s+[^\s]+',
+                        # --wildcard was removed in modern gobuster (v3.2+); passing it
+                        # aborts with "flag provided but not defined: -wildcard" (rc=1).
+                        r'--?wildcard\b',
                     ],
                     # dirsearch: -silent invalid; only -q
                     "dirsearch": [
@@ -396,17 +399,17 @@ class ToolRouter:
                         clean_args = _re.sub(r'\s+', ' ', clean_args).strip()
                         break
 
-                # gobuster: aborts rc=1 when the target returns a matching status
-                # for non-existent URLs ("the server returns a status code that
-                # matches ... for non existing urls") — a soft-404 / wildcard.
-                # `--wildcard` forces it to continue instead of bailing. Add it
-                # for the modes that accept it when the LLM omitted it.
+                # gobuster: on a soft-404/wildcard target older versions aborted
+                # rc=1. Modern gobuster (v3.2+) removed --wildcard and instead
+                # continues, defaulting a 404 status-blacklist; add --no-error so a
+                # noisy wildcard target doesn't spam the run into failure. (The
+                # invalid --wildcard flag itself is stripped above.)
                 if base_bin.endswith("gobuster") or base_bin == "gobuster":
                     _mode = (base_cmd_l[1].lower() if len(base_cmd_l) > 1 else "")
                     if _mode in ("dir", "dns", "vhost", "fuzz") and \
-                            not _re.search(r'(?<!\S)--wildcard\b', clean_args):
-                        clean_args = (clean_args + " --wildcard").strip()
-                        logger.info("Added gobuster --wildcard (soft-404/wildcard target)")
+                            not _re.search(r'(?<!\S)--no-error\b', clean_args):
+                        clean_args = (clean_args + " --no-error").strip()
+                        logger.info("Added gobuster --no-error (soft-404/wildcard target)")
 
                 # dalfox: flags that REQUIRE a value fail rc=2 when an LLM/planner
                 # passes them bare (observed: `--blind` with no callback URL →
