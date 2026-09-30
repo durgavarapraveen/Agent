@@ -39,7 +39,10 @@ def impact_rank(impact: str) -> int:
 @dataclass
 class ScanBudget:
     max_requests: int = 100_000
-    max_runtime_s: float = 7_200.0          # 2h
+    max_runtime_s: float = 14_400.0         # 4h — a full coverage scan of a rich
+    # target routinely stays productive past 2h; the old 2h default hard-stopped
+    # runs mid-EXPLOITATION. Still bounded to prevent runaways; BUDGET_MAX_RUNTIME_S
+    # overrides (0 disables the cap).
     max_bandwidth_mb: float = 5_000.0
     max_browser_sessions: int = 5
     max_llm_cost: float = 100.0
@@ -54,7 +57,7 @@ class ScanBudget:
                 return default
         return cls(
             max_requests=_f("BUDGET_MAX_REQUESTS", 100_000),
-            max_runtime_s=_f("BUDGET_MAX_RUNTIME_S", 7_200.0),
+            max_runtime_s=_f("BUDGET_MAX_RUNTIME_S", 14_400.0),
             max_bandwidth_mb=_f("BUDGET_MAX_BANDWIDTH_MB", 5_000.0),
             max_browser_sessions=_f("BUDGET_MAX_BROWSER_SESSIONS", 5),
             max_llm_cost=_f("BUDGET_MAX_LLM_COST", 100.0),
