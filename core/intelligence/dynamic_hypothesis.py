@@ -284,7 +284,8 @@ class DynamicHypothesisEngine:
             from core.hypothesis.universal_patterns import deterministic_hypotheses
             base = getattr(self.ctx, "target", "") or ""
             existing = {h.vulnerability_class + h.attack_surface for h in hyps}
-            for dh in deterministic_hypotheses(base, families):
+            for dh in deterministic_hypotheses(base, families,
+                                               getattr(self.ctx, "technologies", None)):
                 if dh.vulnerability_class + dh.attack_surface not in existing:
                     hyps.append(dh)
         except Exception as e:

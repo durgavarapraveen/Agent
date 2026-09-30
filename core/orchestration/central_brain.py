@@ -7700,10 +7700,18 @@ class CentralBrain(
         except Exception:
             admin_paths = ["/admin", "/administration", "/api/admin"]
         # Add admin/sensitive paths from discovered endpoints
+        # Supplementary keyword pass over discovered endpoints (the discover_endpoints
+        # admin pass above is the primary). Tokens come from the canonical
+        # endpoint_hints admin role so no route shape is duplicated here.
+        try:
+            from core.common.endpoint_hints import _ROLE_KEYWORDS as _RK
+            _admin_kw = [k.strip("/").split("/")[0] for k in _RK.get("admin", []) if k.strip("/")]
+            _admin_kw = list(dict.fromkeys(_admin_kw + ["internal", "config", "staff"]))
+        except Exception:
+            _admin_kw = ["admin", "manage", "dashboard", "panel", "internal", "config", "users", "staff"]
         for ep in (getattr(self.ctx, "endpoints", []) or []):
             ep_url = ep if isinstance(ep, str) else (ep.get("url", "") if isinstance(ep, dict) else "")
-            if ep_url and any(k in ep_url.lower() for k in ["admin", "manage", "dashboard", "panel",
-                                                              "internal", "config", "users", "staff"]):
+            if ep_url and any(k in ep_url.lower() for k in _admin_kw):
                 path = ep_url if ep_url.startswith("/") else f"/{ep_url.lstrip('/')}"
                 if path not in admin_paths:
                     admin_paths.append(path)
