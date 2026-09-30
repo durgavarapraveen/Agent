@@ -2182,8 +2182,12 @@ class AdvancedJWTExecutor(GenericHTTPExecutor):
         # Discover a JWKS
         jwks_pub_pem = None
         jwks_used_path = None
-        for wp in self.JWKS_PATHS:
-            status, body, _ = self._probe(base + wp, headers=headers)
+        # Discovered JWKS/keys endpoints first (whatever the path), fixed well-known
+        # locations as a floor.
+        for wp in self._endpoints_by_keywords(
+                experiment, ("jwks", "/keys", "/.well-known/jwks", "certs", "publickey"),
+                self.JWKS_PATHS):
+            status, body, _ = self._probe(wp, headers=headers)
             if status == 200 and ("keys" in body and "kty" in body):
                 jwks_used_path = wp
                 try:
@@ -4840,10 +4844,13 @@ class SAMLFlawDetector(GenericHTTPExecutor):
         findings = []
         import base64 as _b64
 
-        saml_eps = list(self.SAML_HINTS) + [
-            e for e in self._all_endpoints_as_paths(experiment)
-            if "saml" in e.lower() or "sso" in e.lower()
-        ]
+        # Discovered SAML/SSO endpoints FIRST (whatever the path), fixed hints as a
+        # floor — content-first union.
+        saml_eps = [e for e in self._all_endpoints_as_paths(experiment)
+                    if any(k in e.lower() for k in ("saml", "sso", "adfs", "idp", "simplesaml"))]
+        for h in self.SAML_HINTS:
+            if h not in saml_eps:
+                saml_eps.append(h)
         saml_eps = list(dict.fromkeys(saml_eps))[:8]
 
         for ep in saml_eps:
