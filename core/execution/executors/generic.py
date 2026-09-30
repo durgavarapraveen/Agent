@@ -195,22 +195,33 @@ class GenericHTTPExecutor(ExecutorBase):
 
     def _endpoints_by_keywords(self, experiment: SecurityExperiment,
                                keywords, fallback=()) -> List[str]:
-        """Content-driven endpoint selection: return DISCOVERED endpoints (from
-        captured traffic / JS-mined routes / crawl, via ``_discovered_endpoints``)
-        whose URL contains any of ``keywords`` — the app's real path whatever it
-        is named. Only when observed content matches nothing do we fall back to
-        the hardcoded ``fallback`` paths (resolved against the target base), so a
-        modern app is never reduced to guessing. Returns full/absolute URLs."""
+        """Union (content-first, with a guaranteed coverage floor): return the
+        app's DISCOVERED endpoints (captured traffic / JS-mined routes / crawl, via
+        ``_discovered_endpoints``) whose URL contains any of ``keywords`` — the real
+        path whatever it is named — FIRST, then ALWAYS append the hardcoded
+        ``fallback`` standards (base-resolved) that were not already discovered.
+
+        Discovered-first means a modern app's true endpoint is prioritized in the
+        early probe waves; appending the fixed set means a legacy/standard endpoint
+        that discovery missed is never skipped. Deduped by path (ignoring query).
+        Returns full/absolute URLs."""
         kws = [k.lower() for k in keywords]
-        hits, seen = [], set()
-        for ep in self._discovered_endpoints(experiment):
-            if any(k in ep.lower() for k in kws) and ep not in seen:
-                seen.add(ep)
-                hits.append(ep)
-        if hits:
-            return hits
         base = self._base(experiment).rstrip("/")
-        return [p if p.startswith("http") else base + ("/" + p.lstrip("/")) for p in fallback]
+        ordered: List[str] = []
+        seen = set()
+
+        def _add(u: str):
+            key = u.split("?")[0].lower()
+            if key not in seen:
+                seen.add(key)
+                ordered.append(u)
+
+        for ep in self._discovered_endpoints(experiment):   # content first (priority)
+            if any(k in ep.lower() for k in kws):
+                _add(ep)
+        for p in fallback:                                  # fixed standards floor
+            _add(p if p.startswith("http") else base + ("/" + p.lstrip("/")))
+        return ordered
 
     def _credential_endpoints(self, experiment: SecurityExperiment) -> List[str]:
         """Credential-accepting endpoints discovered from captured traffic — any
