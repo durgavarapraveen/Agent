@@ -24,6 +24,36 @@ def _normalize_curl_headers(cmd: str) -> str:
     return pat.sub(lambda m: f'{m.group(1)}"{m.group(2).strip()}"', cmd)
 
 
+def _valid_url(s: str) -> bool:
+    import re as _re
+    return bool(_re.match(
+        r'^https?://[A-Za-z0-9\.\-_:]+(?::\d+)?(?:/[A-Za-z0-9\-._~:/?#\[\]@!$&\'()*+,;=%]*)?$',
+        s))
+
+
+def _valid_host(s: str) -> bool:
+    import re as _re
+    return bool(_re.match(
+        r'^[A-Za-z0-9]([A-Za-z0-9\-\.]{0,253}[A-Za-z0-9])?$', s))
+
+
+def _kali_target_host(target: str) -> str:
+    """The bare hostname of a scan target: scheme and any :port stripped. Host
+    tools (nmap/subfinder/…) and the host-validity check both want this, never
+    host:port."""
+    d = target.replace("https://", "").replace("http://", "").split("/")[0]
+    return d.rsplit(":", 1)[0] if ":" in d else d
+
+
+def kali_target_is_valid(target: str) -> bool:
+    """Belt-and-suspenders guard before a target is interpolated (shlex-quoted)
+    into a Kali shell command: the whole target must look like a URL or host, and
+    its bare host must be a valid hostname. Rejects shell metacharacters
+    (`;`/`` ` ``/`$()`/`|`) that would survive as an injection; accepts ordinary
+    ported URLs like http://localhost:3000 that the host check used to reject."""
+    return (_valid_url(target) or _valid_host(target)) and _valid_host(_kali_target_host(target))
+
+
 def _dalfox_oob_callback():
     """Return an active OOB collaborator HTTP callback URL for dalfox --blind, or
     None when no collaborator is configured (then --blind is dropped)."""
@@ -106,24 +136,16 @@ class ToolRouter:
                     # `target` was interpolated raw via f-strings; a target string
                     # containing shell metacharacters (`;`, `` ` ``, `$()`, `|`)
                     # would achieve command injection.
-                    import shlex, re as _re_router
+                    import shlex
 
-                    def _valid_url(s: str) -> bool:
-                        return bool(_re_router.match(
-                            r'^https?://[A-Za-z0-9\.\-_:]+(?::\d+)?(?:/[A-Za-z0-9\-._~:/?#\[\]@!$&\'()*+,;=%]*)?$',
-                            s))
-
-                    def _valid_host(s: str) -> bool:
-                        return bool(_re_router.match(
-                            r'^[A-Za-z0-9]([A-Za-z0-9\-\.]{0,253}[A-Za-z0-9])?$', s))
-
-                    # Strip http(s):// for tools that expect domain names
-                    domain = target.replace("https://", "").replace("http://", "").split("/")[0]
-                    # Also derive a base domain for tools that fail on subdomains or just need the root
+                    # Bare hostname (scheme + :port stripped) for host-based tools
+                    # and the validity check; a base domain for tools that just need
+                    # the root. See _kali_target_host / kali_target_is_valid.
+                    domain = _kali_target_host(target)
                     base_domain = domain[4:] if domain.startswith("www.") else domain
 
-                    # Refuse to build the command if either form fails validation.
-                    if not (_valid_url(target) or _valid_host(target)) or not _valid_host(domain):
+                    # Refuse to build the command if the target fails validation.
+                    if not kali_target_is_valid(target):
                         from core.common.schemas import (
                             ToolResult as _STR, ToolExecutionStatus as _TES,
                             ErrorInfo as _EI, ErrorType as _ET,
