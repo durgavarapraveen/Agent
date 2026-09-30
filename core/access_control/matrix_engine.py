@@ -21,6 +21,24 @@ class MatrixEngine:
             IdorTest(replayer)
         ]
         
+    def _flag_authz_coverage_unknown(self, path: str, reason: str, partial: bool = False) -> None:
+        """Loudly record that authorization coverage is unknown/incomplete for this
+        endpoint — so a missing-identity scan never silently reads as 'authz clean'.
+        Surfaces on shared_context.authz_coverage_unknown for the coverage ledger."""
+        level = logger.warning if not partial else logger.info
+        level("AUTHZ_COVERAGE_UNKNOWN endpoint=%s reason=%s "
+              "(supply >=2 identities via AUTH_* or enable AUTH_SELF_REGISTER)",
+              path, reason)
+        if self.shared_context is not None:
+            try:
+                store = getattr(self.shared_context, "authz_coverage_unknown", None)
+                if not isinstance(store, list):
+                    store = []
+                store.append({"endpoint": path, "reason": reason, "partial": partial})
+                self.shared_context.authz_coverage_unknown = store
+            except Exception:
+                pass
+
     def analyze(self, request_node):
         path = request_node.get("path", "unknown")
         logger.info(f"AUTHORIZATION_TEST_STARTED endpoint={path}")
@@ -33,8 +51,18 @@ class MatrixEngine:
         # selected by relative privilege rank rather than a "standard" literal)
         standard_users = [uid for uid, iden in self.identities.items() if ts.role_rank(iden.role) == 1]
         if not standard_users:
+            # Authorization CANNOT be tested without an authenticated low-priv
+            # identity — fail LOUD (not a silent skip) so the gap is visible.
+            self._flag_authz_coverage_unknown(
+                path, "no authenticated low-privilege identity available")
             return
-            
+        # Horizontal IDOR/BOLA needs ≥2 identities; with one we can only test
+        # vertical/unauth — record that horizontal coverage is unknown.
+        if len(self.identities) < 2:
+            self._flag_authz_coverage_unknown(
+                path, "only one identity — horizontal (cross-user) authz untested",
+                partial=True)
+
         owner_id = standard_users[0]
         baseline_resp = self.replayer.replay(request_node, identity_id=owner_id)
         if baseline_resp:
@@ -52,12 +80,12 @@ class MatrixEngine:
                 matrix_results["anonymous"] = anon_resp["status"] if anon_resp else 0
                 
             elif isinstance(test, HorizontalTest):
-                for peer_id, result in results.items():
+                for peer_id, _result in results.items():
                     peer_resp = self.replayer.replay(request_node, identity_id=peer_id)
                     matrix_results[peer_id] = peer_resp["status"] if peer_resp else 0
                     
             elif isinstance(test, VerticalTest):
-                for admin_id, result in results.items():
+                for _admin_id, _result in results.items():
                     # For vertical, we might need to know the admin's actual response status
                     admins = [uid for uid, iden in self.identities.items() if ts.is_admin_role(iden.role)]
                     if admins:

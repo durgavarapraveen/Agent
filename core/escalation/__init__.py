@@ -6,6 +6,7 @@ from core.escalation.escalation_gate import (
     RiskLevel,
     get_escalation_gate,
 )
+from core.escalation.hitl import require_human_approval, CRITICAL_TASKS
 
 __all__ = [
     "EscalationGate",
@@ -13,4 +14,6 @@ __all__ = [
     "ApprovalStatus",
     "RiskLevel",
     "get_escalation_gate",
+    "require_human_approval",
+    "CRITICAL_TASKS",
 ]

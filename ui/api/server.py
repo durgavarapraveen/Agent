@@ -780,7 +780,7 @@ async def _on_shutdown():
     # sweep can pick them up. Never terminate the subprocess here — supervisor
     # restart may want to hand off to the same PID.
     try:
-        for job_id, job in list(_active_scans.items()):
+        for _job_id, job in list(_active_scans.items()):
             if job.get("status") in ("running", "starting"):
                 job["status"] = "stopping"
         _persist_scan_state()
@@ -4319,6 +4319,9 @@ if _FRONTEND_DIR.exists():
 
 if __name__ == "__main__":
     import uvicorn
-    _api_port = int(os.getenv("API_PORT", "8903"))
+    # Default matches docker-compose/Dockerfile.web (8900) so a bare
+    # `python -m ui.api.server` listens where the rest of the stack expects it
+    # (P2-7 — was 8903, which diverged from compose and settings).
+    _api_port = int(os.getenv("API_PORT", "8900"))
     _api_host = os.getenv("API_HOST", "0.0.0.0")
     uvicorn.run(app, host=_api_host, port=_api_port)

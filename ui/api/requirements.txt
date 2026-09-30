@@ -1,2 +1,5 @@
 fastapi>=0.104.0
 uvicorn>=0.24.0
+# Required by the RAG upload route (File/Form params in server.py); without it
+# FastAPI raises at import time and the whole API crash-loops on startup.
+python-multipart>=0.0.9

@@ -102,7 +102,7 @@ class ConvergenceEngine:
             blocked_count = 0
 
         s = _S()
-        for test_id, run_state in self.coverage_engine.state.coverage_map.items():
+        for _test_id, run_state in self.coverage_engine.state.coverage_map.items():
             if run_state.status == TestState.NOT_APPLICABLE:
                 continue
             s.applicable_count += 1

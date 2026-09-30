@@ -71,7 +71,7 @@ class ComplianceReporter:
     def render_markdown(self, findings: List[Dict]) -> str:
         summary = self.build(findings)
         lines = ["## Compliance Summary", ""]
-        for fw, data in summary["frameworks"].items():
+        for _fw, data in summary["frameworks"].items():
             lines.append(f"### {data['name']}  "
                          f"({data['controls_failed']} fail / "
                          f"{data['controls_total']} controls)")

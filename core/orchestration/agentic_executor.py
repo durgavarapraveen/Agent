@@ -936,16 +936,34 @@ class AgenticExecutor:
     # dangerous flags (arbitrary file write / shell / script), not the target.
     _TARGET_FLAGS = {"-u", "--url", "-l", "--list", "-target", "--target", "-host", "--host"}
 
+    # Code-exec / arbitrary-file-write flag fragments. An UNLISTED tool (one with
+    # no explicit allowlist below) has these stripped; everything else is kept so
+    # legit recon flags survive. Downstream defence is shell=False + scope, but a
+    # tool must never be handed --os-shell / --file-write from an LLM plan.
+    _UNLISTED_BLOCK_SUBSTR = (
+        "os-shell", "os-pwn", "os-cmd", "os-smbrelay", "sql-shell",
+        "file-write", "file-dest", "file-upload", "eval", "tamper-script",
+    )
+
     TOOL_ARG_ALLOWLIST: Dict[str, set] = {
         "nmap": {"-p", "-sV", "-sC", "-sS", "-sT", "-sU", "-A", "-O", "-T0", "-T1", "-T2", "-T3", "-T4", "-T5",
                  "--top-ports", "--script", "--open", "-Pn", "-n", "--min-rate", "--max-rate", "-oN", "-oX", "-oG"},
         "sqlmap": {"-u", "--url", "-r", "-g", "--batch", "--level", "--risk", "--dbs", "--tables", "--dump",
                    "--forms", "--crawl", "--flush-session", "--random-agent", "--technique", "--tamper", "-p",
                    "--data", "--cookie", "--headers", "--method", "--threads", "--timeout", "--retries",
-                   "--dbms", "--os"},
+                   "--dbms", "--os",
+                   # extraction depth: without these sqlmap could only confirm,
+                   # never actually dump the evidence that proves impact.
+                   "-D", "-T", "-C", "--dump-all", "--columns", "--schema", "--count",
+                   "--current-db", "--current-user", "--is-dba", "--passwords",
+                   "--search", "--where", "--start", "--stop"},
         "nuclei": {"-u", "-l", "-t", "-tags", "--tags", "-s", "-severity", "--severity", "-as", "--automatic-scan",
                    "-rl", "--rate-limit", "-c", "--concurrency", "-H", "--header", "-fr", "--follow-redirects",
-                   "-j", "-jsonl", "--jsonl", "-silent", "-nc", "-duc", "-timeout", "-retries"},
+                   "-j", "-jsonl", "--jsonl", "-silent", "-nc", "-duc", "-timeout", "-retries",
+                   # template include/exclude selectors + progress; legit scoping
+                   # flags an LLM plan commonly uses that were being stripped.
+                   "-id", "-eid", "-exclude-id", "-itags", "-etags", "-exclude-tags",
+                   "-es", "-exclude-severity", "-et", "-exclude-templates", "-stats", "-vv"},
         "dalfox": {"url", "--url", "--blind", "--cookie", "--header", "--data", "--method", "--mining-dict",
                    "--follow-redirects", "--timeout", "--delay", "--only-discovery", "-p", "--silence",
                    "--no-color", "--user-agent"},
@@ -974,7 +992,25 @@ class AgenticExecutor:
 
         allowlist = AgenticExecutor.TOOL_ARG_ALLOWLIST.get(tool_id)
         if not allowlist:
-            return raw_args
+            # Unlisted tool (subfinder/httpx/whatweb/sslscan/arjun/feroxbuster/…):
+            # we can't allowlist every recon tool's flags without breaking them,
+            # but must not pass code-exec / arbitrary-file-write flags unchecked.
+            # Strip only the explicit danger blocklist; keep every other flag.
+            out = []
+            for tok in tokens:
+                base = (tok.split("=")[0] if "=" in tok else tok).lower().lstrip("-")
+                # Token-boundary match (exact base, or base starts with the token
+                # followed by a separator) so a dangerous fragment can't strip a
+                # benign flag that merely contains it (e.g. "eval" vs "--evaluate").
+                dangerous = tok.startswith("-") and any(
+                    base == b or base.startswith(b + "-") or base.startswith(b + "_")
+                    for b in AgenticExecutor._UNLISTED_BLOCK_SUBSTR
+                )
+                if dangerous:
+                    logger.warning(f"[ToolSanitize] Stripped dangerous arg {tok!r} for unlisted tool {tool_id}")
+                    continue
+                out.append(tok)
+            return " ".join(out)
 
         allowlist = allowlist | AgenticExecutor._TARGET_FLAGS
         sanitized = []
@@ -1845,8 +1881,15 @@ RULES:
         try:
             import re as _re
             text = resp_text[:200_000]  # cap for perf
-            # Emails
-            email_re = _re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b')
+            # Emails. ReDoS-SAFE: bounded local part + explicit DNS labels (each
+            # label has no '.', so it never overlaps the literal '.' between labels).
+            # The old r'...@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' had a '.'-in-class adjacent
+            # to a literal '\.', causing catastrophic backtracking on long dotted
+            # runs (a 200KB /api/Challenges body once hung the scan for ~54 min).
+            email_re = _re.compile(
+                r'\b[A-Za-z0-9._%+-]{1,64}@'
+                r'(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?\.){1,8}'
+                r'[A-Za-z]{2,24}\b')
             emails = set()
             for m in email_re.finditer(text):
                 e = m.group(0).lower()
@@ -2692,8 +2735,15 @@ RULES:
                     logger.info(f"[AutoDetect] Negative value: {method} {url[:120]}")
 
         # ── 41. AUTHENTICATION BYPASS INDICATORS ──
-        auth_bypass_paths = ["/admin", "/api/admin", "/rest/admin", "/dashboard",
-                             "/management", "/internal", "/panel"]
+        # Admin-path substrings come from the single canonical source
+        # (endpoint_hints._ROLE_KEYWORDS["admin"]) so no one app's route shape
+        # (e.g. "/rest/admin") is baked in here; fail open to a generic set.
+        try:
+            from core.common.endpoint_hints import _ROLE_KEYWORDS as _RK
+            auth_bypass_paths = list(_RK.get("admin", [])) + ["/management", "/internal", "/panel"]
+        except Exception:
+            auth_bypass_paths = ["/admin", "/api/admin", "/dashboard",
+                                 "/management", "/internal", "/panel"]
         if status == 200 and len(resp_text) > 100:
             if any(bp in path_lower for bp in auth_bypass_paths):
                 auth_indicators = ["admin", "dashboard", "management", "configuration",

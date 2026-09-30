@@ -376,7 +376,7 @@ class AbuseChIntelligence:
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
             resp = urllib.request.urlopen(req, timeout=10, context=_SSL_CONTEXT)
             data = json.loads(resp.read().decode())
-            for uid, udata in list(data.items())[:50]:
+            for _uid, udata in list(data.items())[:50]:
                 if isinstance(udata, list) and len(udata) > 0:
                     item = udata[0]
                     u = item.get("url", "")

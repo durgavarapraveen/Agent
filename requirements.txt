@@ -63,3 +63,8 @@ ddgs>=6.0
 #   pip install semgrep
 # core.analysis.sast_bridge degrades gracefully (skips SAST) when it is absent.
 semgrep
+
+# ── gRPC probing (Tier 3) — server-reflection enumeration + unauth reachability ──
+# grpc_probe.py cleanly no-ops when these are absent.
+grpcio
+grpcio-reflection

@@ -207,8 +207,11 @@ RUN CFLAGS="-std=gnu17" /opt/venv/bin/pip install --no-cache-dir \
     psycopg2-binary \
     playwright \
     impacket \
-    paramspider \
     requests_ntlm
+
+# paramspider is not published on PyPI — install from the maintainer's GitHub.
+RUN /opt/venv/bin/pip install --no-cache-dir \
+    "git+https://github.com/devanshbatham/paramspider.git"
 
 # ============================================================
 # Playwright + Chromium (browser actuator)

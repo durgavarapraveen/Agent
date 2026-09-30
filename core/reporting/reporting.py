@@ -68,7 +68,17 @@ def mask_sensitive_data(text: str, enabled: bool = True) -> str:
     s = re.sub(r'\b([a-zA-Z0-9._%+-]+)@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b', _mask_email, s)
 
     # ── Phone (best-effort, doesn't mask 10-digit IDs by requiring a dial format) ──
-    s = re.sub(r'\+?\d{1,3}[\s.-]?\(?\d{2,4}\)?[\s.-]?\d{3,4}[\s.-]?\d{3,4}', '[MASKED_PHONE]', s)
+    # A dotted-quad IPv4 address (a scan target/host, not PII) matches the phone
+    # shape — never mask it, or logs/scope show every IP as [MASKED_PHONE] and the
+    # target becomes undebuggable.
+    def _mask_phone(m):
+        val = m.group(0)
+        octs = val.split(".")
+        if len(octs) == 4 and all(o.isdigit() and 0 <= int(o) <= 255 for o in octs):
+            return val
+        return "[MASKED_PHONE]"
+
+    s = re.sub(r'\+?\d{1,3}[\s.-]?\(?\d{2,4}\)?[\s.-]?\d{3,4}[\s.-]?\d{3,4}', _mask_phone, s)
 
     # ── Credit card ──
     s = re.sub(r'\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13})\b', '[MASKED_CC]', s)
@@ -418,7 +428,7 @@ class EnterpriseReporter:
         if not summary.get("frameworks"):
             return "<p class='muted'>No frameworks selected.</p>"
         blocks = []
-        for fw, data in summary["frameworks"].items():
+        for _fw, data in summary["frameworks"].items():
             rows = "".join(
                 f"<tr><td>{html.escape(c['control_id'])}</td>"
                 f"<td>{html.escape(c['control_title'])}</td>"

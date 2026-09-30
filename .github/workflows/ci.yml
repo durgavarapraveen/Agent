@@ -32,9 +32,17 @@ jobs:
         run: |
           python -m compileall -q core agents ui/api main.py
 
-      - name: Ruff (style + basic bug checks)
+      - name: Ruff (bug checks + bugbear)
         run: |
           ruff check --output-format=github .
+
+      - name: Lint debt ratchet (no new blind-except / raise-without-from)
+        run: |
+          python scripts/lint_ratchet.py
+
+      - name: Mypy type gate (ratcheted packages)
+        run: |
+          python scripts/mypy_gate.py
 
       - name: Architecture inventory staleness check
         run: |

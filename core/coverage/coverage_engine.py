@@ -114,7 +114,7 @@ class CoverageEngine:
 
     def _recalculate_global_state(self, test_id: str):
         applicable_endpoints = []
-        for ep_id, test_map in self.state.endpoint_coverage_map.items():
+        for _ep_id, test_map in self.state.endpoint_coverage_map.items():
             if test_id in test_map and test_map[test_id].status != TestState.NOT_APPLICABLE:
                 applicable_endpoints.append(test_map[test_id])
                 
@@ -159,7 +159,7 @@ class CoverageEngine:
             "tests_blocked": 0
         }
         
-        for test_id, run_state in self.state.coverage_map.items():
+        for _test_id, run_state in self.state.coverage_map.items():
             s = run_state.status
             if s != TestState.NOT_APPLICABLE:
                 counts["tests_applicable"] += 1

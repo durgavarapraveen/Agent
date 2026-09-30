@@ -15,6 +15,7 @@ _ROLE_KEYWORDS: Dict[str, List[str]] = {
     "register": [
         "/register", "/signup", "/sign-up", "/create-account", "/users/new",
         "/api/register", "/api/signup", "/api/users", "/users/create",
+        "/auth/register", "/api/auth/register", "/api/v1/auth/register",
     ],
     "logout": [
         "/logout", "/signout", "/sign-out", "/api/logout",
@@ -45,6 +46,11 @@ _ROLE_KEYWORDS: Dict[str, List[str]] = {
     "redirect": [
         "/redirect", "/redir", "/goto", "/link", "/url", "/out",
         "/api/redirect",
+    ],
+    "sse": [
+        "/events", "/event-stream", "/stream", "/sse", "/subscribe",
+        "/notifications", "/feed", "/live", "/updates", "/api/events",
+        "/api/stream", "/api/notifications",
     ],
 }
 
@@ -96,7 +102,7 @@ def _lower_paths_from_ctx(ctx) -> Set[str]:
                 if u_full.startswith(("http://", "https://")):
                     out.add(u_full.split("?")[0].lower())
     # 4. Endpoint discoveries stored inside tool_results by tool name
-    for tool_name, res in (getattr(ctx, "tool_results", {}) or {}).items():
+    for _tool_name, res in (getattr(ctx, "tool_results", {}) or {}).items():
         if not isinstance(res, dict):
             continue
         for key in ("endpoints", "paths", "urls", "found"):

@@ -73,12 +73,50 @@ UNIVERSAL_PATTERNS: List[Pattern] = [
             frozenset({TestFamily.API, TestFamily.SECRET_DISCLOSURE, TestFamily.AUTH_SESSION})),
 ]
 
-# Common sensitive paths for the deterministic info-disclosure/storage probes.
+# Stack-agnostic sensitive paths — always probed (any tech stack).
 _SENSITIVE_PATHS = [
     "/.git/config", "/.git/HEAD", "/.env", "/.env.local", "/config.json",
-    "/wp-config.php.bak", "/backup.zip", "/db.sql", "/robots.txt",
-    "/.aws/credentials", "/server-status", "/actuator/env", "/phpinfo.php",
+    "/backup.zip", "/db.sql", "/robots.txt", "/.aws/credentials",
 ]
+# Stack-SPECIFIC sensitive paths — probed only when the target's detected tech
+# matches, so we adapt to the app instead of firing PHP/Spring/Apache paths at
+# an app that runs none of them. token -> paths.
+_STACK_SENSITIVE_PATHS = {
+    ("php", "wordpress", "wp", "laravel", "symfony"): ["/wp-config.php.bak", "/phpinfo.php"],
+    ("java", "spring", "springboot", "spring-boot", "tomcat"): ["/actuator/env", "/actuator/health"],
+    ("apache", "httpd"): ["/server-status"],
+    ("nginx",): ["/nginx_status"],
+    (".net", "asp.net", "aspnet", "iis"): ["/web.config", "/elmah.axd"],
+}
+
+
+def _tech_blob(technologies) -> str:
+    """Normalize ctx.technologies (dict / list / str / objects) to a lowercase
+    token blob for substring matching."""
+    if not technologies:
+        return ""
+    try:
+        if isinstance(technologies, dict):
+            parts = list(technologies.keys()) + [str(v) for v in technologies.values()]
+        elif isinstance(technologies, (list, tuple, set)):
+            parts = [str(t if not isinstance(t, dict) else t.get("name", t)) for t in technologies]
+        else:
+            parts = [str(technologies)]
+        return " ".join(parts).lower()
+    except Exception:
+        return ""
+
+
+def _sensitive_paths_for(technologies=None) -> List[str]:
+    """Universal sensitive paths + the stack-specific ones whose tech is detected.
+    When tech is unknown (None/empty), include ALL stack-specific paths so coverage
+    is never silently narrowed on a target we couldn't fingerprint."""
+    paths = list(_SENSITIVE_PATHS)
+    blob = _tech_blob(technologies)
+    for tokens, extra in _STACK_SENSITIVE_PATHS.items():
+        if not blob or any(t in blob for t in tokens):
+            paths.extend(extra)
+    return list(dict.fromkeys(paths))
 
 
 def patterns_for_families(families: Optional[List[TestFamily]] = None) -> List[Pattern]:
@@ -98,9 +136,12 @@ def checklist_text(families: Optional[List[TestFamily]] = None) -> str:
 
 
 def deterministic_hypotheses(base_url: str,
-                             families: Optional[List[TestFamily]] = None) -> List["object"]:
+                             families: Optional[List[TestFamily]] = None,
+                             technologies=None) -> List["object"]:
     """No-LLM hypotheses for info-disclosure / insecure-storage: fetch common
-    sensitive paths. Returns `DynamicHypothesis` objects ready for the engine."""
+    sensitive paths. Stack-specific paths (PHP/Spring/Apache/...) are included only
+    when the target's detected `technologies` match, so probes adapt to the app.
+    Returns `DynamicHypothesis` objects ready for the engine."""
     from core.intelligence.dynamic_hypothesis import DynamicHypothesis
     if families and not (set(families) & {TestFamily.SECRET_DISCLOSURE,
                                           TestFamily.INFRA_CONFIG}):
@@ -108,7 +149,7 @@ def deterministic_hypotheses(base_url: str,
     if not base_url:
         return []
     out: List[object] = []
-    for path in _SENSITIVE_PATHS:
+    for path in _sensitive_paths_for(technologies):
         url = urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
         out.append(DynamicHypothesis(
             vulnerability_class="Information Disclosure",

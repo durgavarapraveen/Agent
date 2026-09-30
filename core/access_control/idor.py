@@ -8,7 +8,8 @@ class IdorTest(AccessControlTest):
     def _peer_object_ids(identities, exclude_uid) -> list:
         """Best-effort real object ids belonging to OTHER identities, for
         cross-identity substitution (a genuine cross-user object beats a blind
-        integer increment)."""
+        integer increment). Returns (owner_uid, object_id) pairs so the owner's
+        legitimate view can be fetched for the cross-user content oracle."""
         out = []
         for uid, iden in identities.items():
             if uid == exclude_uid:
@@ -17,7 +18,7 @@ class IdorTest(AccessControlTest):
             for cand in (attrs.get("user_id"), attrs.get("id"), attrs.get("object_id"),
                          attrs.get("account_id"), getattr(iden, "id", None), uid):
                 if cand and ts.looks_like_id(str(cand)):
-                    out.append(str(cand))
+                    out.append((uid, str(cand)))
         return out
 
     def execute(self, request_node, identities) -> dict:
@@ -30,6 +31,7 @@ class IdorTest(AccessControlTest):
             return results
 
         owner_id = standard_users[0]
+        peer_uid = ""   # identity that legitimately owns the substituted object
 
         # Determine if the request has an ID to mutate.
         path = request_node.get("path", "")
@@ -47,9 +49,9 @@ class IdorTest(AccessControlTest):
             _, original_id = id_segments[-1]
             # Prefer substituting another identity's REAL object id (proves
             # cross-user access) over a blind increment.
-            peer_ids = [pid for pid in self._peer_object_ids(identities, owner_id) if pid != original_id]
-            if peer_ids:
-                mutated_id = peer_ids[0]
+            peer_pairs = [(u, pid) for (u, pid) in self._peer_object_ids(identities, owner_id) if pid != original_id]
+            if peer_pairs:
+                peer_uid, mutated_id = peer_pairs[0]
             elif ts.is_numeric_id(original_id):
                 mutated_id = str(int(original_id) + 1)
             else:
@@ -66,9 +68,9 @@ class IdorTest(AccessControlTest):
             if not match or not ts.looks_like_id(match.group(1)):
                 return results
             original_id = match.group(1)
-            peer_ids = [pid for pid in self._peer_object_ids(identities, owner_id) if pid != original_id]
-            if peer_ids:
-                mutated_id = peer_ids[0]
+            peer_pairs = [(u, pid) for (u, pid) in self._peer_object_ids(identities, owner_id) if pid != original_id]
+            if peer_pairs:
+                peer_uid, mutated_id = peer_pairs[0]
             elif ts.is_numeric_id(original_id):
                 mutated_id = str(int(original_id) + 1)
             else:
@@ -84,13 +86,26 @@ class IdorTest(AccessControlTest):
         mutated_request["path"] = mutated_path
         
         mutated_resp = self.replayer.replay(mutated_request, identity_id=owner_id)
-        
+
+        # Cross-user content oracle: fetch the object OWNER's legitimate view of
+        # the SAME object, so compare() can prove the attacker actually received
+        # the owner's data (not just a same-size 200).
+        peer_body = ""
+        if peer_uid:
+            try:
+                peer_resp = self.replayer.replay(mutated_request, identity_id=peer_uid)
+                if peer_resp and peer_resp["status"] < 400:
+                    peer_body = peer_resp["body"]
+            except Exception:
+                peer_body = ""
+
         result = AuthorizationOracle.compare(
-            baseline_resp["status"], 
-            mutated_resp["status"], 
-            baseline_resp["body"], 
-            mutated_resp["body"]
+            baseline_resp["status"],
+            mutated_resp["status"],
+            baseline_resp["body"],
+            mutated_resp["body"],
+            peer_body,
         )
-        
+
         results["IDOR"] = result
         return results

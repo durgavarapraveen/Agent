@@ -84,7 +84,7 @@ class ActionGate:
                 seen = getattr(ctx, "_gate_seen_ops", None)
                 if seen is None:
                     seen = set()
-                    setattr(ctx, "_gate_seen_ops", seen)
+                    ctx._gate_seen_ops = seen
                 sig = f"{op}|{host}"
                 flags["duplicate"] = sig in seen
                 seen.add(sig)

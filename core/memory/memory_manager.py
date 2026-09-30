@@ -321,7 +321,7 @@ class AgentMemory:
     def _endpoint_lines(self, flt: str) -> List[str]:
         eps = getattr(self.ctx, "endpoints", {}) or {}
         lines = []
-        for key, ep in (eps.items() if isinstance(eps, dict) else []):
+        for _key, ep in (eps.items() if isinstance(eps, dict) else []):
             url = getattr(ep, "url", None) or (ep.get("url") if isinstance(ep, dict) else str(ep))
             method = getattr(ep, "method", None) or (ep.get("method") if isinstance(ep, dict) else "")
             row = f"{method or 'GET'} {url}".strip()

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # response via the OracleEngine. Response-detectable per-category classes live
 # here; PATT payloads for each are already in the catalog (§6/§7).
 ENGINE_CLASSES = {
-    "SQLI", "NOSQLI", "XSS", "SSTI", "RCE", "LFI", "XXE", "SSRF",
+    "SQLI", "NOSQLI", "XSS", "SSTI", "RCE", "LFI", "RFI", "XXE", "SSRF",
     "OPEN_REDIRECT", "MASS_ASSIGNMENT", "PROTOTYPE_POLLUTION",
     "HOST_HEADER_INJECTION", "CACHE_POISONING", "EMAIL_INJECTION",
     "CORS_MISCONFIGURATION", "INFORMATION_DISCLOSURE",
@@ -128,6 +128,16 @@ class Dispatcher:
             return surfaces
 
     async def run(self, ctx) -> List[Dict[str, Any]]:
+        # Mid-phase target-down short-circuit: don't launch the injection battery at
+        # an unreachable host. The main loop handles recovery/finalize. Fail-open.
+        try:
+            from core.adaptation.target_health import get_target_health
+            if get_target_health().is_down:
+                logger.info("[Dispatcher] target DOWN — skipping injection dispatch "
+                            "(mid-phase short-circuit)")
+                return []
+        except Exception:
+            pass
         budget = self._int_env("DISPATCH_BUDGET", 0)          # 0 = all payloads
         max_surfaces = self._int_env("DISPATCH_MAX_SURFACES", 40)
         max_points = self._int_env("DISPATCH_MAX_POINTS", 30)
@@ -198,7 +208,7 @@ class Dispatcher:
         logger.info("Dispatcher: %d surfaces → %d findings; coverage %.0f%% (%s); delegated=%s",
                     len(surfaces), len(findings), rep["completeness"] * 100, rep["counts"], delegated_seen)
         try:
-            setattr(ctx, "coverage_ledger", rep)
+            ctx.coverage_ledger = rep
         except Exception:
             pass
         try:
@@ -235,7 +245,7 @@ class Dispatcher:
         for s in surfaces:
             summary["kinds"][s.kind] = summary["kinds"].get(s.kind, 0) + 1
         try:
-            setattr(ctx, "surface_coverage", summary)
+            ctx.surface_coverage = summary
         except Exception:
             pass
 

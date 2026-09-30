@@ -92,51 +92,14 @@ class FindingIngestionMixin:
                     v.setdefault("_downgraded_by", "observation_gate")
         except Exception:
             pass
-        # P0-A1: uniform confirming-oracle gate. Every finding funnels through
-        # here, but only probes routed via UniversalProbeEngine/violation_tester
-        # were oracle-checked before. Re-verify CONFIRMED findings against the
-        # canonical OracleEngine so a self-reported "CONFIRMED" can't reach the
-        # DB unless a real oracle agrees. Fail-safe & generic:
-        #   - only acts when an oracle EXISTS for the class (unknown class stays
-        #     inconclusive, never downgraded),
-        #   - only downgrades when we actually fed the oracle response evidence
-        #     AND it refuted (is_vulnerable False, no oracle error),
-        #   - never UPGRADES status (confirmation still earned elsewhere).
+        # P0-A1 / P1-4: uniform confirming-oracle gate via the shared
+        # oracle_reverify (single source of truth). Downgrades a self-reported
+        # CONFIRMED only for response-derivable classes an oracle can actually
+        # judge from the finding's own evidence (SQLI/SSTI/RCE/...); field-keyed
+        # classes are never downgraded here. Never upgrades.
         try:
-            from core.evidence.oracle import get_oracle_engine
-            if str(v.get("status") or "").upper() == "CONFIRMED":
-                _eng = get_oracle_engine()
-                # Normalize the class key (oracle keys are UPPER_SNAKE) so a
-                # multi-word type like "JWT Forgery" maps to "JWT_FORGERY" and
-                # lookups match by design, not by luck.
-                _cls = (v.get("type") or v.get("attack_type") or "").upper().replace(" ", "_").replace("-", "_")
-                if _cls and _cls in getattr(_eng, "_oracles", {}):
-                    # Map generic finding fields onto the keys oracles read.
-                    _resp = (v.get("response_body") or v.get("response_snippet")
-                             or v.get("response") or v.get("evidence") or v.get("proof") or "")
-                    if isinstance(_resp, (dict, list)):
-                        _resp = str(_resp)
-                    _ev = {
-                        "response_body": _resp,
-                        "response_headers": v.get("response_headers") or v.get("headers") or {},
-                        "status_code": v.get("status_code") or v.get("response_code"),
-                        "canary": v.get("canary") or v.get("marker") or v.get("payload") or "",
-                        "payload": v.get("payload") or "",
-                        "elapsed_ms": v.get("elapsed_ms") or v.get("timing_ms") or 0,
-                        "oob_interaction": v.get("oob_interaction") or v.get("interaction"),
-                        "evidence_id": v.get("evidence_id") or v.get("finding_id") or v.get("id"),
-                    }
-                    # Only judge when there is real response evidence to judge on;
-                    # absent evidence => inconclusive, leave status untouched.
-                    if _resp:
-                        _res = _eng.evaluate(_cls, _ev)
-                        _reason = (getattr(_res, "reasoning", "") or "")
-                        if (not getattr(_res, "is_vulnerable", False)
-                                and not _reason.startswith("Oracle error")
-                                and not _reason.startswith("No oracle")):
-                            v["status"] = "UNCONFIRMED"
-                            v.setdefault("_downgraded_by", "oracle_gate")
-                            v.setdefault("_oracle_reason", _reason)
+            from core.evidence.confirmation_gate import oracle_reverify
+            oracle_reverify(v)
         except Exception:
             pass
         # P0-A2: run the evidence-tiered confirmation gates that
@@ -208,6 +171,10 @@ class FindingIngestionMixin:
             v.setdefault("decision_id", d.decision_id)
         except Exception:
             pass
+        # Gates above are the same set core.evidence.confirmation_gate applies.
+        # Mark this dict gated so the universal sink (add_vulnerability) does not
+        # redundantly re-run them on this path (P0-1 idempotency).
+        v["_gated"] = True
         try:
             self.ctx.add_vulnerability(v)
         except Exception as e:
@@ -420,7 +387,7 @@ class FindingIngestionMixin:
                 try:
                     self.ctx.update("asset_classes", asset_map)
                 except Exception:
-                    setattr(self.ctx, "asset_classes", asset_map)
+                    self.ctx.asset_classes = asset_map
             except Exception:
                 pass
         

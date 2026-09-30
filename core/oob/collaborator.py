@@ -353,9 +353,25 @@ def prepare_oob(payload: str, tag: str = ""):
 
 def confirm_oob(token: str, wait_s: float = 6.0) -> List[OOBInteraction]:
     """Return any out-of-band interactions for `token` (waiting up to wait_s for a
-    delayed callback). A non-empty result is proof of a BLIND vulnerability."""
+    delayed callback). A non-empty result is proof of a BLIND vulnerability.
+
+    NOTE: this BLOCKS (time.sleep) up to wait_s. Never call it directly from async
+    code — it stalls the whole event loop, serializing any asyncio.gather() the
+    caller runs. Use `aconfirm_oob` from an async context instead."""
     try:
         return get_collaborator().had_interaction(token, wait_s=wait_s)
+    except Exception:
+        return []
+
+
+async def aconfirm_oob(token: str, wait_s: float = 6.0) -> List[OOBInteraction]:
+    """Async wrapper for `confirm_oob`: runs the blocking wait in a worker thread so
+    it never blocks the event loop. Use this in probes that await concurrent tasks
+    (asyncio.gather) — a direct confirm_oob() there serializes every task on its
+    time.sleep wait."""
+    import asyncio as _asyncio
+    try:
+        return await _asyncio.to_thread(confirm_oob, token, wait_s)
     except Exception:
         return []
 

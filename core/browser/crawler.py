@@ -117,7 +117,7 @@ def same_origin(a, b):
     except Exception:
         return False
 
-requests_out, forms_out, sinks_out = [], [], {}
+requests_out, forms_out, sinks_out, websockets_out = [], [], {}, []
 visited, queue = set(), [BASE]
 with sync_playwright() as pw:
     browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
@@ -142,6 +142,21 @@ with sync_playwright() as pw:
         except Exception:
             pass
     page.on("request", on_req)
+    def on_ws(ws):
+        try:
+            rec = {"url": ws.url, "frames": []}
+            websockets_out.append(rec)
+            def _cap(d, payload):
+                try:
+                    if isinstance(payload, str) and len(rec["frames"]) < 10:
+                        rec["frames"].append({"dir": d, "data": payload[:2000]})
+                except Exception:
+                    pass
+            ws.on("framesent", lambda p: _cap("sent", p))
+            ws.on("framereceived", lambda p: _cap("recv", p))
+        except Exception:
+            pass
+    page.on("websocket", on_ws)
     while queue and len(visited) < MAX_PAGES:
         url = queue.pop(0)
         if url in visited:
@@ -174,7 +189,7 @@ with sync_playwright() as pw:
         except Exception:
             pass
     browser.close()
-print("__CRAWL_JSON__" + json.dumps({"requests": requests_out, "forms": forms_out, "sinks": sinks_out}))
+print("__CRAWL_JSON__" + json.dumps({"requests": requests_out, "forms": forms_out, "sinks": sinks_out, "websockets": websockets_out}))
 '''
 
 
@@ -204,6 +219,33 @@ async def _crawl_kali_container(ctx, base_url: str, max_pages: int, auth: Option
     return _ingest_crawl_data(ctx, data)
 
 
+def _record_websocket(ctx, ws_url: str, frames=None) -> None:
+    """Record a live WebSocket handshake as a captured_request carrying an
+    'Upgrade: websocket' header so websocket_probe discovers the REAL ws URL
+    (instead of only its hardcoded WS_PATHS guesses), plus any observed frames on
+    ctx.websockets for message-schema-aware injection."""
+    if not ws_url:
+        return
+    http_url = ws_url.replace("wss://", "https://").replace("ws://", "http://")
+    if not _in_scope(http_url):
+        return
+    rec = {"url": ws_url, "method": "GET", "body": None,
+           "headers": {"Upgrade": "websocket", "Connection": "Upgrade"},
+           "ws_frames": list(frames or [])}
+    try:
+        ctx.add_captured_request(rec)
+    except Exception:
+        pass
+    try:
+        store = getattr(ctx, "websockets", None)
+        if not isinstance(store, list):
+            store = []
+        store.append({"url": ws_url, "frames": list(frames or [])})
+        ctx.websockets = store
+    except Exception:
+        pass
+
+
 def _ingest_crawl_data(ctx, data: dict) -> int:
     captured = 0
     for rec in data.get("requests", []):
@@ -214,6 +256,8 @@ def _ingest_crawl_data(ctx, data: dict) -> int:
             captured += 1
         except Exception:
             pass
+    for ws in (data.get("websockets") or []):
+        _record_websocket(ctx, ws.get("url", ""), ws.get("frames"))
     for fm in data.get("forms", []):
         page_url = fm.get("page") or fm.get("action") or ""
         _record_form(ctx, page_url, fm)
@@ -221,7 +265,7 @@ def _ingest_crawl_data(ctx, data: dict) -> int:
         try:
             store = getattr(ctx, "dom_sinks", None) or {}
             store[url] = sinks
-            setattr(ctx, "dom_sinks", store)
+            ctx.dom_sinks = store
         except Exception:
             pass
     return captured
@@ -266,6 +310,24 @@ async def _crawl_playwright(ctx, base_url: str, max_pages: int, auth: Optional[d
             except Exception:
                 pass
         page.on("request", _on_request)
+
+        def _on_ws(ws):
+            try:
+                frames: List[dict] = []
+
+                def _cap(direction, payload):
+                    try:
+                        if isinstance(payload, str) and len(frames) < 10:
+                            frames.append({"dir": direction, "data": payload[:2000]})
+                    except Exception:
+                        pass
+                ws.on("framesent", lambda p: _cap("sent", p))
+                ws.on("framereceived", lambda p: _cap("recv", p))
+                ws.on("close", lambda *_: _record_websocket(ctx, ws.url, frames))
+                _record_websocket(ctx, ws.url, frames)  # record URL now; frames fill in
+            except Exception:
+                pass
+        page.on("websocket", _on_ws)
 
         while queue and len(visited) < max_pages:
             url = queue.pop(0)
@@ -334,7 +396,7 @@ def _flag_dom_sinks(ctx, url: str, html: str) -> None:
             store = getattr(ctx, "dom_sinks", None)
             if store is None:
                 store = {}
-                setattr(ctx, "dom_sinks", store)
+                ctx.dom_sinks = store
             store[url] = present
         except Exception:
             pass
@@ -406,7 +468,7 @@ async def _harvest_spa_routes(ctx, base_url: str, cap: int = 80) -> None:
     paths, and store them on ctx.spa_routes (idempotent, best-effort)."""
     if getattr(ctx, "_spa_routes_done", False):
         return
-    setattr(ctx, "_spa_routes_done", True)
+    ctx._spa_routes_done = True
     from core.security.scoped_http import get_scoped_client
     routes: Set[str] = set()
     try:
@@ -434,7 +496,7 @@ async def _harvest_spa_routes(ctx, base_url: str, cap: int = 80) -> None:
         try:
             existing = set(getattr(ctx, "spa_routes", None) or [])
             merged = sorted(existing | routes)[:cap]
-            setattr(ctx, "spa_routes", merged)
+            ctx.spa_routes = merged
             logger.info("[Crawler] harvested %d SPA route(s) from JS bundles", len(merged))
         except Exception:
             pass

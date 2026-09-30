@@ -80,6 +80,46 @@ def _class_of(finding: Dict[str, Any]) -> str:
         return "xss"
     if "ssrf" in raw:
         return "ssrf"
+    # Extended recognizers so chains/staging get a real class instead of the
+    # generic "other" (which rendered as "Exploit other via other"). Kept AFTER
+    # the checks above so existing precedence is unchanged; only the former
+    # fall-through cases are reclassified. None of these are in _NOISY_CLASSES,
+    # so severity gating is unaffected.
+    if re.search(r"\brce\b", raw) or "remote code" in raw or "os command" in raw or ("command" in raw and "inject" in raw):
+        return "rce"
+    if "ssti" in raw or "template inject" in raw or "server-side template" in raw:
+        return "ssti"
+    if "xxe" in raw or "xml external" in raw:
+        return "xxe"
+    if "nosql" in raw:
+        return "nosqli"
+    if re.search(r"\blfi\b", raw) or "path traversal" in raw or "directory traversal" in raw or "file inclusion" in raw:
+        return "lfi"
+    if "deserial" in raw:
+        return "deserialization"
+    if "jwt" in raw or "json web token" in raw or "alg=none" in raw or "alg:none" in raw or "alg none" in raw:
+        return "jwt"
+    if "mass assignment" in raw or "mass_assignment" in raw:
+        return "mass_assignment"
+    if "csrf" in raw or "cross-site request" in raw:
+        return "csrf"
+    if "smuggl" in raw:
+        return "http_smuggling"
+    if re.search(r"\bcors\b", raw) or "cross-origin resource sharing" in raw:
+        return "cors"
+    if "race condition" in raw or "race_condition" in raw:
+        return "race_condition"
+    if ("file upload" in raw or "file_upload" in raw or "unrestricted upload" in raw):
+        return "file_upload"
+    if "business logic" in raw or "business_logic" in raw or "logic flaw" in raw or "price manip" in raw:
+        return "business_logic"
+    if ("missing" in raw and "auth" in raw) or "api_abuse" in raw or "api abuse" in raw \
+            or "bfla" in raw or "broken function level" in raw or "unauthenticated" in raw \
+            or "no authentication" in raw:
+        return "broken_auth"
+    if ("weak" in raw and ("credential" in raw or "password" in raw)) \
+            or "default password" in raw or "default credential" in raw:
+        return "weak_credentials"
     return "other"
 
 

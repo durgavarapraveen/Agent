@@ -353,9 +353,13 @@ class TestAuthorizationMatrix:
         mgr = SessionIdentityManager()
         s1 = mgr.create_identity("user")
         matrix = AuthorizationMatrix(mgr)
+        # Budget is now SCOPE-PROPORTIONAL: effective = max(safety_budget,
+        # len(identities)*3), so a small static budget never drops in-scope
+        # identity checks (authorization_matrix.py). Every valid identity under
+        # test is therefore checked.
         tester = AccessTester(matrix, safety_budget=1)
         results = tester.orchestrate_cross_identity_experiment("r1", "a1", [s1.identity.id, s1.identity.id])
-        assert len(results) == 1  # budget = 1
+        assert len(results) == 2  # both identities tested (scope-proportional budget)
 
 
 # ── Phase 8.1: Workflow State Machine ──
@@ -571,9 +575,18 @@ from core.evidence.oracle import OracleEngine, OracleResult, get_oracle_engine
 
 
 class TestOracleEngine:
-    def test_all_14_classes(self):
+    def test_core_classes_supported(self):
+        # The OracleEngine has grown well beyond the original 14 classes (now ~90+).
+        # Assert the core classes are registered and the catalog is at least the
+        # original size — not an exact count that goes stale on every expansion.
         engine = OracleEngine()
-        assert len(engine.supported_classes()) == 14
+        supported = set(engine.supported_classes())
+        core = {"SQLI", "NOSQLI", "XSS", "IDOR", "AUTH_BYPASS", "SSRF", "XXE",
+                "SSTI", "RCE", "LFI", "OPEN_REDIRECT", "MASS_ASSIGNMENT",
+                "ACCESS_CONTROL", "CSRF"}
+        missing = core - supported
+        assert not missing, f"core oracle classes missing: {sorted(missing)}"
+        assert len(supported) >= 14
 
     def test_unknown_class_inconclusive(self):
         engine = OracleEngine()

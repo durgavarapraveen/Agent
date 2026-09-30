@@ -195,7 +195,7 @@ class DNSResolver:
             infos = socket.getaddrinfo(canonical, None, socket.AF_UNSPEC,
                                        socket.SOCK_STREAM)
             seen: Set[str] = set()
-            for family, _, _, _, sockaddr in infos:
+            for _family, _, _, _, sockaddr in infos:
                 ip = sockaddr[0]
                 if ip not in seen:
                     seen.add(ip)
@@ -641,6 +641,13 @@ class NetworkBroker:
                     finally:
                         await client.aclose()
                 if resp is None:
+                    # Transport failure after retries — feed the adaptive target-health
+                    # signal so the controller can back off a dead/unreachable host.
+                    try:
+                        from core.adaptation.target_health import record_response as _rh
+                        _rh(transport_error=True)
+                    except Exception:
+                        pass
                     raise _last_exc if _last_exc is not None else RuntimeError(
                         f"NetworkBroker: request failed for {current_url}")
 
@@ -674,6 +681,13 @@ class NetworkBroker:
                 if _nk is not None and resp.status_code in (404, 500, 502, 503, 504):
                     self._neg_cache[_nk] = (resp.status_code,
                                             time.monotonic() + self._neg_ttl)
+                # Feed the adaptive target-health signal (502/503/504 = server
+                # unavailable; everything else counts as reachable).
+                try:
+                    from core.adaptation.target_health import record_response as _rh
+                    _rh(status=resp.status_code)
+                except Exception:
+                    pass
                 return resp
 
             from core.security.egress_firewall import EgressBlocked

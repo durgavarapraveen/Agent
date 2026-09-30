@@ -158,7 +158,7 @@ class ComplianceMapper:
         evidence = []
         scorecards = self.generate_scorecard(vulnerabilities)
 
-        for fw, controls in self.mappings.items():
+        for _fw, controls in self.mappings.items():
             vuln_types = set(str(v.get("type") or v.get("title") or "").upper() for v in vulnerabilities)
             for c in controls:
                 ftypes = [t.upper() for t in c.get("finding_types", [])]

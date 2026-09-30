@@ -5,6 +5,55 @@ from core.common.schemas import ToolInvocation, ToolResult
 logger = logging.getLogger(__name__)
 
 
+def _normalize_curl_headers(cmd: str) -> str:
+    """Quote unquoted curl `-H NAME: VALUE` headers whose value contains a space or
+    a `/` (User-Agent, Content-Type, Accept, ...). An LLM often emits
+    `-H User-Agent: Mozilla/5.0` unquoted; the shell then splits it and curl reads
+    the second word (`Mozilla`, `application`) as a positional URL → curl (6)
+    'Could not resolve host'. Quoting the header restores the intended request.
+    Only rewrites already-UNquoted headers (skips `-H "X: y"`), and stops the value
+    at the next flag / URL / query so nothing unrelated is absorbed. Safe, curl-only."""
+    import re as _re
+    if not cmd or "curl" not in cmd.split(" ", 1)[0]:
+        return cmd
+    # -H NAME: value...  (NAME unquoted; capture value up to next -flag, http(s)://,
+    # a detached ?query/&param, or end).
+    pat = _re.compile(
+        r'(-H\s+)(?!["\'])([A-Za-z][A-Za-z0-9-]*:\s*\S+(?:\s+[^\s"\'-][^\s]*)*?)'
+        r'(?=\s+-[A-Za-z]|\s+https?://|\s+[?&]|\s*$)')
+    return pat.sub(lambda m: f'{m.group(1)}"{m.group(2).strip()}"', cmd)
+
+
+def _valid_url(s: str) -> bool:
+    import re as _re
+    return bool(_re.match(
+        r'^https?://[A-Za-z0-9\.\-_:]+(?::\d+)?(?:/[A-Za-z0-9\-._~:/?#\[\]@!$&\'()*+,;=%]*)?$',
+        s))
+
+
+def _valid_host(s: str) -> bool:
+    import re as _re
+    return bool(_re.match(
+        r'^[A-Za-z0-9]([A-Za-z0-9\-\.]{0,253}[A-Za-z0-9])?$', s))
+
+
+def _kali_target_host(target: str) -> str:
+    """The bare hostname of a scan target: scheme and any :port stripped. Host
+    tools (nmap/subfinder/…) and the host-validity check both want this, never
+    host:port."""
+    d = target.replace("https://", "").replace("http://", "").split("/")[0]
+    return d.rsplit(":", 1)[0] if ":" in d else d
+
+
+def kali_target_is_valid(target: str) -> bool:
+    """Belt-and-suspenders guard before a target is interpolated (shlex-quoted)
+    into a Kali shell command: the whole target must look like a URL or host, and
+    its bare host must be a valid hostname. Rejects shell metacharacters
+    (`;`/`` ` ``/`$()`/`|`) that would survive as an injection; accepts ordinary
+    ported URLs like http://localhost:3000 that the host check used to reject."""
+    return (_valid_url(target) or _valid_host(target)) and _valid_host(_kali_target_host(target))
+
+
 def _dalfox_oob_callback():
     """Return an active OOB collaborator HTTP callback URL for dalfox --blind, or
     None when no collaborator is configured (then --blind is dropped)."""
@@ -87,24 +136,16 @@ class ToolRouter:
                     # `target` was interpolated raw via f-strings; a target string
                     # containing shell metacharacters (`;`, `` ` ``, `$()`, `|`)
                     # would achieve command injection.
-                    import shlex, re as _re_router
+                    import shlex
 
-                    def _valid_url(s: str) -> bool:
-                        return bool(_re_router.match(
-                            r'^https?://[A-Za-z0-9\.\-_:]+(?::\d+)?(?:/[A-Za-z0-9\-._~:/?#\[\]@!$&\'()*+,;=%]*)?$',
-                            s))
-
-                    def _valid_host(s: str) -> bool:
-                        return bool(_re_router.match(
-                            r'^[A-Za-z0-9]([A-Za-z0-9\-\.]{0,253}[A-Za-z0-9])?$', s))
-
-                    # Strip http(s):// for tools that expect domain names
-                    domain = target.replace("https://", "").replace("http://", "").split("/")[0]
-                    # Also derive a base domain for tools that fail on subdomains or just need the root
+                    # Bare hostname (scheme + :port stripped) for host-based tools
+                    # and the validity check; a base domain for tools that just need
+                    # the root. See _kali_target_host / kali_target_is_valid.
+                    domain = _kali_target_host(target)
                     base_domain = domain[4:] if domain.startswith("www.") else domain
 
-                    # Refuse to build the command if either form fails validation.
-                    if not (_valid_url(target) or _valid_host(target)) or not _valid_host(domain):
+                    # Refuse to build the command if the target fails validation.
+                    if not kali_target_is_valid(target):
                         from core.common.schemas import (
                             ToolResult as _STR, ToolExecutionStatus as _TES,
                             ErrorInfo as _EI, ErrorType as _ET,
@@ -318,17 +359,23 @@ class ToolRouter:
                         r'-o\s+/dev/stdout',       # duplicate output redirection
                         r'-x\s+php,json,bak,txt,html',  # comma-list rejected; use -x per ext
                     ],
-                    # wafw00f only accepts -v (verbose); -silent/-s/-o etc all invalid
+                    # wafw00f only accepts -v (verbose); -silent/-s/-o etc all invalid.
+                    # LLMs also hallucinate --aggressive (nmap-ism) which wafw00f
+                    # rejects with "no such option" (rc=2 → TOOL_FAILED).
                     "wafw00f": [
                         r'-silent\b',
                         r'-s\b(?!\S)',             # bare -s (short for something else)
                         r'-o\s+[^\s]+',
                         r'--silent\b',
+                        r'--?aggressive\b',        # not a wafw00f option
                     ],
                     # gobuster dir: -q and --no-error are valid but LLM sometimes adds -mc
                     "gobuster": [
                         r'-mc\s+[^\s]+',
                         r'-fs\s+[^\s]+',
+                        # --wildcard was removed in modern gobuster (v3.2+); passing it
+                        # aborts with "flag provided but not defined: -wildcard" (rc=1).
+                        r'--?wildcard\b',
                     ],
                     # dirsearch: -silent invalid; only -q
                     "dirsearch": [
@@ -351,6 +398,18 @@ class ToolRouter:
                         # collapse double spaces
                         clean_args = _re.sub(r'\s+', ' ', clean_args).strip()
                         break
+
+                # gobuster: on a soft-404/wildcard target older versions aborted
+                # rc=1. Modern gobuster (v3.2+) removed --wildcard and instead
+                # continues, defaulting a 404 status-blacklist; add --no-error so a
+                # noisy wildcard target doesn't spam the run into failure. (The
+                # invalid --wildcard flag itself is stripped above.)
+                if base_bin.endswith("gobuster") or base_bin == "gobuster":
+                    _mode = (base_cmd_l[1].lower() if len(base_cmd_l) > 1 else "")
+                    if _mode in ("dir", "dns", "vhost", "fuzz") and \
+                            not _re.search(r'(?<!\S)--no-error\b', clean_args):
+                        clean_args = (clean_args + " --no-error").strip()
+                        logger.info("Added gobuster --no-error (soft-404/wildcard target)")
 
                 # dalfox: flags that REQUIRE a value fail rc=2 when an LLM/planner
                 # passes them bare (observed: `--blind` with no callback URL →
@@ -437,11 +496,51 @@ class ToolRouter:
                 else:
                     logger.info(f"Skipped duplicate extra_args for: {base_cmd}")
 
+            # Quote unquoted curl -H headers (User-Agent/Content-Type/… with spaces
+            # or slashes) so the shell doesn't split the value into a bogus URL
+            # (curl (6) "Could not resolve host: Mozilla/application"). Curl-only,
+            # runs for both LLM-provided and auto-built commands.
+            _cmd = invocation.params.get("command")
+            if isinstance(_cmd, str) and _cmd.lstrip().startswith("curl"):
+                _fixed = _normalize_curl_headers(_cmd)
+                if _fixed != _cmd:
+                    invocation.params["command"] = _fixed
+                    logger.info("Quoted unquoted curl -H header(s) in command")
+
             if inspect.iscoroutinefunction(best_tool.run):
                 raw_result = await best_tool.run(**invocation.params)
             else:
                 raw_result = best_tool.run(**invocation.params)
-                
+
+            # Error-feedback self-repair: if a Kali/CLI command failed, ask a cheap
+            # LLM to correct the command from its OWN stderr and retry ONCE. This is
+            # the general form of the static per-tool flag fixes above — it handles
+            # unseen bad flags/args without a hardcoded rule. Server-independent
+            # (reasons over the tool error, not the target); scope- and shell-safe
+            # (see core.tools.command_repair). Cached per error-signature so it
+            # never loops.
+            if (not getattr(raw_result, "success", True)
+                    and best_tool.__class__.__name__ == "KaliTool"
+                    and isinstance(invocation.params.get("command"), str)):
+                try:
+                    from core.tools.command_repair import repair_command
+                    _orig_cmd = invocation.params["command"]
+                    _fixed = await repair_command(
+                        best_tool.name, _orig_cmd,
+                        getattr(raw_result, "error", "") or "",
+                        target=invocation.target)
+                    if _fixed:  # non-empty → a safe corrected command to retry
+                        logger.info("[CmdRepair] retrying %s with LLM-corrected command",
+                                    best_tool.name)
+                        invocation.params["command"] = _fixed
+                        if inspect.iscoroutinefunction(best_tool.run):
+                            raw_result = await best_tool.run(**invocation.params)
+                        else:
+                            raw_result = best_tool.run(**invocation.params)
+                except Exception as _cre:
+                    logger.debug("[CmdRepair] repair skipped for %s: %s",
+                                 best_tool.name, _cre)
+
             from core.common.schemas import ToolResult as SchemaToolResult, ToolExecutionStatus
             
             result = SchemaToolResult(

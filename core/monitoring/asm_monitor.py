@@ -113,7 +113,7 @@ class ASMMonitor:
         technologies = set()
         techs = getattr(ctx, "technologies", {}) or {}
         if isinstance(techs, dict):
-            for host, tlist in techs.items():
+            for _host, tlist in techs.items():
                 for t in (tlist or []):
                     technologies.add(str(t).lower())
         elif isinstance(techs, list):

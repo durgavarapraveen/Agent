@@ -242,9 +242,19 @@ class AuthSessionManager:
                 self.cookies[name] = value
             token = None
             try:
-                token = self._extract_json_path(resp.json(), self.config.token_json_path)
-            except Exception as e:
-                logger.debug("token extraction from login response failed: %s", e)
+                _data = resp.json()
+            except Exception:
+                _data = None
+            if _data is not None:
+                try:
+                    token = self._extract_json_path(_data, self.config.token_json_path)
+                except Exception as e:
+                    logger.debug("token extraction from login response failed: %s", e)
+                if not token:
+                    # Configured token_json_path missed (a different app's response
+                    # shape). Fall back to a recursive scan for a JWT-/token-shaped
+                    # value so ANY target resolves without an app-specific path.
+                    token = self._find_token(_data)
             if token:
                 self.headers[self.config.header_name] = f"{self.config.token_prefix}{token}"
                 self._jwt_exp = _decode_jwt_exp(str(token))
@@ -260,6 +270,34 @@ class AuthSessionManager:
             else:
                 return None
         return str(cur) if cur is not None else None
+
+    @staticmethod
+    def _find_token(obj: Any, _depth: int = 0) -> Optional[str]:
+        """Target-agnostic fallback: recursively scan a login response for a
+        token value when the configured token_json_path does not match. Prefers a
+        JWT-shaped value (``eyJ...``) found anywhere; otherwise a long string held
+        under a token-named key. Returns None if nothing token-shaped is present."""
+        if _depth > 6:
+            return None
+        if isinstance(obj, str):
+            return obj if obj.startswith("eyJ") and len(obj) > 20 else None
+        if isinstance(obj, dict):
+            for v in obj.values():  # a JWT anywhere in the tree wins
+                sub = AuthSessionManager._find_token(v, _depth + 1)
+                if sub:
+                    return sub
+            for k, v in obj.items():  # else a long value under a token-named key
+                if isinstance(v, str) and len(v) > 20 and any(
+                        t in k.lower() for t in
+                        ("token", "jwt", "access", "auth", "session", "bearer")):
+                    return v
+            return None
+        if isinstance(obj, list):
+            for v in obj:
+                sub = AuthSessionManager._find_token(v, _depth + 1)
+                if sub:
+                    return sub
+        return None
 
     # ------------------------------------------------------------- session use
 

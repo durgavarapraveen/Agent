@@ -294,7 +294,7 @@ class RetestEngine:
 
         successes = 0
 
-        for attempt_idx in range(attempts):
+        for _attempt_idx in range(attempts):
             self._rate_limit_delay()
             status, body = await self._single_probe(url, method, headers)
             matched = False

@@ -96,7 +96,6 @@ from core.access_control.matrix_engine import MatrixEngine
 from core.security.security_context import SecurityContext as SecurityContextV2
 from core.security.capability_registry import CapabilityRegistry, CapabilityDefinition
 from core.security.authorization_service import AuthorizationService, AuthorizationPolicy
-from core.reasoning.reasoning_engine import ReasoningEngine
 
 # P1a — Experiment Model
 from core.domain.experiment import SecurityExperiment
@@ -287,6 +286,27 @@ from core.orchestration.central_brain_mixins.finding_ingestion import FindingIng
 from core.orchestration.central_brain_mixins.persistence import PersistenceMixin
 from core.orchestration.central_brain_mixins.osint_bridge import OsintBridgeMixin
 from core.orchestration.central_brain_mixins.recon_context import ReconContextMixin
+from core.orchestration.central_brain_mixins.planning import PlanningMixin
+from core.orchestration.central_brain_mixins.aux_runners import AuxRunnersMixin
+from core.orchestration.central_brain_mixins.exploitation_runners import ExploitationRunnersMixin
+from core.orchestration.central_brain_mixins.agent_execution import AgentExecutionMixin
+from core.orchestration.central_brain_mixins.analysis_pipelines import AnalysisPipelinesMixin
+from core.orchestration.central_brain_mixins.authz import AuthzMixin
+from core.orchestration.central_brain_mixins.phase_gate import PhaseGateMixin
+from core.orchestration.central_brain_mixins.setup_builders import SetupBuildersMixin
+from core.orchestration.central_brain_mixins.auth_session import AuthSessionMixin
+from core.orchestration.central_brain_mixins.prompt_building import PromptBuildingMixin
+from core.orchestration.central_brain_mixins.endpoint_feed import EndpointFeedMixin
+from core.orchestration.central_brain_mixins.advanced_engine_sync import AdvancedEngineSyncMixin
+from core.orchestration.central_brain_mixins.coverage_matrix import CoverageMatrixMixin
+from core.orchestration.central_brain_mixins.finding_validation import FindingValidationMixin
+from core.orchestration.central_brain_mixins.reporting import ReportingMixin
+
+
+from core.orchestration.central_brain_mixins._auth_helpers import (
+    _auth_find_token,
+    _auth_is_spa_shell,
+)
 
 
 class CentralBrain(
@@ -294,6 +314,21 @@ class CentralBrain(
     OsintBridgeMixin,
     PersistenceMixin,
     FindingIngestionMixin,
+    PlanningMixin,
+    AuxRunnersMixin,
+    ExploitationRunnersMixin,
+    AgentExecutionMixin,
+    AnalysisPipelinesMixin,
+    AuthzMixin,
+    PhaseGateMixin,
+    SetupBuildersMixin,
+    AuthSessionMixin,
+    PromptBuildingMixin,
+    EndpointFeedMixin,
+    AdvancedEngineSyncMixin,
+    CoverageMatrixMixin,
+    FindingValidationMixin,
+    ReportingMixin,
 ):
 
     @property
@@ -309,6 +344,76 @@ class CentralBrain(
         self.current_phase = new_phase
         logger.info(f"BRAIN_PHASE_TRANSITION: old_phase='{old_phase}' -> new_phase='{new_phase}'")
 
+    def _post_adaptive(self, title: str, data: Optional[dict] = None) -> None:
+        """Publish an adaptive-controller event to the shared blackboard so it shows
+        live in the UI (Blackboard feed, `adaptive` kind). Never raises."""
+        try:
+            from core.orchestration import blackboard as _bb
+            _bb.post(getattr(self, "_scan_id", "") or "", "adaptive-controller",
+                     "adaptive", str(title)[:280], data or {})
+        except Exception:
+            pass
+
+    async def _run_lead_agents(self, tasks: list) -> int:
+        """Dynamic parallel fan-out for specific LEADS (depth-chasing) — ON TOP OF,
+        never instead of, the deterministic coverage battery. Each task is an
+        independent agentic objective (e.g. "chain the IDOR + mass-assign into
+        privesc"); the executors run concurrently and their findings merge into ctx +
+        blackboard like any other agent. This never decides whether a vuln CLASS gets
+        tested (the static battery already guarantees that) — it only chases leads.
+
+        Bounded (≤4 tasks/call, ≤2 fan-outs/scan) and scope-safe (every request is
+        scope-gated in the executor). Best-effort; returns findings added; never raises.
+        """
+        try:
+            from core.orchestration.parallel_agents import run_parallel_agents
+            from agents.llm_harness_adapter import get_llm
+            from core.security.authorization import AuthContext
+        except Exception:
+            return 0
+        used = int(getattr(self, "_fanouts_used", 0) or 0)
+        if used >= 2:
+            logger.info("[Adaptive] fan-out budget exhausted (2/scan) — skipping")
+            return 0
+        clean = [t for t in (tasks or [])
+                 if isinstance(t, dict) and str(t.get("objective", "")).strip()][:4]
+        if not clean:
+            return 0
+        self._fanouts_used = used + 1
+        try:
+            allowed = list(self.tools.tools.keys()) if hasattr(self, "tools") \
+                and hasattr(self.tools, "tools") else []
+            auth_context = AuthContext(allowed_tools=allowed, has_elevated_privilege=True,
+                                       target_profile=getattr(self, "target_profile", None))
+        except Exception:
+            auth_context = None
+        phase = getattr(self.current_phase, "value", "EXPLOITATION")
+
+        async def _worker(task):
+            try:
+                ex = AgenticExecutor(
+                    llm_harness=get_llm(),
+                    tool_invocation_engine=self.tool_invocation_engine,
+                    shared_context=self.ctx, auth_context=auth_context)
+                r = await ex.execute(objective=str(task["objective"])[:500],
+                                     phase=phase, max_rounds=8)
+                return len(getattr(r, "findings", []) or [])
+            except Exception as e:
+                logger.warning("[Adaptive] lead agent failed: %s", e)
+                return 0
+
+        self._post_adaptive(f"Fan-out: {len(clean)} parallel lead agent(s)",
+                            {"objectives": [str(t["objective"])[:80] for t in clean]})
+        logger.warning("[Adaptive] fan-out: %d parallel lead agent(s)", len(clean))
+        results = await run_parallel_agents(clean, _worker, concurrency=3,
+                                            label="adaptive_fanout")
+        n = sum(x for x in results if isinstance(x, int))
+        logger.info("[Adaptive] fan-out complete: %d finding(s) from %d lead agent(s)",
+                    n, len(clean))
+        self._post_adaptive(f"Fan-out complete: {n} finding(s) merged from "
+                            f"{len(clean)} lead agent(s)")
+        return n
+
     def _evaluate_phase_transition(self) -> Optional[ExecutionPhase]:
         # Soft deadline: once the runtime budget is nearly spent, jump straight to
         # REPORTING so the scan finalizes with the results it has instead of being
@@ -320,6 +425,30 @@ class CentralBrain(
                 return ExecutionPhase.REPORTING
         except Exception:
             pass
+
+        # Adaptive re-plan. Two sources, both bounded + fail-open:
+        #  (a) an LLM free-form decision stashed on _adaptive_override by llm_replan()
+        #      (opt-in NEO_ADAPTIVE_LLM) — consumed once here;
+        #  (b) the deterministic rule (jump BACK to ACTIVE_SCANNING when surface grew).
+        # None ⇒ the normal sequence below runs unchanged.
+        try:
+            _ov = getattr(self, "_adaptive_override", None)
+            if _ov is not None:
+                self._adaptive_override = None
+                logger.info(f"[Adaptive] honoring LLM re-plan override -> {_ov.value}")
+                self._post_adaptive(f"LLM re-plan → {_ov.value}",
+                                    {"from": getattr(self.current_phase, "value", None),
+                                     "to": _ov.value, "source": "llm"})
+                return _ov
+        except Exception:
+            pass
+        try:
+            from core.adaptation.adaptive_controller import get_controller
+            _rp = get_controller(self).replan_phase(self)
+            if _rp is not None:
+                return _rp
+        except Exception as _ae:
+            logger.debug(f"[Adaptive] replan hook skipped: {_ae}")
 
         # Anti-loop: if the current phase gave up via the no-progress guard, force
         # advance along the canonical sequence instead of letting the planner
@@ -413,8 +542,8 @@ class CentralBrain(
         # (query/body/header) and confirm via the Oracle. Non-injection classes
         # (idor, jwt, file_upload, race, graphql) are handled by specialized
         # probes. Override with UPE_CLASSES="sqli,xss,...".
-        default_classes = ["sqli", "nosqli", "xss", "ssti", "ssrf", "lfi", "rce",
-                           "xxe", "open_redirect", "prototype_pollution",
+        default_classes = ["sqli", "nosqli", "xss", "ssti", "ssrf", "lfi", "rfi",
+                           "rce", "xxe", "open_redirect", "prototype_pollution",
                            "cors_misconfiguration", "host_header_injection",
                            "email_injection", "cache_poisoning"]
         env_classes = os.getenv("UPE_CLASSES", "").strip()
@@ -786,11 +915,19 @@ class CentralBrain(
                 except ValueError:
                     _entry_cap = 3
                 _reentry = _entries >= _entry_cap
-                if _done or _stall or _reentry:
+                # P1-1: honor the no-progress giveup on the DAG (happy) path too.
+                # A phase that gave up via the no-progress guard (_should_exit_phase
+                # populates _no_progress_phases) must not be re-selected by the
+                # scheduler while its completion predicate is unmet — mark it
+                # completed so the DAG advances. Previously this force-advance only
+                # fired in the legacy except-fallback, which the DAG path bypasses.
+                _no_prog = cur_name in (getattr(self, "_no_progress_phases", None) or set())
+                if _done or _stall or _reentry or _no_prog:
                     completed.add(cur_name)
-                    if not _done and (_stall or _reentry):
+                    if not _done and (_stall or _reentry or _no_prog):
                         logger.info("PHASE_STALL_ADVANCE: %s completion predicate unmet "
                                     "but %s; advancing", cur_name,
+                                    "no-progress giveup" if _no_prog else
                                     "stall cap hit" if _stall else
                                     f"re-entry cap ({_entries}/{_entry_cap}) hit")
             # P0.6: controlled re-entry — a completed phase may be re-run ONLY
@@ -850,6 +987,21 @@ class CentralBrain(
             reasons = sched.blocked_reasons(self.ctx, completed)
             if reasons:
                 logger.info(f"PHASE_DAG_BLOCKED: {reasons}")
+            # P1-5: never terminate without REPORTING having run at least once —
+            # the REPORTING phase hosts CriticAgent FP-validation + the LLM finding
+            # validator + report generation. If the DAG has nothing ready but
+            # REPORTING never executed (and it's allowed), force it once so the
+            # critic isn't skipped on an early/blocked exit. Bounded: once we are
+            # in REPORTING (or it's completed) this no longer fires, so the loop
+            # still terminates.
+            _rep = ExecutionPhase.REPORTING.value
+            _rep_allowed = (not self._allowed_phases) or (_rep in self._allowed_phases)
+            if (_rep not in completed and _rep_allowed and self.current_phase
+                    and self.current_phase.value != _rep):
+                logger.info("PHASE_DAG_FINALIZE: no phase ready and REPORTING not run "
+                            "— forcing REPORTING once (critic + report).")
+                self.transition_phase(ExecutionPhase.REPORTING)
+                return
             self.current_phase = None
             return
         except Exception as _e:
@@ -884,7 +1036,13 @@ class CentralBrain(
         from core.orchestration.checkpointer import Checkpointer
 
         self._stop_requested = False
-        self._stop_file = Path(f".antigravity/stop_{target.replace('://', '_').replace('/', '_')}.signal")
+        # Slug MUST match the server's stop-file slug exactly (ui/api/server.py:
+        # stop_scan / cleanup), which also strips ':'. Without the ':' replace a
+        # target like "host:8080" produced a different filename here, so the UI
+        # "stop" wrote a file this brain never polled and the scan ran until the
+        # watchdog (P0-4).
+        _stop_slug = target.replace("://", "_").replace("/", "_").replace(":", "_")
+        self._stop_file = Path(f".antigravity/stop_{_stop_slug}.signal")
 
         self.llm = LLMClient.get()
         self.ctx = SharedContext(target, scope)
@@ -1135,7 +1293,10 @@ class CentralBrain(
             allowed_actions=["scan", "fuzz", "enumerate", "exploit"],
             blocked_patterns=[],
         ))
-        self.reasoning_engine = ReasoningEngine(llm_client=None)
+        # (Removed dead self.reasoning_engine = ReasoningEngine(llm_client=None):
+        #  it was constructed but none of its methods were ever called, and its
+        #  llm_client was always None — P2-4/P2-5. LLM-driven hypotheses come from
+        #  DynamicHypothesisEngine (_run_dynamic_hypothesis_cycle).)
 
         # ── Phase 2.1: Unified Authorization Authority ──
         self.auth_authority = AuthorizationAuthority.get()
@@ -1920,735 +2081,6 @@ class CentralBrain(
         except Exception:
             pass
 
-    def _register_capabilities(self):
-        for name, executor in [
-            ("sqli", self.sqli_executor),
-            ("xss", self.xss_executor),
-            ("authentication", self.auth_executor),
-            ("authorization", self.authz_executor),
-        ]:
-            self.capability_registry.register(CapabilityDefinition(
-                name=name,
-                executor_class=type(executor),
-                timeout_seconds=executor.timeout_seconds,
-                description=f"Deterministic {name} executor",
-            ))
-
-    def _build_coverage_matrix_from_surface(self):
-        endpoints = self.endpoint_inventory.list_endpoints()
-        ep_ids = [ep.get("endpoint_id", ep.get("url", "")) for ep in endpoints]
-
-        applicable_pairs = []
-        not_discovered_pairs = []
-        identities = list(self.security_context_v2.identities.keys()) or ["default"]
-
-        # Phase 5/30: Use classify_all_tests for NOT_DISCOVERED distinction
-        discovered_features = {}
-        if hasattr(self.ctx, 'attack_surface') and self.ctx.attack_surface:
-            surface = self.ctx.attack_surface
-            discovered_features = {
-                "has_jwt": any("jwt" in str(t).lower() for t in getattr(surface, '_technologies', {}).values()),
-                "has_graphql": any("graphql" in str(ep).lower() for ep in getattr(surface, '_endpoints', {}).values()),
-                "has_websocket": any("ws" in str(ep).lower() for ep in getattr(surface, '_endpoints', {}).values()),
-                "has_login": any(kw in str(ep).lower() for ep in getattr(surface, '_endpoints', {}).values() for kw in ("login", "signin", "auth")),
-                "has_otp": any(kw in str(ep).lower() for ep in getattr(surface, '_endpoints', {}).values() for kw in ("otp", "mfa", "2fa")),
-            }
-
-        for ep in endpoints:
-            classified = self.applicability_engine.classify_all_tests(
-                ep, identities=identities, discovered_features=discovered_features,
-            )
-            ep_id = ep.get("endpoint_id", ep.get("url", ""))
-            for t in classified.get("applicable", []):
-                applicable_pairs.append((ep_id, t.test_id))
-            for t in classified.get("not_discovered", []):
-                not_discovered_pairs.append((ep_id, t.test_id))
-
-        if not applicable_pairs:
-            return
-
-        # Include NOT_DISCOVERED test IDs in the matrix so they can be promoted later
-        nd_test_ids = {p[1] for p in not_discovered_pairs}
-        all_ep_ids = list({p[0] for p in applicable_pairs} | {p[0] for p in not_discovered_pairs})
-        all_test_ids = list({p[1] for p in applicable_pairs} | nd_test_ids)
-        # Pass the REAL per-endpoint applicable pairs so non-applicable cells in
-        # the ep×test grid start NOT_APPLICABLE — prevents the coverage
-        # denominator from exploding to the full cross-product (~55k) and keeps
-        # convergence meaningful.
-        self.coverage_matrix = CoverageMatrix(
-            all_ep_ids, all_test_ids, applicable=set(applicable_pairs))
-
-        # Mark NOT_DISCOVERED cells (update_state is the real API; the old
-        # .update() name silently AttributeError'd and never marked them).
-        from core.coverage.coverage_matrix import CoverageState
-        _app_set = set(applicable_pairs)
-        for ep_id, test_id in not_discovered_pairs:
-            if (ep_id, test_id) not in _app_set:
-                self.coverage_matrix.update_state(ep_id, test_id, CoverageState.NOT_DISCOVERED)
-
-        self.convergence_engine = ConvergenceEngineV2(self.coverage_matrix)
-        # P1-F2 / P1-F1: keep the completion validator and ctx-exposed engine
-        # pointed at the freshly-rebuilt live V2 engine.
-        try:
-            self.completion_validator = CompletionValidator(self.coverage_engine, self.convergence_engine)
-        except Exception:
-            pass
-        try:
-            if getattr(self, "ctx", None) is not None:
-                self.ctx.convergence_engine = self.convergence_engine
-        except Exception:
-            pass
-        self.pipeline_v2 = ExecutionPipelineV2(
-            executor_registry=self.executor_registry,
-            tool_portfolio=self.tool_portfolio,
-            coverage_matrix=self.coverage_matrix,
-            finding_store=self.finding_store_v2,
-            evidence_validator=self.evidence_validator,
-        )
-        logger.info(f"[CoverageMatrix] Built: {len(all_ep_ids)} endpoints × {len(all_test_ids)} tests "
-                    f"= {len(applicable_pairs)} applicable + {len(not_discovered_pairs)} not_discovered")
-
-    def _feed_endpoints_to_v2(self):
-        count = 0
-
-        def _params_of(ep):
-            out = []
-            for p in getattr(ep, "parameters", []) or []:
-                pt = getattr(p, "parameter_type", None)
-                loc = pt.value if hasattr(pt, "value") else (pt or "query")
-                out.append({"name": getattr(p, "name", ""), "location": loc})
-            return out
-
-        def _feed_obj(ep):
-            self.endpoint_inventory.add_endpoint({
-                "endpoint_id": getattr(ep, "endpoint_id", "")
-                or (ep.canonical_id() if hasattr(ep, "canonical_id") else ""),
-                "url": getattr(ep, "url", "") or getattr(ep, "path", ""),
-                "method": (ep.method_set[0] if getattr(ep, "method_set", None) else "GET"),
-                "parameters": _params_of(ep),
-                "auth_required": getattr(ep, "auth_required", False),
-                "content_type": getattr(ep, "content_type", "") or "text/html",
-            })
-
-        eps = getattr(self.ctx, "endpoints", None) or {}
-        ep_iter = eps.values() if isinstance(eps, dict) else eps
-        for ep in ep_iter:
-            try:
-                if isinstance(ep, str):
-                    self.endpoint_inventory.add_endpoint({"url": ep, "method": "GET"})
-                elif isinstance(ep, dict):
-                    self.endpoint_inventory.add_endpoint(ep)
-                else:
-                    _feed_obj(ep)
-                count += 1
-            except Exception as e:
-                logger.debug(f"[V2Sync] ctx endpoint feed skipped: {e}")
-
-        # Pull the deduped AttackSurfaceState endpoints (store #2, authoritative).
-        surface = getattr(self.ctx, "attack_surface", None)
-        surf_eps = getattr(surface, "endpoints", None)
-        if isinstance(surf_eps, dict):
-            for ep in surf_eps.values():
-                try:
-                    _feed_obj(ep)
-                    count += 1
-                except Exception as e:
-                    logger.debug(f"[V2Sync] surface endpoint feed skipped: {e}")
-
-        if count > 0:
-            uniq = len(self.endpoint_inventory.list_endpoints())
-            logger.info(f"[V2Sync] Fed {count} endpoint records into EndpointInventoryV2 "
-                        f"({uniq} unique)")
-            self.security_context_v2.endpoints = {
-                str(ep.get("endpoint_id") or ep.get("url") or ""): ep
-                for ep in self.endpoint_inventory.list_endpoints()
-            }
-
-    def _sync_v1_findings_to_coverage_matrix(self):
-        if not hasattr(self, 'coverage_matrix') or not self.coverage_matrix:
-            return
-
-        matrix = self.coverage_matrix.get_matrix()
-        if not matrix:
-            return
-
-        _VULN_TO_TESTS = {
-            "NUCLEI_MATCH": ["info_disclosure_01", "cors_misconfig_01"],
-            "NIKTO_FINDING": ["info_disclosure_01", "path_directory_01"],
-            "MISSING_HEADER": ["header_injection_01", "info_disclosure_01"],
-            "TLS_WEAKNESS": ["info_disclosure_01"],
-            "INFO_DISCLOSURE": ["info_disclosure_01"],
-        }
-        _KEYWORD_TO_TESTS = {
-            "sqli": ["sqli_basic_01", "sqli_time_based_01", "sqli_error_based_01", "sqli_union_01"],
-            "sql injection": ["sqli_basic_01", "sqli_time_based_01", "sqli_error_based_01"],
-            "xss": ["xss_reflected_01", "xss_stored_01", "xss_dom_01"],
-            "cross-site scripting": ["xss_reflected_01", "xss_stored_01"],
-            "csrf": ["csrf_token_01"],
-            "ssrf": ["ssrf_basic_01", "ssrf_cloud_01"],
-            "command injection": ["cmdi_basic_01"],
-            "path traversal": ["path_traversal_01"],
-            "directory": ["path_directory_01"],
-            "open redirect": ["open_redirect_01"],
-            "cors": ["cors_misconfig_01"],
-            "idor": ["authz_idor_01", "authz_horizontal_01"],
-            "privilege": ["authz_priv_esc_01"],
-            "brute": ["auth_login_01"],
-            "default cred": ["auth_default_creds_01"],
-            "session": ["auth_session_hijack_01"],
-            "jwt": ["jwt_manipulation_01", "jwt_algo_confusion_01", "jwt_none_algo_01"],
-            "xxe": ["xxe_basic_01"],
-            "ssti": ["ssti_basic_01"],
-            "template injection": ["ssti_basic_01"],
-            "nosql": ["nosqli_basic_01", "nosqli_logical_01"],
-            "file upload": ["upload_type_01", "upload_rce_01"],
-            "graphql": ["graphql_introspection_01", "graphql_mutation_01"],
-            "websocket": ["ws_hijack_01"],
-            "race condition": ["race_condition_01"],
-            "ldap": ["ldap_injection_01"],
-            "nuclei": ["info_disclosure_01"],
-        }
-
-        ep_ids = list(matrix.keys())
-        confirmed_cells = set()
-        tested_tests = set()
-
-        for vuln in getattr(self.ctx, 'vulnerabilities', []):
-            if not isinstance(vuln, dict):
-                continue
-            vtype = vuln.get("type", "")
-            title = (vuln.get("title", "") or "").lower()
-            location = vuln.get("location", "") or vuln.get("target", "")
-
-            matched_tests = set()
-            if vtype in _VULN_TO_TESTS:
-                matched_tests.update(_VULN_TO_TESTS[vtype])
-            for kw, tids in _KEYWORD_TO_TESTS.items():
-                if kw in title:
-                    matched_tests.update(tids)
-
-            if not matched_tests:
-                matched_tests.add("info_disclosure_01")
-
-            best_ep = None
-            if location:
-                loc_lower = location.lower()
-                for eid in ep_ids:
-                    if eid.lower() in loc_lower or loc_lower in eid.lower():
-                        best_ep = eid
-                        break
-            if not best_ep and ep_ids:
-                best_ep = ep_ids[0]
-
-            if best_ep:
-                for tid in matched_tests:
-                    if tid in matrix.get(best_ep, {}):
-                        from core.coverage.coverage_matrix import CoverageState
-                        self.coverage_matrix.update_state(best_ep, tid, CoverageState.CONFIRMED)
-                        confirmed_cells.add((best_ep, tid))
-                        tested_tests.add(tid)
-
-        _TOOL_CAPS_TO_TESTS = {
-            "vulnerability_scanning": [
-                "sqli_basic_01", "xss_reflected_01", "xss_stored_01", "cmdi_basic_01",
-                "path_traversal_01", "path_directory_01", "info_disclosure_01",
-                "cors_misconfig_01", "header_injection_01", "open_redirect_01",
-                "ssti_basic_01", "csrf_token_01",
-            ],
-            "tls_analysis": ["info_disclosure_01"],
-            "port_scanning": ["info_disclosure_01"],
-            "header_analysis": ["header_injection_01", "cors_misconfig_01", "info_disclosure_01"],
-        }
-
-        ran_caps = set()
-        for task in getattr(self.ctx, 'completed_tasks', []):
-            if isinstance(task, dict):
-                ran_caps.add(task.get("capability", ""))
-            elif isinstance(task, str):
-                ran_caps.add(task)
-
-        from core.coverage.coverage_matrix import CoverageState
-        for cap, test_ids in _TOOL_CAPS_TO_TESTS.items():
-            if cap not in ran_caps:
-                continue
-            for eid in ep_ids:
-                for tid in test_ids:
-                    if tid not in matrix.get(eid, {}):
-                        continue
-                    if (eid, tid) in confirmed_cells:
-                        continue
-                    self.coverage_matrix.update_state(eid, tid, CoverageState.REJECTED)
-                    tested_tests.add(tid)
-
-        total_cells = sum(len(tests) for tests in matrix.values())
-        gaps_after = len(self.coverage_matrix.get_gaps())
-        logger.info(
-            f"[V1→V2Bridge] Synced {len(self.ctx.vulnerabilities)} findings → "
-            f"{len(confirmed_cells)} confirmed, {total_cells - gaps_after - len(confirmed_cells)} rejected, "
-            f"{gaps_after} remaining gaps (was {total_cells})"
-        )
-
-    def _sync_recon_to_advanced_engines(self):
-        """Synchronizes RECON artifacts to ApplicationModel, MultiChannelDiscovery, SemanticInference, and SpecialistTeam."""
-        # 1. Application Model
-        try:
-            if hasattr(self, "application_model") and self.application_model:
-                self.application_model.hydrate_from_shared_context(self.ctx)
-                logger.info(f"[ApplicationModel] Hydrated from context: {len(self.application_model.endpoints)} endpoints, {len(self.application_model.hosts)} hosts")
-        except Exception as _ame:
-            logger.debug(f"[ApplicationModel] Hydration skipped: {_ame}")
-
-        # 2. Multi-Channel Discovery
-        try:
-            if hasattr(self, "multi_channel_discovery") and self.multi_channel_discovery:
-                from core.discovery.multi_channel import DiscoveredAsset, DiscoverySource
-                synced_count = 0
-                for ep in (self.ctx.endpoints or []):
-                    ep_url = ep.get("url") if isinstance(ep, dict) else getattr(ep, "url", str(ep))
-                    ep_method = ep.get("method", "GET") if isinstance(ep, dict) else getattr(ep, "method", "GET")
-                    if ep_url:
-                        self.multi_channel_discovery.add_asset(DiscoveredAsset(
-                            url=ep_url, method=ep_method, source=DiscoverySource.CRAWL
-                        ))
-                        synced_count += 1
-                if synced_count:
-                    logger.info(f"[MultiChannelDiscovery] Ingested {synced_count} assets")
-        except Exception as _mde:
-            logger.debug(f"[MultiChannelDiscovery] Ingestion skipped: {_mde}")
-
-        # 3. Semantic Inference Engine
-        try:
-            if hasattr(self, "semantic_inference") and self.semantic_inference:
-                inferred = 0
-                for ep in (self.ctx.endpoints or [])[:50]:
-                    ep_dict = ep if isinstance(ep, dict) else {"url": getattr(ep, "url", str(ep))}
-                    inf = self.semantic_inference.infer_endpoint(ep_dict)
-                    if inf and inf.inferred_type != "unknown":
-                        inferred += 1
-                        ep_dict["semantic_type"] = inf.inferred_type
-                        ep_dict["semantic_confidence"] = inf.confidence
-                if inferred:
-                    logger.info(f"[SemanticInference] Inferred semantic types for {inferred} endpoints")
-        except Exception as _sie:
-            logger.debug(f"[SemanticInference] Inference skipped: {_sie}")
-
-        # 4. Source Intelligence Graph
-        try:
-            if hasattr(self, "source_intelligence") and self.source_intelligence:
-                for jep in (getattr(self.ctx, "js_endpoints", []) or []):
-                    jurl = jep if isinstance(jep, str) else jep.get("url", "")
-                    if jurl:
-                        self.source_intelligence.add_node("endpoint", jurl)
-        except Exception as _sige:
-            logger.debug(f"[SourceIntelligence] Node addition skipped: {_sige}")
-
-        # 5. Specialist Team Evidence Bus
-        try:
-            if hasattr(self, "specialist_team") and self.specialist_team:
-                from core.orchestration.specialist_agents import EvidenceArtifact, SpecialistRole
-                self.specialist_team.bus.publish(EvidenceArtifact(
-                    producer_role=SpecialistRole.RECON,
-                    artifact_type="recon_inventory",
-                    data={
-                        "subdomains": len(self.ctx.subdomains),
-                        "endpoints": len(self.ctx.endpoints),
-                        "ports": len(getattr(self.ctx, "ports", [])),
-                    },
-                    provenance="recon_phase"
-                ))
-                logger.info("[SpecialistTeam] Posted RECON inventory artifact to evidence bus")
-        except Exception as _ste:
-            logger.debug(f"[SpecialistTeam] Posting skipped: {_ste}")
-
-        # 6. Phase 1.5: Business-domain app understanding + test hypotheses.
-        # Try async LLM path first for richer inference; fall back to heuristic.
-        try:
-            if hasattr(self, "app_understanding") and self.app_understanding:
-                from core.intelligence.app_understanding import AppSignals
-                signals = AppSignals.from_context(self.ctx)
-                try:
-                    import asyncio as _aio
-                    loop = _aio.get_event_loop()
-                    if loop.is_running():
-                        import concurrent.futures
-                        with concurrent.futures.ThreadPoolExecutor(1) as pool:
-                            understanding = pool.submit(
-                                _aio.run, self.app_understanding.analyze(signals)
-                            ).result(timeout=30)
-                    else:
-                        understanding = loop.run_until_complete(
-                            self.app_understanding.analyze(signals))
-                except Exception:
-                    understanding = self.app_understanding.heuristic(signals)
-                specs = self.app_understanding.to_test_specs(
-                    understanding, base_endpoints=signals.endpoints[:50])
-                self.ctx.app_understanding = understanding.to_dict()
-                self.ctx.business_test_specs = specs
-                self._app_understanding = understanding
-                self.app_understanding.populate_app_model(understanding)
-                logger.info(
-                    f"[AppUnderstanding] domain={understanding.business_domain} "
-                    f"(conf={understanding.domain_confidence:.2f}, src={understanding.source}), "
-                    f"{len(specs)} business-logic test specs, "
-                    f"{len(understanding.entities)} entities, "
-                    f"{len(understanding.security_invariants)} invariants")
-        except Exception as _aue:
-            logger.debug(f"[AppUnderstanding] skipped: {_aue}")
-
-        # 6b. Phase 1.2: build workflow state machines + negative test cases from
-        # captured multi-step flows (guarded; empty when nothing was captured).
-        try:
-            captured = getattr(self.ctx, "captured_requests", None) or getattr(self.ctx, "endpoints", None)
-            if captured:
-                from core.discovery.workflow_crawler import WorkflowCrawler
-                crawler = WorkflowCrawler()
-                sm = crawler.build_from_requests(captured if isinstance(captured, list) else [])
-                if len(sm.steps) >= 2:
-                    self.ctx.workflow_test_cases = [c.__dict__ for c in crawler.generate_test_cases(sm)]
-                    logger.info("[WorkflowCrawler] %d workflow test case(s) generated",
-                                len(self.ctx.workflow_test_cases))
-        except Exception as _wce:
-            logger.debug(f"[WorkflowCrawler] skipped: {_wce}")
-
-        # 6c. P1-19: domain-aware workflow generation + negative testing.
-        # Uses inferred domain model (entities, state transitions) to build
-        # multi-step browser workflows, execute them, and run negative test
-        # cases (skip-step, reorder, replay, direct-access) for biz-logic bugs.
-        try:
-            understanding = getattr(self, "_app_understanding", None)
-            captured = getattr(self.ctx, "captured_requests", None)
-            if understanding or captured:
-                from core.workflows.workflow_generator import WorkflowGenerator
-                from core.workflows.workflow_executor import WorkflowExecutor
-
-                creds = {}
-                if hasattr(self.ctx, "harvested_creds") and self.ctx.harvested_creds:
-                    c = self.ctx.harvested_creds[0] if isinstance(self.ctx.harvested_creds, list) else {}
-                    creds = {"username": c.get("username", ""), "password": c.get("password", "")}
-
-                gen = WorkflowGenerator(
-                    target_url=str(self.ctx.target),
-                    understanding=understanding,
-                    captured_requests=captured if isinstance(captured, list) else [],
-                    credentials=creds,
-                )
-                workflows = gen.generate_all()
-                if workflows:
-                    executor = WorkflowExecutor(
-                        target_url=str(self.ctx.target),
-                        scan_id=getattr(self.ctx, "_scan_id", "") or getattr(self.ctx, "scan_id", ""),
-                    )
-                    import asyncio as _aio2
-                    _coro = executor.execute_all(workflows, captured if isinstance(captured, list) else [])
-                    try:
-                        _loop2 = _aio2.get_event_loop()
-                        if _loop2.is_running():
-                            import concurrent.futures as _cf2
-                            with _cf2.ThreadPoolExecutor(1) as _pool2:
-                                wf_results = _pool2.submit(_aio2.run, _coro).result(timeout=120)
-                        else:
-                            wf_results = _loop2.run_until_complete(_coro)
-                    except Exception:
-                        wf_results = _aio2.run(_coro)
-                    biz_findings = []
-                    for wr in wf_results:
-                        biz_findings.extend(wr.findings)
-                    if biz_findings:
-                        for f in biz_findings:
-                            self.ctx.vulnerabilities.append(f)
-                        logger.info("[P1-19] %d business-logic finding(s) from %d workflow(s)",
-                                    len(biz_findings), len(workflows))
-                    else:
-                        logger.info("[P1-19] %d workflow(s) executed, no business-logic issues found",
-                                    len(workflows))
-        except Exception as _wfe:
-            logger.debug(f"[P1-19 WorkflowExecutor] skipped: {_wfe}")
-
-        # 7. Phase 6.2: incremental scanning. When ANTIGRAVITY_INCREMENTAL=1 and a
-        # saved baseline exists, narrow ctx.endpoints to the new/changed ones.
-        # Conservative: only prunes when the result is non-empty — otherwise the
-        # full endpoint set is kept (never turns a scan into a no-op).
-        try:
-            import os as _os
-            if _os.getenv("ANTIGRAVITY_INCREMENTAL") == "1":
-                from core.monitoring.incremental import IncrementalScanner
-                scanner = IncrementalScanner()
-                plan = scanner.plan(getattr(self, "target", ""), self.ctx, incremental=True)
-                if not plan.full_scan and plan.endpoints_to_scan:
-                    kept = IncrementalScanner.filter_endpoints(self.ctx.endpoints or [], plan)
-                    if kept:
-                        logger.info("[Incremental] re-scanning %d changed/new endpoint(s) "
-                                    "(was %d).", len(kept), len(self.ctx.endpoints or []))
-                        self.ctx.endpoints = kept
-                elif not plan.full_scan and not plan.endpoints_to_scan:
-                    logger.info("[Incremental] attack surface unchanged since baseline.")
-        except Exception as _ie:
-            logger.debug(f"[Incremental] skipped: {_ie}")
-
-    def _sync_scanning_to_advanced_engines(self):
-        """Synchronizes ACTIVE_SCANNING results to ResourceGovernor, DifferentialEngine, AnomalyPipeline, and SpecialistTeam."""
-        # 1. Resource Governor
-        try:
-            if hasattr(self, "resource_governor") and self.resource_governor:
-                from core.orchestration.resource_governor import ResourceType, QuotaLevel
-                self.resource_governor.set_quota(
-                    ResourceType.HTTP_REQUESTS, QuotaLevel.SCAN, self._scan_id, limit=5000.0
-                )
-                self.resource_governor.set_quota(
-                    ResourceType.CONCURRENT_TASKS, QuotaLevel.SCAN, self._scan_id, limit=20.0
-                )
-                self.resource_governor.consume(
-                    ResourceType.HTTP_REQUESTS, QuotaLevel.SCAN, self._scan_id, amount=10.0
-                )
-        except Exception as _rge:
-            logger.debug(f"[ResourceGovernor] Quotas skipped: {_rge}")
-
-        # 2. Differential Engine & Anomaly Pipeline
-        try:
-            if hasattr(self, "differential_engine") and self.differential_engine:
-                from core.analysis.differential_engine import ResponseSnapshot
-                base_snap = ResponseSnapshot(
-                    snapshot_id="baseline_root",
-                    url=self.ctx.target,
-                    status_code=200,
-                    headers=(),
-                    body_length=len(getattr(self.ctx, "body_content", "") or ""),
-                    response_time_ms=50.0,
-                )
-                var_snap = ResponseSnapshot(
-                    snapshot_id="variant_root",
-                    url=self.ctx.target,
-                    status_code=200,
-                    headers=(),
-                    body_length=len(getattr(self.ctx, "body_content", "") or ""),
-                    response_time_ms=52.0,
-                )
-                self.differential_engine.compare(base_snap, var_snap)
-        except Exception as _dfe:
-            logger.debug(f"[DifferentialEngine] Baseline skipped: {_dfe}")
-
-        # 3. Specialist Team Evidence Bus
-        try:
-            if hasattr(self, "specialist_team") and self.specialist_team:
-                from core.orchestration.specialist_agents import EvidenceArtifact, SpecialistRole
-                self.specialist_team.bus.publish(EvidenceArtifact(
-                    producer_role=SpecialistRole.WEB_SEMANTICS,
-                    artifact_type="scan_findings",
-                    data={"finding_count": len(self.ctx.vulnerabilities)},
-                    provenance="active_scanning"
-                ))
-                logger.info("[SpecialistTeam] Posted SCAN findings artifact to evidence bus")
-        except Exception as _ste:
-            logger.debug(f"[SpecialistTeam] Posting skipped: {_ste}")
-
-    def _sync_exploit_to_advanced_engines(self):
-        """Synchronizes EXPLOITATION artifacts to HypothesisLedger, EvidenceGraph, SecretLifecycleManager, and SpecialistTeam."""
-        # 1. Hypothesis Ledger
-        try:
-            if hasattr(self, "hypothesis_ledger") and self.hypothesis_ledger:
-                hypotheses_v2 = self.ctx.get("hypotheses_v2", []) if hasattr(self.ctx, "get") else getattr(self.ctx, "hypotheses_v2", [])
-                for h in hypotheses_v2[:20]:
-                    target = getattr(h, "target", self.ctx.target)
-                    hyp_text = getattr(h, "hypothesis", getattr(h, "rationale", "generic_hypothesis"))
-                    self.hypothesis_ledger.record_hypothesis(
-                        url=target,
-                        hypothesis=str(hyp_text),
-                        prerequisites=[],
-                        expected_observation="exploit_confirmation",
-                    )
-        except Exception as _hle:
-            logger.debug(f"[HypothesisLedger] Sync skipped: {_hle}")
-
-        # 2. Evidence Graph
-        try:
-            if hasattr(self, "evidence_graph") and self.evidence_graph:
-                for v in (self.ctx.vulnerabilities or []):
-                    v_dict = v if isinstance(v, dict) else {"title": str(v)}
-                    self.evidence_graph.add_node("finding", v_dict)
-                integrity_ok = self.evidence_graph.verify_integrity()
-                logger.info(f"[EvidenceGraph] Synchronized {len(self.evidence_graph.nodes)} evidence nodes (integrity_valid={integrity_ok})")
-        except Exception as _ege:
-            logger.debug(f"[EvidenceGraph] Sync skipped: {_ege}")
-
-        # 3. Secret Lifecycle Manager
-        try:
-            if hasattr(self, "secret_lifecycle") and self.secret_lifecycle:
-                from core.security.secret_lifecycle import SecretLifecycleRule
-                rule = SecretLifecycleRule(name="harvested_rule", max_age_seconds=86400.0, revoke_on_leak=True)
-                self.secret_lifecycle.register_rule(rule)
-                for cred in (getattr(self.ctx, "harvested_creds", []) or []):
-                    u = cred.get("username", "anon")
-                    s_id = f"cred_{u}_{self._scan_id}"
-                    self.secret_lifecycle.track(
-                        secret_ref=s_id,
-                        rule_name="harvested_rule",
-                        tenant_id=self.tenant_id
-                    )
-                logger.info(f"[SecretLifecycle] Tracked {len(getattr(self.ctx, 'harvested_creds', []) or [])} credentials")
-        except Exception as _sle:
-            logger.debug(f"[SecretLifecycle] Tracking skipped: {_sle}")
-
-        # 4. Specialist Team Evidence Bus
-        try:
-            if hasattr(self, "specialist_team") and self.specialist_team:
-                from core.orchestration.specialist_agents import EvidenceArtifact, SpecialistRole
-                self.specialist_team.bus.publish(EvidenceArtifact(
-                    producer_role=SpecialistRole.VERIFICATION,
-                    artifact_type="exploit_summary",
-                    data={
-                        "vulnerabilities": len(self.ctx.vulnerabilities),
-                        "exploits": len(self.ctx.exploit_results),
-                        "harvested_creds": len(getattr(self.ctx, "harvested_creds", []) or []),
-                    },
-                    provenance="exploitation_phase"
-                ))
-                logger.info("[SpecialistTeam] Posted EXPLOIT summary artifact to evidence bus")
-        except Exception as _ste:
-            logger.debug(f"[SpecialistTeam] Posting skipped: {_ste}")
-
-    AUTH_TEST_IDS = frozenset({
-        "auth_login_01", "auth_session_hijack_01", "auth_default_creds_01",
-        "auth_credential_stuffing_01", "auth_password_policy_01", "authentication",
-    })
-
-    def _run_v2_experiment_cycle(self, max_experiments: int = None):
-        gaps = self.coverage_matrix.get_gaps()
-        if not gaps:
-            return
-
-        if max_experiments is None:
-            inv = getattr(self, 'endpoint_inventory_v2', None)
-            try:
-                n_endpoints = len(inv.list_endpoints()) if inv is not None else 0
-            except Exception:
-                n_endpoints = 0
-            max_experiments = max(500, min(n_endpoints * 4, 5000))
-
-        hypotheses = self.hypothesis_engine.generate(gaps)
-        ranked = self.hypothesis_engine.rank(hypotheses)
-
-        identity_ctx = self._build_identity_context()
-        all_creds = identity_ctx.get("all_credentials", [])
-        has_creds = bool(all_creds)
-
-        executed = 0
-        batch_size = min(len(ranked), max_experiments)
-        for h in ranked[:batch_size]:
-            # Skip auth tests early when no credentials are available
-            if h.test_id in self.AUTH_TEST_IDS and not has_creds:
-                self.coverage_matrix.update_state(h.endpoint_id, h.test_id, CoverageState.NOT_APPLICABLE)
-                continue
-            ep_data = self.security_context_v2.endpoints.get(h.endpoint_id, {})
-            base_url = ep_data.get("url", h.endpoint_id)
-
-            is_auth_test = h.test_id in self.AUTH_TEST_IDS
-            if is_auth_test and len(all_creds) > 1:
-                for cred in all_creds:
-                    exp = SecurityExperiment(
-                        hypothesis_id=f"{h.hypothesis_id}_{cred['role']}",
-                        endpoint_id=h.endpoint_id,
-                        capability=h.test_id,
-                        priority=h.priority,
-                        input_parameters={
-                            "url": base_url,
-                            "username": cred["username"],
-                            "password": cred["password"],
-                            "login_url": cred.get("login_url", ""),
-                            "role": cred["role"],
-                        },
-                    )
-                    self.experiment_scheduler.queue(exp)
-            else:
-                exp = SecurityExperiment(
-                    hypothesis_id=h.hypothesis_id,
-                    endpoint_id=h.endpoint_id,
-                    capability=h.test_id,
-                    priority=h.priority,
-                    input_parameters={
-                        "url": base_url,
-                        **identity_ctx,
-                    },
-                )
-                if not self.experiment_scheduler.queue(exp):
-                    continue
-
-        while self.experiment_scheduler.size() > 0 and executed < max_experiments:
-            exp = self.experiment_scheduler.next()
-            if not exp:
-                break
-
-            result = self.pipeline_v2.execute(exp)
-            executed += 1
-
-            if result.finding:
-                self.knowledge_graph.add_finding(result.finding)
-                self.security_context_v2.add_finding(result.finding.finding_id, result.finding.to_dict())
-            if result.evidence:
-                self.knowledge_graph.add_evidence(result.evidence)
-                if result.finding:
-                    self.knowledge_graph.connect_evidence(result.finding.finding_id, result.evidence.evidence_id)
-
-            if not result.success and result.error:
-                error_code = result.execution_result.error_code if result.execution_result else ""
-                if error_code == "NO_CREDENTIALS":
-                    self.coverage_matrix.update_state(exp.endpoint_id, exp.capability, CoverageState.NOT_APPLICABLE)
-                    continue
-                exc = Exception(result.error)
-                ft = self.failure_classifier.classify(exc, {"error_code": error_code})
-                action = self.recovery_policy.get_action(ft)
-                if action == RetryAction.BLOCK:
-                    self.coverage_matrix.update_state(exp.endpoint_id, exp.capability, CoverageState.BLOCKED)
-                logger.info(f"[V2Recovery] {ft.value} → {action.value} for {exp.capability}@{exp.endpoint_id}")
-
-        conv = self.convergence_engine.calculate_convergence()
-        logger.info(f"[V2Cycle] Executed {executed} experiments, coverage={conv:.1%}, gaps={len(self.coverage_matrix.get_gaps())}")
-
-    def _build_identity_context(self) -> Dict[str, Any]:
-        ctx: Dict[str, Any] = {}
-        if self.ctx.harvested_creds:
-            best = self.ctx.harvested_creds[0]
-            ctx["username"] = best.get("username", best.get("email", ""))
-            ctx["password"] = best.get("password", "")
-            ctx["login_url"] = best.get("login_url", "")
-            ctx["role"] = best.get("role", "default")
-            # Store all credential sets for multi-role testing
-            ctx["all_credentials"] = [
-                {
-                    "role": c.get("role", "default"),
-                    "username": c.get("username", c.get("email", "")),
-                    "password": c.get("password", ""),
-                    "login_url": c.get("login_url", ""),
-                }
-                for c in self.ctx.harvested_creds if c.get("username")
-            ]
-        if self.ctx.sessions:
-            for sid, sess in self.ctx.sessions.items():
-                token = getattr(sess, "token", None) or getattr(sess, "jwt", None)
-                if token:
-                    ctx["auth_token"] = token
-                    ctx["auth_header"] = f"Bearer {token}"
-                    break
-        for vuln in self.ctx.vulnerabilities:
-            evidence = vuln.get("evidence") or vuln.get("proof") or {}
-            if isinstance(evidence, dict):
-                token = evidence.get("token") or evidence.get("jwt") or evidence.get("auth_token")
-                if token and "auth_token" not in ctx:
-                    ctx["auth_token"] = token
-                    ctx["auth_header"] = f"Bearer {token}"
-        return ctx
-
-    def _generate_coverage_report(self) -> str:
-        cat_map = {}
-        for t in self.test_catalog_v2.list_all():
-            cat_map[t.test_id] = t.attack_type
-        report = CoverageReport(
-            coverage_matrix=self.coverage_matrix,
-            finding_store=self.finding_store_v2,
-            knowledge_graph=self.knowledge_graph,
-            test_category_map=cat_map,
-        )
-        return report.generate()
-
     async def _heartbeat_loop(self):
         while True:
             try:
@@ -2659,11 +2091,25 @@ class CentralBrain(
                 pending = self.task_manager.get_pending_tasks() if hasattr(self, 'task_manager') else []
                 pending_count = len(pending) if pending else 0
                 
+                # Self-diagnosis: one runtime-health snapshot per beat (target
+                # reachability, coverage gaps, tool cooldowns, momentum) so the
+                # controller — and the operator reading logs — can see WHY the agent
+                # adapts. Appended to the heartbeat; never raises.
+                _diag = ""
+                try:
+                    from core.adaptation.adaptive_controller import get_controller
+                    _d = get_controller(self).diagnose(self)
+                    _t = _d.get("target", {}) or {}
+                    _diag = (f" | Target: {_t.get('state', '?')} "
+                             f"(hard {_t.get('hard_rate', 0)}) | Gaps: {_d.get('coverage_gaps', 0)}")
+                except Exception:
+                    pass
                 logger.info(
                     f"[HEARTBEAT] {datetime.now().isoformat(timespec='seconds')} | "
                     f"Phase: {self.current_phase.value} | "
                     f"Pending Tasks: {pending_count} | "
                     f"Failure Streak: {self.phase_state.consecutive_failures}"
+                    f"{_diag}"
                 )
                 self._write_progress({"phase": self.current_phase.value, "status": "running"})
             except asyncio.CancelledError:
@@ -2874,6 +2320,52 @@ class CentralBrain(
                     stopped = True
                     break
 
+                # Adaptive target-health re-plan: if the target is DOWN (sustained
+                # 5xx/timeouts), don't keep attacking a dead host. Back off and probe
+                # for recovery; resume if it comes back, else finalize with the
+                # results so far. This is the "target is down → abandon the plan"
+                # behaviour, not a fixed step. Fail-open.
+                try:
+                    from core.adaptation.target_health import get_target_health, wait_for_recovery
+                    _th = get_target_health()
+                    if _th.is_down and self.current_phase != ExecutionPhase.REPORTING \
+                            and not getattr(self, "_forced_report", False):
+                        _bo = int(getattr(self, "_target_backoffs", 0)) + 1
+                        self._target_backoffs = _bo
+                        logger.warning("[Adaptive] target DOWN %s — backing off (attempt %d/3)",
+                                       _th.summary(), _bo)
+                        self._post_adaptive(f"Target DOWN — backing off ({_bo}/3)",
+                                            _th.summary())
+
+                        async def _probe_target():
+                            try:
+                                from core.security.scoped_http import get_scoped_client
+                                _u = self.ctx.target
+                                if not _u.startswith(("http://", "https://")):
+                                    _u = "https://" + _u
+                                async with get_scoped_client(timeout=10, follow_redirects=True) as _c:
+                                    _r = await _c.get(_u)
+                                    return _r.status_code < 500
+                            except Exception:
+                                return False
+
+                        if await wait_for_recovery(_probe_target, max_wait=120, interval=20):
+                            logger.info("[Adaptive] target recovered — resuming scan")
+                            self._post_adaptive("Target recovered — resuming scan")
+                            _th.reset()
+                        elif _bo >= 3:
+                            logger.critical("[Adaptive] target still DOWN after %d back-offs "
+                                            "— finalizing with current results", _bo)
+                            self._post_adaptive("Target still DOWN after 3 back-offs — "
+                                                "finalizing with current results")
+                            self._soft_deadline_hit = True
+                            self._forced_report = True
+                            await self._flush_partial("target-down")
+                            self.current_phase = ExecutionPhase.REPORTING
+                            continue
+                except Exception as _te:
+                    logger.debug("[Adaptive] target-health backoff skipped: %s", _te)
+
                 # §26/§46: external watchdog / kill switch — stop the scan on a
                 # budget breach or out-of-band kill, independent of the LLM.
                 # SOFT deadline: once the runtime budget is nearly spent, force
@@ -2962,6 +2454,16 @@ class CentralBrain(
                 # Record state
                 if hasattr(self, 'phase_state'):
                     self.phase_history.append(self.phase_state)
+
+                # Adaptive free-form re-plan (opt-in NEO_ADAPTIVE_LLM): let the LLM
+                # choose the next action from live state; it stashes an override the
+                # transition below honors. No-op when disabled. Async — must run here,
+                # not in the sync _transition_to_next_phase.
+                try:
+                    from core.adaptation.adaptive_controller import get_controller
+                    await get_controller(self).llm_replan(self)
+                except Exception as _lre:
+                    logger.debug(f"[Adaptive] llm_replan skipped: {_lre}")
 
                 self._transition_to_next_phase()
                 self.checkpointer.save_checkpoint(self)
@@ -3252,31 +2754,6 @@ class CentralBrain(
         except Exception:
             pass
 
-    def _build_understanding_report(self, understanding, plan) -> Dict[str, Any]:
-        """Structured report of what the model understood + what the plan requires."""
-        u = understanding
-        rel = plan.relevant_families() if plan else []
-        items = [it for it in (plan.ordered() if plan else []) if it.relevant]
-        return {
-            "domain": getattr(u, "business_domain", "generic"),
-            "domain_confidence": round(float(getattr(u, "domain_confidence", 0.0) or 0.0), 2),
-            "source": getattr(u, "source", ""),
-            "business_rules": list(getattr(u, "business_rules", []) or [])[:20],
-            "data_sensitivity": dict(getattr(u, "data_sensitivity", {}) or {}),
-            "roles": list(getattr(u, "roles", []) or [])[:20],
-            "entities": list(getattr(u, "entities", []) or [])[:20],
-            "security_invariants": list(getattr(u, "security_invariants", []) or [])[:20],
-            "trust_boundaries": list(getattr(u, "trust_boundaries", []) or [])[:20],
-            "threat_model": plan.threat_model if plan else {},
-            # "what is required": the prioritized test plan.
-            "required_testing": [
-                {"family": it.family.value, "priority": it.priority, "why": it.rationale}
-                for it in items
-            ],
-            "relevant_families": [f.value for f in rel],
-            "skipped_families": [f.value for f in (plan.skipped_families() if plan else [])],
-        }
-
     # ── Engagement-plan accessors (reused by scanners to stay domain-scoped) ──
     def _get_engagement_plan(self):
         plan = getattr(self, "_engagement_plan", None)
@@ -3319,79 +2796,6 @@ class CentralBrain(
             self.ctx.plan_skipped_families = s
         except Exception:
             pass
-
-    def _build_poc_bundles(self) -> int:
-        """Assemble a normalized, report-grade PoC bundle on each confirmed finding
-        from evidence already captured — request/proof, response snapshot,
-        screenshot path, technique, and reproduction steps. Idempotent; non-fatal."""
-        n = 0
-        for v in (getattr(self.ctx, "vulnerabilities", []) or []):
-            if not isinstance(v, dict) or v.get("poc"):
-                continue
-            det = v.get("details", {}) if isinstance(v.get("details"), dict) else {}
-            url = v.get("url") or v.get("location") or det.get("url") or ""
-            proof = v.get("proof") or v.get("evidence") or det.get("proof") or ""
-            resp = det.get("response_snippet") or det.get("error_snippet") or v.get("response") or ""
-            shot = (v.get("screenshot") or v.get("screenshot_path")
-                    or (v.get("evidence", {}) or {}).get("screenshot")
-                    if isinstance(v.get("evidence"), dict) else v.get("screenshot"))
-            steps = [s for s in [
-                f"Target the endpoint: {url}" if url else "",
-                f"Send the proving request ({det.get('technique', v.get('sub_type', 'payload'))}).",
-                f"Observe: {str(proof)[:160]}" if proof else "",
-                ("Out-of-band callback received (blind confirmation)."
-                 if det.get("oob") else ""),
-            ] if s]
-            v["poc"] = {
-                "url": url,
-                "technique": det.get("technique") or v.get("sub_type") or "",
-                "request_proof": str(proof)[:500],
-                "response_snapshot": str(resp)[:500],
-                "screenshot": shot or "",
-                "oob": det.get("oob") or [],
-                "confirmed": bool(v.get("confirmed") or v.get("status") == "CONFIRMED"),
-                "steps": steps,
-            }
-            n += 1
-        if n:
-            logger.info(f"[PoC] built {n} reproduction bundle(s)")
-        return n
-
-    async def _run_attack_chaining(self) -> None:
-        """Combine confirmed findings into scored end-to-end attack chains (graph
-        detector + LLM-proposed), rescore findings by chain membership, persist, and
-        stash the report-ready result on ctx. Non-fatal."""
-        try:
-            from core.exploitation.chain_builder import ChainBuilder
-        except Exception:
-            return
-        vulns = list(getattr(self.ctx, "vulnerabilities", []) or [])
-        if len(vulns) < 2:
-            return
-        cb = ChainBuilder()
-        result = cb.synthesize(vulns)  # graph chains + rescore + narratives
-        try:
-            llm_chains = await cb.llm_propose_chains(vulns)
-        except Exception:
-            llm_chains = []
-        if llm_chains:
-            result.setdefault("narratives", []).extend(llm_chains)
-            result["llm_chain_count"] = len(llm_chains)
-        self.ctx.attack_chains = result
-        try:
-            from core.database.pg_store import AttackChainRepo
-            scan_id = getattr(self, "_scan_id", "") or getattr(self.ctx, "scan_id", "") or ""
-            rows = [{"chain_id": n.get("chain_id"),
-                     "description": " → ".join(n.get("steps", []))[:500],
-                     "score": n.get("cvss", 0), "status": "detected",
-                     "steps": n.get("steps", []), "impact": n.get("severity", "")}
-                    for n in result.get("narratives", [])]
-            AttackChainRepo.bulk_upsert(scan_id, rows)
-        except Exception as e:
-            logger.debug(f"[Chaining] persist skipped: {e}")
-        logger.info("[Chaining] %d graph + %d llm chain(s); %d finding(s) upgraded by chain",
-                    result.get("chain_count", 0), result.get("llm_chain_count", 0),
-                    result.get("rescore", {}).get("upgraded_count", 0))
 
     async def _assert_phase_coverage(self, phase: str) -> None:
         """Coverage-gate: a phase is not done until every REQUIRED coverage unit
@@ -3446,53 +2850,6 @@ class CentralBrain(
             logger.info("PHASE_COVERAGE: phase=exploitation required=%d ran=%d gaps=%s",
                         len(required), len(ran & required), sorted(missing))
             return
-
-    async def _adaptive_spawn_from_recon(self) -> None:
-        """Hybrid pipeline hook: as soon as RECON knows the attack surface, launch
-        specialist teams for the highest-value discovered signals NOW (concurrently,
-        ahead of the ACTIVE_SCANNING sweep) instead of waiting. Bounded by
-        ADAPTIVE_SPAWN_MAX (default 6) and deduped; the sweep skips what ran here."""
-        try:
-            from core.orchestration.family_scheduler import (
-                family_for_signal, spawn_family_team, classify_family_jev)
-            cap = int(os.getenv("ADAPTIVE_SPAWN_MAX", "6"))
-            if self._adaptive_spawns >= cap:
-                return
-            # Collect endpoint/surface signals (dicts or strings) discovered in recon.
-            eps = getattr(self.ctx, "endpoints", None)
-            signals: List[str] = []
-            if isinstance(eps, dict):
-                for v in eps.values():
-                    signals.append(v.get("url", "") if isinstance(v, dict) else str(v))
-            elif isinstance(eps, (list, tuple, set)):
-                for v in eps:
-                    signals.append(v.get("url", "") if isinstance(v, dict) else str(v))
-
-            # First relevant, not-yet-spawned family per signal → one team each,
-            # capped. Launch concurrently; recon/next phase continues meanwhile.
-            from collections import OrderedDict
-            picks: "OrderedDict[Any, str]" = OrderedDict()
-            for sig in signals:
-                fam = family_for_signal(sig)
-                if fam is None:  # opt-in Jev routing recovers missed signals
-                    fam = await classify_family_jev(
-                        sig, scan_id=getattr(self, "_scan_id", ""))
-                if fam is None or fam in self._families_spawned or fam in picks:
-                    continue
-                picks[fam] = sig
-                if self._adaptive_spawns + len(picks) >= cap:
-                    break
-            if not picks:
-                return
-            self._adaptive_spawns += len(picks)
-            logger.info("[AdaptiveSpawn] recon surfaced %d specialist team(s): %s",
-                        len(picks), [f.value for f in picks])
-            await asyncio.gather(
-                *[spawn_family_team(self, fam, reason=f"recon signal: {sig[:80]}")
-                  for fam, sig in picks.items()],
-                return_exceptions=True)
-        except Exception as e:
-            logger.debug(f"[AdaptiveSpawn] skipped: {e}")
 
     async def run_phase(self, phase: str):
         self.phase_state = PhaseState(phase_name=phase)
@@ -3769,6 +3126,13 @@ class CentralBrain(
                 logger.debug(f"[AdvancedSync] Recon sync failed (non-fatal): {_sync_err}")
 
         elif phase == ExecutionPhase.ACTIVE_SCANNING.value:
+            # Adaptive: snapshot the surface size so a later jump-back to re-scan can
+            # detect meaningful growth (endpoints discovered after this pass).
+            try:
+                from core.adaptation.adaptive_controller import get_controller
+                get_controller(self).note_active_scanning(self)
+            except Exception:
+                pass
             # Kick the systematic specialist sweep off NOW (recon is complete, so
             # probes are already well-targeted) to run CONCURRENTLY with the
             # scanners below, instead of waiting for phase end. It is idempotent
@@ -3939,6 +3303,12 @@ class CentralBrain(
                 if not check.authorized:
                     logger.warning(f"Compliance check failed: {check.reason}. Skipping EXPLOIT phase.")
                     return
+
+            # Auth self-heal: if self-registration seeded creds but no login URL
+            # resolved at Phase 0 (real endpoint not yet crawled), re-resolve it now
+            # from discovered content and authenticate — so the authenticated
+            # battery (IDOR/JWT/business-logic) runs instead of skipping.
+            await self._reresolve_login_and_auth()
 
             # RESILIENCE: run the LLM-independent expert-probe battery FIRST, so
             # EXPLOITATION always produces agents + findings even if the LLM
@@ -4240,7 +3610,7 @@ class CentralBrain(
                             getattr(ep, 'endpoint_id', getattr(ep, 'id', '')))
                         if not ep_requests:
                             continue
-                        for ident_id, identity in self.identity_manager.identities.items():
+                        for _ident_id, identity in self.identity_manager.identities.items():
                             try:
                                 replayed = self.replay_engine.replay_request(
                                     ep_requests[0], identity)
@@ -4290,7 +3660,16 @@ class CentralBrain(
                                 f"{len(osint_users)} usernames, {len(osint_pw)} leaked passwords")
                 endpoints = getattr(self.ctx, 'endpoints', []) or []
                 captured = getattr(self.ctx, 'captured_requests', []) or []
-                spray_results = await spray.spray(endpoints, captured)
+                # HITL: credential spraying makes real authentication attempts —
+                # require human approval (auto-approved only under opted-in autonomy).
+                from core.escalation.hitl import require_human_approval
+                if not await require_human_approval(
+                        "credential_spray", kind="credential_spray",
+                        target=self.ctx.target, ctx=self.ctx):
+                    logger.warning("[CredSpray] DENIED by human-in-the-loop — skipped")
+                    spray_results = []
+                else:
+                    spray_results = await spray.spray(endpoints, captured)
                 spray_findings = spray.get_findings()
                 for sf in spray_findings:
                     self.ctx.add_vulnerability(sf)
@@ -4435,6 +3814,7 @@ class CentralBrain(
             try:
                 from core.exploitation.cross_role_replay import run_cross_role_replay
                 await run_cross_role_replay(self.ctx)
+                self._coverage_ran.add("exploitation:cross_role_replay")
             except Exception as _e:
                 logger.warning(f"[CrossRoleReplay] failed (non-fatal): {_e}")
 
@@ -4458,6 +3838,7 @@ class CentralBrain(
             try:
                 from core.exploitation.graphql_ws_probe import run_graphql_and_ws
                 await run_graphql_and_ws(self.ctx)
+                self._coverage_ran.add("exploitation:graphql_ws")
             except Exception as _e:
                 logger.warning(f"[GraphQLWSProbe] failed (non-fatal): {_e}")
 
@@ -4663,6 +4044,53 @@ class CentralBrain(
                 logger.warning(f"[Chaining] failed (non-fatal): {e}")
 
         elif phase == ExecutionPhase.REPORTING.value:
+            # Finalize safety-net: critical EXPLOITATION probes live only at
+            # single call-sites in that phase — if the scan short-circuited to
+            # REPORTING (soft deadline / watchdog / phase-DAG finalize) they may
+            # never have run. Run any that didn't, exactly once, so high-value
+            # classes (BOLA cross-role, GraphQL/WS, expert sweep) can't be
+            # silently skipped. Each is guarded by its _coverage_ran key.
+            _critical = [
+                ("exploitation:cross_role_replay",
+                 "core.exploitation.cross_role_replay", "run_cross_role_replay"),
+                ("exploitation:graphql_ws",
+                 "core.exploitation.graphql_ws_probe", "run_graphql_and_ws"),
+                ("exploitation:expert_probes",
+                 "core.exploitation.expert_probes", "run_all_expert_probes"),
+            ]
+            for _key, _mod, _fn in _critical:
+                if _key in self._coverage_ran:
+                    continue
+                try:
+                    _m = __import__(_mod, fromlist=[_fn])
+                    await getattr(_m, _fn)(self.ctx)
+                    self._coverage_ran.add(_key)
+                    logger.info(f"[FinalizeSafetyNet] ran {_fn} (was skipped pre-REPORTING)")
+                except Exception as _e:
+                    logger.warning(f"[FinalizeSafetyNet] {_fn} failed (non-fatal): {_e}")
+
+            # Coverage ledger — enumerable (surface × vuln_class) verdicts so a
+            # scan can't silently skip a class. Built once here, after all probe
+            # phases have stamped self._coverage_ran; NOT_RUN cells are logged
+            # loud and surfaced in the report.
+            try:
+                from core.orchestration.coverage_ledger import build_and_log
+                _cov = build_and_log(self.ctx, getattr(self, "_coverage_ran", set()))
+                if _cov:
+                    self.ctx.update('coverage_ledger', _cov)
+            except Exception as e:
+                logger.warning(f"[CoverageLedger] non-fatal: {e}")
+
+            # Red-team narrative & purple-team debrief (documentation only) —
+            # ATT&CK-tag findings, track objectives, order the kill-chain, and
+            # list detection gaps for the blue-team debrief. No offensive
+            # execution; read-only over the confirmed findings.
+            try:
+                from core.reporting.redteam_narrative import build_redteam_narrative
+                build_redteam_narrative(self.ctx)
+            except Exception as e:
+                logger.warning(f"[RedTeamNarrative] non-fatal: {e}")
+
             # Convergence validation before reporting
             try:
                 is_complete, issues = self.completion_validator.validate_completion()
@@ -5214,7 +4642,17 @@ class CentralBrain(
         logger.info("\n>>> PHASE 1b: HTTP REQUEST INTERCEPTION")
         try:
             capturer = RequestCapturer(max_pages=12, max_depth=2)
-            result = await asyncio.to_thread(capturer.capture, target)
+            # Authenticated capture: feed the live auth blob (JWT/cookies/headers)
+            # so the crawl intercepts logged-in XHR/fetch traffic, not just the
+            # anonymous surface. Empty blob → anonymous crawl (unchanged).
+            try:
+                from core.actuation.browser_actuator import BrowserActuator
+                auth = BrowserActuator.auth_from_ctx(self.ctx) or {}
+            except Exception:
+                auth = {}
+            if auth:
+                logger.info(f"[capture] authenticated crawl (auth: {sorted(auth.keys())})")
+            result = await asyncio.to_thread(capturer.capture, target, auth)
             if result.error and not result.requests:
                 # P1.9: distinguish a BROWSER-UNAVAILABLE failure (no Chromium /
                 # playwright) from a page that genuinely made no client-side
@@ -5240,125 +4678,6 @@ class CentralBrain(
                         f"requests across {len(self.ctx.crawled_pages)} pages")
         except Exception as e:      # noqa: BLE001
             logger.error(f"[capture] request interception failed: {e}")
-
-    def _build_postex_runner(self):
-        """B3: return a scope-gated command runner for post-exploitation, or
-        None (plan-only). Activating live post-ex execution requires ALL of:
-          1. operator opt-in via env NEO_ENABLE_POSTEX=1 (default off),
-          2. a real foothold command channel present on ctx.foothold_runner,
-          3. per-command scope validation + consent (never removed/weakened).
-        Against a web target with no OS foothold this correctly returns None."""
-        import os
-        if os.getenv("NEO_ENABLE_POSTEX", "0") != "1":
-            return None
-        channel = getattr(self.ctx, "foothold_runner", None)
-        if not callable(channel):
-            logger.info("[PostExploit] NEO_ENABLE_POSTEX set but no foothold channel — plan-only")
-            return None
-
-        target = getattr(self.ctx, "target", "")
-
-        async def _scoped_runner(cmd: str) -> str:
-            # Authorization checks are mandatory and must never be bypassed.
-            try:
-                from core.security.authorization import TargetScopeValidator
-                if not TargetScopeValidator.get().is_authorized(target):
-                    logger.warning(f"[PostExploit] DENY out-of-scope target: {target}")
-                    return "[denied: out-of-scope]"
-            except Exception as e:
-                logger.warning(f"[PostExploit] scope check failed, refusing: {e}")
-                return "[denied: scope-check-error]"
-            try:
-                from core.security.consent import get_consent
-                if not get_consent().allows("post_exploit_exec"):
-                    return "[denied: no-consent]"
-            except Exception:
-                pass  # consent module optional; scope check already enforced
-            out = await channel(cmd)
-            try:
-                from core.orchestration import blackboard as _bb
-                _bb.post(getattr(self, "_scan_id", ""), "postex", "pivot",
-                         f"post-ex cmd on {target}",
-                         {"cmd": str(cmd)[:200], "output_preview": str(out)[:300]})
-            except Exception:
-                pass
-            return out
-
-        logger.info("[PostExploit] Live runner ENABLED (scope+consent gated)")
-        return _scoped_runner
-
-    async def _run_post_exploitation(self):
-        logger.info("\n>>> PHASE 6: POST-EXPLOITATION (privesc / lateral / persistence)")
-
-        def should_skip_postex():
-            has_rce = self.ctx.has_shell_access
-            has_creds = len(self.ctx.harvested_creds) > 0
-            has_exploitable_logic = any(
-                v.get("type", "").lower() in ("business_logic", "idor", "auth_bypass") 
-                for v in self.ctx.vulnerabilities
-            )
-            
-            # Skip ONLY if truly nothing to work with
-            if has_rce or has_creds or has_exploitable_logic:
-                return False
-            return True
-
-        if should_skip_postex():
-            logger.info("No shell/RCE foothold, credentials, or logic vulnerabilities established — skipping post-exploitation")
-            return
-
-        # Runner stays None (plan-only) unless a confirmed foothold session is
-        # wired in AND the operator has explicitly enabled post-ex execution.
-        # Persistence install additionally requires DEEP + authorize.
-        runner = self._build_postex_runner()
-        authorize_persistence = False  # never auto-install; operator opt-in only
-
-        self.post_exploit = PostExploitManager(
-            self.ctx, tier=self.tier,
-            runner=runner, authorize_persistence=authorize_persistence,
-        )
-        try:
-            result = await self.post_exploit.run()
-            if result.get("status") == "completed":
-                pv = result["privesc"]; lat = result["lateral"]
-                logger.info(
-                    f"Post-exploitation: {pv['count']} privesc paths, "
-                    f"{lat['pivots']} pivots, {lat['credentials']} creds, "
-                    f"{len(result['persistence']['installed'])} persistence installed "
-                    f"(plan-only={self.tier != 'DEEP'}), "
-                    f"{result['mitre']['techniques']} ATT&CK techniques"
-                )
-                rec = pv.get("recommended")
-                if rec:
-                    logger.info(f"Recommended escalation: {rec.get('technique')} — "
-                                f"{rec.get('path','')}")
-        except Exception as e:      # noqa: BLE001
-            logger.error(f"Post-exploitation phase failed: {e}")
-
-    async def _parse_authorization(self, auth_doc: str):
-        logger.info("Parsing authorization document...")
-        self.ctx.log_brain("Parsing authorization document", "parse_auth")
-
-        result = await self.llm.generate_json(
-            f"Parse this authorization document and extract:\n"
-            f"- domains: list of authorized domains\n"
-            f"- max_tier: POC, SHALLOW, or DEEP\n"
-            f"- restrictions: any restrictions mentioned\n"
-            f"- valid_until: expiration date if mentioned\n\n"
-            f"Document:\n{auth_doc[:3000]}\n\n"
-            f"Return JSON: {{\"domains\": [...], \"max_tier\": \"...\", "
-            f"\"restrictions\": [...], \"valid_until\": \"...\"}}",
-            tier=TaskTier.SMALL,
-        )
-
-        if result and result.get("domains"):
-            self.ctx.scope = result
-            self.auth.scope = AuthorizationManager.create_scope(
-                domains=result["domains"],
-                max_tier=result.get("max_tier", "POC"),
-            )
-            logger.info(f"Scope: {result['domains']}, tier: {result.get('max_tier')}")
-
 
     async def _run_phase(self, phase: str):
         # Special phases have dedicated DETERMINISTIC handlers (the real OSINT
@@ -5685,7 +5004,6 @@ class CentralBrain(
                 f"llm_errors={getattr(result, 'llm_errors', 0)}, {reason}) — falling back")
 
     def _deterministic_fallback(self, phase: str, executed_caps: set = None):
-        from core.common.schemas import BrainDecision, BrainDecisionAction, TaskSpec, CapabilityType
         from uuid import uuid4
 
         executed_caps = executed_caps or set()
@@ -5791,75 +5109,6 @@ class CentralBrain(
             await run_specialist_probes(self)
         except Exception as e:
             logger.warning(f"[FamilyScheduler] {reason} sweep failed (non-fatal): {e}")
-
-    async def _run_network_verification(self):
-        """Dispatch allow-listed Metasploit auxiliary scanners against open
-        network services found during recon. Read-only (Level-A). Opt-in via
-        NEO_ENABLE_MSF; each run is scope-validated and module-allow-listed in
-        the adapter. Idempotent per scan."""
-        from core.utils.scan_flags import enable_metasploit
-        if not enable_metasploit():
-            return
-        if getattr(self, "_netverify_ran", False):
-            return
-        self._netverify_ran = True
-
-        from core.tools.adapters.metasploit import _PORT_DEFAULT, _host
-        ports = dict(getattr(self.ctx, "ports", {}) or {})
-        host = _host(self.target or "")
-        # Prefer a resolved IP when we have one (msf RHOSTS likes IPs).
-        ips = list(getattr(self.ctx, "ips", []) or [])
-        rhost = ips[0] if ips else host
-        if not rhost:
-            return
-
-        jobs = []
-        for p_str, _svc in ports.items():
-            try:
-                p = int(str(p_str).split("/")[0])
-            except (TypeError, ValueError):
-                continue
-            mod = _PORT_DEFAULT.get(p)
-            if mod:
-                jobs.append((p, mod))
-        if not jobs:
-            logger.info("[MSF] no open services matched an aux-scanner module")
-            return
-
-        from core.security.authorization import AuthContext
-        allowed_tools = list(self.tools.tools.keys()) if hasattr(self, "tools") and hasattr(self.tools, "tools") else []
-        auth_context = AuthContext(allowed_tools=allowed_tools, has_elevated_privilege=True,
-                                   target_profile=getattr(self, "target_profile", None))
-        session_id = "session_netverify"
-
-        logger.info(f"[MSF] network verification: {len(jobs)} module(s) on {rhost}")
-        import re as _re
-        for p, mod in jobs:
-            try:
-                params = {"target": rhost, "module": mod, "rport": p}
-                result = await self.tool_invocation_engine.invoke_from_capability(
-                    "network_vuln_verification", rhost, params, session_id, auth_context)
-                out = str(getattr(result, "stdout", "") or "")
-                # Aux scanners print a clear vulnerable signal; capture only that.
-                if _re.search(r"\bVULNERABLE\b|appears? (?:to be )?vulnerable|is likely VULNERABLE", out, _re.I):
-                    self.ctx.add_vulnerability({
-                        "title": f"Metasploit {mod.split('/')[-1]} reports target VULNERABLE",
-                        "type": "NETWORK_SERVICE",
-                        "severity": "HIGH",
-                        "location": f"{rhost}:{p}",
-                        "target": rhost,
-                        "details": f"msf module {mod} flagged {rhost}:{p} as vulnerable.",
-                        "proof": out[-1500:],
-                        "tool": "msf_scanner",
-                    })
-                    logger.info(f"[MSF] VULNERABLE: {mod} on {rhost}:{p}")
-            except Exception as e:
-                logger.debug(f"[MSF] {mod} on {rhost}:{p} failed: {e}")
-
-        try:
-            await self._flush_partial("msf_network_verification")
-        except Exception:
-            pass
 
     async def _run_phase_approach_a(self, phase: str):
         logger.debug(f"phase={phase} approach=A")
@@ -6672,7 +5921,7 @@ class CentralBrain(
 
                     if not valid_specs_and_agents:
                         logger.info("[Scheduler] No new valid/non-duplicate agents to execute in this stage. Advancing phase.")
-                        for task, s_dict in spawn_specs:
+                        for task, _s_dict in spawn_specs:
                             obj = task.spec.objective
                             if obj:
                                 completed_objectives.add(obj.lower().strip())
@@ -6850,140 +6099,6 @@ class CentralBrain(
         for act in self.automation.evaluate():
             logger.info(f"Automation recommends: {act['action']} ({act['rule']})")
     
-    def _feed_recon_to_attack_surface_state(self):
-        surface = getattr(self.ctx, 'attack_surface', None)
-        if not surface:
-            logger.debug("[ReconV2Wire] No AttackSurfaceState on ctx, skipping")
-            return
-
-        fed = {"assets": 0, "endpoints": 0, "technologies": 0, "parameters": 0}
-
-        # Subdomains → assets
-        for sub in getattr(self.ctx, 'subdomains', []) or []:
-            if isinstance(sub, str) and sub.strip():
-                surface.add_asset(sub.strip(), "subdomain", {"hostname": sub.strip()},
-                                  source="recon_pipeline")
-                fed["assets"] += 1
-
-        # IPs → assets
-        for ip in getattr(self.ctx, 'ips', []) or []:
-            if isinstance(ip, str) and ip.strip():
-                surface.add_asset(ip.strip(), "ip", {"address": ip.strip()},
-                                  source="recon_pipeline")
-                fed["assets"] += 1
-
-        # Technologies → technologies
-        for host, techs in (getattr(self.ctx, 'technologies', {}) or {}).items():
-            if isinstance(techs, bool) or techs is None:
-                continue
-            for tech in (techs if isinstance(techs, list) else [techs]):
-                try:
-                    if isinstance(tech, dict):
-                        from core.domain.asset import Technology as TechObj
-                        t = TechObj(name=tech.get("name", ""), version=tech.get("version", ""),
-                                    source="recon_pipeline")
-                        surface.add_technology(host, t)
-                    elif isinstance(tech, str):
-                        from core.domain.asset import Technology as TechObj
-                        surface.add_technology(host, TechObj(name=tech, source="recon_pipeline"))
-                    else:
-                        continue
-                    fed["technologies"] += 1
-                except Exception:
-                    pass
-
-        # Endpoints → endpoints
-        from core.domain.endpoint import Endpoint as EPObj
-        from core.domain.parameter import Parameter as ParamObj
-        from urllib.parse import urlparse
-        ep_errors = 0
-        for ep_data in getattr(self.ctx, 'endpoints', []) or []:
-            try:
-                if isinstance(ep_data, dict):
-                    url = ep_data.get("url", ep_data.get("path", ""))
-                    method = ep_data.get("method", "GET").upper()
-                elif isinstance(ep_data, str):
-                    url = ep_data
-                    method = "GET"
-                else:
-                    continue
-                if not url:
-                    continue
-
-                parsed = urlparse(url if "://" in url else f"https://{url}")
-                path = parsed.path or "/"
-                host = parsed.hostname or self.ctx.target if hasattr(self.ctx, 'target') else ""
-                scheme = parsed.scheme or "https"
-                port = parsed.port or (443 if scheme == "https" else 80)
-
-                ep = EPObj(
-                    endpoint_id="",
-                    url=url,
-                    path=path,
-                    method_set=[method],
-                    host=host,
-                    scheme=scheme,
-                    port=port,
-                    source="recon_pipeline",
-                )
-                # P0.1: one canonical, content-addressed identity across every
-                # store — a random uuid made the same URL "new" here but a
-                # "duplicate" elsewhere, which drove transferred_to_v2 to 1-3.
-                try:
-                    ep.endpoint_id = ep.canonical_id()
-                except Exception:
-                    ep.endpoint_id = ep.normalized_key()
-                if surface.add_endpoint(ep, source="recon_pipeline"):
-                    fed["endpoints"] += 1
-
-                    # Parameters for this endpoint
-                    params = ep_data.get("params", []) if isinstance(ep_data, dict) else []
-                    for p in params:
-                        try:
-                            if isinstance(p, dict):
-                                param = ParamObj(name=p.get("name", ""), parameter_type=p.get("type", "query"))
-                            elif isinstance(p, str):
-                                param = ParamObj(name=p, parameter_type="query")
-                            else:
-                                continue
-                            surface.add_parameter(ep.endpoint_id, param, source="recon_pipeline")
-                            fed["parameters"] += 1
-                        except Exception as pe:
-                            logger.debug(f"[ReconV2Wire] Parameter add failed: {pe}")
-            except Exception as ep_err:
-                ep_errors += 1
-                if ep_errors <= 3:
-                    logger.warning(f"[ReconV2Wire] Endpoint construction failed: {ep_err}")
-        if ep_errors > 3:
-            logger.warning(f"[ReconV2Wire] {ep_errors} total endpoint construction failures")
-
-        # Phase 5: Wire redirects from subdomain_status into AttackSurfaceState
-        subdomain_status = getattr(self.ctx, 'subdomain_status', {}) or {}
-        for host, info in subdomain_status.items():
-            if isinstance(info, dict):
-                redirect_url = info.get("url", "")
-                if redirect_url and host and redirect_url != f"https://{host}" and redirect_url != f"http://{host}":
-                    from urllib.parse import urlparse as _up
-                    redirect_host = _up(redirect_url).netloc
-                    if redirect_host and redirect_host != host:
-                        surface.add_redirect(host, redirect_host)
-
-        # Phase 5: Wire related applications (e.g., API subdomains as related apps)
-        target = self.ctx.target if hasattr(self.ctx, 'target') else ""
-        api_subs = [s for s in getattr(self.ctx, 'subdomains', []) or []
-                    if isinstance(s, str) and any(kw in s.lower() for kw in ("api.", "admin.", "staging.", "dev.", "app."))]
-        for sub in api_subs:
-            surface.add_related_application(target, sub)
-
-        # Mark transferred counts for Phase 4 tracking
-        if fed["endpoints"] > 0 or fed["parameters"] > 0:
-            surface.mark_transferred_to_v2(fed["endpoints"], fed["parameters"])
-
-        surface.log_transfer_counts()
-        logger.info(f"[ReconV2Wire] Fed to AttackSurfaceState: "
-                    f"assets={fed['assets']} endpoints={fed['endpoints']} "
-                    f"technologies={fed['technologies']} parameters={fed['parameters']}")
-
     async def _classify_subdomains(self):
         subs = getattr(self.ctx, "subdomains", []) or []
         if not subs:
@@ -7094,72 +6209,6 @@ class CentralBrain(
         logger.info(f"[Preflight] Endpoint catalog: {len(result)} useful endpoints "
                     f"(filtered static assets) from {len(sources)} raw URLs")
         return result
-
-    def _feed_catalog_to_attack_surface(self):
-        from urllib.parse import urlparse, parse_qs
-        from core.domain.endpoint import Endpoint
-        from core.domain.parameter import Parameter, ParameterType
-
-        catalog = getattr(self.ctx, "endpoint_catalog", []) or []
-        added = 0
-        for entry in catalog:
-            url = entry.get("url", "")
-            method = entry.get("method", "GET")
-            path = entry.get("path", "/")
-            if not url:
-                continue
-            pu = urlparse(url)
-            eid = f"{method}:{pu.netloc}{pu.path}"
-            # skip if already in the graph
-            if eid in self.attack_surface.endpoints:
-                continue
-            # extract parameters from query string
-            params = []
-            qs = parse_qs(pu.query, keep_blank_values=True)
-            for pname in qs:
-                params.append(Parameter(
-                    name=pname,
-                    parameter_type=ParameterType.QUERY,
-                    inferred_data_type="string",
-                    is_required=False,
-                ))
-            # for POST/PUT/PATCH, add a generic body param so injection matrix tests it
-            if method in ("POST", "PUT", "PATCH") and not any(
-                    p.parameter_type == ParameterType.BODY for p in params):
-                params.append(Parameter(
-                    name="body",
-                    parameter_type=ParameterType.BODY,
-                    inferred_data_type="string",
-                    is_required=False,
-                ))
-            try:
-                ep = Endpoint(
-                    endpoint_id=eid,
-                    url=url,
-                    path=pu.path or "/",
-                    method_set=[method],
-                    parameters=params,
-                    auth_required=entry.get("kind") == "sensitive",
-                )
-                self.attack_surface.add_endpoint(ep)
-                # Also register each parameter into the graph's parameter inventory
-                # so the InjectionMatrix / param-fuzz path can actually enumerate
-                # them (without this, parameters=0 despite thousands of endpoints).
-                try:
-                    for _p in params:
-                        self.attack_surface.add_parameter(eid, _p)
-                except Exception:
-                    pass
-                added += 1
-            except Exception:
-                continue
-        if added:
-            try:
-                self.attack_surface.build_graph()
-            except Exception:
-                pass
-            logger.info(f"[Preflight→AttackSurface] Fed {added} catalog endpoints "
-                        f"(with params) into attack surface graph")
 
     def _hydrate_attack_surface_from_ctx_endpoints(self):
         from urllib.parse import urlparse, parse_qs
@@ -7347,16 +6396,31 @@ class CentralBrain(
     async def _probe_web_privilege_escalation(self):
         from agents.kali_executor import KaliDockerExecutor
         target = self.ctx.target.rstrip("/")
-        admin_paths = [
-            "/admin", "/administration", "/api/admin",
-            "/admin/dashboard", "/panel", "/manage", "/console",
-            "/api/v1/admin", "/admin/users", "/api/admin/users",
-        ]
+        # Discovery-driven admin paths (same source as the authenticated branch
+        # below) — canonical shapes live in endpoint_hints, not hardcoded here.
+        try:
+            from core.common import endpoint_hints
+            from urllib.parse import urlparse as _urlparse
+            admin_paths = []
+            for full in endpoint_hints.discover_endpoints(self.ctx, "admin", include_fallback=True):
+                pp = _urlparse(full).path or ""
+                if pp and pp not in admin_paths:
+                    admin_paths.append(pp)
+        except Exception:
+            admin_paths = ["/admin", "/administration", "/api/admin"]
         # Add admin/sensitive paths from discovered endpoints
+        # Supplementary keyword pass over discovered endpoints (the discover_endpoints
+        # admin pass above is the primary). Tokens come from the canonical
+        # endpoint_hints admin role so no route shape is duplicated here.
+        try:
+            from core.common.endpoint_hints import _ROLE_KEYWORDS as _RK
+            _admin_kw = [k.strip("/").split("/")[0] for k in _RK.get("admin", []) if k.strip("/")]
+            _admin_kw = list(dict.fromkeys(_admin_kw + ["internal", "config", "staff"]))
+        except Exception:
+            _admin_kw = ["admin", "manage", "dashboard", "panel", "internal", "config", "users", "staff"]
         for ep in (getattr(self.ctx, "endpoints", []) or []):
             ep_url = ep if isinstance(ep, str) else (ep.get("url", "") if isinstance(ep, dict) else "")
-            if ep_url and any(k in ep_url.lower() for k in ["admin", "manage", "dashboard", "panel",
-                                                              "internal", "config", "users", "staff"]):
+            if ep_url and any(k in ep_url.lower() for k in _admin_kw):
                 path = ep_url if ep_url.startswith("/") else f"/{ep_url.lstrip('/')}"
                 if path not in admin_paths:
                     admin_paths.append(path)
@@ -7784,70 +6848,6 @@ class CentralBrain(
         except Exception:
             pass
 
-    async def _run_sast_pipeline(self) -> None:
-        from core.analysis.source_extractor import (
-            extract_exposed_git, rehydrate_sourcemap, run_semgrep)
-        from core.analysis.codeql_runner import run_codeql, llm_review_finding
-
-        scan_id = getattr(self, "_scan_id", None) or "unscoped"
-        base = getattr(self.ctx, "target", None)
-        if not base:
-            return
-
-        source_trees = []
-        # 3.1 — git leak
-        exposed = any(
-            "/.git/" in str(v.get("location", ""))
-            or "git config" in str(v.get("title", "")).lower()
-            for v in (self.ctx.vulnerabilities or []))
-        if exposed:
-            tree = extract_exposed_git(base, scan_id)
-            if tree:
-                source_trees.append(tree)
-        # 3.2 — sourcemap rehydration for every same-origin bundle
-        try:
-            base_host = str(base).split("/")[2] if "://" in base else base
-        except Exception:
-            base_host = ""
-        for js_url in list(getattr(self.ctx, "js_bundles", []) or [])[:20]:
-            if base_host and base_host not in js_url:
-                continue
-            tree = rehydrate_sourcemap(js_url, scan_id)
-            if tree:
-                source_trees.append(tree)
-
-        if not source_trees:
-            logger.info("[SAST] no source recovered — skipping semgrep/codeql")
-            return
-
-        for tree in source_trees:
-            # 3.3 — semgrep
-            findings = run_semgrep(tree)
-            # 3.4 — codeql (best-effort)
-            try:
-                findings.extend(run_codeql(tree))
-            except Exception as e:
-                logger.debug(f"[SAST] codeql failed: {e}")
-            logger.info(f"[SAST] {tree}: {len(findings)} raw findings")
-            # 3.5 — hand each to the LLM code reviewer, cap so we don't
-            # overspend the LLM budget on a huge tree.
-            for f in findings[:50]:
-                if hasattr(self.ctx, "add_vulnerability"):
-                    self.ctx.add_vulnerability(f)
-                try:
-                    proposal = await llm_review_finding(f, tree)
-                    if proposal:
-                        # Publish the proposed exploit as a note on the
-                        # scratchpad so the ExploitPhase picks it up.
-                        try:
-                            from core.orchestration.agent_scratchpad import get_scratchpad
-                            pad = get_scratchpad(scan_id, "sast-reviewer")
-                            pad.post("tool", proposal, topic="sast_exploit_proposal")
-                        except Exception:
-                            pass
-                except Exception as e:
-                    logger.debug(f"[SAST] LLM review failed for {f.get('rule_id')}: {e}")
-
     async def _prime_framework_corpus(self) -> None:
         try:
             from core.intelligence.framework_corpus import lookup_all
@@ -7878,155 +6878,6 @@ class CentralBrain(
         else:
             logger.info(f"[FrameworkCorpus] no quirks matched fingerprints "
                         f"({len(fps)} stacks checked)")
-
-    async def _run_bundle_and_dom_analysis(self) -> None:
-        base = getattr(self.ctx, "target", None) or getattr(self, "target", None)
-        if not base:
-            return
-        try:
-            from core.exploitation.js_bundle_analyzer import analyze_bundles
-            routes = await analyze_bundles(self.ctx, base)
-            if routes:
-                logger.info(f"[BundleAnalyzer] extracted {len(routes)} route(s) from JS bundles")
-        except Exception as e:
-            logger.debug(f"[BundleAnalyzer] skipped: {e}")
-        try:
-            from core.exploitation.dom_sink_monitor import run_dom_sink_monitor
-            findings = await run_dom_sink_monitor(self.ctx, base)
-            for f in findings or []:
-                if isinstance(f, dict):
-                    f.setdefault("phase", "recon")
-                    f.setdefault("tool", "dom_sink_monitor")
-                    if hasattr(self.ctx, "add_vulnerability"):
-                        self.ctx.add_vulnerability(f)
-            logger.info(f"[DOMSinkMonitor] found {len(findings or [])} client-side sink hit(s)")
-        except Exception as e:
-            logger.debug(f"[DOMSinkMonitor] skipped: {e}")
-
-    async def _run_semantic_fuzz_with_coverage(self) -> None:
-        try:
-            from core.exploitation.semantic_api_fuzzer import run_semantic_fuzz
-            from core.exploitation.coverage_tracker import CoverageTracker
-        except Exception as e:
-            logger.debug(f"[SemanticFuzz] import failed: {e}")
-            return
-        if not getattr(self.ctx, "captured_requests", None):
-            if getattr(self.ctx, "browser_status", "") == "UNAVAILABLE":
-                logger.info("[SemanticFuzz] captured_requests UNAVAILABLE (browser missing) "
-                            "— not a negative result; skipping")
-            else:
-                logger.info("[SemanticFuzz] no captured_requests — skipping")
-            return
-        tracker = CoverageTracker()
-        # Expose the tracker to the fuzzer via ctx so it can filter blind
-        # mutations. The fuzzer treats a missing tracker as no-op.
-        self.ctx.coverage_tracker = tracker
-        findings = await run_semantic_fuzz(self.ctx)
-        for f in findings or []:
-            if isinstance(f, dict):
-                f.setdefault("phase", "exploit")
-                f.setdefault("tool", "semantic_api_fuzzer")
-                if hasattr(self.ctx, "add_vulnerability"):
-                    self.ctx.add_vulnerability(f)
-        logger.info(f"[SemanticFuzz] {len(findings or [])} finding(s); "
-                    f"coverage across {len(tracker._buckets)} endpoint bucket(s)")
-
-    async def _run_format_probes(self) -> None:
-        try:
-            from core.exploitation.format_probes import available_probes, get_probe
-            from core.orchestration.agent_scratchpad import get_scratchpad
-        except Exception as e:
-            logger.debug(f"[FormatProbes] import failed: {e}")
-            return
-        scan_id = getattr(self, "_scan_id", None) or "unscoped"
-        # Filter to endpoints that look like uploads or dataset-preview surfaces.
-        endpoints = list(getattr(self.ctx, "endpoints", []) or [])
-        upload_eps = [e for e in endpoints
-                      if any(k in str(e).lower()
-                             for k in ("upload", "dataset", "preview",
-                                       "import", "attachment", "file"))]
-        if not upload_eps:
-            logger.info("[FormatProbes] no upload/preview endpoints — skipping")
-            return
-        pad = get_scratchpad(scan_id, "format-probes")
-        probes = available_probes()
-        logger.info(f"[FormatProbes] queueing {len(probes)} probe(s) × "
-                    f"{len(upload_eps)} endpoint(s)")
-        for probe_name in probes:
-            try:
-                probe = get_probe(probe_name)()
-            except Exception as e:
-                logger.debug(f"[FormatProbes] probe {probe_name} build failed: {e}")
-                continue
-            if not probe.get("payload"):
-                continue
-            for ep in upload_eps[:5]:
-                pad.post("tool", {
-                    "probe": probe_name,
-                    "endpoint": str(ep),
-                    "filename": probe.get("filename"),
-                    "mime": probe.get("mime"),
-                    "sink_signature": probe.get("sink_signature", []),
-                    "rationale": probe.get("rationale", ""),
-                }, topic="format_probe_ready")
-
-    async def _run_dynamic_hypothesis_cycle(self, cycle_name: str = "first_order") -> None:
-        """Pα: Run a dynamic hypothesis engine cycle to discover novel attack surfaces."""
-        from core.intelligence.dynamic_hypothesis import DynamicHypothesisEngine
-        engine = DynamicHypothesisEngine(ctx=self.ctx)
-        findings = await engine.run_cycle(cycle_name=cycle_name)
-        for f in findings:
-            self.ctx.add_vulnerability(f)
-        stats = engine.stats()
-        logger.info(f"[Pα] {cycle_name}: tested={stats['hypotheses_tested']}, "
-                    f"confirmed={stats['hypotheses_confirmed']}, findings={stats['findings']}")
-        self._log_activity("pa_engine", f"Pα {cycle_name}: {stats['findings']} findings from "
-                           f"{stats['hypotheses_tested']} hypotheses", tool="dynamic_hypothesis")
-
-    async def _run_authz_phase(self) -> None:
-        try:
-            from core.exploitation.cross_role_replay import run_cross_role_replay
-        except Exception as e:
-            logger.debug(f"[AUTHZ] cross_role_replay import failed: {e}")
-            return
-        captured = getattr(self.ctx, "captured_requests", []) or []
-        identities = []
-        try:
-            identities = list(getattr(self.identity_manager, "identities", []) or [])
-        except Exception:
-            pass
-        if not captured:
-            if getattr(self.ctx, "browser_status", "") == "UNAVAILABLE":
-                logger.info("[AUTHZ] captured_requests UNAVAILABLE (browser missing) — "
-                            "not a negative result; skipping cross-role replay")
-            else:
-                logger.info("[AUTHZ] no captured_requests on ctx — skipping cross-role replay")
-            return
-        if len(identities) < 2:
-            logger.info(f"[AUTHZ] only {len(identities)} identity/identities discovered — "
-                        f"cross-role replay needs at least 2 to compare")
-            return
-        logger.info(f"[AUTHZ] cross-role replay: {len(captured)} requests × "
-                    f"{len(identities)} identities")
-        findings = await run_cross_role_replay(self.ctx)
-        for f in findings or []:
-            if isinstance(f, dict):
-                f.setdefault("phase", "authz")
-                f.setdefault("tool", "cross_role_replay")
-                if hasattr(self.ctx, "add_vulnerability"):
-                    self.ctx.add_vulnerability(f)
-        logger.info(f"[AUTHZ] cross-role replay produced {len(findings or [])} finding(s)")
-
-    def _load_phase_prompt(self, phase: str) -> Optional[str]:
-        prompt_map = {
-            "recon": "core/prompts/brain/brain_recon.txt",
-            "analyze": "core/prompts/brain/brain_analyze.txt",
-            "exploit": "core/prompts/brain/brain_exploit.txt",
-        }
-        path = prompt_map.get(phase)
-        if path and Path(path).exists():
-            return Path(path).read_text(encoding="utf-8")
-        return None
 
     async def _generate_exploit_plan(self) -> Optional[Dict]:
         if not self.ctx.vulnerabilities:
@@ -8206,79 +7057,6 @@ class CentralBrain(
         if detonated:
             logger.info(f"[Sandbox] detonated {detonated} synthesized exploits")
 
-    async def _run_agent_exploitation(self) -> None:
-        from core.actuation import ObjectiveAgentLoop
-        from core.common.config import get_config as _cfg
-        from agents.llm_harness_adapter import get_llm, initialize_llm
-
-        harness = get_llm()
-        if harness is None:
-            await initialize_llm()
-            harness = get_llm()
-        if harness is None:
-            logger.warning("[AgentExploit] no LLM harness available — skipping")
-            return
-
-        # Brief context from what recon/scanning already found.
-        known = "; ".join(
-            f"[{v.get('severity','?')}] {v.get('title', v.get('type','?'))}"
-            for v in (self.ctx.vulnerabilities or [])[:8]
-        )
-        catalog = getattr(self.ctx, "endpoint_catalog", []) or []
-        api_eps = [e["path"] for e in catalog if e.get("kind") in ("api", "sensitive")][:12]
-        context = (f"Findings: {known or 'none yet'}. "
-                   f"API/sensitive endpoints: {', '.join(api_eps) or 'none'}.")
-
-        # Register leaked identities for authenticated IDOR/access-control testing.
-        try:
-            await self._augment_auth_with_osint()
-        except Exception:
-            pass
-
-        # Feed OSINT into auth attacks, JWT forgery, and IDOR.
-        try:
-            idents = self._osint_identities()
-            o_users = idents.get("usernames", [])
-            o_creds = idents.get("leaked_pairs", [])
-            emails = idents.get("emails", [])
-            admin_emails = idents.get("admin_emails", [])
-            o_pw = self._osint_spray_material()[2]
-            if o_users or o_creds or emails:
-                cred_hint = "; ".join(f"{u}:{p}" for u, p in o_creds[:8])
-                admin_hint = ', '.join((admin_emails or emails)[:3]) or 'admin email'
-                context += (
-                    f"\nOSINT intel:\n"
-                    f"Users: {', '.join(o_users[:15])}\n"
-                    + (f"Emails: {', '.join(emails[:10])}\n" if emails else "")
-                    + (f"Leaked creds: {cred_hint}\n" if cred_hint else "")
-                    + (f"Passwords: {', '.join(o_pw[:8])}\n" if o_pw else "")
-                    + "USE: 1) Credential stuff login endpoints. "
-                    f"2) jwt_forge: sub/email={admin_hint}, role=admin, alg=none then HS256. "
-                    "3) IDOR: access other users' objects via /api /rest endpoints.\n"
-                )
-        except Exception:
-            pass
-
-        objective = (
-            f"Actively exploit the authorized target {self.ctx.target}. Confirm and "
-            "demonstrate real vulnerabilities — authentication bypass, JWT flaws, IDOR / "
-            "broken access control, injection, business-logic abuse, and client-side "
-            "(DOM/CSP) issues via the browser. Chain requests and identities as needed. "
-            "Call report_finding for each vulnerability you concretely demonstrate."
-        )
-        loop = ObjectiveAgentLoop(
-            target=self.ctx.target, harness=harness,
-            auth_headers=getattr(self.ctx, "auth_headers", None),
-            max_steps=_cfg().get_int("AGENT_EXPLOIT_STEPS", 16),
-            verifier=None,  # general targets have no benchmark oracle — evidence-driven
-        )
-        result = await loop.run(objective, context=context, category="exploitation",
-                                scan_id=self._scan_id)
-        for f in result.get("findings", []):
-            self.ctx.add_vulnerability(f)
-        logger.info(f"[AgentExploit] loop finished: {result.get('steps')} steps, "
-                    f"{len(result.get('findings', []))} findings reported")
-
     def _analyze_cloud_privesc(self) -> None:
         from core.cloud.iam_privesc import CloudPrivescScanner
         from core.common.config import get_config as _cfg
@@ -8300,33 +7078,6 @@ class CentralBrain(
             self.ctx.add_vulnerability(f)
         if findings:
             logger.info(f"[CloudPrivesc] added {len(findings)} cloud privilege-escalation findings")
-
-    def _run_attack_path_engine(self) -> None:
-        """Construct ranked forward attack paths over ctx.vulnerabilities and
-        merge them into ctx.attack_chains (the report's source) + persist to the
-        attack graph. Deterministic; transparent factors; non-fatal."""
-        from core.attack_surface.attack_path_engine import AttackPathEngine
-        from core.orchestration.infra_agents import to_attack_chains
-
-        paths = AttackPathEngine(list(self.ctx.vulnerabilities or []),
-                                 identities=list(getattr(self.ctx, "identities", []) or [])
-                                 ).generate()
-        if not paths:
-            return
-        chains = to_attack_chains(paths)
-        cur = self.ctx.get("attack_chains", []) or []
-        if isinstance(cur, dict):
-            cur = list(cur.values())
-        if not isinstance(cur, list):
-            cur = []
-        self.ctx.update("attack_chains", cur + chains)
-        try:
-            from core.database.pg_store import AttackGraphRepo
-            AttackGraphRepo.bulk_upsert(getattr(self, "_scan_id", "") or "", chains)
-        except Exception as e:
-            logger.debug("[AttackPathEngine] persist skipped: %s", e)
-        logger.info("[AttackPathEngine] %d ranked attack paths (top score=%.3f)",
-                    len(paths), paths[0].get("score", 0))
 
     def _analyze_infra_agents(self) -> None:
         """Run the Kubernetes / cloud / dependency-SCA agents (opt-in) and merge
@@ -8430,12 +7181,12 @@ class CentralBrain(
         # Operator override next (used when discovery found nothing).
         if cfg.get("AUTH_REGISTER_URL", ""):
             candidates.append(cfg.get("AUTH_REGISTER_URL", ""))
-        # Generic app-agnostic guesses LAST, only as a fallback when discovery
-        # found nothing. No target-specific paths — real routes come from the
-        # discovered list above.
-        for p in ("api/auth/register", "api/register", "api/v1/auth/register",
-                  "auth/register", "register", "signup", "users"):
-            candidates.append(urljoin(base, p))
+        # Generic fallback LAST, only when discovery/config found nothing. Path
+        # shapes come from the single canonical source (endpoint_hints), not literals
+        # duplicated here; discover_endpoints returns discovered matches first and
+        # falls back to that keyword set. Real routes still lead via the call above.
+        candidates.extend(endpoint_hints.discover_endpoints(
+            self.ctx, "register", include_fallback=True))
         candidates = list(dict.fromkeys(candidates))
         # Login URL: explicit config → discovered login endpoint → generic
         # fallback (not an app-specific "/rest/user/login" default).
@@ -8446,7 +7197,12 @@ class CentralBrain(
                      or urljoin(base, "login"))
         uname_field = cfg.get("AUTH_USERNAME_FIELD", "email") or "email"
         pw_field = cfg.get("AUTH_PASSWORD_FIELD", "password") or "password"
-        tok_path = cfg.get("AUTH_TOKEN_JSON_PATH", "authentication.token") or "authentication.token"
+        # Generic, non-app-specific default. The real path is resolved from the
+        # captured login response (_resolve_login_url → _auth_find_token walk); this
+        # seed only matters if that never runs, so it must not bake in one app's
+        # envelope. Downstream token extraction (auth_session._find_token) also
+        # walks for a JWT-shaped value when this path misses.
+        tok_path = cfg.get("AUTH_TOKEN_JSON_PATH", "token") or "token"
 
         def _cred_result(role, url):
             return {
@@ -8460,6 +7216,8 @@ class CentralBrain(
         # Compact, secret-free evidence trail (kind, url, status) fed to Jev to
         # decide whether authentication is POSSIBLE, regardless of outcome.
         auth_signals: list = []
+
+        _is_spa_shell = _auth_is_spa_shell  # module-level; shared with re-resolver
 
         async def _register_one(client, role: str):
             email = f"scan_{secrets.token_hex(5)}@example.com"
@@ -8480,6 +7238,10 @@ class CentralBrain(
                         continue
                     auth_signals.append(("register", url, r.status_code))
                     if r.status_code in (200, 201):
+                        if _is_spa_shell(r):
+                            # Decoy 200 (SPA/static shell) — not a real signup. Keep
+                            # trying so the loop reaches the JSON API endpoint.
+                            continue
                         logger.info(f"[Auth] self-registered throwaway account "
                                     f"'{role}' at {url} ({r.status_code})")
                         return _cred_result(role, url)
@@ -8509,7 +7271,7 @@ class CentralBrain(
                         body["passwordRepeat"] = pw
                     try:
                         r = await client.post(url, json=body)
-                        if r.status_code in (200, 201):
+                        if r.status_code in (200, 201) and not _is_spa_shell(r):
                             logger.info(f"[Auth] self-registered '{role}' at {url} "
                                         f"via LLM-synthesized body ({r.status_code})")
                             return _cred_result(role, url)
@@ -8526,10 +7288,10 @@ class CentralBrain(
         # captured — so the discovered/generic single guess (e.g. "/login", an SPA
         # route that returns index.html, no token) silently yields 0 identities and
         # every authenticated test is skipped. Resolve the real one by trying each.
-        # Fully target-agnostic: config → discovered login endpoints → generic
-        # login leaves tried as SIBLINGS of each register endpoint (login usually
-        # shares the register API root) and relative to the base. No app-specific
-        # paths.
+        # Fully target-agnostic, ordered: config → discovered login endpoints →
+        # login tried as a SIBLING of each register endpoint that the app actually
+        # exposed (login usually shares the register API root — a structural, not
+        # app-specific, relation) → the centralized content-driven fallback below.
         _login_leaves = ("login", "signin", "sign-in", "authenticate",
                          "sessions", "session", "token")
         login_candidates = []
@@ -8537,15 +7299,21 @@ class CentralBrain(
         login_candidates.extend(_disc_login)
         if cfg.get("AUTH_LOGIN_URL", ""):
             login_candidates.append(cfg.get("AUTH_LOGIN_URL", ""))
+        # Sibling-of-register: parent path is derived from a live register route,
+        # so this adapts to whatever API root the target uses.
         for reg in candidates:
             parent = reg.rsplit("/", 1)[0] if "/" in reg.split("://", 1)[-1] else reg
             for leaf in _login_leaves:
                 login_candidates.append(parent + "/" + leaf)
-        for leaf in _login_leaves:
-            login_candidates.append(urljoin(base, leaf))
-            login_candidates.append(urljoin(base, "api/" + leaf))
-            login_candidates.append(urljoin(base, "auth/" + leaf))
-        login_candidates = list(dict.fromkeys([u for u in login_candidates if u]))[:32]
+        # Content-driven fallback: endpoint_hints matches login-role endpoints
+        # against paths ACTUALLY discovered/captured this scan, and only if none
+        # matched returns its canonical keyword shapes. The path shapes live in one
+        # place (endpoint_hints._ROLE_KEYWORDS["login"]) — no app-specific literals
+        # duplicated here. Substring matching there also catches collection-scoped
+        # routes (e.g. a discovered ".../rest/user/login" matches "/user/login").
+        login_candidates.extend(
+            endpoint_hints.discover_endpoints(self.ctx, "login", include_fallback=True))
+        login_candidates = list(dict.fromkeys([u for u in login_candidates if u]))[:48]
 
         def _dig(obj, path):
             cur = obj
@@ -8556,8 +7324,12 @@ class CentralBrain(
                     return None
             return cur
 
+        _find_token = _auth_find_token  # module-level; shared with re-resolver
+
         async def _resolve_login_url(client, email, pw):
-            """First candidate URL that returns an auth token for the creds."""
+            """First candidate URL that returns an auth token for the creds.
+            Returns (url, token_json_path). Tries the configured path first, then a
+            recursive token scan so an unexpected response shape still resolves."""
             body = {uname_field: email, pw_field: pw}
             for url in login_candidates:
                 try:
@@ -8565,15 +7337,33 @@ class CentralBrain(
                 except Exception:
                     continue
                 auth_signals.append(("login", url, r.status_code))
-                if r.status_code not in (200, 201):
+                if r.status_code not in (200, 201) or _is_spa_shell(r):
                     continue
                 try:
-                    tok = _dig(r.json(), tok_path)
+                    data = r.json()
                 except Exception:
-                    tok = None
-                if tok and isinstance(tok, str) and len(tok) > 20:
-                    return url
-            return ""
+                    continue
+                tok = _dig(data, tok_path)
+                if isinstance(tok, str) and len(tok) > 20:
+                    return url, tok_path
+                found = _find_token(data)
+                if found:
+                    return url, found[0]
+            return "", ""
+
+        # HITL: creating accounts is an outward, state-changing action — require
+        # human approval (auto-approved only if the operator opted into autonomy).
+        try:
+            from core.escalation.hitl import require_human_approval
+            if not await require_human_approval(
+                    "self_register_accounts", kind="account_creation",
+                    target=base, details={"identities": ["user_a", "user_b"]},
+                    ctx=self.ctx):
+                logger.warning("[Auth] self-registration DENIED by human-in-the-loop — skipped")
+                return
+        except Exception as _he:
+            logger.warning(f"[Auth] HITL gate error — skipping self-registration: {_he}")
+            return
 
         creds = []
         async with get_scoped_client(timeout=20, follow_redirects=True) as client:
@@ -8584,12 +7374,15 @@ class CentralBrain(
             # Point creds at a login URL that actually mints a token (best-effort;
             # keeps the original guess if none resolves so nothing regresses).
             if creds:
-                real_login = await _resolve_login_url(
+                real_login, real_tok_path = await _resolve_login_url(
                     client, creds[0]["username"], creds[0]["password"])
                 if real_login:
                     for c in creds:
                         c["login_url"] = real_login
-                    logger.info(f"[Auth] resolved login endpoint for self-reg identities: {real_login}")
+                        if real_tok_path:
+                            c["token_json_path"] = real_tok_path
+                    logger.info(f"[Auth] resolved login endpoint for self-reg identities: "
+                                f"{real_login} (token path: {real_tok_path or tok_path})")
                 else:
                     logger.warning("[Auth] self-reg: no login URL returned a token — "
                                    "authenticated tests may be skipped")
@@ -8621,368 +7414,6 @@ class CentralBrain(
         self.ctx.auth_credentials = lst
         logger.info(f"[Auth] self-registration seeded {len(creds)} identity(ies) "
                     f"for horizontal access-control testing: {[c['role'] for c in creds]}")
-
-    async def _jev_auth_possible(self, registered: bool, signals: list) -> None:
-        """Ask Jev (opt-in classifier) whether authentication is POSSIBLE on this
-        target from the register/login evidence, and record the verdict on ctx.
-        Runs whether or not our signup succeeded. Best-effort: with Jev off /
-        unavailable it falls back to the concrete signal (a minted cred proves
-        auth is possible; otherwise unknown)."""
-        verdict = True if registered else None
-        prob = 1.0 if registered else 0.0
-        try:
-            from agents.providers.jev_classifier import get_jev
-            jev = get_jev(scan_id=getattr(self, "_scan_id", ""))
-            if jev is not None and jev.is_available():
-                # Dedup so the evidence isn't flooded with identical repeats
-                # (register is attempted per-identity × per-payload), which would
-                # otherwise fill the cap with the same 404 and hide login signals.
-                seen: set = set()
-                uniq = []
-                for t in (signals or []):
-                    if t not in seen:
-                        seen.add(t)
-                        uniq.append(t)
-                evid = {
-                    "self_register_succeeded": registered,
-                    # endpoint + HTTP status only — no bodies, no creds
-                    "attempts": [{"kind": k, "url": u, "status": s}
-                                 for (k, u, s) in uniq[:24]],
-                }
-                v, p = await jev.noul(
-                    evid,
-                    "Given these registration/login endpoint attempts (URL + HTTP "
-                    "status), is user authentication POSSIBLE on this target — "
-                    "i.e. does an auth surface exist that could yield a valid "
-                    "session (an open signup, or a login endpoint that accepts "
-                    "credentials)? Judge by response shape, not just 2xx: a login "
-                    "endpoint answering 400/401/403/405/422 (not 404) EXISTS and "
-                    "means an auth surface is present, so authentication is "
-                    "possible. A 200/201 on a signup or login is a strong yes. "
-                    "Only 404/blocked on every candidate (no responsive auth "
-                    "endpoint at all) points to no.",
-                    name="auth_possible", site="triage")
-                if v is not None:
-                    verdict, prob = v, p
-        except Exception as e:
-            logger.debug("[Auth] Jev auth-possibility check skipped: %s", e)
-        try:
-            self.ctx.auth_possible = {
-                "value": (bool(verdict) if verdict is not None else None),
-                "probability": round(float(prob or 0.0), 3),
-                "self_register": registered,
-            }
-        except Exception:
-            pass
-        logger.info("[Auth] authentication possible? %s (p=%.2f, self_register=%s)",
-                    verdict, float(prob or 0.0), registered)
-
-    async def _llm_register_body(self, url: str, email: str, pw: str,
-                                 error_text: str) -> dict:
-        """Synthesize a registration request body from the server's OWN
-        validation error (target-agnostic). Returns {} on any failure so the
-        caller falls back gracefully."""
-        try:
-            prompt = (
-                "A JSON account-registration request to a web API was rejected. "
-                "Infer the required fields from the server's validation error and "
-                "return ONLY a JSON object for a body that would register a new "
-                "account. Use minimal valid placeholder values for any extra "
-                "required fields.\n"
-                f"Endpoint: {url}\n"
-                f"Credential fields should use email={email}, password={pw}.\n"
-                f"Server error response (truncated):\n{(error_text or '')[:1200]}"
-            )
-            body = await self.llm.generate_json(prompt, tier=TaskTier.SMALL,
-                                                max_tokens=400)
-            return body if isinstance(body, dict) and body else {}
-        except Exception:
-            return {}
-
-    async def _llm_admin_path_candidates(self, limit: int = 8) -> list:
-        """LLM-proposed admin/privileged URL paths for THIS target, inferred
-        from discovered endpoints + detected technologies. Modern apps route
-        admin under varied paths, so this augments discovery. Returns [] on any
-        failure."""
-        try:
-            eps = []
-            for e in (getattr(self.ctx, "endpoints", []) or [])[:60]:
-                u = e if isinstance(e, str) else (e.get("url", "") if isinstance(e, dict) else "")
-                if u:
-                    eps.append(u)
-            _t = getattr(self.ctx, "technologies", None)
-            techs = (list(_t)[:15] if isinstance(_t, dict) else (list(_t or [])[:15]))
-            if not eps and not techs:
-                return []
-            prompt = (
-                "You are mapping a web app's admin/privileged surface. From the "
-                "discovered endpoints and detected technologies, propose up to "
-                f"{limit} likely ADMIN or privileged URL PATHS (leading slash, no "
-                "host) a regular user should NOT reach. Prefer paths consistent "
-                "with the app's own routing style. Return JSON "
-                "{\"paths\": [\"/...\"]}.\n"
-                f"Endpoints: {eps}\nTechnologies: {techs}"
-            )
-            data = await self.llm.generate_json(prompt, tier=TaskTier.SMALL,
-                                                max_tokens=300)
-            out = []
-            for p in ((data.get("paths") if isinstance(data, dict) else []) or []):
-                if isinstance(p, str) and p.startswith("/") and len(p) < 120:
-                    out.append(p.split("?")[0])
-            return out[:limit]
-        except Exception:
-            return []
-
-    async def _setup_auth_session(self) -> None:
-        self.auth_session = None
-        self.multi_auth = None
-        try:
-            # 0. Zero-config auth: when no creds are supplied and self-registration
-            # is enabled, create a throwaway account so the authenticated surface
-            # (IDOR/JWT/business-logic) is reachable. Best-effort; seeds
-            # ctx.auth_credentials which the login machinery below consumes.
-            try:
-                if not (getattr(self.ctx, "auth_credentials", None)):
-                    await self._bootstrap_self_registration()
-            except Exception as _e:
-                logger.warning(f"[Auth] self-registration bootstrap failed (non-fatal): {_e}")
-
-            # 1. Multi-role credentials supplied by the UI / CLI.
-            creds = getattr(self.ctx, "auth_credentials", None) \
-                or [c for c in getattr(self.ctx, "harvested_creds", []) if isinstance(c, dict) and c.get("username")]
-            if creds:
-                from core.authentication.auth_session import MultiIdentityAuthManager
-                multi = MultiIdentityAuthManager(creds)
-                await multi.authenticate_all()
-                self.multi_auth = multi
-                # Expose per-role sessions for cross-role (IDOR / access-control) testing.
-                self.ctx.auth_sessions = multi.sessions_map()
-                default = multi.default_session()
-                if default:
-                    self.auth_session = default
-                    self.ctx.auth_headers = default.auth_headers()
-                    self.ctx.auth_cookies = dict(default.cookies)
-                self.ctx.auth_summary = multi.summary()
-                self.ctx.log_brain(
-                    f"Authenticated {len(multi.summary()['authenticated_roles'])} role session(s)", "auth")
-                logger.info(f"[Auth] multi-role sessions ready: {multi.summary()['authenticated_roles']}")
-
-                # Connect real role sessions into the access-control / IDOR replay
-                # engine so cross-role authorization tests use live credentials.
-                try:
-                    from core.authentication.identity_bridge import build_replay_sessions
-                    bridge = build_replay_sessions(
-                        multi_auth=multi,
-                        replay_session_manager=getattr(self, "replay_session_manager", None),
-                        identity_manager=self.identity_manager,
-                        shared_context=self.ctx,
-                    )
-                    self.ctx.replay_identity_bridge = bridge
-                except Exception as e:
-                    logger.warning(f"[Auth] replay-engine bridge failed (non-fatal): {e}")
-                return
-
-            # 2. Single .env-configured session.
-            from core.authentication.auth_session import AuthSessionManager
-            mgr = AuthSessionManager()
-            if not mgr.enabled:
-                return
-            ok = await mgr.authenticate()
-            self.auth_session = mgr
-            self.ctx.auth_headers = mgr.auth_headers()
-            self.ctx.auth_cookies = dict(mgr.cookies)
-            self.ctx.auth_summary = mgr.summary()
-            if ok and mgr.config.probe_url:
-                live = await mgr.is_authenticated()
-                logger.info(f"[Auth] session live-check on probe url: {'OK' if live else 'FAILED'}")
-            if ok:
-                logger.info("[Auth] authenticated session active — post-auth surface unlocked")
-                self.ctx.log_brain("Authenticated session established", "auth")
-        except Exception as e:
-            logger.warning(f"[Auth] session setup failed (non-fatal): {e}")
-        # Publish the active auth into the process-wide registry so V2 executors
-        # that don't hold a reference to shared_context (see
-        # core/execution/executors/generic.py::_auth_headers) can pick it up.
-        try:
-            from core.execution.executors.auth_registry import set_active_auth
-            set_active_auth(
-                headers=getattr(self.ctx, "auth_headers", {}) or {},
-                cookies=getattr(self.ctx, "auth_cookies", {}) or {},
-                sessions=getattr(self.ctx, "auth_sessions", {}) or {},
-            )
-        except Exception as _e:
-            logger.debug(f"[Auth] registry publish failed: {_e}")
-        # If we obtained a real live session (from UI creds or .env auth), also
-        # persist a proof-of-entry so the UI 'Access Gained' panel shows it.
-        try:
-            hdrs = getattr(self.ctx, "auth_headers", {}) or {}
-            authz = hdrs.get("Authorization", "")
-            if authz.startswith("Bearer "):
-                from core.database.pg_store import AuthBypassRepo
-                from urllib.parse import urlparse as _up
-                _base = self.ctx.target
-                _host = _up(_base if "://" in _base else f"https://{_base}").netloc
-                for cred in (getattr(self.ctx, "auth_credentials", None) or [{}])[:1]:
-                    AuthBypassRepo.insert(
-                        self._scan_id, _host, "credential_replay",
-                        cred.get("login_url", "") or _base,
-                        method="POST",
-                        username=cred.get("username") or cred.get("email") or "",
-                        password=cred.get("password") or "",
-                        payload="(operator-supplied credentials)",
-                        token=authz[len("Bearer "):],
-                        response_status=200,
-                        response_snippet="Session established via _setup_auth_session",
-                        role=cred.get("role") or "", severity="info",
-                    )
-        except Exception:
-            pass
-
-    async def _auto_login_with_harvested_creds(self) -> None:
-        creds = getattr(self.ctx, "harvested_creds", []) or []
-        candidates = []
-        seen = set()
-        for c in creds:
-            if not isinstance(c, dict):
-                continue
-            if c.get("token"):
-                continue  # already have a session
-            user = c.get("username") or c.get("email")
-            pw = c.get("password")
-            if not (user and pw):
-                continue
-            key = f"{user}|{pw}"
-            if key in seen:
-                continue
-            seen.add(key)
-            candidates.append(c)
-        if not candidates:
-            return
-
-        # Discover login endpoints from what we've already seen the app expose.
-        base = self.ctx.target
-        if not base.startswith(("http://", "https://")):
-            base = f"https://{base}"
-        from urllib.parse import urlparse as _up
-        base_host = _up(base).netloc
-        # Generic endpoint discovery — reads everything the crawler + ffuf +
-        # captured requests found, classifies as "login" role, falls back to a
-        # generic industry-standard list (/login, /signin, /oauth/token, ...)
-        # only when nothing was discovered on this target.
-        from core.common.endpoint_hints import discover_endpoints
-        login_urls = set(discover_endpoints(self.ctx, "login", max_results=20))
-
-        logger.info(f"[AutoLogin] Trying {len(candidates)} plaintext cred(s) against {len(login_urls)} login endpoint(s)")
-        import httpx as _httpx, json as _json, base64 as _b64
-        from core.database.pg_store import AuthBypassRepo
-        from core.execution.executors.auth_registry import set_active_auth
-
-        # Expert mode: long-backoff retry so a transient 503/timeout doesn't
-        # declare valid creds dead. Retries spread over ~4 minutes total.
-        RETRY_DELAYS = [0, 2, 5, 15, 45, 120]  # seconds
-        BODY_SHAPES = [
-            ("json", {"email": "{U}", "password": "{P}"}),
-            ("json", {"username": "{U}", "password": "{P}"}),
-            ("json", {"login": "{U}", "password": "{P}"}),
-            ("json", {"user": "{U}", "pass": "{P}"}),
-            ("json", {"identifier": "{U}", "password": "{P}"}),
-            ("json", {"id": "{U}", "pwd": "{P}"}),
-            ("form", "email={U}&password={P}"),
-            ("form", "username={U}&password={P}"),
-            ("form", "j_username={U}&j_password={P}"),
-        ]
-        import asyncio as _asyncio
-        async with _httpx.AsyncClient(follow_redirects=True, timeout=30, verify=False) as client:
-            for cred in candidates:
-                user = cred.get("username") or cred.get("email")
-                pw = cred.get("password")
-                logged_in = False
-                for lurl in login_urls:
-                    if logged_in:
-                        break
-                    for shape, tmpl in BODY_SHAPES:
-                        if logged_in:
-                            break
-                        for delay in RETRY_DELAYS:
-                            if delay:
-                                await _asyncio.sleep(delay)
-                            try:
-                                if shape == "json":
-                                    body = {k: (v.replace("{U}", str(user)).replace("{P}", str(pw))
-                                                if isinstance(v, str) else v)
-                                            for k, v in tmpl.items()}
-                                    resp = await client.post(lurl, json=body)
-                                else:
-                                    from urllib.parse import quote as _q
-                                    body_s = tmpl.replace("{U}", _q(str(user))).replace("{P}", _q(str(pw)))
-                                    resp = await client.post(
-                                        lurl, content=body_s,
-                                        headers={"Content-Type": "application/x-www-form-urlencoded"})
-                                    body = body_s
-                            except Exception:
-                                continue
-                            # Treat transient errors as retryable
-                            if resp.status_code in (429, 500, 502, 503, 504):
-                                logger.debug(f"[AutoLogin] {user}@{lurl} shape={shape} -> {resp.status_code}, retrying")
-                                continue
-                            if resp.status_code not in (200, 201):
-                                break  # non-transient failure — try next body shape
-                        # Token/session-shape agnostic: accept a JWT, an opaque
-                        # bearer token, OR a session cookie — was eyJ-only, which
-                        # dropped every non-JWT login and lost credential-replay /
-                        # cross-role coverage on cookie/opaque-token apps.
-                        from core.common import auth_shape as _ash
-                        try:
-                            _j = resp.json()
-                        except Exception:
-                            _j = None
-                        _sess = _ash.extract_session(_j, getattr(resp, "headers", None))
-                        token = _sess.get("token")
-                        if not token:
-                            continue
-                        _transport = _sess.get("transport", "bearer")
-                        _cookie_name = _sess.get("cookie_name", "")
-                        # Role from JWT across modern claim shapes (roles[]/scope/
-                        # realm_access.roles/cognito:groups/namespaced); "" if opaque.
-                        role = _ash.primary_role(token) if _sess.get("is_jwt") else ""
-                        # Attach token, publish, persist
-                        cred["token"] = token
-                        cred["role"] = role
-                        cred["login_url"] = lurl
-                        cred["transport"] = _transport
-                        hdrs = dict(getattr(self.ctx, "auth_headers", {}) or {})
-                        cookies = dict(getattr(self.ctx, "auth_cookies", {}) or {})
-                        if _transport == "cookie" and _cookie_name:
-                            cookies[_cookie_name] = token
-                            self.ctx.auth_cookies = cookies
-                        else:
-                            hdrs["Authorization"] = f"Bearer {token}"
-                            self.ctx.auth_headers = hdrs
-                        try:
-                            set_active_auth(
-                                headers=hdrs,
-                                cookies=cookies,
-                                sessions=getattr(self.ctx, "auth_sessions", {}) or {},
-                            )
-                        except Exception:
-                            pass
-                        try:
-                            payload_str = _json.dumps(body) if isinstance(body, dict) else str(body)
-                            AuthBypassRepo.insert(
-                                self._scan_id, _up(lurl).netloc or base_host,
-                                "credential_replay", lurl,
-                                method="POST", username=user, password=pw,
-                                payload=payload_str,
-                                token=token, response_status=resp.status_code,
-                                response_snippet=(resp.text or "")[:600],
-                                role=role,
-                                severity=("critical" if "admin" in role.lower() else "high"),
-                            )
-                        except Exception:
-                            pass
-                        logger.info(f"[AutoLogin] {user} -> {lurl} (shape={shape}) = 200 (role={role or '?'}) — token attached")
-                        logged_in = True
-                        break  # break retry loop
 
     async def _escalate_sqli_to_dump(self) -> None:
         vulns = getattr(self.ctx, "vulnerabilities", []) or []
@@ -9089,695 +7520,6 @@ class CentralBrain(
         counts = self.reward_policy.record_finding_outcomes(findings)
         logger.info(f"[RewardPolicy] outcomes recorded: {counts}")
 
-    def _summarize_context(self) -> str:
-
-        lines = []
-        
-        # Target
-        lines.append(f"Target: {self.ctx.target}")
-        
-        # Subdomains
-        subs = self.ctx.get_subdomains()
-        if subs:
-            lines.append(f"Discovered subdomains: {len(subs)} ({', '.join(subs[:3])})")
-        else:
-            lines.append("Subdomains: None discovered yet")
-        
-        # Ports
-        ports_data = self.ctx.data.get("ports", {})
-        if ports_data:
-            all_ports = []
-            for host, port_list in ports_data.items():
-                all_ports.extend(port_list)
-            lines.append(f"Open ports found: {len(set(all_ports))} ({', '.join(map(str, sorted(set(all_ports))[:5]))})")
-        else:
-            lines.append("Open ports: None scanned yet")
-        
-        # Technologies
-        techs_by_host = self.ctx.data.get("technologies", {})
-        if techs_by_host:
-            all_techs = []
-            for host, tech_list in techs_by_host.items():
-                all_techs.extend(tech_list)
-            if all_techs:
-                lines.append(f"Technologies identified: {', '.join(set(all_techs)[:3])}")
-        
-        # Endpoints
-        endpoints = self.ctx.get_endpoints()
-        if endpoints:
-            lines.append(f"Web endpoints discovered: {len(endpoints)} ({', '.join(endpoints[:3])})")
-        
-        # Vulnerabilities
-        vulns = self.ctx.data.get("vulnerabilities", [])
-        if vulns:
-            lines.append(f"Vulnerabilities found: {len(vulns)}")
-            for vuln in vulns[:2]:
-                severity = vuln.get("severity", "UNKNOWN")
-                title = vuln.get("title", "Unknown")
-                lines.append(f"  - {title} ({severity})")
-        else:
-            lines.append("Vulnerabilities: None identified yet")
-        
-        return "\n".join(lines)
-
-    def _build_agent_context(self, keys: list) -> str:
-        
-        if not keys:
-            return f"Target: {self.ctx.target}\nObjective: Complete assigned task"
-        
-        lines = []
-        for key in keys:
-            if key == "target":
-                lines.append(f"Target: {self.ctx.target}")
-            elif key == "subdomains":
-                subs = self.ctx.get_subdomains()
-                if subs:
-                    lines.append(f"Subdomains ({len(subs)}): {', '.join(subs[:5])}")
-            elif key == "ports":
-                ports_data = self.ctx.data.get("ports", {})
-                if ports_data:
-                    lines.append(f"Open ports: {list(ports_data.keys())}")
-            elif key == "technologies":
-                techs = self.ctx.get_technologies(self.ctx.target)
-                if techs:
-                    lines.append(f"Technologies: {', '.join(techs[:3])}")
-            elif key == "endpoints":
-                eps = self.ctx.get_endpoints()
-                if eps:
-                    lines.append(f"Endpoints ({len(eps)}): {eps[:3]}")
-            elif key == "vulnerabilities":
-                vulns = self.ctx.data.get("vulnerabilities", [])
-                if vulns:
-                    lines.append(f"Known vulns ({len(vulns)}): {[v.get('title', '?') for v in vulns[:2]]}")
-        
-        return "\n".join(lines) if lines else f"Target: {self.ctx.target}"
-
-    async def _spawn_and_run_agent(self, spec: Dict):
-        from core.orchestration.dynamic_agent import DynamicAgent
-        
-        objective = spec.get("objective", "")
-        tools = spec.get("tools", [])
-        context_keys = spec.get("context_keys", [])
-        max_steps = spec.get("max_steps", 10)
-        
-        logger.info(f"  Spawning agent: {objective}")
-        
-        # Build agent context from shared context
-        agent_context = self._build_agent_context(context_keys)
-        
-        # Spawn agent
-        agent_id = f"AGENT-{len(self.spawner.agents) + 1:03d}"
-        
-        agent = DynamicAgent(
-            agent_id=agent_id,
-            objective=objective,
-            tool_registry=self.tools,
-            shared_context=self.ctx,
-            agent_context=agent_context,
-            allowed_tools=tools,
-            max_steps=max_steps
-        )
-        
-        # Run agent
-        logger.info(f"  Running {agent_id}...")
-        result = await agent.execute()
-        
-        # Handle result
-        if result.get("status") == "success":
-            logger.info(f"  ✓ {agent_id} succeeded")
-            self.ctx.add_event(f"{agent_id}: Success", result.get("results", {}))
-        else:
-            logger.warning(f"  ✗ {agent_id} failed: {result.get('reason', 'unknown')}")
-            self.ctx.add_event(f"{agent_id}: Failed", result)
-
-    async def _spawn_multiple_agents(self, specs: list):
-        from core.orchestration.dynamic_agent import DynamicAgent
-        
-        logger.info(f"  Spawning {len(specs)} agents in parallel...")
-        
-        agents = []
-        for i, spec in enumerate(specs):
-            objective = spec.get("objective", "")
-            tools = spec.get("tools", [])
-            context_keys = spec.get("context_keys", [])
-            max_steps = spec.get("max_steps", 8)
-            
-            # Build context
-            agent_context = self._build_agent_context(context_keys)
-            
-            # Create agent
-            agent_id = f"AGENT-{len(agents) + 1:03d}"
-            agent = DynamicAgent(
-                agent_id=agent_id,
-                objective=objective,
-                tool_registry=self.tools,
-                shared_context=self.ctx,
-                agent_context=agent_context,
-                allowed_tools=tools,
-                max_steps=max_steps
-            )
-            agents.append(agent)
-        
-        # Run all in parallel
-        logger.info(f"  Running {len(agents)} agents...")
-        results = await asyncio.gather(*[agent.execute() for agent in agents])
-        
-        # Log results
-        for agent, result in zip(agents, results):
-            if result.get("status") == "success":
-                logger.info(f"  ✓ {agent.agent_id} succeeded")
-            else:
-                logger.warning(f"  ✗ {agent.agent_id} {result.get('reason', 'failed')}")
-
-    def _build_brain_prompt(self, phase: str, iteration: int) -> str:
-        
-        context = self._summarize_context()
-        
-        prompt = f"""You are an AUTONOMOUS PENTESTING ORCHESTRATION BRAIN.
-
-⚠️  CRITICAL: You are Claude, an LLM. You orchestrate agents that execute tools.
-You do NOT execute tools yourself. You DECIDE what agents should do.
-
-Target: {self.ctx.target}
-Phase: {phase.upper()} (Iteration {iteration})
-
-CURRENT STATE:
-{context}
-
-WHAT AGENTS NEED (examples):
-
-For Subdomain Discovery:
-  objective: "Find all subdomains of target domain"
-  tools: ["amass", "subfinder", "dig", "whois"]
-
-For Port Scanning:
-  objective: "Scan for open ports and services"
-  tools: ["nmap", "masscan"]
-
-For Tech Stack Detection:
-  objective: "Identify web server, frameworks, CMS"
-  tools: ["httpx", "whatweb", "wafw00f"]
-
-For Directory Discovery:
-  objective: "Find hidden directories and files"
-  tools: ["gobuster", "feroxbuster", "ffuf"]
-
-For JavaScript Analysis:
-  objective: "Extract endpoints and secrets from JS"
-  tools: ["curl", "strings"]
-
-For Vulnerability Scanning:
-  objective: "Scan for CVEs and known vulnerabilities"
-  tools: ["nuclei", "nessus"]
-
-YOUR ROLE:
-1. Look at current state
-2. Identify what's missing
-3. Decide which tools would help
-4. Spawn agent with objective + tools
-5. Agent executes tools, you don't
-
-PHASE RULES:
-RECON: Discover targets (subdomains, ports, tech, endpoints)
-ANALYZE: Find vulnerabilities
-EXPLOIT: Execute vulnerabilities
-REPORT: Compile findings
-
-RESPONSE: JSON only (no other text)
-
-Single agent:
-{{
-  "thinking": "why this helps fill the gap",
-  "action": "spawn_agent",
-  "agent_spec": {{
-    "objective": "specific goal for agent",
-    "tools": ["tool1", "tool2", "tool3"],
-    "context_keys": ["target", "existing_data"],
-    "max_steps": 8
-  }}
-}}
-
-Phase complete:
-{{
-  "thinking": "why we have enough information",
-  "action": "phase_complete"
-}}
-
-CRITICAL RULES:
-✓ You orchestrate. Agents execute.
-✓ Give agents both objective AND tools
-✓ Only spawn agents that address gaps
-✓ JSON only response"""
-        
-        return prompt
-
-    def _active_frameworks(self):
-        try:
-            from core.common.config import get_config
-            fw = get_config().config.get("COMPLIANCE_FRAMEWORKS")
-            if fw:
-                return fw
-        except Exception:       # noqa: BLE001
-            pass
-        return available_frameworks()
-
-    def _validate_findings(self, ts: str):
-        # Work on shallow copies so we don't mutate the canonical vuln list.
-        findings = [dict(v) for v in self.ctx.vulnerabilities]
-
-        # 1. Confidence gate — LOW confidence -> needs_review (not main report).
-        gated = confidence_gate(findings)
-        reported, needs_review = gated["report"], gated["needs_review"]
-
-        # 2. Cross-scan dedup — suppress recurring-unchanged, flag new/resolved.
-        try:
-            dedup = DedupStore()
-            dd = dedup.process_scan(reported, scan_id=ts, include_recurring=True)
-            reported = dd["report"]
-            suppressed_findings = dd.get("suppressed_findings", [])
-            
-            # Explicit logging for suppressed findings
-            for sf in suppressed_findings:
-                reason = "recurring_deduplicated_by_fingerprint"
-                logger.info(f"SUPPRESSED: {sf.get('id', 'unknown')} reason={reason}")
-                
-            dedup_summary = {
-                "suppressed_recurring": dd["suppressed"],
-                "suppressed_findings": [f.get("title") or f.get("name") or f.get("type") for f in suppressed_findings],
-                "resolved": len(dd["resolved"]),
-                "reported": len(reported)
-            }
-        except Exception as e:      # noqa: BLE001
-            logger.warning(f"[report] dedup failed: {e}")
-            dedup_summary = {"suppressed_recurring": 0, "suppressed_findings": [], "resolved": 0,
-                             "reported": len(reported), "error": str(e)}
-
-        logger.info(f"[report] findings: {len(reported)} reported, "
-                    f"{len(needs_review)} need review, "
-                    f"{dedup_summary['suppressed_recurring']} recurring suppressed")
-        return {"reported": reported, "needs_review": needs_review,
-                "dedup": dedup_summary}
-
-    async def _generate_report(self):
-        # Attack-chain intelligence: compose distinct exploitation paths from
-        # the scan artefacts (SQLi→dump→crack→login→IDOR chains, etc.)
-        try:
-            from core.reporting.chain_intelligence import synthesize_chains
-            await synthesize_chains(self._scan_id)
-        except Exception as _e:
-            logger.warning(f"[ChainIntel] synthesis failed (non-fatal): {_e}")
-
-        # Benchmark scoring (opt-in) — generic across benchmarks/targets: build a
-        # corpus (live challenge API → checklist over the attack surface → static)
-        # and score findings per-challenge into benchmark_results + the blackboard.
-        if os.getenv("NEO_BENCHMARK", "0").strip() == "1":
-            try:
-                from core.benchmark.runner import generate_corpus, score_corpus
-                _tgt = getattr(self.ctx, "target", "") or "target"
-                suite = os.getenv("NEO_BENCHMARK_SUITE", "") or (
-                    _tgt.split("://")[-1].split("/")[0].split(":")[0] or "target")
-                corpus = generate_corpus(getattr(self.ctx, "target", ""), suite,
-                                         scan_id=self._scan_id, ctx=self.ctx)
-                if corpus.challenges:
-                    score_corpus(self._scan_id, corpus,
-                                 list(self.ctx.vulnerabilities or []), ctx=self.ctx)
-            except Exception as _e:
-                logger.warning(f"[Benchmark] scoring failed (non-fatal): {_e}")
-
-        """LLM generates final report.
-
-        Token-savings: prefer the LLM's OWN phase-by-phase summaries recorded
-        during the scan (scan_llm_memory) over dumping raw context. Uses the
-        SMALL tier because this is prose summarisation, not reasoning — the
-        LARGE reasoning-model tier tripled cost with no quality gain.
-        """
-        # 1. Reuse recorded per-phase summaries the scan-time LLM produced
-        try:
-            from core.database.pg_store import LLMMemoryRepo
-            mem_rows = LLMMemoryRepo.get_by_scan(self._scan_id, kind="summary", limit=30)
-        except Exception:
-            mem_rows = []
-        if mem_rows:
-            memory_txt = "\n\n".join(f"### {m.get('phase','phase')}\n{(m.get('content') or '').strip()}"
-                                       for m in mem_rows if (m.get("content") or "").strip())
-        else:
-            memory_txt = ""
-        # 2. Compact fact snapshot — just counts + top vuln titles (no full details)
-        v_list = self.ctx.vulnerabilities or []
-        sev_counts: Dict[str, int] = {}
-        for v in v_list:
-            s = (v.get("severity") or "INFO").upper()
-            sev_counts[s] = sev_counts.get(s, 0) + 1
-        top_vulns = [v.get("title", "") for v in v_list
-                     if (v.get("severity") or "").upper() in ("CRITICAL", "HIGH")][:15]
-        fact_snapshot = {
-            "target": self.ctx.target,
-            "severity_counts": sev_counts,
-            "top_high_critical": top_vulns,
-            "attack_chains_count": len(self.ctx.attack_chains or []),
-            "exploit_results_count": len(self.ctx.exploit_results or []),
-            "harvested_creds_count": len(self.ctx.harvested_creds or []),
-        }
-        # 3. SMALL tier — this is summarisation, not reasoning
-        exec_summary = await self.llm.generate_response(
-            "Write a 3-paragraph professional executive summary for this pentest. "
-            "Cover: overall risk posture, key finding categories, recommendations. "
-            "Use the scan-time analyst notes as your primary source; the fact "
-            "snapshot is only for citing exact counts.\n\n"
-            f"SCAN-TIME ANALYST NOTES:\n{memory_txt or '(no phase summaries recorded)'}\n\n"
-            f"FACT SNAPSHOT: {json.dumps(fact_snapshot, default=str)}\n\n"
-            "Be concise (3 paragraphs max, ~250 words total).",
-            tier=TaskTier.SMALL,
-            max_tokens=800,
-        )
-        # generate_response() returns a NormalizedLLMResponse, but the JSON report
-        # and self.reporter.generate() expect a plain string — passing the object
-        # crashed the enterprise report with "'NormalizedLLMResponse' object has no
-        # attribute 'replace'" (implemented.md §9.4). Extract .content.
-        exec_summary = getattr(exec_summary, "content", exec_summary)
-        if not isinstance(exec_summary, str):
-            exec_summary = str(exec_summary or "")
-
-        # ── Finding validation + compliance mapping (production-grade layer) ──
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        validated = self._validate_findings(ts)
-        frameworks = self._active_frameworks()
-        try:
-            compliance_summary = ComplianceReporter(frameworks).build(
-                self.ctx.vulnerabilities)
-        except Exception as e:      # noqa: BLE001
-            logger.warning(f"[report] compliance mapping failed: {e}")
-            compliance_summary = {"active_frameworks": frameworks, "error": str(e)}
-
-        # Build report
-        report = {
-            "metadata": {
-                "title": f"Penetration Test Report - {self.ctx.target}",
-                "target": self.ctx.target,
-                "timestamp": datetime.now().isoformat(),
-                "duration_seconds": (datetime.now() - self.start_time).total_seconds(),
-                "agents_used": len(self.ctx.agents_spawned),
-                "token_usage": self._get_token_usage(),
-            },
-            "executive_summary": exec_summary,
-            "scope": self.ctx.scope,
-            "context": self._build_recon_context(),
-            "vulnerabilities": validated["reported"],
-            "vulnerabilities_all": self.ctx.vulnerabilities,
-            "needs_review": validated["needs_review"],
-            "dedup": validated["dedup"],
-            "compliance": compliance_summary,
-            "attack_chains": self.ctx.attack_chains,
-            "exploit_results": self.ctx.exploit_results,
-            "post_exploitation": (
-                self.post_exploit.to_dict() if self.post_exploit else {
-                    "privesc_findings": self.ctx.privesc_findings,
-                    "harvested_creds": self.ctx.harvested_creds,
-                    "lateral_plan": self.ctx.lateral_plan,
-                    "persistence_plan": self.ctx.persistence_plan,
-                    "mitre_mappings": self.ctx.mitre_mappings,
-                }
-            ),
-            "technical_data": {
-                "subdomains": self.ctx.subdomains,
-                "ips": self.ctx.ips,
-                "ports": self.ctx.ports,
-                "technologies": self.ctx.technologies,
-                "endpoints": self.ctx.endpoints,
-                "directories": self.ctx.directories,
-                "headers": self.ctx.headers,
-                "ssl_info": self.ctx.ssl_info,
-                "secrets": self.ctx.secrets,
-                "crawled_pages": self.ctx.crawled_pages,
-                "captured_requests": self.ctx.captured_requests,
-            },
-            "automation": self.automation.to_dict(),
-            "exploit_consent": get_consent().summary(),
-            "remediation": self.automation.remediation_report(),
-            "metrics": self.metrics.snapshot(),
-            "scheduled_scan": AutomationEngine.schedule_config(self.ctx.target),
-            "brain_log": self.ctx.brain_log,
-            "agents": self.ctx.agents_spawned,
-        }
-
-        # P2: Coverage & Confidence section — blind spots (what was NOT tested),
-        # unified coverage %, and capability-based attack-chain reasoning. Makes
-        # the report state its own confidence instead of implying completeness.
-        try:
-            from core.coverage.unified_coverage import UnifiedCoverage
-            cov = UnifiedCoverage.from_brain(self).summary()
-        except Exception:
-            cov = {}
-        chains = []
-        try:
-            from core.exploitation.chain_reasoner import ChainReasoner
-            vulns = list(getattr(self.ctx, "vulnerabilities", []) or [])
-            if vulns:
-                chains = [c.to_dict() for c in ChainReasoner().analyze(vulns)]
-        except Exception:
-            chains = []
-        report["coverage_confidence"] = {
-            "coverage": cov,
-            "blind_spots": getattr(self.ctx, "blind_spots", {}) or {},
-            "attack_chains_reasoned": chains,
-            "note": "Findings reflect executed tests only; see blind_spots for untested surface.",
-        }
-
-        # Generate automated exploit POC reproduction scripts (Python, cURL, Markdown).
-        # PoCs persist to Postgres (scan_artifacts) so the UI can render them; disk
-        # writes only happen when REPORTS_ENABLED=1.
-        try:
-            # Ensure the shared_context knows its scan_id so POCGenerator can persist to DB
-            try:
-                setattr(self.ctx, "scan_id", getattr(self, "_scan_id", None) or getattr(self.ctx, "scan_id", None))
-            except Exception:
-                pass
-            from core.common.reports_config import reports_enabled as _re
-            poc_files = POCGenerator.generate(self.ctx,
-                                              output_dir=str(self.report_dir) if _re() else None)
-            if poc_files:
-                report["poc_artifacts"] = poc_files
-                logger.info(f"POC reproduction scripts generated: {poc_files}")
-        except Exception as pe:
-            logger.warning(f"POC generation failed (non-fatal): {pe}")
-
-        # Coverage ledger into the persisted report so finished scans keep the
-        # "what was tested vs UNKNOWN" picture (§23/§24) for the UI.
-        try:
-            _oos = []
-            try:
-                from core.security.authorization import TargetScopeValidator
-                _oos = TargetScopeValidator.get().discovered_out_of_scope()
-            except Exception:
-                pass
-            report["coverage"] = {
-                "ledger": getattr(self.ctx, "coverage_ledger", {}) or {},
-                "surface": getattr(self.ctx, "surface_coverage", {}) or {},
-                "discovered_out_of_scope": _oos,
-                "dom_sinks": getattr(self.ctx, "dom_sinks", {}) or {},
-                # Coverage-vs-plan: what the Test Plan scoped in and what it skipped
-                # (skipped ≠ tested-clean — UNKNOWN≠CLEAN).
-                "engagement_plan": getattr(self.ctx, "engagement_plan", {}) or {},
-                "plan_skipped_families": getattr(self.ctx, "plan_skipped_families", []) or [],
-            }
-            # Threat model = Phase 1 deliverable.
-            report["threat_model"] = getattr(self.ctx, "threat_model", {}) or {}
-        except Exception:
-            pass
-
-        # Save  (ts computed above, shared with the validation/dedup scan_id)
-        report_path = self.report_dir / f"pentest_{ts}.json"
-        with open(report_path, 'w', encoding='utf-8') as f:
-            json.dump(report, f, indent=2, default=str, ensure_ascii=False)
-        logger.info(f"Report saved: {report_path}")
-
-        # Persist to PostgreSQL under the canonical run id (never the wall-clock
-        # timestamp) so this run's rows are isolated from every other run.
-        try:
-            from core.database.pg_store import ScanRepo, VulnRepo
-            run_id = self._scan_id
-            ScanRepo.create(run_id, self.ctx.target, self.tier)
-            ScanRepo.save_report(run_id, report)
-            VulnRepo.bulk_insert(run_id, list(self.ctx.vulnerabilities))
-        except Exception as pg_err:
-            logger.warning(f"[report] PG persist failed (non-fatal): {pg_err}")
-
-        # Enterprise HTML/PDF report + final dashboard
-        try:
-            self.reporter.active_frameworks = frameworks
-            paths = self.reporter.generate(executive_summary=exec_summary,
-                                           stem=f"pentest_{ts}")
-            logger.info(f"Enterprise report: {paths.get('html')}"
-                        + (f" | {paths['pdf']}" if paths.get("pdf") else ""))
-            self.metrics.write_dashboard()
-        except Exception as e:      # noqa: BLE001
-            logger.error(f"Enterprise report generation failed: {e}")
-
-        # Save shared context as backup
-        ctx_path = self.report_dir / f"context_{ts}.json"
-        self.ctx.save(str(ctx_path))
-        logger.info(f"Context saved: {ctx_path}")
-
-    def _get_token_usage(self) -> Dict[str, Any]:
-        try:
-            from agents.llm_harness_adapter import get_llm
-            harness = get_llm()
-            if harness and hasattr(harness, "budget"):
-                stats = harness.budget.stats()
-                total_input = sum(r.input_tokens for r in harness.budget.requests)
-                total_output = sum(r.output_tokens for r in harness.budget.requests)
-                stats["input_tokens"] = total_input
-                stats["output_tokens"] = total_output
-                return stats
-        except Exception:
-            pass
-        return {}
-
-    def plan_reconnaissance(self, state: ExecutionState) -> BrainDecision:
-        
-        # What do we already know?
-        hosts_known = len(self.knowledge_store.get_by_type("host"))
-        ports_known = len(self.knowledge_store.get_by_type("port"))
-        services_known = len(self.knowledge_store.get_by_type("service"))
-        
-        # What should we investigate?
-        tasks = []
-        
-        # Stage 1: DNS if no hosts known
-        if hosts_known == 0:
-            tasks.append(TaskSpec(
-                objective=f"Enumerate DNS records for {self.target}",
-                capability=CapabilityType.DNS_ENUMERATION,
-                inputs={"domain": self.target},
-                context_requirements=["hosts"],
-                success_criteria=[
-                    SuccessCriterion(
-                        criterion_type=SuccessCriterionType.KNOWLEDGE_EXISTS,
-                        entity_type="host"
-                    )
-                ],
-                timeout_seconds=300,
-                max_steps=5,
-            ))
-        
-        # Stage 2: Port scan discovered hosts
-        elif hosts_known > 0 and ports_known == 0:
-            tasks.append(TaskSpec(
-                objective="Scan discovered hosts for open ports",
-                capability=CapabilityType.PORT_SCANNING,
-                inputs={"targets": [h["host"] for h in self.context_resolver.resolve_hosts(self.authorized_scope)]},
-                context_requirements=["hosts"],
-                success_criteria=[
-                    SuccessCriterion(
-                        criterion_type=SuccessCriterionType.KNOWLEDGE_EXISTS,
-                        entity_type="port"
-                    )
-                ],
-                timeout_seconds=600,
-                max_steps=8,
-            ))
-        
-        # Stage 3: Technology fingerprinting
-        elif ports_known > 0 and services_known == 0:
-            tasks.append(TaskSpec(
-                objective="Fingerprint technologies on discovered services",
-                capability=CapabilityType.TECHNOLOGY_FINGERPRINTING,
-                inputs={"ports": self.context_resolver.resolve_ports()},
-                context_requirements=["ports"],
-                success_criteria=[
-                    SuccessCriterion(
-                        criterion_type=SuccessCriterionType.KNOWLEDGE_EXISTS,
-                        entity_type="technology"
-                    )
-                ],
-                timeout_seconds=300,
-                max_steps=8,
-            ))
-        
-        else:
-            # Recon complete
-            return BrainDecision(
-                action=BrainDecisionAction.COMPLETE,
-                thought="Reconnaissance phase complete - hosts, ports, technologies discovered",
-                reason="Sufficient reconnaissance data collected"
-            )
-        
-        if tasks:
-            return BrainDecision(
-                action=BrainDecisionAction.SPAWN_AGENTS,
-                thought=f"Spawning {len(tasks)} reconnaissance task(s)",
-                tasks=tasks,
-            )
-        
-        return BrainDecision(
-            action=BrainDecisionAction.WAIT,
-            thought="Waiting for reconnaissance tasks to complete",
-            wait_seconds=5,
-        )
-
-    def make_decision(self, state: ExecutionState) -> BrainDecision:
-        
-        # Safety check
-        if self.execution_count >= self.max_iterations:
-            logger.warning("[Brain] Max iterations reached, completing")
-            return BrainDecision(
-                action=BrainDecisionAction.COMPLETE,
-                reason="Max execution iterations reached"
-            )
-        
-        self.execution_count += 1
-        
-        # Check if all objectives completed
-        completed_count = len(state.tasks_completed)
-        failed_count = len(state.tasks_failed)
-        blocked_count = len(state.tasks_blocked)
-        running_count = len(state.tasks_running)
-        
-        logger.info(f"[Brain] Iteration {self.execution_count}: "
-                    f"completed={completed_count}, running={running_count}, "
-                    f"failed={failed_count}, blocked={blocked_count}")
-        
-        # Check for blocking issues
-        if blocked_count > 0 and running_count == 0 and completed_count == 0:
-            return BrainDecision(
-                action=BrainDecisionAction.BLOCKED,
-                reason="Tasks blocked and no progress being made"
-            )
-        
-        # Phase-based decision
-        phase = self._determine_phase(state)
-        
-        if phase == "recon":
-            return self.plan_reconnaissance(state)
-        elif phase == "analysis":
-            return self.plan_analysis(state)
-        else:
-            return BrainDecision(
-                action=BrainDecisionAction.COMPLETE,
-                reason="No more phases to execute"
-            )
-
-    def plan_analysis(self, state: ExecutionState) -> BrainDecision:
-        # This would implement deeper analysis logic
-        return BrainDecision(
-            action=BrainDecisionAction.COMPLETE,
-            reason="Analysis planning not yet implemented"
-        )
-
-    def _determine_phase(self, state: ExecutionState) -> str:
-        hosts_known = len(self.knowledge_store.get_by_type("host"))
-        ports_known = len(self.knowledge_store.get_by_type("port"))
-        services_known = len(self.knowledge_store.get_by_type("service"))
-        
-        if hosts_known == 0:
-            return "recon"
-        elif ports_known == 0:
-            return "recon"
-        elif services_known == 0:
-            return "recon"
-        else:
-            return "analysis"
-
     def get_execution_state(self) -> ExecutionState:
         # Separate tasks by status
         all_tasks = self.task_manager.get_all_tasks()
@@ -9818,146 +7560,6 @@ CRITICAL RULES:
             "tasks": self.task_manager.to_dict(),
             "start_time": self.start_time.isoformat(),
         }
-
-    def _get_db_execution_context(self) -> Dict[str, Any]:
-        completed_tasks = []
-        for task in self.task_manager.get_all_tasks():
-            if task.status.value in ("COMPLETED", "FAILED", "RUNNING"):
-                target = task.spec.inputs.get("target") or task.spec.inputs.get("url") or task.spec.inputs.get("domain") or self.target
-                tools = task.spec.inputs.get("tools", [])
-                summary_finding = ""
-                if task.result and isinstance(task.result, dict):
-                    summary_finding = str(task.result.get("results") or task.result.get("reason") or "")[:150]
-                completed_tasks.append([
-                    task.spec.capability.value,
-                    target,
-                    ",".join(tools) if tools else "default",
-                    task.status.value,
-                    summary_finding
-                ])
-
-        # Pull discovered assets from persistent knowledge store or shared context
-        subdomains = list(getattr(self.ctx, "subdomains", []))
-        ips = list(getattr(self.ctx, "ips", []))
-        ports = dict(getattr(self.ctx, "ports", {}))
-        technologies = dict(getattr(self.ctx, "technologies", {}))
-
-        return {
-            "completed_tasks": completed_tasks[-10:],
-            "discovered_assets": {
-                "subdomains": subdomains[:10],
-                "ips": ips[:10],
-                "open_ports": ports,
-                "technologies": technologies
-            }
-        }
-
-    def _is_recon_complete(self, db_context: Dict[str, Any]) -> bool:
-        return self._evaluate_phase_gate("recon", db_context)
-
-    def _evaluate_phase_gate(self, phase: str, db_context: Dict[str, Any]) -> bool:
-        completed = db_context.get("completed_tasks", [])
-        p_lower = phase.lower().strip()
-
-        # 1. Reconnaissance Phase Gate (recon, osint, deep_recon)
-        if p_lower in ("recon", "osint_reconnaissance", "deep_reconnaissance"):
-            if not completed:
-                return False
-            recon_caps = {"dns_enumeration", "port_scanning", "technology_fingerprinting", "tls_analysis", "subdomain_enumeration", "endpoint_discovery"}
-            executed_recon = {f"{item[0]}:{item[1]}" for item in completed if item[0] in recon_caps}
-            subdomains = db_context.get("discovered_assets", {}).get("subdomains", [])
-            targets = set([self.target] + subdomains[:5])
-            required_port_scans = {f"port_scanning:{t}" for t in targets}
-            if required_port_scans.issubset(executed_recon) or len(executed_recon) >= 3:
-                return True
-            return False
-
-        # 2. Vulnerability Assessment Phase Gate (analyze)
-        elif p_lower in ("analyze", "vulnerability_assessment"):
-            vuln_caps = {"vulnerability_scanning", "http_analysis", "javascript_analysis"}
-            executed_vulns = [item for item in completed if item[0] in vuln_caps]
-            if getattr(self.ctx, "vulnerabilities", []) or len(executed_vulns) >= 2:
-                return True
-            return False
-
-        # 3. Exploitation Phase Gate (exploit)
-        elif p_lower in ("exploit", "exploitation"):
-            vulns = getattr(self.ctx, "vulnerabilities", [])
-            if not vulns:
-                return True
-            exploit_results = getattr(self.ctx, "exploit_results", [])
-            if len(exploit_results) >= len(vulns) or len(exploit_results) >= 3:
-                return True
-            return False
-
-        return False
-
-    def _aggregate_wave_results(self, agents: List[Any], results: List[Any]) -> None:
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                continue
-            
-            res_data = result if isinstance(result, dict) else {}
-            
-            # 1. Aggregate discovered ports
-            discovered_ports = res_data.get("open_ports") or res_data.get("ports") or []
-            if isinstance(discovered_ports, list):
-                for port in discovered_ports:
-                    if isinstance(port, (int, str)):
-                        self.ctx.ports[str(port)] = "open"
-                    elif isinstance(port, dict):
-                        p_num = str(port.get("port", ""))
-                        if p_num:
-                            self.ctx.ports[p_num] = port.get("service", "open")
-
-            # 2. Aggregate discovered endpoints
-            endpoints = res_data.get("endpoints") or res_data.get("discovered_endpoints") or []
-            if isinstance(endpoints, list):
-                for ep in endpoints:
-                    if isinstance(ep, str) and ep not in self.ctx.endpoints:
-                        self.ctx.endpoints.append(ep)
-
-            # 3. Aggregate discovered subdomains
-            subdomains = res_data.get("subdomains") or []
-            if isinstance(subdomains, list):
-                for sub in subdomains:
-                    if isinstance(sub, str) and sub not in self.ctx.subdomains:
-                        self.ctx.subdomains.append(sub)
-
-            # 4. Aggregate technologies
-            techs = res_data.get("technologies") or res_data.get("tech") or res_data.get("tech_stack") or {}
-            target_host = self.ctx.target.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0]
-            if isinstance(techs, dict):
-                for k, v in techs.items():
-                    if isinstance(v, list):
-                        self.ctx.add_technologies(k, v)
-                    else:
-                        self.ctx.add_technologies(target_host, [f"{k}:{v}" if v != "detected" else k])
-            elif isinstance(techs, list) and techs:
-                self.ctx.add_technologies(target_host, techs)
-
-            # 5. Persist to KnowledgeStore if available
-            if hasattr(self, "store") and self.store:
-                try:
-                    for port, service in self.ctx.ports.items():
-                        self.store.add_asset(
-                            asset_type="port",
-                            value=f"{self.ctx.target}:{port}",
-                            metadata={"service": service}
-                        )
-                    for ep in self.ctx.endpoints:
-                        self.store.add_endpoint(
-                            target_id=self.ctx.target,
-                            url=ep,
-                            method="GET"
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to persist wave aggregation to knowledge store: {e}")
-
-            try:
-                self._write_live_results()
-            except Exception:
-                pass
 
     async def _run_phase_osint_reconnaissance(self):
         logger.info("\n>>> PHASE 0: OSINT RECONNAISSANCE")

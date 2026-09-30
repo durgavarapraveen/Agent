@@ -58,7 +58,7 @@ class AttackSurfaceGraph:
         
     def add_workflow(self, workflow: Workflow):
         self.workflows.add_workflow(workflow)
-        for req_id in workflow.request_ids:
+        for _req_id in workflow.request_ids:
             self.edges_count += 1 # WORKFLOW -> CONTAINS -> REQUEST
             
     def add_page_call(self, page_url: str, endpoint_id: str):

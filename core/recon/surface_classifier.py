@@ -37,6 +37,43 @@ LOC_GRAPHQL = "graphql_arg"
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 _NUM_RE = re.compile(r"^\d+$")
+# A path segment following one of these (or any plural-looking segment) is treated
+# as a resource id even when it's a slug/username, not just numeric/UUID — so
+# /users/jdoe and /orders/ab-99 become IDOR/injection points.
+_COLLECTION_RE = re.compile(r"^[a-z][a-z0-9_-]*s$", re.I)
+_KNOWN_COLLECTIONS = {
+    "user", "users", "account", "accounts", "order", "orders", "post", "posts",
+    "item", "items", "product", "products", "file", "files", "project", "projects",
+    "invoice", "invoices", "profile", "profiles", "doc", "docs", "document",
+    "documents", "group", "groups", "team", "teams", "org", "orgs", "customer",
+    "customers", "ticket", "tickets", "message", "messages", "comment", "comments",
+}
+_PATH_STATIC_EXT = (".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico",
+                    ".woff", ".woff2", ".map", ".json", ".xml", ".webp", ".txt")
+_PATH_ACTION_WORDS = {"new", "edit", "create", "update", "delete", "list", "search",
+                      "login", "logout", "register", "index", "home", "about", "api"}
+# Non-actionable URLs that must NEVER become attack surfaces: JS build internals
+# and source-parse artifacts crawlers mine from bundles. They carry no server-side
+# injection surface, but each one still multiplies the coverage matrix
+# (endpoints × classes) and burns probe budget — the coverage-denominator
+# explosion. High-precision only: framework internals + obvious code fragments,
+# NOT every static asset (a real handler ending in .js is left alone).
+_NON_ACTIONABLE_MARKERS = (
+    "/node_modules/", ".routeConfig", "route.js", "$1", "this.",
+    "rolldown-", "/webpack/", "runtime.js", "polyfills",
+)
+
+
+def _is_non_actionable_url(url: str) -> bool:
+    try:
+        low = str(url).lower()
+    except Exception:
+        return False
+    if low.endswith(".map"):
+        return True
+    return any(m.lower() in low for m in _NON_ACTIONABLE_MARKERS)
+
+
 _URL_VALUE_RE = re.compile(r"^(https?|ftp|gopher|file)://|^//|%2f%2f", re.I)
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _JWT_RE = re.compile(r"^ey[A-Za-z0-9_-]+\.ey[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
@@ -124,12 +161,101 @@ class SurfaceClassifier:
                     seen.add(dk)
                     surfaces.append(s)
 
+        # 3. SPA routes mined from JS bundles (crawler F-X1 → ctx.spa_routes).
+        # These never enter captured_requests or the endpoint inventory, so
+        # without this step the whole server-side injection battery
+        # (SQLI/SSTI/SSRF/IDOR/...) never reaches JS-only routes — they'd get
+        # DOM-XSS + route-disclosure only (P0-2 chaining gap). Each route is
+        # concretised into a requestable URL and classified like any surface.
+        spa_routes = getattr(ctx, "spa_routes", None) or []
+        base = getattr(ctx, "target", "") or ""
+        n_spa = 0
+        for route in spa_routes:
+            try:
+                s = self._surface_from_spa_route(str(route), base)
+            except Exception as e:
+                logger.debug("surface from spa route failed: %s", e)
+                continue
+            if s and s.url:
+                dk = f"{s.method} {s.url}"
+                if dk not in seen:
+                    seen.add(dk)
+                    surfaces.append(s)
+                    n_spa += 1
+
+        # Drop non-actionable surfaces (JS build internals, source-parse artifacts)
+        # BEFORE enrichment/coverage so they neither inflate the coverage matrix
+        # (endpoints × classes → denominator explosion) nor waste probe budget.
+        _before = len(surfaces)
+        surfaces = [s for s in surfaces if not _is_non_actionable_url(s.url)]
+        _dropped = _before - len(surfaces)
+        if _dropped:
+            logger.info("[SurfaceClassifier] dropped %d non-actionable surface(s) "
+                        "(JS internals / source-parse artifacts)", _dropped)
+
+        # 4. Globally-discovered parameter NAMES (arjun/recon mining → ctx
+        # "parameters"). These are names with no captured request and no endpoint
+        # association, so they never became injection points — starving the whole
+        # injection battery (SSRF from url-named params like redirect_uri/callback,
+        # NoSQLi/SQLi from generic text params) whenever the browser captured no
+        # live API traffic. Attach them as query injection points to param-less
+        # endpoint/SPA surfaces so the battery actually runs on them.
+        disc = self._discovered_params(ctx)
+        n_param_pts = 0
+        if disc:
+            _INJECTABLE = (LOC_QUERY, LOC_JSON, LOC_FORM, LOC_MULTIPART)
+            enriched = 0
+            for s in surfaces:
+                if enriched >= 40:
+                    break  # bound the injection matrix on param-rich targets
+                # ONLY synthetic endpoint/SPA surfaces — never captured requests
+                # (whose raw is the request dict and may carry an "endpoint" key).
+                if not (s.raw.get("endpoint") is True or "spa_route" in s.raw):
+                    continue
+                if any(p.location in _INJECTABLE for p in s.injection_points):
+                    continue  # already has its own injectable points
+                for name in disc:
+                    s.injection_points.append(self._point(LOC_QUERY, name, ""))
+                    n_param_pts += 1
+                s.injection_points = self._dedup_points(s.injection_points)
+                enriched += 1
+
         tech = self._tech(ctx)
         for s in surfaces:
             self._assign_classes(s, tech)
-        logger.info("SurfaceClassifier: %d surfaces (%d captured, %d endpoints)",
-                    len(surfaces), len(getattr(ctx, "captured_requests", []) or []), len(endpoints))
+        logger.info("SurfaceClassifier: %d surfaces (%d captured, %d endpoints, %d spa-routes, "
+                    "%d discovered-param points)",
+                    len(surfaces), len(getattr(ctx, "captured_requests", []) or []),
+                    len(endpoints), n_spa, n_param_pts)
         return surfaces
+
+    @staticmethod
+    def _discovered_params(ctx, cap: int = 30) -> List[str]:
+        """Flat list of discovered parameter NAMES (ctx 'parameters'), filtered to
+        plausible param names (drops HTTP verbs / junk tokens), deduped, capped."""
+        raw = None
+        try:
+            raw = ctx.get("parameters") if hasattr(ctx, "get") else None
+        except Exception:
+            raw = None
+        if raw is None:
+            raw = getattr(ctx, "parameters", None)
+        out: List[str] = []
+        seen: Set[str] = set()
+        _VERBS = {"get", "post", "put", "patch", "delete", "head", "options"}
+        for item in (raw or []):
+            name = item.get("name") if isinstance(item, dict) else item
+            name = str(name or "").strip()
+            # Allow single-char params (e.g. Juice Shop search `q`); cap length.
+            if not re.match(r"^[A-Za-z_][A-Za-z0-9_.\-]{0,39}$", name):
+                continue
+            if name.lower() in _VERBS or name.lower() in seen:
+                continue
+            seen.add(name.lower())
+            out.append(name)
+            if len(out) >= cap:
+                break
+        return out
 
     # ── request → surface ──────────────────────────────────────────────
     def _surface_from_request(self, req: Dict[str, Any]) -> Optional[Surface]:
@@ -161,10 +287,22 @@ class SurfaceClassifier:
             for name, val in self._parse_cookie(cookie):
                 pts.append(self._point(LOC_COOKIE, name, val))
         # injectable headers (host / forwarded / referer / origin / ua)
-        for hname in ("host", "x-forwarded-for", "x-forwarded-host", "referer",
-                      "origin", "user-agent", "x-original-url", "x-rewrite-url"):
+        _std_hdrs = ("host", "x-forwarded-for", "x-forwarded-host", "referer",
+                     "origin", "user-agent", "x-original-url", "x-rewrite-url")
+        for hname in _std_hdrs:
             if hname in headers:
                 pts.append(self._point(LOC_HEADER, hname, str(headers[hname])))
+        # custom headers actually seen on this request (X-Tenant-Id, X-Api-Version,
+        # X-User-Id, …) — derive the fuzz-list from real traffic, not a fixed
+        # allowlist. Skips standard/noise x- headers already covered or irrelevant.
+        _skip = set(_std_hdrs) | {"x-requested-with", "x-csrf-token", "x-xsrf-token",
+                                  "x-content-type-options", "x-frame-options"}
+        _added = 0
+        for hname in list(headers.keys()):
+            hl = str(hname).lower()
+            if hl.startswith("x-") and hl not in _skip and _added < 8:
+                pts.append(self._point(LOC_HEADER, hl, str(headers[hname])))
+                _added += 1
 
         # multipart / file upload (may be carried as files/fields, not a raw body)
         is_multipart = "multipart" in ctype or self._has_file_field(req)
@@ -222,6 +360,49 @@ class SurfaceClassifier:
         s.injection_points = self._dedup_points(pts)
         return s
 
+    # ── spa route → surface (JS-bundle-mined client routes) ────────────
+    def _surface_from_spa_route(self, route: str, base: str) -> Optional[Surface]:
+        r = (route or "").strip().lstrip("#")
+        if not r:
+            return None
+        absolute = r.startswith(("http://", "https://"))
+        if not absolute and not r.startswith("/"):
+            r = "/" + r
+        path_part, _, query = r.partition("?")
+        if absolute:
+            full = path_part
+        else:
+            # Concretise route templates (:id, {id}, <id>, *) so the path is a
+            # real, requestable URL and the templated segment is picked up as an
+            # id-shaped injection point by _points_from_path.
+            segs = [seg for seg in path_part.split("/") if seg != ""]
+            concrete = [
+                "1" if (seg.startswith((":", "{", "<")) or seg == "*") else seg
+                for seg in segs
+            ]
+            path = "/" + "/".join(concrete) if concrete else "/"
+            full = urllib.parse.urljoin((base or "").rstrip("/") + "/", path.lstrip("/"))
+        if query:
+            full = f"{full}?{query}"
+        if not full.startswith(("http://", "https://")):
+            return None
+        # Scope guard: an absolute route to a DIFFERENT registrable domain (e.g. a
+        # CDN) must never mint an on-target surface — the probe layer would
+        # otherwise be handed an off-scope host. Same-domain (incl. subdomains) OK.
+        if absolute and base:
+            def _reg(h: str) -> str:
+                parts = (h or "").lower().strip(".").split(".")
+                return ".".join(parts[-2:]) if len(parts) >= 2 else (h or "").lower()
+            _bh = urllib.parse.urlparse(base if "://" in base else "http://" + base).hostname or ""
+            _fh = urllib.parse.urlparse(full).hostname or ""
+            if _bh and _fh and _reg(_fh) != _reg(_bh):
+                return None
+        s = Surface(url=full, method="GET", raw={"spa_route": route})
+        s.injection_points = self._dedup_points(
+            self._points_from_query(full) + self._points_from_path(full)
+        )
+        return s
+
     # ── point builders ─────────────────────────────────────────────────
     def _point(self, location: str, name: str, value: str = "") -> InjectionPoint:
         p = InjectionPoint(location=location, name=str(name), sample_value=str(value or ""))
@@ -267,9 +448,21 @@ class SurfaceClassifier:
         out: List[InjectionPoint] = []
         try:
             path = urllib.parse.urlparse(url).path
-            for i, seg in enumerate(seg for seg in path.split("/") if seg):
+            segs = [seg for seg in path.split("/") if seg]
+            for i, seg in enumerate(segs):
                 if _NUM_RE.match(seg) or _UUID_RE.match(seg):  # id-shaped path segment
                     out.append(self._point(LOC_PATH, str(i), seg))
+                    continue
+                low = seg.lower()
+                if any(low.endswith(ext) for ext in _PATH_STATIC_EXT) or low in _PATH_ACTION_WORDS:
+                    continue
+                # slug/username id: a non-numeric segment right after a collection
+                # noun (users/<slug>, orders/<code>) — a real IDOR/injection point.
+                prev = segs[i - 1].lower() if i > 0 else ""
+                if prev and (prev in _KNOWN_COLLECTIONS or _COLLECTION_RE.match(prev)):
+                    p = self._point(LOC_PATH, str(i), seg)
+                    p.signals.add("id_like")
+                    out.append(p)
         except Exception:
             pass
         return out

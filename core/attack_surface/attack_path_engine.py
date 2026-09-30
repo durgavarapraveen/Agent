@@ -35,6 +35,16 @@ _CLASS_STAGE = {
     "open_redirect": "initial_access", "other": "initial_access",
     "info_disclosure": "credential_access", "security_header": "initial_access",
     "idor": "privilege_escalation", "authz": "privilege_escalation",
+    # Extended classes (mirror the widened impact_engine._class_of) so staging is
+    # meaningful instead of collapsing to initial_access.
+    "rce": "execution", "ssti": "execution", "deserialization": "execution",
+    "race_condition": "execution", "file_upload": "execution",
+    "xxe": "initial_access", "nosqli": "initial_access", "csrf": "initial_access",
+    "http_smuggling": "initial_access", "business_logic": "initial_access",
+    "broken_auth": "initial_access",
+    "lfi": "credential_access", "cors": "credential_access",
+    "weak_credentials": "credential_access",
+    "jwt": "privilege_escalation", "mass_assignment": "privilege_escalation",
 }
 
 
@@ -89,7 +99,7 @@ class AttackPathEngine:
             by_host.setdefault(_host(f), []).append(f)
 
         # 1) Same-host chains: an initial-access step → each higher-stage step.
-        for host, group in by_host.items():
+        for _h, group in by_host.items():
             group = sorted(group, key=lambda x: _STAGE[_stage(x)])
             starts = [f for f in group if _STAGE[_stage(f)] <= _STAGE["execution"]]
             targets = [f for f in group
